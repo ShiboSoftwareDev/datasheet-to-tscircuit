@@ -767,13 +767,13 @@ a {
 }
 
 .terminal-window::-webkit-scrollbar,
-.code-card pre::-webkit-scrollbar {
+.code-tab-content pre::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 .terminal-window::-webkit-scrollbar-thumb,
-.code-card pre::-webkit-scrollbar-thumb {
+.code-tab-content pre::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 9px;
   background: #3c4450;
@@ -811,56 +811,10 @@ a {
   animation: blink 1s step-end infinite;
 }
 
-.preview-tabs {
-  display: flex;
-  height: 100%;
-  align-items: stretch;
-  gap: 3px;
-}
-
-.preview-tabs button {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 11px;
-  border: 0;
-  color: #7b838e;
-  background: transparent;
-  font-size: 10px;
-  font-weight: 680;
-  cursor: pointer;
-}
-
-.preview-tabs button::after {
-  position: absolute;
-  right: 9px;
-  bottom: -1px;
-  left: 9px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: transparent;
-  content: "";
-}
-
-.preview-tabs button:hover,
-.preview-tabs button.active {
-  color: var(--blue);
-}
-
-.preview-tabs button.active::after {
-  background: var(--blue);
-}
-
-.preview-hint {
-  color: #a0a7b0;
-  font-size: 9px;
-}
-
 .viewer-shell {
   position: relative;
-  height: clamp(430px, calc(100vh - 255px), 620px);
-  min-height: 430px;
+  height: clamp(620px, calc(100vh - 255px), 680px);
+  min-height: 620px;
   overflow: hidden;
   background:
     linear-gradient(rgba(126, 140, 157, 0.06) 1px, transparent 1px),
@@ -870,6 +824,11 @@ a {
 
 .viewer-shell > div {
   height: 100%;
+}
+
+/* Runframe currently repeats its active fallback trigger for the built-in Code tab. */
+.viewer-shell [role="tablist"] > [id$="-trigger-code"] ~ [id$="-trigger-code"] {
+  display: none;
 }
 
 .empty-preview {
@@ -958,17 +917,35 @@ a {
   animation-delay: 450ms;
 }
 
-.code-card pre {
-  max-height: 370px;
+.code-tab-content {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  background: #fff;
+}
+
+.code-tab-content .card-toolbar {
+  flex: 0 0 auto;
+  background: #fff;
+}
+
+.code-tab-content pre {
+  min-height: 0;
+  flex: 1;
   margin: 0;
   overflow: auto;
   padding: 17px 19px 22px;
-  color: #cad3de;
-  background: #171c23;
+  border-top: 1px solid #edf0f3;
+  color: #28323e;
+  background: #fff;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 10.5px;
   line-height: 1.62;
   tab-size: 2;
+}
+
+.code-tab-content pre::-webkit-scrollbar-thumb {
+  background: #c8d0da;
 }
 
 .code-actions button,
@@ -1183,11 +1160,7 @@ footer a {
   }
 
   .viewer-shell {
-    height: 420px;
-  }
-
-  .preview-hint {
-    display: none;
+    height: 620px;
   }
 }
 
