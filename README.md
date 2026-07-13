@@ -3,7 +3,9 @@
 A Bun + React application that accepts a component datasheet, runs
 [`tsci-agent`](https://github.com/tscircuit/tsci-agent) in an isolated job
 workspace, streams the full agent process output, builds the generated TSX with
-`tsci`, and previews the resulting Circuit JSON in schematic and PCB viewers.
+`tsci`, and previews the resulting Circuit JSON with the same
+[`@tscircuit/runframe`](https://github.com/tscircuit/runframe) surface used by
+tscircuit.com.
 
 ## Run locally
 
