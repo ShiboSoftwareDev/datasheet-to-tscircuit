@@ -1,0 +1,43 @@
+{
+  "name": "datasheet-to-tscircuit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turn component datasheets into previewable tscircuit TSX with tsci-agent",
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,green \"bun --watch src/server/index.ts\" \"vite\"",
+    "dev:server": "bun --watch src/server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "bun src/server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "bun run typecheck && bun test && bun run build"
+  },
+  "dependencies": {
+    "@tscircuit/pcb-viewer": "latest",
+    "@tscircuit/schematic-viewer": "latest",
+    "circuit-json": "latest",
+    "lucide-react": "latest",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "tsci-agent": "latest",
+    "tscircuit": "latest"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "latest",
+    "@types/bun": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "typescript": "^5.9.3",
+    "vite": "latest"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "packageManager": "bun@1.3.9"
+}

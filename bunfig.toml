@@ -1,0 +1,2 @@
+# tscircuit handbook convention: do not commit generated Bun lockfiles.
+lockfile = false

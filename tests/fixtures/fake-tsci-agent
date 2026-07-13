@@ -1,0 +1,47 @@
+#!/usr/bin/env bun
+
+const args = process.argv.slice(2)
+const directory_index = args.indexOf("--dir")
+const job_dir = directory_index >= 0 ? args[directory_index + 1] : process.cwd()
+
+if (!job_dir) throw new Error("Missing --dir")
+
+console.error("[agent] start\n")
+console.error("[turn] start\n")
+console.error('[tool] read {"path":"datasheet.pdf"}\n')
+await Bun.sleep(80)
+console.error("[tool] read ok\n")
+console.log("I found an 8-pin digital temperature sensor and mapped its SOIC package.\n")
+console.error('[tool] write {"path":"index.circuit.tsx"}\n')
+
+await Bun.write(
+  `${job_dir}/index.circuit.tsx`,
+  `export default function TemperatureSensor() {
+  return (
+    <chip
+      name="U1"
+      manufacturerPartNumber="TMP-DEMO"
+      footprint="soic8"
+      pinLabels={{
+        pin1: "SDA",
+        pin2: "SCL",
+        pin3: "ALERT",
+        pin4: "GND",
+        pin5: "A2",
+        pin6: "A1",
+        pin7: "A0",
+        pin8: "VCC",
+      }}
+      schPinArrangement={{
+        leftSide: { direction: "top-to-bottom", pins: ["SDA", "SCL", "ALERT", "GND"] },
+        rightSide: { direction: "top-to-bottom", pins: ["VCC", "A0", "A1", "A2"] },
+      }}
+    />
+  )
+}
+`,
+)
+
+console.error("[tool] write ok\n")
+console.error("[turn] end\n")
+console.error("[agent] done\n")
