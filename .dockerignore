@@ -1,0 +1,11 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.DS_Store
+.cursor
+.runtime
+dist
+node_modules
+*.log

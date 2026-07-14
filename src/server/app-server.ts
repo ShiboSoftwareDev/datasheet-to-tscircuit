@@ -4,9 +4,17 @@ import { createJobApiHandler } from "./job-api"
 import { JobStore } from "./job-store"
 
 export interface AppServerOptions {
+  hostname?: string
   port?: number
   root_dir?: string
   job_store?: JobStore
+}
+
+export function resolveServerHostname(
+  option_hostname?: string,
+  environment_hostname = process.env.HOST,
+): string {
+  return option_hostname?.trim() || environment_hostname?.trim() || "127.0.0.1"
 }
 
 function getStaticResponse(request: Request, root_dir: string): Response {
@@ -38,6 +46,7 @@ export async function createAppServer(options: AppServerOptions = {}) {
   })
 
   return Bun.serve({
+    hostname: resolveServerHostname(options.hostname),
     port: options.port ?? Number(process.env.PORT ?? 3000),
     async fetch(request) {
       const api_response = await handleApiRequest(request)
