@@ -50,11 +50,11 @@ function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) 
       ) : (
         <FlaskConical size={25} />
       )}
-      <strong>{preview ? "Building live circuit preview" : "Waiting for benchmark TSX"}</strong>
+      <strong>{preview ? "Waiting for a saved circuit run" : "Waiting for benchmark TSX"}</strong>
       <p>
         {preview?.error_message ??
           (preview
-            ? "The source is already available below; the server is compiling its viewers."
+            ? "The source is available below. The agent or validation workflow must run it before viewers appear."
             : "This appears as soon as the agent writes its first benchmark circuit.")}
       </p>
       {preview?.code && (
@@ -74,7 +74,14 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
           <Activity size={16} />
           <span>{preview?.source_file ?? "Live benchmark circuit"}</span>
         </div>
-        {preview && <small>{preview.build_status.replace("_", " ")}</small>}
+        {preview && (
+          <small>
+            {preview.build_status.replace("_", " ")}
+            {preview.snapshot_origin === "server_validation" ? " · verified snapshot" : ""}
+            {preview.snapshot_origin === "workspace" ? " · saved workspace run" : ""}
+            {preview.is_stale ? " · older than source" : ""}
+          </small>
+        )}
       </header>
       <div className="model-runframe-shell">
         {!preview?.circuit_json ? (
@@ -82,13 +89,18 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
         ) : (
           <Suspense fallback={<CircuitPlaceholder preview={preview} />}>
             <CircuitJsonPreview
+              key={`${preview.source_file}:${preview.updated_at}:model-tabs-v2`}
               circuitJson={preview.circuit_json}
               code={preview.code}
               showCodeTab
               codeTabContent={<ModelCode preview={preview} />}
               availableTabs={["code", "schematic", "analog_simulation"]}
               defaultActiveTab="analog_simulation"
+              defaultTab="analog_simulation"
+              showJsonTab={false}
+              showRenderLogTab={false}
               showFileMenu={false}
+              allowSelectingVersion={false}
               isWebEmbedded
               projectName={preview.source_file.replace(/\.circuit\.tsx$/i, "")}
             />
@@ -231,7 +243,7 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
           </span>
           {preview.result_points && (
             <span className="result-series">
-              <i /> Server-verified model
+              <i /> Server-verified model{preview.is_stale ? " (older source)" : ""}
             </span>
           )}
           {!preview.result_points && (

@@ -1,4 +1,4 @@
-import { copyFile, readdir, readFile, rm, stat } from "node:fs/promises"
+import { copyFile, mkdir, readdir, readFile, rm, stat } from "node:fs/promises"
 import { delimiter, dirname, join } from "node:path"
 import type { JobLogStream, ModelManifest, ModelProgress, ModelProgressPhase } from "@/shared/job-types"
 import type { JobStore } from "./job-store"
@@ -14,6 +14,9 @@ import type { ModelRunStore } from "./model-run-store"
 import { scoreModelBenchmarks } from "./model-scorer"
 import {
   clearVerifiedSimulationResults,
+  getModelSimulationSourceSignature,
+  getSimulationBuildPlan,
+  getVerifiedResultsDirectory,
   type SimulationBenchmarkVerification,
   verifySimulationBenchmark,
   writeSimulationValidationReport,
@@ -447,28 +450,71 @@ async function validateChampion(
       integration_errors.push("The independent benchmark re-run reached its validation time limit")
       break
     }
-    await append("system", `Re-running locked benchmark ${benchmark_file}…\n`)
-    await rm(join(input.job_dir, "dist", "spice", "benchmarks", benchmark_id), {
-      recursive: true,
-      force: true,
-    })
-    const simulation_exit_code = await streamModelProcess({
-      command: [context.tsci_bin, "simulate", "analog", join("benchmarks", benchmark_file)],
-      cwd: input.model_dir,
-      signal: input.signal,
-      on_chunk: append,
-    })
+    const build_plan = await getSimulationBuildPlan(input.model_dir, benchmark_id)
+    const point_paths: Array<{ path: string; x: number }> = []
+    let simulation_exit_code = 0
+    for (let point_index = 0; point_index < build_plan.length; point_index += 1) {
+      const point = build_plan[point_index]!
+      await append(
+        "system",
+        `Building and running locked benchmark ${benchmark_file} (${point_index + 1}/${build_plan.length})${point.x === undefined ? "" : ` at x=${point.x}`}…\n`,
+      )
+      await rm(join(input.job_dir, "dist", "spice", "benchmarks", benchmark_id), {
+        recursive: true,
+        force: true,
+      })
+      const command = [context.tsci_bin, "build", join("benchmarks", benchmark_file), "--ignore-warnings"]
+      if (point.props) command.push("--inject-props", JSON.stringify(point.props))
+      simulation_exit_code = await streamModelProcess({
+        command,
+        cwd: input.model_dir,
+        signal: input.signal,
+        on_chunk: append,
+      })
+      const generated_path = join(input.job_dir, "dist", "spice", "benchmarks", benchmark_id, "circuit.json")
+      if (simulation_exit_code === 0 && point.x !== undefined) {
+        const saved_path = join(
+          input.model_dir,
+          "validation-artifacts",
+          benchmark_id,
+          "runs",
+          point.run_id,
+          "circuit.json",
+        )
+        await mkdir(dirname(saved_path), { recursive: true })
+        await Bun.write(saved_path, await readFile(generated_path))
+        point_paths.push({ path: saved_path, x: point.x })
+      }
+      if (simulation_exit_code !== 0) break
+    }
     if (simulation_exit_code !== 0) {
-      const error_message = `${benchmark_file} simulation exited with code ${simulation_exit_code}`
+      const captured = await verifySimulationBenchmark({
+        model_dir: input.model_dir,
+        benchmark_id,
+        source_signature: await getModelSimulationSourceSignature(input.model_dir, benchmark_id),
+        circuit_json_paths: point_paths.length ? point_paths : undefined,
+      })
+      const error_message = `${benchmark_file} build exited with code ${simulation_exit_code}${
+        captured.error_message ? `: ${captured.error_message}` : ""
+      }`
       integration_errors.push(error_message)
-      simulation_verifications.push({ benchmark_id, passed: false, error_message })
+      simulation_verifications.push({
+        ...captured,
+        benchmark_id,
+        passed: false,
+        error_message,
+      })
+      await writeSimulationValidationReport(input.model_dir, simulation_verifications)
       continue
     }
     const verification = await verifySimulationBenchmark({
       model_dir: input.model_dir,
       benchmark_id,
+      source_signature: await getModelSimulationSourceSignature(input.model_dir, benchmark_id),
+      circuit_json_paths: point_paths.length ? point_paths : undefined,
     })
     simulation_verifications.push(verification)
+    await writeSimulationValidationReport(input.model_dir, simulation_verifications)
     if (!verification.passed) {
       integration_errors.push(`${benchmark_file}: ${verification.error_message}`)
     }
@@ -521,7 +567,6 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
       model_run_id: input.model_run_id,
       model_dir,
       model_run_store: context.model_run_store,
-      tsci_bin: context.tsci_bin,
     })
     await progress_monitor.sync()
 
@@ -618,7 +663,6 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
 
     while (true) {
       agent_attempt += 1
-      await clearVerifiedSimulationResults(model_dir)
       const remaining_before_agent = context.model_run_store.getRemainingTimeMs(input.model_run_id) ?? 0
       if (remaining_before_agent <= 0) {
         budget_exhausted = true
@@ -704,6 +748,7 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
         validation_controller.abort()
       }, remaining_before_validation)
       try {
+        await clearVerifiedSimulationResults(model_dir)
         final_champion = await validateChampion(
           {
             model_run_id: input.model_run_id,
@@ -715,7 +760,7 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
           context,
         )
         final_validation = await scoreModelBenchmarks(model_dir, {
-          results_directory_override: join(model_dir, "results", "verified"),
+          results_directory_override: getVerifiedResultsDirectory(model_dir),
         })
         await Bun.write(
           join(model_dir, "validation-report.json"),
@@ -746,7 +791,7 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
         `${score_failures.length} of ${final_validation?.benchmark_count ?? 0} benchmarks failed scoring.`
       await Bun.write(
         join(model_dir, "validation-feedback.md"),
-        `# Server validation feedback\n\nValidation is not complete. Fix the model or benchmark circuits, then rerun the full locked suite.\n\n## Simulation failures\n\n${
+        `# Server validation feedback\n\nValidation is not complete. Fix the model or benchmark circuits, then rerun the full locked suite.\n\nThe exact server-run outputs are saved in \`simulation-validation.json\` and \`validation-artifacts/<benchmark-id>/\`. Inspect those Circuit JSON files and extracted curves before changing the model.\n\n## Simulation failures\n\n${
           simulation_failures.length > 0
             ? simulation_failures
                 .map(

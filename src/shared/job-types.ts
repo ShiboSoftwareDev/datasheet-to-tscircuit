@@ -169,6 +169,8 @@ export interface ModelCircuitPreview {
   build_status: "source_ready" | "building" | "ready" | "failed"
   updated_at: string
   circuit_json?: AnyCircuitElement[]
+  snapshot_origin?: "workspace" | "server_validation"
+  is_stale?: boolean
   error_message?: string
 }
 
@@ -181,6 +183,7 @@ export interface ModelReferencePreview {
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]
   result_points?: ModelCurvePoint[]
+  is_stale?: boolean
   updated_at: string
 }
 

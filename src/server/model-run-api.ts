@@ -193,6 +193,7 @@ function getModelRunFile(request_url: URL, context: ModelRunApiContext): Respons
     model: { name: "model.lib", content_type: "text/plain; charset=utf-8" },
     manifest: { name: "model-manifest.json", content_type: "application/json" },
     report: { name: "validation-report.json", content_type: "application/json" },
+    simulation_report: { name: "simulation-validation.json", content_type: "application/json" },
     model_card: { name: "model-card.md", content_type: "text/markdown; charset=utf-8" },
     component: { name: "component-with-model.circuit.tsx", content_type: "text/typescript; charset=utf-8" },
     log: { name: "model-agent.log", content_type: "text/plain; charset=utf-8" },
@@ -223,7 +224,6 @@ async function getSelectedPreview(request_url: URL, context: ModelRunApiContext)
   }
   const preview = await loadModelSelectedPreview({
     model_dir,
-    tsci_bin: context.tsci_bin,
     benchmark_id,
   })
   return preview

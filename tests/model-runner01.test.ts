@@ -14,6 +14,9 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(prompt).toContain("Re-read run-control.json")
   expect(prompt).toContain("do not reduce tests or loosen tolerances")
   expect(prompt).toContain("100% validation")
+  expect(prompt).toContain("tsci build benchmarks/<benchmark-id>.circuit.tsx --ignore-warnings")
+  expect(prompt).toContain("UI only reads")
+  expect(prompt).toContain("validation-artifacts")
   const setup_prompt = buildModelSetupPrompt()
   expect(setup_prompt).toContain("untimed evidence")
   expect(setup_prompt).toContain("Do not guess the final pin mapping")
@@ -61,8 +64,9 @@ console.log("champion checkpointed")
     Bun.write(
       tsci_path,
       `#!/usr/bin/env bun
-import { mkdir } from "node:fs/promises"
+import { appendFile, mkdir } from "node:fs/promises"
 const jobDir = ${JSON.stringify(job_dir)}
+await appendFile(jobDir + "/tsci-calls.log", Bun.argv.slice(2).join(" ") + "\\n")
 await mkdir(jobDir + "/dist/spice/benchmarks/transfer", { recursive: true })
 await mkdir(jobDir + "/dist/spice/component-with-model", { recursive: true })
 await Bun.write(jobDir + "/dist/spice/benchmarks/transfer/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "VOUT_PROBE", timestamps_ms: [0, 1], voltage_levels: [0, 1] }]))
@@ -121,6 +125,12 @@ console.log("simulation ok")
   expect(model_run?.progress?.champion?.passing).toBe(1)
   expect(model_run?.progress_history.some((event) => event.phase === "digitizing_graphs")).toBe(true)
   expect(model_run?.progress_history.some((event) => event.phase === "scoring")).toBe(true)
+  const tsci_calls = await Bun.file(join(job_dir, "tsci-calls.log")).text()
+  expect(tsci_calls).toContain("build benchmarks/transfer.circuit.tsx --ignore-warnings")
+  expect(tsci_calls).not.toContain("simulate analog")
+  expect(
+    await Bun.file(join(job_dir, ".model-validation", "benchmarks", "transfer", "circuit.json")).exists(),
+  ).toBe(true)
 
   await rm(job_dir, { recursive: true, force: true })
 }, 20_000)
@@ -145,6 +155,9 @@ const attempt = previous + 1
 await Bun.write(attemptFile, String(attempt))
 if (attempt > 1 && await Bun.file(dir + "/validation-feedback.md").exists()) {
   await Bun.write(dir + "/feedback-seen.txt", "yes")
+}
+if (attempt > 1 && await Bun.file(dir + "/validation-artifacts/transfer/circuit.json").exists()) {
+  await Bun.write(dir + "/simulation-artifact-seen.txt", "yes")
 }
 await mkdir(dir + "/benchmarks", { recursive: true })
 await mkdir(dir + "/evidence/curves", { recursive: true })
@@ -199,6 +212,7 @@ await Bun.write(jobDir + "/dist/spice/component-with-model/circuit.json", JSON.s
   expect(await Bun.file(join(model_dir, "agent-attempt.txt")).text()).toBe("2")
   expect(model_run?.logs.some((log) => log.message.includes("correction pass 2"))).toBe(true)
   expect(await Bun.file(join(model_dir, "feedback-seen.txt")).text()).toBe("yes")
+  expect(await Bun.file(join(model_dir, "simulation-artifact-seen.txt")).text()).toBe("yes")
   expect(await Bun.file(join(model_dir, "validation-feedback.md")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })

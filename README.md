@@ -103,12 +103,16 @@ numeric benchmark scorer, reruns every generated tscircuit analog test bench, an
 keeps the best checkpointed model when time expires. The model tab streams
 structured progress checkpoints live, including datasheet/graph evidence counts,
 the active benchmark, iteration number, and current champion score, alongside the
-complete agent log. As benchmark TSX and numeric evidence appear, the server
-builds a live runframe and plots the reference curve with the current model result.
+complete agent log. As benchmark TSX, saved Circuit JSON, and numeric evidence
+appear, the server loads them into the runframe and plots the reference curve
+with the current model result. Viewing or switching benchmarks never executes TSX;
+only the agent and background validation workflow can refresh a saved simulation.
 Candidate CSVs written by the agent are not trusted for final scoring or display:
-the server reruns each analog circuit, rejects Circuit JSON simulation errors,
-extracts probe graphs into hashed `results/verified` CSVs, and scores and plots
-only those verified files. The preview dropdown switches the circuit and its paired reference/result curve
+the server performs a fresh `tsci build` for each analog circuit, rejects Circuit
+JSON errors, and archives the exact source, Circuit JSON, and hashed extracted
+curve under the job's `.model-validation` directory. Diagnostic copies are given
+back to the agent under `spice/validation-artifacts`; scoring and plotting use only
+the archived server results. The preview dropdown switches the saved circuit and its paired reference/result curve
 together. SPICE runframes expose only Analog Simulation, Code, and Schematic, with
 Analog Simulation selected initially. A failed validation pass is sent back to
 the agent for another correction pass until every locked benchmark passes or the
