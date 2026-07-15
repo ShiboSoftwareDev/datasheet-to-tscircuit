@@ -27,8 +27,25 @@ const STATUS_COPY: Record<ModelRunStatus, string> = {
   cancelling: "Stopping",
   cancelled: "Stopped",
   complete: "Validated",
-  timed_out: "Timed out",
+  timed_out: "Ran out of iterations",
   failed: "Failed",
+}
+
+function getStatusCopy(model_run: ModelRun): string {
+  if (model_run.status === "timed_out" && model_run.error_message?.toLowerCase().includes("no output")) {
+    return "Timed out"
+  }
+  return STATUS_COPY[model_run.status]
+}
+
+function getProgressPhaseCopy(model_run: ModelRun): string {
+  if (
+    model_run.progress?.phase === "timed_out" &&
+    !model_run.progress.message.toLowerCase().includes("no output")
+  ) {
+    return "Ran out of iterations"
+  }
+  return PROGRESS_PHASE_COPY[model_run.progress?.phase ?? "queued"]
 }
 
 const PROGRESS_PHASE_COPY: Record<ModelProgressPhase, string> = {
@@ -137,7 +154,7 @@ function LiveProgress({ model_run }: { model_run: ModelRun }) {
       ) : (
         <div className="model-live-body" aria-live="polite">
           <div className="model-current-progress">
-            <span>{PROGRESS_PHASE_COPY[progress.phase]}</span>
+            <span>{getProgressPhaseCopy(model_run)}</span>
             <strong>{progress.message}</strong>
             <small>
               Updated {formatProgressTime(progress.updated_at)} · checkpoint {progress.sequence}
@@ -376,7 +393,7 @@ export function ModelPanel({ job }: { job: Job }) {
             ) : (
               <FlaskConical size={15} />
             )}
-            {STATUS_COPY[model_run.status]}
+            {getStatusCopy(model_run)}
           </span>
           <h2>{model_run.manifest?.part_number ?? job.file_name.replace(/\.pdf$/i, "")}</h2>
           <p>

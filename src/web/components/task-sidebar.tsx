@@ -1,5 +1,5 @@
 import {
-  CheckCircle2,
+  Boxes,
   FlaskConical,
   LoaderCircle,
   PanelLeftClose,
@@ -36,38 +36,80 @@ function formatTaskTime(created_at: string): string {
 
 const MODEL_STATUS_COPY: Record<ModelRunStatus, string> = {
   queued: "Queued",
-  setting_up: "Preparing",
+  setting_up: "Setting up",
   waiting_for_component: "Waiting",
   running: "Generating",
   validating: "Validating",
   cancelling: "Stopping",
-  cancelled: "Stopped",
+  cancelled: "Cancelled",
   complete: "Ready",
   timed_out: "Timed out",
   failed: "Failed",
 }
 
+function getModelStatusCopy(status: ModelRunStatus, error_message?: string): string {
+  if (status === "timed_out" && !error_message?.toLowerCase().includes("no output")) return "Failed"
+  return MODEL_STATUS_COPY[status]
+}
+
+function getStatusTone(status: string): string {
+  if (["Ready", "Complete", "Validated"].includes(status)) return "ready"
+  if (["Failed", "Cancelled", "Stopped", "Timed out"].includes(status)) return "failed"
+  return "working"
+}
+
 function TaskStatus({ task }: { task: JobSummary }) {
   const { model_run, is_loading } = useModelRun(task.job_id)
   const component_ready = task.display_status === "complete"
-  const model_ready = Boolean(model_run?.model_source)
+  const model_ready = model_run?.status === "complete" && Boolean(model_run.model_source)
+  if (!is_loading && !model_run) {
+    return (
+      <span className="task-statuses">
+        <span
+          className={`task-state task-state-component ${component_ready ? "ready" : ""}`}
+          aria-label={`Component ${component_ready ? "Ready" : STATUS_COPY[task.display_status]}`}
+          title={`Component ${component_ready ? "Ready" : STATUS_COPY[task.display_status]}`}
+        >
+          <Boxes size={10} />
+          <span
+            className={`task-state-label task-state-label-${getStatusTone(component_ready ? "Ready" : STATUS_COPY[task.display_status])}`}
+          >
+            {component_ready ? "Ready" : STATUS_COPY[task.display_status]}
+          </span>
+        </span>
+      </span>
+    )
+  }
+  const model_status = model_run?.status
   const model_copy = is_loading
     ? "Loading"
     : model_ready
       ? "Ready"
-      : model_run
-        ? MODEL_STATUS_COPY[model_run.status]
-        : "Not started"
+      : model_status
+        ? getModelStatusCopy(model_status, model_run?.error_message)
+        : "Loading"
 
   return (
     <span className="task-statuses">
-      <span className={`task-state task-state-component ${component_ready ? "ready" : ""}`}>
-        {component_ready && <CheckCircle2 size={10} />}
-        Component {component_ready ? "Ready" : STATUS_COPY[task.display_status]}
+      <span
+        className={`task-state task-state-component ${component_ready ? "ready" : ""}`}
+        aria-label={`Component ${component_ready ? "Ready" : STATUS_COPY[task.display_status]}`}
+        title={`Component ${component_ready ? "Ready" : STATUS_COPY[task.display_status]}`}
+      >
+        <Boxes size={10} />
+        <span
+          className={`task-state-label task-state-label-${getStatusTone(component_ready ? "Ready" : STATUS_COPY[task.display_status])}`}
+        >
+          {component_ready ? "Ready" : STATUS_COPY[task.display_status]}
+        </span>
       </span>
-      <span className={`task-state task-state-model ${model_ready ? "ready" : ""}`}>
-        {model_ready ? <CheckCircle2 size={10} /> : <FlaskConical size={10} />}
-        Model {model_copy}
+      <span
+        className={`task-state task-state-model ${model_ready ? "ready" : ""}`}
+        aria-label={`Model ${model_copy}`}
+        title={`Model ${model_copy}`}
+      >
+        <FlaskConical size={10} />
+        <span className={`task-state-label task-state-label-${getStatusTone(model_copy)}`}>{model_copy}</span>
       </span>
     </span>
   )

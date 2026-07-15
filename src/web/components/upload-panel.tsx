@@ -183,29 +183,26 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
           </i>
         </button>
 
-        {create_pspice_model && (
-          <div className="upload-effort-section">
-            <span>Refinement effort</span>
-            <p>Setup and component waiting are untimed. Effort only extends model refinement.</p>
-            <div
-              className="effort-picker upload-effort-picker"
-              role="group"
-              aria-label="SPICE modeling effort"
-            >
-              {[1, 2, 4, 8].map((value) => (
-                <button
-                  className={model_effort === value ? "selected" : ""}
-                  type="button"
-                  key={value}
-                  onClick={() => updateModelEffort(value)}
-                >
-                  <strong>{value}×</strong>
-                  <small>{value === 1 ? "Baseline" : `${value}× time`}</small>
-                </button>
-              ))}
-            </div>
+        <div
+          className={`upload-effort-section ${create_pspice_model ? "is-visible" : "is-hidden"}`}
+          aria-hidden={!create_pspice_model}
+        >
+          <span className="upload-effort-label">Effort:</span>
+          <div className="effort-picker upload-effort-picker" role="group" aria-label="SPICE modeling effort">
+            {[1, 2, 4, 8].map((value) => (
+              <button
+                className={model_effort === value ? "selected" : ""}
+                type="button"
+                key={value}
+                disabled={!create_pspice_model}
+                onClick={() => updateModelEffort(value)}
+              >
+                <strong>{value}×</strong>
+                <small>{value === 1 ? "Baseline" : `${value}× time`}</small>
+              </button>
+            ))}
           </div>
-        )}
+        </div>
       </section>
 
       {error_message && (

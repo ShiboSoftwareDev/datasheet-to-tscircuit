@@ -348,6 +348,18 @@ a {
   color: #287c4b;
 }
 
+.task-state-label-ready {
+  color: #287c4b;
+}
+
+.task-state-label-working {
+  color: #2563eb;
+}
+
+.task-state-label-failed {
+  color: #b42318;
+}
+
 .task-state-model {
   color: #737d88;
 }
@@ -670,6 +682,9 @@ a {
 }
 
 .upload-model-option {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
   margin-top: 14px;
   overflow: hidden;
   border: 1px solid #dededa;
@@ -687,8 +702,10 @@ a {
 
 .model-option-toggle {
   display: flex;
-  width: 100%;
+  width: auto;
+  min-width: 0;
   min-height: 66px;
+  flex: 1;
   align-items: center;
   gap: 11px;
   padding: 11px 13px;
@@ -767,37 +784,55 @@ a {
 }
 
 .upload-effort-section {
-  padding: 12px 13px 14px 58px;
-  border-top: 1px solid #dde7f5;
+  position: relative;
+  display: flex;
+  width: 190px;
+  align-self: stretch;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 190px;
+  padding-right: 13px;
+  opacity: 1;
+  transition: opacity 120ms ease;
 }
 
-.upload-effort-section > span {
-  color: #424952;
-  font-size: 10px;
+.upload-effort-label {
+  position: absolute;
+  top: 7px;
+  left: 0;
+  color: #68717d;
+  font-size: 8.5px;
   font-weight: 650;
+  line-height: 1;
 }
 
-.upload-effort-section > p {
-  margin: 3px 0 10px;
-  color: #858c95;
-  font-size: 9px;
-  line-height: 1.45;
+.upload-effort-section.is-hidden {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
-.upload-effort-picker {
+.effort-picker.upload-effort-picker {
   width: 100%;
+  grid-template-columns: repeat(4, 1fr);
   gap: 6px;
   margin-top: 0;
 }
 
-.upload-effort-picker button {
-  min-height: 52px;
-  gap: 2px;
-  border-radius: 8px;
+.effort-picker.upload-effort-picker button {
+  height: 24px;
+  min-height: 24px;
+  gap: 1px;
+  padding: 0;
+  border-radius: 6px;
 }
 
-.upload-effort-picker strong {
-  font-size: 14px;
+.effort-picker.upload-effort-picker strong {
+  font-size: 11px;
+}
+
+.effort-picker.upload-effort-picker small {
+  display: none;
 }
 
 .primary-button {
@@ -2222,6 +2257,30 @@ a {
     font-size: 13px;
   }
 
+  .model-option-toggle {
+    gap: 7px;
+    padding: 8px;
+  }
+
+  .model-option-copy small {
+    display: none;
+  }
+
+  .upload-effort-section {
+    width: 116px;
+    flex-basis: 116px;
+    padding-right: 8px;
+  }
+
+  .effort-picker.upload-effort-picker {
+    gap: 2px;
+  }
+
+  .effort-picker.upload-effort-picker button {
+    height: 23px;
+    min-height: 23px;
+  }
+
   .job-main {
     padding: 15px 12px 30px;
   }
@@ -2382,6 +2441,10 @@ a {
 
   .effort-picker {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .effort-picker.upload-effort-picker {
+    grid-template-columns: repeat(4, 1fr);
   }
 
   .model-downloads {
