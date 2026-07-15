@@ -78,6 +78,13 @@ function computeElapsedTime(record: ModelRunRecord, now = Date.now()): number {
   return record.elapsed_time_ms + Math.max(0, now - segment_start)
 }
 
+function computeValidationReserve(record: ModelRunRecord, simulation_run_count = 0): number {
+  const base_reserve = Math.max(250, record.base_effort_ms * 0.25)
+  const estimated_suite_ms =
+    simulation_run_count > 0 ? 15_000 + Math.ceil(simulation_run_count / 4) * 2_000 : 0
+  return Math.round(Math.min(record.allocated_time_ms * 0.8, Math.max(base_reserve, estimated_suite_ms)))
+}
+
 function getPublicModelRun(record: ModelRunRecord): ModelRun {
   return {
     model_run_id: record.model_run_id,
@@ -147,6 +154,11 @@ export class ModelRunStore {
     const existing = this.run_map.get(input.model_run.model_run_id)
     if (existing) return getPublicModelRun(existing)
     const was_active = ACTIVE_STATUSES.has(input.model_run.status)
+    const segment_started_at = input.model_run.segment_started_at
+      ? new Date(input.model_run.segment_started_at).valueOf()
+      : Number.NaN
+    const interrupted_segment_ms =
+      was_active && Number.isFinite(segment_started_at) ? Math.max(0, Date.now() - segment_started_at) : 0
     const record: ModelRunRecord = {
       ...input.model_run,
       model_dir: input.model_dir,
@@ -157,6 +169,10 @@ export class ModelRunStore {
         ? "The server restarted while this model run was active. Retry to continue from its checkpoints."
         : input.model_run.error_message,
       completed_at: was_active ? new Date().toISOString() : input.model_run.completed_at,
+      elapsed_time_ms: Math.min(
+        input.model_run.allocated_time_ms,
+        input.model_run.elapsed_time_ms + interrupted_segment_ms,
+      ),
       segment_started_at: undefined,
       logs: input.logs,
       progress_history: input.model_run.progress_history ?? [],
@@ -197,6 +213,11 @@ export class ModelRunStore {
     const record = this.run_map.get(model_run_id)
     if (!record) return undefined
     return Math.max(0, record.allocated_time_ms - computeElapsedTime(record))
+  }
+
+  getFinalizationReserveMs(model_run_id: string, simulation_run_count = 0): number | undefined {
+    const record = this.run_map.get(model_run_id)
+    return record ? computeValidationReserve(record, simulation_run_count) : undefined
   }
 
   startSegment(model_run_id: string): ModelRun {
@@ -389,7 +410,7 @@ export class ModelRunStore {
           elapsed_time_ms: computeElapsedTime(record),
           remaining_time_ms,
           deadline_at,
-          finalization_reserve_ms: Math.min(60_000, Math.max(5_000, record.base_effort_ms * 0.1)),
+          finalization_reserve_ms: computeValidationReserve(record),
           instruction:
             "Re-read this file before every refinement iteration; effort may be extended while running.",
         },

@@ -161,6 +161,21 @@ export async function getSimulationBuildPlan(
   }))
 }
 
+export async function getSimulationRunCount(model_dir: string): Promise<number> {
+  const manifest: unknown = JSON.parse(await readFile(join(model_dir, "benchmarks.json"), "utf8"))
+  if (!isRecord(manifest) || !Array.isArray(manifest.benchmarks) || manifest.benchmarks.length === 0) {
+    throw new Error("benchmarks.json has no benchmark list")
+  }
+  let run_count = 0
+  for (const benchmark of manifest.benchmarks) {
+    if (!isRecord(benchmark) || typeof benchmark.id !== "string") {
+      throw new Error("benchmarks.json contains an invalid benchmark")
+    }
+    run_count += (await getSimulationBuildPlan(model_dir, benchmark.id)).length
+  }
+  return run_count
+}
+
 async function readSimulationDefinition(
   model_dir: string,
   benchmark_id: string,
@@ -211,6 +226,166 @@ function parseSimulationOutput(value: unknown): { graphs: SimulationGraph[]; err
     })
   }
   return { graphs, errors }
+}
+
+function normalizeModelSource(source: string): string {
+  return source.replace(/\r\n?/g, "\n").trim()
+}
+
+function parseSubcircuitPinSets(model_source: string): string[][] {
+  const lines = model_source.replace(/\r\n?/g, "\n").split("\n")
+  const pin_sets: string[][] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index]!.match(/^\s*\.\s*subckt\s+\S+(?:\s+(.*))?$/i)
+    if (!match) continue
+    const tokens = (match[1] ?? "").trim().split(/\s+/).filter(Boolean)
+    while (index + 1 < lines.length) {
+      const continuation = lines[index + 1]!.match(/^\s*\+\s*(.*)$/)
+      if (!continuation) break
+      index += 1
+      tokens.push(...continuation[1]!.trim().split(/\s+/).filter(Boolean))
+    }
+    const parameter_index = tokens.findIndex(
+      (token) => /^params?:/i.test(token) || token.includes("=") || /^[;$]/.test(token),
+    )
+    pin_sets.push(parameter_index < 0 ? tokens : tokens.slice(0, parameter_index))
+  }
+  return pin_sets
+}
+
+function assertNoSyntheticBenchmarkChannel(model_source: string): void {
+  const comments = model_source
+    .split(/\r?\n/)
+    .filter((line) => /^\s*[*;$]/.test(line))
+    .join("\n")
+  if (/\b(selector|telemetry|benchmark[_ -]?code|metric[_ -]?channel|selected metric)\b/i.test(comments)) {
+    throw new Error("model.lib declares a synthetic benchmark selector or telemetry channel")
+  }
+}
+
+class Connectivity {
+  private parent = new Map<string, string>()
+
+  private root(value: string): string {
+    const parent = this.parent.get(value)
+    if (!parent) {
+      this.parent.set(value, value)
+      return value
+    }
+    if (parent === value) return value
+    const root = this.root(parent)
+    this.parent.set(value, root)
+    return root
+  }
+
+  connect(values: string[]): void {
+    const [first, ...rest] = values
+    if (!first) return
+    const first_root = this.root(first)
+    for (const value of rest) this.parent.set(this.root(value), first_root)
+  }
+
+  connected(first: string, second: string): boolean {
+    return this.root(first) === this.root(second)
+  }
+}
+
+function portKey(port_id: string): string {
+  return `port:${port_id}`
+}
+
+function netKey(net_id: string): string {
+  return `net:${net_id}`
+}
+
+function assertCanonicalDutSimulation(
+  circuit_json: AnyCircuitElement[],
+  model_source: string,
+  probe_name: string,
+): void {
+  const records = circuit_json.map((element) => element as unknown).filter(isRecord)
+  const dut_components = records.filter(
+    (element) => element.type === "source_component" && element.name === "DUT",
+  )
+  if (dut_components.length !== 1 || typeof dut_components[0]?.source_component_id !== "string") {
+    throw new Error("simulation must contain exactly one source component named DUT")
+  }
+  const dut_id = dut_components[0].source_component_id
+  const dut_ports = records.filter(
+    (element) =>
+      element.type === "source_port" &&
+      element.source_component_id === dut_id &&
+      typeof element.source_port_id === "string",
+  )
+  if (dut_ports.length === 0) throw new Error("DUT has no source ports in simulation output")
+
+  const spice_models = records.filter(
+    (element) => element.type === "simulation_spice_subcircuit" && element.source_component_id === dut_id,
+  )
+  if (spice_models.length !== 1 || !isRecord(spice_models[0])) {
+    throw new Error("DUT must have exactly one canonical simulation_spice_subcircuit")
+  }
+  const spice_model = spice_models[0]
+  if (
+    typeof spice_model.subcircuit_source !== "string" ||
+    normalizeModelSource(spice_model.subcircuit_source) !== normalizeModelSource(model_source)
+  ) {
+    throw new Error("DUT simulation does not use the canonical model.lib source")
+  }
+  if (!isRecord(spice_model.spice_pin_to_source_port_map)) {
+    throw new Error("DUT SPICE pin mapping is missing")
+  }
+  const dut_port_ids = new Set(dut_ports.map((port) => port.source_port_id as string))
+  const mapped_spice_pins = Object.keys(spice_model.spice_pin_to_source_port_map)
+  const mapped_port_ids = Object.values(spice_model.spice_pin_to_source_port_map)
+  if (
+    mapped_port_ids.length === 0 ||
+    new Set(mapped_port_ids).size !== mapped_port_ids.length ||
+    mapped_port_ids.some((port_id) => typeof port_id !== "string" || !dut_port_ids.has(port_id))
+  ) {
+    throw new Error("DUT SPICE pin mapping does not resolve exclusively to DUT ports")
+  }
+  const normalized_mapping = mapped_spice_pins.map((pin) => pin.toLowerCase()).sort()
+  const has_exact_subcircuit_mapping = parseSubcircuitPinSets(model_source).some(
+    (pins) =>
+      pins.length > 0 &&
+      JSON.stringify(pins.map((pin) => pin.toLowerCase()).sort()) === JSON.stringify(normalized_mapping),
+  )
+  if (!has_exact_subcircuit_mapping) {
+    throw new Error("DUT SPICE pin mapping must cover every .SUBCKT pin exactly once")
+  }
+
+  const probes = records.filter(
+    (element) => element.type === "simulation_voltage_probe" && element.name === probe_name,
+  )
+  if (probes.length !== 1 || !isRecord(probes[0])) {
+    throw new Error(`simulation must contain exactly one voltage probe named ${probe_name}`)
+  }
+  const probe = probes[0]
+  const signal_key =
+    typeof probe.signal_input_source_port_id === "string"
+      ? portKey(probe.signal_input_source_port_id)
+      : typeof probe.signal_input_source_net_id === "string"
+        ? netKey(probe.signal_input_source_net_id)
+        : undefined
+  if (!signal_key) throw new Error(`${probe_name} has no signal input connectivity`)
+
+  const connectivity = new Connectivity()
+  for (const trace of records) {
+    if (trace.type !== "source_trace") continue
+    const connected = [
+      ...(Array.isArray(trace.connected_source_port_ids)
+        ? trace.connected_source_port_ids.filter((id): id is string => typeof id === "string").map(portKey)
+        : []),
+      ...(Array.isArray(trace.connected_source_net_ids)
+        ? trace.connected_source_net_ids.filter((id): id is string => typeof id === "string").map(netKey)
+        : []),
+    ]
+    connectivity.connect(connected)
+  }
+  if (![...dut_port_ids].some((port_id) => connectivity.connected(signal_key, portKey(port_id)))) {
+    throw new Error(`${probe_name} is not electrically connected to the canonical DUT`)
+  }
 }
 
 function requireGraph(graphs: SimulationGraph[], probe_name: string): SimulationGraph {
@@ -385,8 +560,9 @@ export async function verifySimulationBenchmark(input: {
     const source_path = join(input.model_dir, "benchmarks", `${input.benchmark_id}.circuit.tsx`)
     const circuit_json_path = join(job_dir, "dist", "spice", "benchmarks", input.benchmark_id, "circuit.json")
     const paths = input.circuit_json_paths?.length ? input.circuit_json_paths : [{ path: circuit_json_path }]
-    const [source_text, ...circuit_texts] = await Promise.all([
+    const [source_text, model_source, ...circuit_texts] = await Promise.all([
       readFile(source_path, "utf8"),
+      readFile(join(input.model_dir, "model.lib"), "utf8"),
       ...paths.map(({ path }) => readFile(path, "utf8")),
     ])
     const circuit_jsons = circuit_texts.map((text) => JSON.parse(text) as unknown)
@@ -410,6 +586,10 @@ export async function verifySimulationBenchmark(input: {
     const parsed = circuit_jsons.map((json) => parseSimulationOutput(json))
     const errors = parsed.flatMap(({ errors }) => errors)
     if (errors.length > 0) throw new Error(errors.join("; "))
+    assertNoSyntheticBenchmarkChannel(model_source)
+    for (const circuit of circuit_jsons) {
+      assertCanonicalDutSimulation(circuit as AnyCircuitElement[], model_source, definition.probe_name)
+    }
 
     const points =
       definition.kind === "transient_voltage"
@@ -551,10 +731,30 @@ export async function hasCompleteVerifiedSimulationReport(model_dir: string): Pr
   const report = await readTrustedReport(model_dir)
   if (!report || report.benchmarks.length === 0) return false
   if (report.benchmarks.some((benchmark) => !benchmark.passed)) return false
+  const manifest: unknown = await readFile(join(model_dir, "benchmarks.json"), "utf8")
+    .then((text) => JSON.parse(text) as unknown)
+    .catch(() => undefined)
+  if (!isRecord(manifest) || !Array.isArray(manifest.benchmarks)) return false
+  const benchmark_ids = manifest.benchmarks.flatMap((benchmark) =>
+    isRecord(benchmark) && typeof benchmark.id === "string" ? [benchmark.id] : [],
+  )
+  if (
+    benchmark_ids.length !== manifest.benchmarks.length ||
+    JSON.stringify([...benchmark_ids].sort()) !==
+      JSON.stringify(report.benchmarks.map((benchmark) => benchmark.benchmark_id).sort())
+  ) {
+    return false
+  }
   const artifacts = await Promise.all(
-    report.benchmarks.map((benchmark) =>
-      getVerifiedSimulationArtifact(model_dir, benchmark.benchmark_id).catch(() => undefined),
-    ),
+    report.benchmarks.map(async (benchmark) => {
+      const [artifact, current_signature] = await Promise.all([
+        getVerifiedSimulationArtifact(model_dir, benchmark.benchmark_id).catch(() => undefined),
+        getModelSimulationSourceSignature(model_dir, benchmark.benchmark_id).catch(() => undefined),
+      ])
+      return artifact?.source_signature && artifact.source_signature === current_signature
+        ? artifact
+        : undefined
+    }),
   )
   return artifacts.every((artifact) => artifact?.passed === true && Boolean(artifact.result_text))
 }

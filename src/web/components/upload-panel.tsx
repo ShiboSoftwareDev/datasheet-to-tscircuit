@@ -175,8 +175,8 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
             <FlaskConical size={17} />
           </span>
           <span className="model-option-copy">
-            <strong>Create PSpice model</strong>
-            <small>Starts reference setup immediately alongside component generation.</small>
+            <strong>Create SPICE behavioral model</strong>
+            <small>Validated with ngspice; starts reference setup alongside component generation.</small>
           </span>
           <i aria-hidden="true">
             <b />
@@ -190,7 +190,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
             <div
               className="effort-picker upload-effort-picker"
               role="group"
-              aria-label="PSpice modeling effort"
+              aria-label="SPICE modeling effort"
             >
               {[1, 2, 4, 8].map((value) => (
                 <button
@@ -221,7 +221,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
           </>
         ) : (
           <>
-            {create_pspice_model ? "Generate component + PSpice model" : "Generate component"}{" "}
+            {create_pspice_model ? "Generate component + SPICE model" : "Generate component"}{" "}
             <ArrowRight size={18} />
           </>
         )}

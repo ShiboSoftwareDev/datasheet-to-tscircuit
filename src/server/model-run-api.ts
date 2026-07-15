@@ -96,7 +96,7 @@ export async function launchModelRun(
   await context.model_run_store.appendLog(
     model_run_id,
     "system",
-    `Created a ${input.effort_multiplier}× PSpice model run. Setup and component waiting are untimed; effort applies only to refinement.\n`,
+    `Created a ${input.effort_multiplier}× SPICE behavioral-model run validated with ngspice. Setup and component waiting are untimed; effort applies only to refinement.\n`,
   )
   const runner = context.run_model ?? runModel
   void runner({ model_run_id }, context)

@@ -331,6 +331,27 @@ a {
   white-space: nowrap;
 }
 
+.task-statuses {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.task-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.task-state.ready {
+  color: #287c4b;
+}
+
+.task-state-model {
+  color: #737d88;
+}
+
 .task-entry-actions {
   display: inline-flex;
   flex: 0 0 auto;
@@ -878,6 +899,70 @@ a {
 .preview-column {
   display: grid;
   gap: 18px;
+}
+
+.component-spice-status {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  border: 1px solid #e2e2de;
+  border-radius: 10px;
+  background: #fff;
+  color: #59616b;
+  font-size: 11px;
+}
+
+.component-spice-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #30363d;
+  font-weight: 650;
+}
+
+.spice-available-tag,
+.spice-generating-tag,
+.spice-generate-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.spice-available-tag {
+  padding: 5px 8px;
+  color: #187443;
+  background: #e8f7ed;
+}
+
+.spice-generating-tag {
+  color: #82651a;
+}
+
+.spice-generate-button {
+  padding: 6px 9px;
+  border: 1px solid #c9d8ed;
+  color: #245b9f;
+  background: #f3f7fd;
+  cursor: pointer;
+}
+
+.spice-generate-button:hover:not(:disabled) {
+  background: #e8f0fb;
+}
+
+.spice-generate-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.component-spice-error {
+  margin-left: auto;
+  color: var(--red);
 }
 
 .workspace-card {

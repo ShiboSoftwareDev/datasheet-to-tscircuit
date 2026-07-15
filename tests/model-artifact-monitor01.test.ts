@@ -9,6 +9,36 @@ import {
   writeSimulationValidationReport,
 } from "@/server/model-simulation-validator"
 
+const modelSourceOne = ".subckt TEST IN OUT\nR1 IN OUT 1k\n.ends TEST\n"
+const modelSourceTwo = ".subckt TEST IN OUT\nR1 IN OUT 2k\n.ends TEST\n"
+
+function verifiedCircuit(
+  model_source: string,
+  probe_name: string,
+  component_id: string,
+  voltage_levels: number[],
+) {
+  return [
+    { type: "source_component", source_component_id: "dut", name: "DUT" },
+    { type: "source_port", source_port_id: "dut_in", source_component_id: "dut", name: "IN" },
+    { type: "source_port", source_port_id: "dut_out", source_component_id: "dut", name: "OUT" },
+    {
+      type: "simulation_spice_subcircuit",
+      source_component_id: "dut",
+      subcircuit_source: model_source,
+      spice_pin_to_source_port_map: { IN: "dut_in", OUT: "dut_out" },
+    },
+    { type: "simulation_voltage_probe", name: probe_name, signal_input_source_port_id: "dut_out" },
+    { type: "source_component", source_component_id: component_id },
+    {
+      type: "simulation_transient_voltage_graph",
+      name: probe_name,
+      timestamps_ms: [0, 1],
+      voltage_levels,
+    },
+  ]
+}
+
 test("model previews read persisted Circuit JSON and never rerun TSX on selection", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-artifacts-"))
   const model_dir = join(job_dir, "spice")
@@ -27,7 +57,7 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
     Bun.write(join(benchmark_dir, "output.circuit.tsx"), "export default () => <board />\n"),
     Bun.write(join(evidence_dir, "transfer.csv"), "x,y\n0,0\n1,1\n"),
     Bun.write(join(evidence_dir, "output.csv"), "x,y\n0,1\n1,2\n"),
-    Bun.write(join(model_dir, "model.lib"), "revision-one"),
+    Bun.write(join(model_dir, "model.lib"), modelSourceOne),
     Bun.write(join(model_dir, "component-with-model.circuit.tsx"), "export default () => <chip />\n"),
     Bun.write(join(model_dir, "component.circuit.tsx"), "export default () => <chip />\n"),
     Bun.write(
@@ -69,27 +99,11 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   await Promise.all([
     Bun.write(
       transfer_output,
-      JSON.stringify([
-        { type: "source_component", source_component_id: "transfer-revision-one" },
-        {
-          type: "simulation_transient_voltage_graph",
-          name: "RESULT",
-          timestamps_ms: [0, 1],
-          voltage_levels: [0, 0.9],
-        },
-      ]),
+      JSON.stringify(verifiedCircuit(modelSourceOne, "RESULT", "transfer-revision-one", [0, 0.9])),
     ),
     Bun.write(
       output_output,
-      JSON.stringify([
-        { type: "source_component", source_component_id: "output-revision-one" },
-        {
-          type: "simulation_transient_voltage_graph",
-          name: "RESULT",
-          timestamps_ms: [0, 1],
-          voltage_levels: [1.1, 2.1],
-        },
-      ]),
+      JSON.stringify(verifiedCircuit(modelSourceOne, "RESULT", "output-revision-one", [1.1, 2.1])),
     ),
   ])
 
@@ -156,7 +170,7 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   expect(selected_verified_preview?.circuit_preview?.snapshot_origin).toBe("server_validation")
   expect(selected_verified_preview?.reference_preview?.result_points?.[1]).toEqual({ x: 1, y: 2.1 })
 
-  await Bun.write(join(model_dir, "model.lib"), "revision-two")
+  await Bun.write(join(model_dir, "model.lib"), modelSourceTwo)
   await monitor.sync()
   expect(store.getModelRun("model_1")?.circuit_preview?.is_stale).toBe(true)
   expect(store.getModelRun("model_1")?.reference_preview?.is_stale).toBe(true)
@@ -164,23 +178,18 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   await Bun.sleep(5)
   await Bun.write(
     transfer_output,
-    JSON.stringify([
-      { type: "source_component", source_component_id: "transfer-revision-two" },
-      {
-        type: "simulation_transient_voltage_graph",
-        name: "RESULT",
-        timestamps_ms: [0, 1],
-        voltage_levels: [0, 1],
-      },
-    ]),
+    JSON.stringify(verifiedCircuit(modelSourceTwo, "RESULT", "transfer-revision-two", [0, 1])),
   )
   await monitor.sync()
   const refreshed = store.getModelRun("model_1")?.circuit_preview
   expect(refreshed?.snapshot_origin).toBe("workspace")
   expect(refreshed?.is_stale).toBe(false)
   expect(
-    (refreshed?.circuit_json?.[0] as { source_component_id?: string } | undefined)?.source_component_id,
-  ).toBe("transfer-revision-two")
+    refreshed?.circuit_json?.some(
+      (element) =>
+        (element as { source_component_id?: string }).source_component_id === "transfer-revision-two",
+    ),
+  ).toBe(true)
 
   monitor.stop()
   await rm(job_dir, { recursive: true, force: true })

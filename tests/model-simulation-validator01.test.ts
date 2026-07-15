@@ -5,9 +5,28 @@ import { join } from "node:path"
 import {
   getVerifiedSimulationArtifact,
   getVerifiedResultFile,
+  hasCompleteVerifiedSimulationReport,
   verifySimulationBenchmark,
   writeSimulationValidationReport,
 } from "@/server/model-simulation-validator"
+
+const modelSource = ".subckt TEST IN OUT\nR1 IN OUT 1k\n.ends TEST\n"
+
+function verifiedCircuit(probe_name: string, extra: Array<Record<string, unknown>>) {
+  return [
+    { type: "source_component", source_component_id: "dut", name: "DUT" },
+    { type: "source_port", source_port_id: "dut_in", source_component_id: "dut", name: "IN" },
+    { type: "source_port", source_port_id: "dut_out", source_component_id: "dut", name: "OUT" },
+    {
+      type: "simulation_spice_subcircuit",
+      source_component_id: "dut",
+      subcircuit_source: modelSource,
+      spice_pin_to_source_port_map: { IN: "dut_in", OUT: "dut_out" },
+    },
+    { type: "simulation_voltage_probe", name: probe_name, signal_input_source_port_id: "dut_out" },
+    ...extra,
+  ]
+}
 
 test("simulation verification rejects solver errors and hashes extracted simulator curves", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-simulation-validation-"))
@@ -17,6 +36,7 @@ test("simulation verification rejects solver errors and hashes extracted simulat
     mkdir(join(model_dir, "benchmarks"), { recursive: true }),
     mkdir(circuit_dir, { recursive: true }),
   ])
+  await Bun.write(join(model_dir, "model.lib"), modelSource)
   await Bun.write(join(model_dir, "benchmarks", "transient.circuit.tsx"), "export default () => <board />\n")
   await Bun.write(
     join(model_dir, "benchmarks.json"),
@@ -38,12 +58,14 @@ test("simulation verification rejects solver errors and hashes extracted simulat
   )
   await Bun.write(
     join(circuit_dir, "circuit.json"),
-    JSON.stringify([
-      {
-        type: "simulation_unknown_experiment_error",
-        message: "Singular matrix (real)",
-      },
-    ]),
+    JSON.stringify(
+      verifiedCircuit("VOUT", [
+        {
+          type: "simulation_unknown_experiment_error",
+          message: "Singular matrix (real)",
+        },
+      ]),
+    ),
   )
 
   const failed = await verifySimulationBenchmark({ model_dir, benchmark_id: "transient" })
@@ -53,20 +75,40 @@ test("simulation verification rejects solver errors and hashes extracted simulat
     await Bun.file(join(job_dir, ".model-validation", "benchmarks", "transient", "circuit.json")).exists(),
   ).toBe(true)
 
+  const incomplete_mapping = verifiedCircuit("VOUT", [
+    {
+      type: "simulation_transient_voltage_graph",
+      name: "VOUT",
+      timestamps_ms: [0, 1],
+      voltage_levels: [0, 1],
+    },
+  ])
+  const incomplete_subcircuit = incomplete_mapping[3] as {
+    spice_pin_to_source_port_map: Record<string, string>
+  }
+  incomplete_subcircuit.spice_pin_to_source_port_map = {
+    IN: "dut_in",
+  }
+  await Bun.write(join(circuit_dir, "circuit.json"), JSON.stringify(incomplete_mapping))
+  const incomplete = await verifySimulationBenchmark({ model_dir, benchmark_id: "transient" })
+  expect(incomplete.error_message).toContain("cover every .SUBCKT pin")
+
   await Bun.write(
     join(circuit_dir, "circuit.json"),
-    JSON.stringify([
-      {
-        type: "pcb_missing_footprint_error",
-        message: "No footprint specified for a simulation-only load",
-      },
-      {
-        type: "simulation_transient_voltage_graph",
-        name: "VOUT",
-        timestamps_ms: [0, 0.5, 1],
-        voltage_levels: [0, 1, 2],
-      },
-    ]),
+    JSON.stringify(
+      verifiedCircuit("VOUT", [
+        {
+          type: "pcb_missing_footprint_error",
+          message: "No footprint specified for a simulation-only load",
+        },
+        {
+          type: "simulation_transient_voltage_graph",
+          name: "VOUT",
+          timestamps_ms: [0, 0.5, 1],
+          voltage_levels: [0, 1, 2],
+        },
+      ]),
+    ),
   )
   const passed = await verifySimulationBenchmark({ model_dir, benchmark_id: "transient" })
   expect(passed.passed).toBe(true)
@@ -74,6 +116,7 @@ test("simulation verification rejects solver errors and hashes extracted simulat
     "x,y\n0,1\n0.5,3\n1,5\n",
   )
   await writeSimulationValidationReport(model_dir, [passed])
+  expect(await hasCompleteVerifiedSimulationReport(model_dir)).toBe(true)
   expect(await getVerifiedResultFile(model_dir, "transient")).toBe("results/verified/transient.csv")
   expect(
     (await getVerifiedSimulationArtifact(model_dir, "transient"))?.circuit_json.some(
@@ -87,6 +130,9 @@ test("simulation verification rejects solver errors and hashes extracted simulat
   await Bun.write(join(job_dir, ".model-validation", "results", "transient.csv"), "x,y\n0,999\n1,999\n")
   expect(await getVerifiedResultFile(model_dir, "transient")).toBeUndefined()
 
+  await Bun.write(join(model_dir, "model.lib"), modelSource.replace("1k", "2k"))
+  expect(await hasCompleteVerifiedSimulationReport(model_dir)).toBe(false)
+
   await rm(job_dir, { recursive: true, force: true })
 })
 
@@ -99,7 +145,7 @@ test("parameter sweeps reuse one circuit and combine separately persisted runs",
     mkdir(output_dir, { recursive: true }),
   ])
   await Bun.write(join(model_dir, "benchmarks", "sweep.circuit.tsx"), "export default () => <board />\n")
-  await Bun.write(join(model_dir, "model.lib"), ".model X R\n")
+  await Bun.write(join(model_dir, "model.lib"), modelSource)
   await Bun.write(
     join(model_dir, "benchmarks.json"),
     JSON.stringify({
@@ -121,14 +167,16 @@ test("parameter sweeps reuse one circuit and combine separately persisted runs",
     }),
   )
   const make = (value: number) =>
-    JSON.stringify([
-      {
-        type: "simulation_transient_voltage_graph",
-        name: "RESULT",
-        timestamps_ms: [0, 1],
-        voltage_levels: [0, value],
-      },
-    ])
+    JSON.stringify(
+      verifiedCircuit("RESULT", [
+        {
+          type: "simulation_transient_voltage_graph",
+          name: "RESULT",
+          timestamps_ms: [0, 1],
+          voltage_levels: [0, value],
+        },
+      ]),
+    )
   const first = join(output_dir, "point-000.json")
   const second = join(output_dir, "point-001.json")
   await Bun.write(first, make(2))
@@ -151,6 +199,7 @@ test("legacy probe sweeps are rejected with a migration message", async () => {
   const model_dir = join(job_dir, "spice")
   await mkdir(join(model_dir, "benchmarks"), { recursive: true })
   await mkdir(join(job_dir, "dist", "spice", "benchmarks", "old"), { recursive: true })
+  await Bun.write(join(model_dir, "model.lib"), modelSource)
   await Bun.write(
     join(model_dir, "benchmarks.json"),
     JSON.stringify({

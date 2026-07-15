@@ -2,6 +2,7 @@ import { Boxes, FlaskConical, LoaderCircle, WandSparkles } from "lucide-react"
 import { useEffect, useState } from "react"
 import { AgentLogs } from "./components/agent-logs"
 import { CircuitPreview } from "./components/circuit-preview"
+import { ComponentSpiceStatus } from "./components/component-spice-status"
 import { ModelPanel } from "./components/model-panel"
 import { TaskSidebar } from "./components/task-sidebar"
 import { UploadPanel } from "./components/upload-panel"
@@ -123,6 +124,7 @@ export default function App() {
                   on_cancel={() => cancelTask(job.job_id)}
                 />
                 <div className="preview-column">
+                  <ComponentSpiceStatus job={job} />
                   <CircuitPreview job={job} />
                 </div>
               </div>

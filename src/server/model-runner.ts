@@ -1,8 +1,13 @@
 import { copyFile, mkdir, readdir, readFile, rm, stat } from "node:fs/promises"
-import { delimiter, dirname, join } from "node:path"
+import { delimiter, dirname, join, relative } from "node:path"
 import type { JobLogStream, ModelManifest, ModelProgress, ModelProgressPhase } from "@/shared/job-types"
 import type { JobStore } from "./job-store"
 import { startModelArtifactMonitor, type ModelArtifactMonitor } from "./model-artifact-monitor"
+import {
+  createOrVerifyBenchmarkLock,
+  hasBenchmarkManifest,
+  verifyBenchmarkLock,
+} from "./model-benchmark-lock"
 import { startModelProgressMonitor, type ModelProgressMonitor } from "./model-progress"
 import {
   buildModelAgentPrompt,
@@ -16,6 +21,7 @@ import {
   clearVerifiedSimulationResults,
   getModelSimulationSourceSignature,
   getSimulationBuildPlan,
+  getSimulationRunCount,
   getVerifiedResultsDirectory,
   type SimulationBenchmarkVerification,
   verifySimulationBenchmark,
@@ -150,6 +156,54 @@ function parseModelManifest(value: unknown): ModelManifest {
     simulator: value.simulator as string,
     generated_at: value.generated_at as string,
     pins,
+  }
+}
+
+function parseSubcircuitHeaders(model_source: string): Array<{ name: string; pins: string[] }> {
+  const lines = model_source.replace(/\r\n?/g, "\n").split("\n")
+  const headers: Array<{ name: string; pins: string[] }> = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index]!.match(/^\s*\.\s*subckt\s+(\S+)(?:\s+(.*))?$/i)
+    if (!match) continue
+    const tokens = (match[2] ?? "").trim().split(/\s+/).filter(Boolean)
+    while (index + 1 < lines.length) {
+      const continuation = lines[index + 1]!.match(/^\s*\+\s*(.*)$/)
+      if (!continuation) break
+      index += 1
+      tokens.push(...continuation[1]!.trim().split(/\s+/).filter(Boolean))
+    }
+    const parameter_index = tokens.findIndex(
+      (token) => /^params?:/i.test(token) || token.includes("=") || /^[;$]/.test(token),
+    )
+    const pins = parameter_index < 0 ? tokens : tokens.slice(0, parameter_index)
+    headers.push({ name: match[1]!, pins })
+  }
+  return headers
+}
+
+function validateManifestAgainstModel(manifest: ModelManifest, model_source: string): void {
+  const headers = parseSubcircuitHeaders(model_source)
+  const subcircuit = headers.find(
+    (candidate) => candidate.name.toLowerCase() === manifest.entry_name.toLowerCase(),
+  )
+  if (!subcircuit) {
+    throw new Error(
+      `model-manifest.json entry_name ${manifest.entry_name} does not match a model.lib .SUBCKT`,
+    )
+  }
+  if (subcircuit.pins.length === 0) throw new Error("model.lib .SUBCKT declaration has no pins")
+  const manifest_nodes = manifest.pins.map((pin) => pin.spice_node)
+  const component_pins = manifest.pins.map((pin) => pin.component_pin)
+  if (
+    new Set(manifest_nodes).size !== manifest_nodes.length ||
+    new Set(component_pins).size !== component_pins.length
+  ) {
+    throw new Error("model-manifest.json pin mappings must be one-to-one")
+  }
+  const normalized_header = subcircuit.pins.map((pin) => pin.toLowerCase()).sort()
+  const normalized_manifest = manifest_nodes.map((pin) => pin.toLowerCase()).sort()
+  if (JSON.stringify(normalized_header) !== JSON.stringify(normalized_manifest)) {
+    throw new Error("model-manifest.json must map every .SUBCKT pin exactly once")
   }
 }
 
@@ -354,12 +408,13 @@ async function writeServerIntegratedComponent(input: {
   )
   await Bun.write(
     join(input.model_dir, "component-with-model.circuit.tsx"),
-    `import Component from "./component.circuit"
+    `import type { ComponentProps } from "react"
+import Component from "./component.circuit"
 
 const modelSource = ${JSON.stringify(input.model_source)}
 const ModelComponent = Component as any
 
-export type ComponentWithModelProps = Parameters<typeof Component>[0]
+export type ComponentWithModelProps = ComponentProps<typeof Component>
 
 export default function ComponentWithModel(props: ComponentWithModelProps) {
   return (
@@ -376,6 +431,116 @@ export default function ComponentWithModel(props: ComponentWithModelProps) {
 }
 `,
   )
+}
+
+function normalizeModelSource(source: string): string {
+  return source.replace(/\r\n?/g, "\n").trim()
+}
+
+function assertIntegratedCircuitUsesCanonicalModel(value: unknown, model_source: string): void {
+  if (!isCircuitJson(value)) throw new Error("The integrated component did not produce valid Circuit JSON")
+  const spice_models = value.filter((element) => element.type === "simulation_spice_subcircuit")
+  if (
+    spice_models.length !== 1 ||
+    !("subcircuit_source" in spice_models[0]!) ||
+    typeof spice_models[0]!.subcircuit_source !== "string" ||
+    normalizeModelSource(spice_models[0]!.subcircuit_source) !== normalizeModelSource(model_source)
+  ) {
+    throw new Error("The integrated component does not contain exactly one canonical model.lib subcircuit")
+  }
+}
+
+function toImportPath(from_directory: string, target_file: string): string {
+  const path = relative(from_directory, target_file)
+    .replaceAll("\\", "/")
+    .replace(/\.tsx$/i, "")
+  return path.startsWith(".") ? path : `./${path}`
+}
+
+async function runParameterSweepBuilds(input: {
+  benchmark_id: string
+  benchmark_file: string
+  build_plan: Awaited<ReturnType<typeof getSimulationBuildPlan>>
+  job_dir: string
+  model_dir: string
+  signal: AbortSignal
+  tsci_bin: string
+  append: (stream: JobLogStream, message: string) => Promise<void>
+}): Promise<{ exit_code: number; point_paths: Array<{ path: string; x: number }> }> {
+  const build_root = join(input.model_dir, ".server-validation-builds", input.benchmark_id)
+  await rm(build_root, { recursive: true, force: true })
+  await mkdir(build_root, { recursive: true })
+  const benchmark_source = join(input.model_dir, "benchmarks", input.benchmark_file)
+  const runs = await Promise.all(
+    input.build_plan.map(async (point, point_index) => {
+      if (point.x === undefined || !point.props) throw new Error("parameter sweep build plan is invalid")
+      const point_x = point.x
+      const wrapper_path = join(build_root, `${point.run_id}.circuit.tsx`)
+      await Bun.write(
+        wrapper_path,
+        `import Benchmark from ${JSON.stringify(toImportPath(dirname(wrapper_path), benchmark_source))}\n\nexport default function ServerValidationPoint() {\n  return <Benchmark {...${JSON.stringify(point.props)}} />\n}\n`,
+      )
+      return { point, point_x, point_index, wrapper_path }
+    }),
+  )
+  const results: Array<{ exit_code: number; path?: string; x: number } | undefined> = Array(runs.length)
+  let next_index = 0
+  const concurrency_value = Number(process.env.MODEL_VALIDATION_CONCURRENCY ?? 4)
+  const concurrency = Number.isInteger(concurrency_value) ? Math.max(1, Math.min(8, concurrency_value)) : 4
+  const worker = async () => {
+    while (!input.signal.aborted) {
+      const run_index = next_index
+      next_index += 1
+      const run = runs[run_index]
+      if (!run) return
+      await input.append(
+        "system",
+        `Building locked benchmark ${input.benchmark_file} (${run.point_index + 1}/${runs.length}) at x=${run.point.x}…\n`,
+      )
+      const source_relative = relative(input.model_dir, run.wrapper_path)
+      const exit_code = await streamModelProcess({
+        command: [input.tsci_bin, "build", source_relative, "--ignore-warnings"],
+        cwd: input.model_dir,
+        signal: input.signal,
+        on_chunk: input.append,
+      })
+      const generated_path = join(
+        input.job_dir,
+        "dist",
+        "spice",
+        ".server-validation-builds",
+        input.benchmark_id,
+        run.point.run_id,
+        "circuit.json",
+      )
+      if (exit_code !== 0) {
+        results[run_index] = { exit_code, x: run.point_x }
+        continue
+      }
+      const saved_path = join(
+        input.model_dir,
+        "validation-artifacts",
+        input.benchmark_id,
+        "runs",
+        run.point.run_id,
+        "circuit.json",
+      )
+      await mkdir(dirname(saved_path), { recursive: true })
+      await Bun.write(saved_path, await readFile(generated_path))
+      results[run_index] = { exit_code, path: saved_path, x: run.point_x }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, runs.length) }, () => worker()))
+  const completed = results.filter(
+    (result): result is { exit_code: number; path?: string; x: number } => result !== undefined,
+  )
+  return {
+    exit_code:
+      completed.find((result) => result.exit_code !== 0)?.exit_code ?? (input.signal.aborted ? 143 : 0),
+    point_paths: completed.flatMap((result) =>
+      result.exit_code === 0 && result.path ? [{ path: result.path, x: result.x }] : [],
+    ),
+  }
 }
 
 async function validateChampion(
@@ -397,48 +562,29 @@ async function validateChampion(
     readFile(join(input.model_dir, "model-card.md"), "utf8"),
     readIterationCount(input.model_dir).catch(() => 0),
   ])
-  if (!/^\s*\.\s*(subckt|model)\b/im.test(model_source)) {
-    throw new Error("model.lib must contain a .SUBCKT or .MODEL declaration")
-  }
   const manifest = parseModelManifest(manifest_value)
-  const component_path = join(input.model_dir, "component-with-model.circuit.tsx")
-  if (!(await Bun.file(component_path).exists())) {
-    await writeServerIntegratedComponent({ model_dir: input.model_dir, manifest, model_source })
-  }
+  validateManifestAgainstModel(manifest, model_source)
+  await verifyBenchmarkLock(input.model_dir)
+  await writeServerIntegratedComponent({ model_dir: input.model_dir, manifest, model_source })
 
   const append = async (stream: JobLogStream, message: string) => {
     await context.model_run_store.appendLog(input.model_run_id, stream, message)
   }
   const integration_errors: string[] = []
-  let build_exit_code = await streamModelProcess({
+  const build_exit_code = await streamModelProcess({
     command: [context.tsci_bin, "build", "component-with-model.circuit.tsx", "--ignore-warnings"],
     cwd: input.model_dir,
     signal: input.signal,
     on_chunk: append,
   })
-  if (build_exit_code !== 0 && !input.signal.aborted) {
-    await append(
-      "system",
-      "The agent integration component did not build; retrying with the server-generated wrapper.\n",
-    )
-    await writeServerIntegratedComponent({ model_dir: input.model_dir, manifest, model_source })
-    build_exit_code = await streamModelProcess({
-      command: [context.tsci_bin, "build", "component-with-model.circuit.tsx", "--ignore-warnings"],
-      cwd: input.model_dir,
-      signal: input.signal,
-      on_chunk: append,
-    })
-  }
   if (build_exit_code !== 0) {
     integration_errors.push(`The tscircuit model integration build exited with code ${build_exit_code}`)
   } else {
-    await attachModelToGeneratedComponent({
-      job_id: input.job_id,
-      job_dir: input.job_dir,
-      model_dir: input.model_dir,
-      job_store: context.job_store,
-    })
-    await append("system", "Attached the model to the generated footprint/schematic component.\n")
+    const integrated_circuit: unknown = JSON.parse(
+      await readFile(join(input.job_dir, "dist", "spice", "component-with-model", "circuit.json"), "utf8"),
+    )
+    assertIntegratedCircuitUsesCanonicalModel(integrated_circuit, model_source)
+    await append("system", "Built the server-generated canonical model wrapper.\n")
   }
 
   const benchmark_files = await listModelBenchFiles(input.model_dir)
@@ -451,41 +597,34 @@ async function validateChampion(
       break
     }
     const build_plan = await getSimulationBuildPlan(input.model_dir, benchmark_id)
-    const point_paths: Array<{ path: string; x: number }> = []
+    let point_paths: Array<{ path: string; x: number }> = []
     let simulation_exit_code = 0
-    for (let point_index = 0; point_index < build_plan.length; point_index += 1) {
-      const point = build_plan[point_index]!
-      await append(
-        "system",
-        `Building and running locked benchmark ${benchmark_file} (${point_index + 1}/${build_plan.length})${point.x === undefined ? "" : ` at x=${point.x}`}…\n`,
-      )
+    if (build_plan.length > 1) {
+      const sweep_result = await runParameterSweepBuilds({
+        benchmark_id,
+        benchmark_file,
+        build_plan,
+        job_dir: input.job_dir,
+        model_dir: input.model_dir,
+        signal: input.signal,
+        tsci_bin: context.tsci_bin,
+        append,
+      })
+      simulation_exit_code = sweep_result.exit_code
+      point_paths = sweep_result.point_paths
+    } else {
+      await append("system", `Building and running locked benchmark ${benchmark_file}…\n`)
       await rm(join(input.job_dir, "dist", "spice", "benchmarks", benchmark_id), {
         recursive: true,
         force: true,
       })
       const command = [context.tsci_bin, "build", join("benchmarks", benchmark_file), "--ignore-warnings"]
-      if (point.props) command.push("--inject-props", JSON.stringify(point.props))
       simulation_exit_code = await streamModelProcess({
         command,
         cwd: input.model_dir,
         signal: input.signal,
         on_chunk: append,
       })
-      const generated_path = join(input.job_dir, "dist", "spice", "benchmarks", benchmark_id, "circuit.json")
-      if (simulation_exit_code === 0 && point.x !== undefined) {
-        const saved_path = join(
-          input.model_dir,
-          "validation-artifacts",
-          benchmark_id,
-          "runs",
-          point.run_id,
-          "circuit.json",
-        )
-        await mkdir(dirname(saved_path), { recursive: true })
-        await Bun.write(saved_path, await readFile(generated_path))
-        point_paths.push({ path: saved_path, x: point.x })
-      }
-      if (simulation_exit_code !== 0) break
     }
     if (simulation_exit_code !== 0) {
       const captured = await verifySimulationBenchmark({
@@ -593,7 +732,7 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
         on_chunk: append,
       })
       if (cancellation_signal.aborted) {
-        await append("system", "\nThe PSpice model setup was stopped. Extracted evidence was preserved.\n")
+        await append("system", "\nThe SPICE model setup was stopped. Extracted evidence was preserved.\n")
         markModelRunCancelled(input.model_run_id, context.model_run_store)
         return
       }
@@ -633,6 +772,7 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
       }
     }
     await copyComponentIntoModelWorkspace({ job_dir, model_dir })
+    if (await hasBenchmarkManifest(model_dir)) await createOrVerifyBenchmarkLock(model_dir)
 
     context.model_run_store.startSegment(input.model_run_id)
     updateServerProgress(
@@ -643,7 +783,7 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
     )
     await append(
       "system",
-      `The component is ready. Starting the fixed PSpice refinement workflow with ${Math.round(
+      `The component is ready. Starting the fixed ngspice-validated SPICE refinement workflow with ${Math.round(
         (context.model_run_store.getRemainingTimeMs(input.model_run_id) ?? 0) / 1000,
       )} seconds of refinement time remaining…\n`,
     )
@@ -664,9 +804,15 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
     while (true) {
       agent_attempt += 1
       const remaining_before_agent = context.model_run_store.getRemainingTimeMs(input.model_run_id) ?? 0
-      if (remaining_before_agent <= 0) {
+      const simulation_run_count = (await hasBenchmarkManifest(model_dir))
+        ? await getSimulationRunCount(model_dir).catch(() => 0)
+        : 0
+      const validation_reserve_ms =
+        context.model_run_store.getFinalizationReserveMs(input.model_run_id, simulation_run_count) ?? 0
+      if (remaining_before_agent <= validation_reserve_ms) {
         budget_exhausted = true
-        final_error_message = "The effort budget expired before every benchmark could be verified."
+        final_error_message =
+          "The reserved independent-validation window was reached before refinement finished."
         break
       }
 
@@ -689,12 +835,30 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
         )
       }
 
-      const agent_exit_code = await streamModelProcess({
-        command: [context.agent_bin, "do", "--prompt", buildModelAgentPrompt(), "--dir", model_dir],
-        cwd: model_dir,
-        signal: process_controller.signal,
-        on_chunk: append,
-      })
+      if (await hasBenchmarkManifest(model_dir)) await verifyBenchmarkLock(model_dir)
+      const agent_controller = new AbortController()
+      let validation_reserve_reached = false
+      const cancel_agent = () => agent_controller.abort()
+      process_controller.signal.addEventListener("abort", cancel_agent, { once: true })
+      const refinement_timer = setTimeout(
+        () => {
+          validation_reserve_reached = true
+          agent_controller.abort()
+        },
+        Math.max(1, remaining_before_agent - validation_reserve_ms),
+      )
+      let agent_exit_code: number
+      try {
+        agent_exit_code = await streamModelProcess({
+          command: [context.agent_bin, "do", "--prompt", buildModelAgentPrompt(), "--dir", model_dir],
+          cwd: model_dir,
+          signal: agent_controller.signal,
+          on_chunk: append,
+        })
+      } finally {
+        clearTimeout(refinement_timer)
+        process_controller.signal.removeEventListener("abort", cancel_agent)
+      }
       if (cancellation_signal.aborted) {
         await append("system", "\nThe SPICE model run was stopped. Champion checkpoints were preserved.\n")
         await publishAvailableModelCheckpoint(input.model_run_id, model_dir, context.model_run_store).catch(
@@ -712,7 +876,21 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
       if (!checkpoint_available) {
         throw new Error("The agent did not leave a canonical, promoted, or recoverable model checkpoint")
       }
-      if (agent_exit_code !== 0 && !budget_exhausted) {
+      if (!(await hasBenchmarkManifest(model_dir))) {
+        if (validation_reserve_reached) {
+          final_error_message = "Refinement reached the validation reserve before creating a benchmark suite."
+          break
+        }
+        throw new Error("The agent did not create benchmarks.json")
+      }
+      await createOrVerifyBenchmarkLock(model_dir)
+      if (validation_reserve_reached) {
+        await append(
+          "system",
+          `Stopped refinement with ${Math.round(validation_reserve_ms / 1000)} seconds reserved for independent validation.\n`,
+        )
+      }
+      if (agent_exit_code !== 0 && !budget_exhausted && !validation_reserve_reached) {
         throw new Error(`tsci-agent exited with code ${agent_exit_code}`)
       }
       if (budget_exhausted) {
@@ -791,7 +969,7 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
         `${score_failures.length} of ${final_validation?.benchmark_count ?? 0} benchmarks failed scoring.`
       await Bun.write(
         join(model_dir, "validation-feedback.md"),
-        `# Server validation feedback\n\nValidation is not complete. Fix the model or benchmark circuits, then rerun the full locked suite.\n\nThe exact server-run outputs are saved in \`simulation-validation.json\` and \`validation-artifacts/<benchmark-id>/\`. Inspect those Circuit JSON files and extracted curves before changing the model.\n\n## Simulation failures\n\n${
+        `# Server validation feedback\n\nValidation is not complete. Fix the model without changing the server-locked benchmark manifest, circuits, evidence, tolerances, or sweep points.\n\nThe exact server-run outputs are saved in \`simulation-validation.json\` and \`validation-artifacts/<benchmark-id>/\`. Inspect those Circuit JSON files and extracted curves before changing the model.\n\n## Simulation failures\n\n${
           simulation_failures.length > 0
             ? simulation_failures
                 .map(
@@ -830,6 +1008,13 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
     const validation_complete = final_validation?.all_passed === true && !final_champion?.integration_error
     if (validation_complete && final_champion && final_validation) {
       await rm(join(model_dir, "validation-feedback.md"), { force: true })
+      await attachModelToGeneratedComponent({
+        job_id: model_run.job_id,
+        job_dir,
+        model_dir,
+        job_store: context.job_store,
+      })
+      await append("system", "Attached the validated server-generated model wrapper to the component.\n")
       await append("system", "SPICE model complete. Every locked benchmark passed verified simulation.\n")
       updateServerProgress(
         input.model_run_id,

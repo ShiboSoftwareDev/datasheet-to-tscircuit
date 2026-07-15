@@ -61,6 +61,11 @@ export function CircuitPreview({ job }: { job: Job }) {
               code={job.component_code}
               showCodeTab={Boolean(job.component_code)}
               codeTabContent={<CodePanel job={job} />}
+              availableTabs={["code", "pcb", "schematic"]}
+              defaultActiveTab="pcb"
+              defaultTab="pcb"
+              showJsonTab={false}
+              showRenderLogTab={false}
               showFileMenu
               isWebEmbedded
               projectName={job.file_name.replace(/\.pdf$/i, "")}

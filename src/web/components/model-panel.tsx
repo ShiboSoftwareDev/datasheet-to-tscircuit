@@ -310,7 +310,7 @@ export function ModelPanel({ job }: { job: Job }) {
     return (
       <section className="model-start-card">
         <span className="eyebrow">
-          <FlaskConical size={14} /> PSpice model generator
+          <FlaskConical size={14} /> SPICE model generator · ngspice validation
         </span>
         <h2>Build and validate a simulation model.</h2>
         <p>
@@ -347,7 +347,7 @@ export function ModelPanel({ job }: { job: Job }) {
             </>
           ) : (
             <>
-              <FlaskConical size={17} /> Create PSpice model
+              <FlaskConical size={17} /> Create SPICE model
             </>
           )}
         </button>

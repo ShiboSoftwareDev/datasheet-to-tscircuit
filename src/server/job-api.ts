@@ -156,7 +156,7 @@ async function createJobFromRequest(request: Request, context: JobApiContext): P
     )
   }
   if (create_pspice_model && !context.model_run_store) {
-    return errorResponse("model_runner_unavailable", "PSpice model generation is unavailable.", 503)
+    return errorResponse("model_runner_unavailable", "SPICE model generation is unavailable.", 503)
   }
 
   const job_id = crypto.randomUUID()

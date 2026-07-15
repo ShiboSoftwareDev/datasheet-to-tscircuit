@@ -12,6 +12,29 @@ import {
   writeSimulationValidationReport,
 } from "@/server/model-simulation-validator"
 
+const verifiedModelSource = ".subckt RESTORED IN OUT\nR1 IN OUT 1k\n.ends RESTORED\n"
+
+function verifiedCircuit(probe_name: string) {
+  return [
+    { type: "source_component", source_component_id: "dut", name: "DUT" },
+    { type: "source_port", source_port_id: "dut_in", source_component_id: "dut", name: "IN" },
+    { type: "source_port", source_port_id: "dut_out", source_component_id: "dut", name: "OUT" },
+    {
+      type: "simulation_spice_subcircuit",
+      source_component_id: "dut",
+      subcircuit_source: verifiedModelSource,
+      spice_pin_to_source_port_map: { IN: "dut_in", OUT: "dut_out" },
+    },
+    { type: "simulation_voltage_probe", name: probe_name, signal_input_source_port_id: "dut_out" },
+    {
+      type: "simulation_transient_voltage_graph",
+      name: probe_name,
+      timestamps_ms: [0, 1],
+      voltage_levels: [0, 1],
+    },
+  ]
+}
+
 test("persisted component and model jobs survive a server restart and deletion removes both", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-restore-"))
   const job_dir = join(jobs_root, "job_restore")
@@ -142,6 +165,7 @@ test("verified simulation artifacts and dropdown previews survive a server resta
     Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nverified fixture"),
     Bun.write(join(model_dir, "benchmarks", "transfer.circuit.tsx"), "export default () => <board />\n"),
     Bun.write(join(model_dir, "evidence", "curves", "transfer.csv"), "x,y\n0,0\n1,1\n"),
+    Bun.write(join(model_dir, "model.lib"), verifiedModelSource),
     Bun.write(
       join(model_dir, "benchmarks.json"),
       JSON.stringify({
@@ -162,17 +186,7 @@ test("verified simulation artifacts and dropdown previews survive a server resta
         ],
       }),
     ),
-    Bun.write(
-      join(circuit_dir, "circuit.json"),
-      JSON.stringify([
-        {
-          type: "simulation_transient_voltage_graph",
-          name: "VOUT",
-          timestamps_ms: [0, 1],
-          voltage_levels: [0, 1],
-        },
-      ]),
-    ),
+    Bun.write(join(circuit_dir, "circuit.json"), JSON.stringify(verifiedCircuit("VOUT"))),
   ])
 
   const original_jobs = new JobStore()

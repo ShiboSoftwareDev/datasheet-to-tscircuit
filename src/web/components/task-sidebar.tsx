@@ -1,5 +1,16 @@
-import { LoaderCircle, PanelLeftClose, PanelLeftOpen, Plus, RotateCcw, Square, Trash2 } from "lucide-react"
-import type { JobDisplayStatus, JobSummary } from "@/shared/job-types"
+import {
+  CheckCircle2,
+  FlaskConical,
+  LoaderCircle,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  RotateCcw,
+  Square,
+  Trash2,
+} from "lucide-react"
+import type { JobDisplayStatus, JobSummary, ModelRunStatus } from "@/shared/job-types"
+import { useModelRun } from "../use-model-run"
 import { Brand } from "./brand"
 
 const STATUS_COPY: Record<JobDisplayStatus, string> = {
@@ -21,6 +32,45 @@ function formatTaskTime(created_at: string): string {
   return Number.isNaN(created.valueOf())
     ? ""
     : new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(created)
+}
+
+const MODEL_STATUS_COPY: Record<ModelRunStatus, string> = {
+  queued: "Queued",
+  setting_up: "Preparing",
+  waiting_for_component: "Waiting",
+  running: "Generating",
+  validating: "Validating",
+  cancelling: "Stopping",
+  cancelled: "Stopped",
+  complete: "Ready",
+  timed_out: "Timed out",
+  failed: "Failed",
+}
+
+function TaskStatus({ task }: { task: JobSummary }) {
+  const { model_run, is_loading } = useModelRun(task.job_id)
+  const component_ready = task.display_status === "complete"
+  const model_ready = Boolean(model_run?.model_source)
+  const model_copy = is_loading
+    ? "Loading"
+    : model_ready
+      ? "Ready"
+      : model_run
+        ? MODEL_STATUS_COPY[model_run.status]
+        : "Not started"
+
+  return (
+    <span className="task-statuses">
+      <span className={`task-state task-state-component ${component_ready ? "ready" : ""}`}>
+        {component_ready && <CheckCircle2 size={10} />}
+        Component {component_ready ? "Ready" : STATUS_COPY[task.display_status]}
+      </span>
+      <span className={`task-state task-state-model ${model_ready ? "ready" : ""}`}>
+        {model_ready ? <CheckCircle2 size={10} /> : <FlaskConical size={10} />}
+        Model {model_copy}
+      </span>
+    </span>
+  )
 }
 
 interface TaskSidebarProps {
@@ -106,7 +156,7 @@ export function TaskSidebar({
                     <span className="task-copy">
                       <strong title={task.file_name}>{task.file_name.replace(/\.pdf$/i, "")}</strong>
                       <small>
-                        {STATUS_COPY[task.display_status]}
+                        <TaskStatus task={task} />
                         <span aria-hidden="true"> · </span>
                         {formatTaskTime(task.created_at)}
                       </small>

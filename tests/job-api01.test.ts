@@ -36,7 +36,7 @@ test("job create accepts a PDF and starts the injected background runner", async
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("job create can launch component and untimed PSpice setup together", async () => {
+test("job create can launch component and untimed SPICE setup together", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-model-"))
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()

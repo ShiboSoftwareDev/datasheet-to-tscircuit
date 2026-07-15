@@ -2,7 +2,7 @@ import { copyFile, mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
-const MODEL_AGENT_INSTRUCTIONS = `# SPICE model development workspace
+const MODEL_AGENT_INSTRUCTIONS = `# SPICE behavioral-model development workspace
 
 Work only inside this directory. The source files are:
 
@@ -42,7 +42,9 @@ extra effort only permits more refinement iterations.
 3. When component.circuit.tsx becomes available, verify its pinout and convert the
    draft into locked \`benchmarks.json\` before tuning the model. The benchmark set,
    conditions, tolerances, and critical flags must not be weakened to improve a
-   score. Document factual corrections in \`benchmark-amendments.md\`.
+   score. When the first refinement pass exits, the server snapshots the complete
+   manifest, evidence CSVs, and benchmark TSX outside this workspace. Later passes
+   must change only the model and its documentation; any benchmark drift is rejected.
 4. Create a baseline model and one executable tscircuit test bench per benchmark.
    Every locked benchmark must include the server-verifiable \`simulation\`
    extraction mapping described below. Write the first usable baseline immediately to canonical
@@ -79,9 +81,10 @@ extra effort only permits more refinement iterations.
 - \`model-manifest.json\`: model identity, dialect, entry name, revision, simulator,
   generated time, and explicit component-pin to SPICE-node mapping.
 - \`component-with-model.circuit.tsx\`: a reusable default-exported tscircuit
-  component attaching the model with \`<spicemodel source={...} spicePinMapping={...} />\`.
-  It must preserve the authoritative component's symbol and footprint, import
-  only \`./component.circuit\` if an import is needed, and build independently.
+   component attaching the model with \`<spicemodel source={...} spicePinMapping={...} />\`.
+   It must preserve the authoritative component's symbol and footprint and build
+   independently. The server always replaces this file with its own canonical
+   wrapper before validation and publication.
 - \`benchmarks.json\`: the locked benchmark manifest described below.
 - \`benchmarks/*.circuit.tsx\`: one reproducible tscircuit bench per benchmark.
 - \`evidence/**/*.csv\`: digitized reference curves as \`x,y\`.
@@ -206,6 +209,18 @@ other quantities into probe voltages with explicit sense elements and document
 the conversion. Every probe must measure behavior caused by the DUT model; never
 hardcode reference y values into sources or the test bench.
 
+Every benchmark must import \`../component-with-model.circuit\`, instantiate exactly
+one model component with \`name="DUT"\`, declare the named \`<voltageprobe>\`, and
+run \`<analogsimulation spiceEngine="ngspice" ... />\`. Every parameter-sweep prop
+key in benchmarks.json must be consumed by the TSX benchmark. The server verifies
+from Circuit JSON that DUT owns the canonical model.lib subcircuit and that the
+named probe is electrically connected to DUT.
+
+Never repurpose physical component pins as benchmark selectors, curve indices,
+telemetry channels, or generic metric outputs. Model pins must retain their
+datasheet electrical meaning in every bench. A multiplexed curve oracle is not a
+device model and is rejected even when its numeric curves match the references.
+
 Do not claim PSpice validation unless the model was executed by PSpice. A model
 tested only with ngspice must say so explicitly even if it uses portable syntax.
 `
@@ -237,7 +252,7 @@ export async function copyComponentIntoModelWorkspace(input: {
 }
 
 export function buildModelSetupPrompt(): string {
-  return `Prepare the untimed evidence and benchmark-reference package for a PSpice model.
+  return `Prepare the untimed evidence and benchmark-reference package for a SPICE behavioral model.
 
 Read AGENTS.md first. Analyze datasheet.pdf, render and inspect every relevant
 electrical graph, digitize reference curves, record operating conditions and
@@ -255,7 +270,7 @@ count, then exit. The server will wait for and provide the component.`
 }
 
 export function buildModelAgentPrompt(): string {
-  return `Develop and validate the PSpice model in this workspace.
+  return `Develop and validate the ngspice-tested SPICE behavioral model in this workspace.
 
 The untimed setup phase is complete and the authoritative
 component.circuit.tsx is now available. The refinement timer is running. Read
@@ -272,7 +287,9 @@ Run or refresh saved viewer output with
 persisted Circuit JSON and will not execute the TSX for you.
 
 If champion artifacts already exist, continue from them and preserve their
-history. Keep a usable champion checkpoint at all times. Finish with every
+history. If a server-owned benchmark lock already exists, do not edit
+benchmarks.json, benchmark TSX, or evidence CSVs; correction passes may change
+only model artifacts and documentation. Keep a usable champion checkpoint at all times. Finish with every
 required artifact and a freshly generated validation-report.json. If
 validation-feedback.md exists, inspect it together with simulation-validation.json
 and validation-artifacts, fix every item, and rerun the locked suite.
