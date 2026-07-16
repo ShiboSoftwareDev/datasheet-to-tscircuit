@@ -77,7 +77,12 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
             y_scale: "linear",
             reference_file: "evidence/curves/transfer.csv",
             result_file: "results/champion/transfer.csv",
-            simulation: { kind: "transient_voltage", probe_name: "RESULT" },
+            simulation: {
+              kind: "transient_voltage",
+              x_axis: "time_ms",
+              probe_name: "RESULT",
+              dut_spice_node: "OUT",
+            },
           },
           {
             id: "output",
@@ -90,7 +95,12 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
             y_scale: "linear",
             reference_file: "evidence/curves/output.csv",
             result_file: "results/champion/output.csv",
-            simulation: { kind: "transient_voltage", probe_name: "RESULT" },
+            simulation: {
+              kind: "transient_voltage",
+              x_axis: "time_ms",
+              probe_name: "RESULT",
+              dut_spice_node: "OUT",
+            },
           },
         ],
       }),
@@ -169,6 +179,57 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   })
   expect(selected_verified_preview?.circuit_preview?.snapshot_origin).toBe("server_validation")
   expect(selected_verified_preview?.reference_preview?.result_points?.[1]).toEqual({ x: 1, y: 2.1 })
+
+  await writeSimulationValidationReport(model_dir, [
+    transfer_verification,
+    {
+      benchmark_id: "output",
+      passed: false,
+      status: "building",
+      generated_at: new Date().toISOString(),
+    },
+  ])
+  const selected_building_preview = await loadModelSelectedPreview({
+    model_dir,
+    benchmark_id: "output",
+  })
+  expect(selected_building_preview?.circuit_preview?.build_status).toBe("building")
+
+  await writeSimulationValidationReport(model_dir, [
+    transfer_verification,
+    {
+      benchmark_id: "output",
+      passed: false,
+      status: "failed",
+      generated_at: new Date().toISOString(),
+      error_message: "Could not identify connected source for VoltageProbe",
+    },
+  ])
+  const selected_failed_preview = await loadModelSelectedPreview({
+    model_dir,
+    benchmark_id: "output",
+  })
+  expect(selected_failed_preview?.circuit_preview?.build_status).toBe("failed")
+  expect(selected_failed_preview?.circuit_preview?.error_message).toContain("VoltageProbe")
+
+  await rm(output_output, { force: true })
+  await writeSimulationValidationReport(model_dir, [transfer_verification])
+  const durable_output = join(model_dir, "validation-artifacts", "output", "runs", "default", "circuit.json")
+  await mkdir(join(durable_output, ".."), { recursive: true })
+  await Bun.write(
+    durable_output,
+    JSON.stringify(verifiedCircuit(modelSourceOne, "RESULT", "output-durable-run", [1, 2])),
+  )
+  const selected_durable_preview = await loadModelSelectedPreview({
+    model_dir,
+    benchmark_id: "output",
+  })
+  expect(selected_durable_preview?.circuit_preview?.snapshot_origin).toBe("workspace")
+  expect(
+    selected_durable_preview?.circuit_preview?.circuit_json?.some(
+      (element) => (element as { source_component_id?: string }).source_component_id === "output-durable-run",
+    ),
+  ).toBe(true)
 
   await Bun.write(join(model_dir, "model.lib"), modelSourceTwo)
   await monitor.sync()

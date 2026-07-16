@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { scoreModelBenchmarks } from "@/server/model-scorer"
+import { parseBenchmarkManifest, scoreModelBenchmarks } from "@/server/model-scorer"
 
 test("model scorer evaluates every locked benchmark from numeric CSV data", async () => {
   const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-scorer-"))
@@ -25,6 +25,12 @@ test("model scorer evaluates every locked benchmark from numeric CSV data", asyn
           tolerance: 0.05,
           reference_file: "evidence/transfer.csv",
           result_file: "results/champion/transfer.csv",
+          simulation: {
+            kind: "transient_voltage",
+            x_axis: "time_ms",
+            probe_name: "RESULT",
+            dut_spice_node: "OUT",
+          },
         },
         {
           id: "dropout",
@@ -35,6 +41,12 @@ test("model scorer evaluates every locked benchmark from numeric CSV data", asyn
           tolerance: 0.05,
           reference_file: "evidence/dropout.csv",
           result_file: "results/champion/dropout.csv",
+          simulation: {
+            kind: "transient_voltage",
+            x_axis: "time_ms",
+            probe_name: "RESULT",
+            dut_spice_node: "OUT",
+          },
         },
       ],
     }),
@@ -56,4 +68,39 @@ test("model scorer evaluates every locked benchmark from numeric CSV data", asyn
   expect(report.benchmarks[1]?.passed).toBe(false)
 
   await rm(model_dir, { recursive: true, force: true })
+})
+
+test("benchmark manifests accept only complete time-domain waveform definitions", async () => {
+  const base = {
+    version: 1 as const,
+    locked_at: new Date().toISOString(),
+    benchmarks: [
+      {
+        id: "bend",
+        title: "Transient waveform",
+        source: { page: 2 },
+        critical: true,
+        weight: 1,
+        tolerance: 0.01,
+        max_error_tolerance: 0.02,
+        reference_file: "evidence/waveform.csv",
+        result_file: "results/champion/bend.csv",
+        simulation: {
+          kind: "transient_voltage",
+          x_axis: "time_ms",
+          probe_name: "RESULT",
+          dut_spice_node: "OUT",
+        },
+      },
+    ],
+  }
+  expect(parseBenchmarkManifest(base).benchmarks[0]?.simulation.x_axis).toBe("time_ms")
+  const invalid = structuredClone(base)
+  invalid.benchmarks[0]!.simulation = {
+    kind: "static_curve",
+    x_axis: "input_voltage",
+    probe_name: "RESULT",
+    dut_spice_node: "OUT",
+  } as (typeof invalid.benchmarks)[0]["simulation"]
+  expect(() => parseBenchmarkManifest(invalid)).toThrow('transient_voltage simulation with x_axis "time_ms"')
 })

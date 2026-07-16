@@ -21,6 +21,7 @@
         "@tscircuit/core": "^0.0.1438",
         "@tscircuit/create-snippet-url": "^0.0.9",
         "@tscircuit/internal-dynamic-import": "^0.0.8",
+        "@tscircuit/ngspice-spice-engine": "^0.0.19",
         "@tscircuit/pcb-viewer": "1.11.374",
         "@tscircuit/runframe": "latest",
         "@tscircuit/schematic-viewer": "^2.0.69",

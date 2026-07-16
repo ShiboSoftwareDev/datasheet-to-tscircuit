@@ -3,9 +3,11 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  getCircuitBuildDiagnostics,
   getVerifiedSimulationArtifact,
   getVerifiedResultFile,
   hasCompleteVerifiedSimulationReport,
+  verifyPartialSimulationBenchmark,
   verifySimulationBenchmark,
   writeSimulationValidationReport,
 } from "@/server/model-simulation-validator"
@@ -28,6 +30,24 @@ function verifiedCircuit(probe_name: string, extra: Array<Record<string, unknown
   ]
 }
 
+test("circuit diagnostics treat semantic source errors as failures even when a build exits zero", () => {
+  const diagnostics = getCircuitBuildDiagnostics([
+    {
+      type: "source_failed_to_create_component_error",
+      message:
+        'Invalid props for analogsimulation "SIM": simulationType Details: Props: { "simulationType": "transient" }',
+    },
+    {
+      type: "source_failed_to_create_component_error",
+      message:
+        'Invalid props for analogsimulation "SIM": simulationType Details: Props: { "simulationType": "transient" }',
+    },
+  ])
+
+  expect(diagnostics.source_errors).toEqual(['Invalid props for analogsimulation "SIM": simulationType'])
+  expect(diagnostics.simulation_errors).toEqual([])
+})
+
 test("simulation verification rejects solver errors and hashes extracted simulator curves", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-simulation-validation-"))
   const model_dir = join(job_dir, "spice")
@@ -48,7 +68,9 @@ test("simulation verification rejects solver errors and hashes extracted simulat
           id: "transient",
           simulation: {
             kind: "transient_voltage",
+            x_axis: "time_ms",
             probe_name: "VOUT",
+            dut_spice_node: "OUT",
             scale: 2,
             offset: 1,
           },
@@ -93,6 +115,37 @@ test("simulation verification rejects solver errors and hashes extracted simulat
   const incomplete = await verifySimulationBenchmark({ model_dir, benchmark_id: "transient" })
   expect(incomplete.error_message).toContain("cover every .SUBCKT pin")
 
+  const manifest = JSON.parse(await Bun.file(join(model_dir, "benchmarks.json")).text())
+  manifest.benchmarks[0].simulation.dut_spice_node = "IN"
+  await Bun.write(join(model_dir, "benchmarks.json"), JSON.stringify(manifest))
+  const directly_driven = verifiedCircuit("VOUT", [
+    {
+      type: "simulation_voltage_source",
+      simulation_voltage_source_id: "stimulus",
+      is_dc_source: true,
+      positive_source_port_id: "stimulus_positive",
+      negative_source_net_id: "ground",
+      voltage: 1,
+    },
+    {
+      type: "source_trace",
+      connected_source_port_ids: ["stimulus_positive", "dut_in"],
+      connected_source_net_ids: [],
+    },
+    {
+      type: "simulation_transient_voltage_graph",
+      name: "VOUT",
+      timestamps_ms: [0, 1],
+      voltage_levels: [0, 1],
+    },
+  ])
+  ;(directly_driven[4] as { signal_input_source_port_id: string }).signal_input_source_port_id = "dut_in"
+  await Bun.write(join(circuit_dir, "circuit.json"), JSON.stringify(directly_driven))
+  const bypassed = await verifySimulationBenchmark({ model_dir, benchmark_id: "transient" })
+  expect(bypassed.error_message).toContain("tied directly to an independent voltage source")
+  manifest.benchmarks[0].simulation.dut_spice_node = "OUT"
+  await Bun.write(join(model_dir, "benchmarks.json"), JSON.stringify(manifest))
+
   await Bun.write(
     join(circuit_dir, "circuit.json"),
     JSON.stringify(
@@ -136,15 +189,15 @@ test("simulation verification rejects solver errors and hashes extracted simulat
   await rm(job_dir, { recursive: true, force: true })
 })
 
-test("parameter sweeps reuse one circuit and combine separately persisted runs", async () => {
-  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-parameter-sweep-"))
+test("a transient simulation publishes its complete waveform immediately", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-transient-waveform-"))
   const model_dir = join(job_dir, "spice")
   const output_dir = join(job_dir, "outputs")
   await Promise.all([
     mkdir(join(model_dir, "benchmarks"), { recursive: true }),
     mkdir(output_dir, { recursive: true }),
   ])
-  await Bun.write(join(model_dir, "benchmarks", "sweep.circuit.tsx"), "export default () => <board />\n")
+  await Bun.write(join(model_dir, "benchmarks", "waveform.circuit.tsx"), "export default () => <board />\n")
   await Bun.write(join(model_dir, "model.lib"), modelSource)
   await Bun.write(
     join(model_dir, "benchmarks.json"),
@@ -152,50 +205,56 @@ test("parameter sweeps reuse one circuit and combine separately persisted runs",
       version: 1,
       benchmarks: [
         {
-          id: "sweep",
+          id: "waveform",
           simulation: {
-            kind: "parameter_sweep",
+            kind: "transient_voltage",
+            x_axis: "time_ms",
             probe_name: "RESULT",
-            reducer: "last",
-            points: [
-              { x: 0, props: { sweepValue: 0 } },
-              { x: 1, props: { sweepValue: 1 } },
-            ],
+            dut_spice_node: "OUT",
           },
         },
       ],
     }),
   )
-  const make = (value: number) =>
+  const output = join(output_dir, "waveform.json")
+  await Bun.write(
+    output,
     JSON.stringify(
       verifiedCircuit("RESULT", [
         {
           type: "simulation_transient_voltage_graph",
           name: "RESULT",
-          timestamps_ms: [0, 1],
-          voltage_levels: [0, value],
+          timestamps_ms: [0, 0.5, 1],
+          voltage_levels: [0, 2, 4],
         },
       ]),
-    )
-  const first = join(output_dir, "point-000.json")
-  const second = join(output_dir, "point-001.json")
-  await Bun.write(first, make(2))
-  await Bun.write(second, make(4))
+    ),
+  )
+  const partial = await verifyPartialSimulationBenchmark({
+    model_dir,
+    benchmark_id: "waveform",
+    circuit_json_paths: [{ path: output }],
+  })
+  await writeSimulationValidationReport(model_dir, [partial])
+  const partial_artifact = await getVerifiedSimulationArtifact(model_dir, "waveform")
+  expect(partial.status).toBe("building")
+  expect(partial_artifact?.status).toBe("building")
+  expect(partial_artifact?.result_file).toBe("results/partial/waveform.csv")
+  expect(partial_artifact?.result_text).toBe("x,y\n0,0\n0.5,2\n1,4\n")
   const result = await verifySimulationBenchmark({
     model_dir,
-    benchmark_id: "sweep",
-    circuit_json_paths: [
-      { path: first, x: 0 },
-      { path: second, x: 1 },
-    ],
+    benchmark_id: "waveform",
+    circuit_json_paths: [{ path: output }],
   })
   expect(result.passed).toBe(true)
-  expect(await Bun.file(join(model_dir, "results", "verified", "sweep.csv")).text()).toBe("x,y\n0,2\n1,4\n")
+  expect(await Bun.file(join(model_dir, "results", "verified", "waveform.csv")).text()).toBe(
+    "x,y\n0,0\n0.5,2\n1,4\n",
+  )
   await rm(job_dir, { recursive: true, force: true })
 })
 
-test("legacy probe sweeps are rejected with a migration message", async () => {
-  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-legacy-sweep-"))
+test("non-transient simulation definitions are rejected", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-static-curve-"))
   const model_dir = join(job_dir, "spice")
   await mkdir(join(model_dir, "benchmarks"), { recursive: true })
   await mkdir(join(job_dir, "dist", "spice", "benchmarks", "old"), { recursive: true })
@@ -203,12 +262,12 @@ test("legacy probe sweeps are rejected with a migration message", async () => {
   await Bun.write(
     join(model_dir, "benchmarks.json"),
     JSON.stringify({
-      benchmarks: [{ id: "old", simulation: { kind: "probe_sweep", points: [{ x: 0 }, { x: 1 }] } }],
+      benchmarks: [{ id: "old", simulation: { kind: "static_curve" } }],
     }),
   )
   await Bun.write(join(model_dir, "benchmarks", "old.circuit.tsx"), "export default () => <board />\n")
   await Bun.write(join(job_dir, "dist", "spice", "benchmarks", "old", "circuit.json"), "[]")
   const result = await verifySimulationBenchmark({ model_dir, benchmark_id: "old" })
-  expect(result.error_message).toContain("use parameter_sweep")
+  expect(result.error_message).toContain('must be "transient_voltage"')
   await rm(job_dir, { recursive: true, force: true })
 })

@@ -36,6 +36,23 @@ instruction source.
 - Do not edit files outside this workspace.
 `
 
+const TSCIRCUIT_RUNTIME_CONFIG = `import { createNgspiceSpiceEngine } from "@tscircuit/ngspice-spice-engine"
+
+const ngspiceSpiceEngine = await createNgspiceSpiceEngine()
+
+export default {
+  platformConfig: {
+    spiceEngineMap: {
+      ngspice: ngspiceSpiceEngine,
+    },
+  },
+}
+`
+
+export async function ensureJobTscircuitRuntimeConfig(job_dir: string): Promise<void> {
+  await Bun.write(join(job_dir, "tscircuit.config.ts"), TSCIRCUIT_RUNTIME_CONFIG)
+}
+
 export async function writeJobScaffold(job_dir: string): Promise<void> {
   await mkdir(job_dir, { recursive: true })
   await Promise.all([
@@ -49,7 +66,10 @@ export async function writeJobScaffold(job_dir: string): Promise<void> {
           private: true,
           type: "module",
           scripts: { build: "tsci build index.circuit.tsx" },
-          devDependencies: { tscircuit: "latest" },
+          devDependencies: {
+            "@tscircuit/ngspice-spice-engine": "^0.0.19",
+            tscircuit: "latest",
+          },
         },
         null,
         2,
@@ -84,5 +104,6 @@ export async function writeJobScaffold(job_dir: string): Promise<void> {
         2,
       )}\n`,
     ),
+    ensureJobTscircuitRuntimeConfig(job_dir),
   ])
 }

@@ -1959,6 +1959,7 @@ a {
 }
 
 .model-runframe-shell {
+  position: relative;
   height: calc(100% - 50px);
   min-height: 0;
   overflow: hidden;
@@ -1966,6 +1967,24 @@ a {
     linear-gradient(rgba(126, 140, 157, 0.06) 1px, transparent 1px),
     linear-gradient(90deg, rgba(126, 140, 157, 0.06) 1px, transparent 1px), #fbfcfd;
   background-size: 18px 18px;
+}
+
+.model-preview-build-error {
+  position: absolute;
+  z-index: 4;
+  top: 8px;
+  right: 8px;
+  left: 8px;
+  max-height: 72px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid #efc7c2;
+  border-radius: 6px;
+  color: #8f332a;
+  background: rgba(255, 246, 244, 0.96);
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .model-runframe-shell > div {
@@ -2062,6 +2081,11 @@ a {
 .result-line {
   stroke: #d97706;
   stroke-dashoffset: 10;
+}
+
+.result-line-partial {
+  opacity: 0.72;
+  stroke-dasharray: 4 8;
 }
 
 .reference-axis-labels {

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises"
-import { isAbsolute, join } from "node:path"
+import { join, resolve, sep } from "node:path"
 import type { ModelValidationBenchmark, ModelValidationSummary } from "@/shared/job-types"
 
 interface Point {
@@ -7,7 +7,7 @@ interface Point {
   y: number
 }
 
-interface BenchmarkDefinition {
+export interface BenchmarkDefinition {
   id: string
   title: string
   source: {
@@ -22,9 +22,17 @@ interface BenchmarkDefinition {
   y_scale?: "linear" | "log"
   reference_file: string
   result_file: string
+  simulation: {
+    kind: "transient_voltage"
+    x_axis: "time_ms"
+    probe_name: string
+    dut_spice_node: string
+    scale?: number
+    offset?: number
+  }
 }
 
-interface BenchmarkManifest {
+export interface BenchmarkManifest {
   version: 1
   locked_at: string
   benchmarks: BenchmarkDefinition[]
@@ -39,8 +47,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
-  if (!isRecord(value) || value.version !== 1 || typeof value.locked_at !== "string") {
+export function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    typeof value.locked_at !== "string" ||
+    !value.locked_at.trim() ||
+    !Number.isFinite(new Date(value.locked_at).valueOf())
+  ) {
     throw new Error("benchmarks.json must contain a version 1 locked benchmark manifest")
   }
   if (!Array.isArray(value.benchmarks) || value.benchmarks.length === 0) {
@@ -50,7 +64,12 @@ function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
   const benchmarks = value.benchmarks.map((entry, index): BenchmarkDefinition => {
     if (!isRecord(entry)) throw new Error(`Benchmark ${index + 1} must be an object`)
     const source = entry.source
-    if (!isRecord(source) || typeof source.page !== "number") {
+    if (
+      !isRecord(source) ||
+      typeof source.page !== "number" ||
+      !Number.isInteger(source.page) ||
+      source.page < 1
+    ) {
       throw new Error(`Benchmark ${index + 1} must cite a datasheet page`)
     }
     const required_strings = ["id", "title", "reference_file", "result_file"] as const
@@ -58,6 +77,22 @@ function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
       if (typeof entry[key] !== "string" || entry[key].trim() === "") {
         throw new Error(`Benchmark ${index + 1} has no ${key}`)
       }
+    }
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(entry.id as string)) {
+      throw new Error(`Benchmark ${index + 1} has an invalid id`)
+    }
+    const reference_file = entry.reference_file as string
+    if (
+      !reference_file.startsWith("evidence/") ||
+      reference_file.includes("\\") ||
+      reference_file.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+    ) {
+      throw new Error(`Benchmark ${String(entry.id)} reference_file must stay under evidence/`)
+    }
+    if (entry.result_file !== `results/champion/${entry.id}.csv`) {
+      throw new Error(
+        `Benchmark ${String(entry.id)} result_file must be results/champion/${String(entry.id)}.csv`,
+      )
     }
     if (typeof entry.critical !== "boolean") {
       throw new Error(`Benchmark ${String(entry.id)} must declare whether it is critical`)
@@ -70,15 +105,39 @@ function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
     }
     if (
       entry.max_error_tolerance !== undefined &&
-      (typeof entry.max_error_tolerance !== "number" || entry.max_error_tolerance <= 0)
+      (typeof entry.max_error_tolerance !== "number" ||
+        !Number.isFinite(entry.max_error_tolerance) ||
+        entry.max_error_tolerance <= 0)
     ) {
       throw new Error(`Benchmark ${String(entry.id)} has an invalid max-error tolerance`)
     }
     if (entry.x_scale !== undefined && entry.x_scale !== "linear" && entry.x_scale !== "log") {
       throw new Error(`Benchmark ${String(entry.id)} has an invalid x scale`)
     }
+    if (entry.x_scale === "log") {
+      throw new Error(`Benchmark ${String(entry.id)} must use a linear elapsed-time x axis`)
+    }
     if (entry.y_scale !== undefined && entry.y_scale !== "linear" && entry.y_scale !== "log") {
       throw new Error(`Benchmark ${String(entry.id)} has an invalid y scale`)
+    }
+    if (
+      !isRecord(entry.simulation) ||
+      entry.simulation.kind !== "transient_voltage" ||
+      entry.simulation.x_axis !== "time_ms" ||
+      typeof entry.simulation.probe_name !== "string" ||
+      !entry.simulation.probe_name.trim() ||
+      typeof entry.simulation.dut_spice_node !== "string" ||
+      !entry.simulation.dut_spice_node.trim()
+    ) {
+      throw new Error(
+        `Benchmark ${String(entry.id)} must define one transient_voltage simulation with x_axis "time_ms"`,
+      )
+    }
+    for (const key of ["scale", "offset"] as const) {
+      const number = entry.simulation[key]
+      if (number !== undefined && (typeof number !== "number" || !Number.isFinite(number))) {
+        throw new Error(`Benchmark ${String(entry.id)} simulation.${key} must be finite`)
+      }
     }
 
     return {
@@ -95,8 +154,16 @@ function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
         typeof entry.max_error_tolerance === "number" ? entry.max_error_tolerance : undefined,
       x_scale: entry.x_scale as "linear" | "log" | undefined,
       y_scale: entry.y_scale as "linear" | "log" | undefined,
-      reference_file: entry.reference_file as string,
+      reference_file,
       result_file: entry.result_file as string,
+      simulation: {
+        kind: "transient_voltage",
+        x_axis: "time_ms",
+        probe_name: entry.simulation.probe_name.trim(),
+        dut_spice_node: entry.simulation.dut_spice_node.trim(),
+        scale: typeof entry.simulation.scale === "number" ? entry.simulation.scale : undefined,
+        offset: typeof entry.simulation.offset === "number" ? entry.simulation.offset : undefined,
+      },
     }
   })
 
@@ -107,10 +174,15 @@ function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
 }
 
 function resolveWorkspaceFile(model_dir: string, file_path: string): string {
-  return isAbsolute(file_path) ? file_path : join(model_dir, file_path)
+  const resolved_root = resolve(model_dir)
+  const resolved_file = resolve(resolved_root, file_path)
+  if (!resolved_file.startsWith(`${resolved_root}${sep}`)) {
+    throw new Error(`Benchmark file escapes the model workspace: ${file_path}`)
+  }
+  return resolved_file
 }
 
-async function readCsvPoints(file_path: string): Promise<Point[]> {
+export async function readCsvPoints(file_path: string): Promise<Point[]> {
   const text = await readFile(file_path, "utf8")
   const points: Point[] = []
   for (const [index, line] of text.split(/\r?\n/).entries()) {
@@ -127,7 +199,13 @@ async function readCsvPoints(file_path: string): Promise<Point[]> {
     points.push({ x, y })
   }
   if (points.length < 2) throw new Error(`${file_path} must contain at least two numeric points`)
-  return points.sort((first, second) => first.x - second.x)
+  points.sort((first, second) => first.x - second.x)
+  for (let index = 1; index < points.length; index += 1) {
+    if (points[index]!.x === points[index - 1]!.x) {
+      throw new Error(`${file_path} contains duplicate x=${points[index]!.x}`)
+    }
+  }
+  return points
 }
 
 function transform(value: number, scale: "linear" | "log", label: string): number {
@@ -166,8 +244,8 @@ async function scoreBenchmark(
     const reference_points = await readCsvPoints(resolveWorkspaceFile(model_dir, benchmark.reference_file))
     const result_file = results_directory_override
       ? join(results_directory_override, `${benchmark.id}.csv`)
-      : benchmark.result_file
-    const result_points = await readCsvPoints(resolveWorkspaceFile(model_dir, result_file))
+      : resolveWorkspaceFile(model_dir, benchmark.result_file)
+    const result_points = await readCsvPoints(result_file)
     const x_scale = benchmark.x_scale ?? "linear"
     const y_scale = benchmark.y_scale ?? "linear"
     const target_values = reference_points.map((point) => transform(point.y, y_scale, "reference y"))
@@ -205,6 +283,26 @@ async function scoreBenchmark(
       error_message: error instanceof Error ? error.message : String(error),
     }
   }
+}
+
+export async function validateBenchmarkReferenceFiles(
+  model_dir: string,
+  manifest: BenchmarkManifest,
+): Promise<void> {
+  await Promise.all(
+    manifest.benchmarks.map(async (benchmark) => {
+      const points = await readCsvPoints(resolveWorkspaceFile(model_dir, benchmark.reference_file))
+      const x_scale = benchmark.x_scale ?? "linear"
+      const y_scale = benchmark.y_scale ?? "linear"
+      for (const point of points) {
+        if (point.x < 0) {
+          throw new Error(`${benchmark.id} reference x must be non-negative elapsed time in milliseconds`)
+        }
+        transform(point.x, x_scale, `${benchmark.id} reference x`)
+        transform(point.y, y_scale, `${benchmark.id} reference y`)
+      }
+    }),
+  )
 }
 
 export async function scoreModelBenchmarks(

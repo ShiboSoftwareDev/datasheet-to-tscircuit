@@ -3,25 +3,14 @@ import { mkdir, readFile, rename, rm } from "node:fs/promises"
 import { dirname, join, relative, resolve, sep } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 
-type ProbeReducer = "last" | "tail_mean" | "peak_to_peak" | "frequency_hz"
-
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }
-
-interface ParameterSweepPoint {
-  x: number
-  props: Record<string, JsonValue>
+type SimulationExtractionDefinition = {
+  kind: "transient_voltage"
+  x_axis: "time_ms"
+  probe_name: string
+  dut_spice_node: string
+  scale: number
+  offset: number
 }
-
-type SimulationExtractionDefinition =
-  | { kind: "transient_voltage"; probe_name: string; scale: number; offset: number }
-  | {
-      kind: "parameter_sweep"
-      probe_name: string
-      reducer: ProbeReducer
-      scale: number
-      offset: number
-      points: ParameterSweepPoint[]
-    }
 
 interface SimulationGraph {
   name: string
@@ -29,9 +18,15 @@ interface SimulationGraph {
   voltage_levels: number[]
 }
 
+export interface CircuitBuildDiagnostics {
+  source_errors: string[]
+  simulation_errors: string[]
+}
+
 export interface SimulationBenchmarkVerification {
   benchmark_id: string
   passed: boolean
+  status?: "building" | "passed" | "failed"
   generated_at: string
   source_file?: string
   source_sha256?: string
@@ -41,6 +36,8 @@ export interface SimulationBenchmarkVerification {
   error_message?: string
   verified_result_file?: string
   sha256?: string
+  partial_result_file?: string
+  partial_sha256?: string
 }
 
 interface SimulationValidationReport {
@@ -60,6 +57,7 @@ export interface VerifiedSimulationArtifact {
   result_file?: string
   result_text?: string
   error_message?: string
+  status: "building" | "passed" | "failed"
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -92,73 +90,28 @@ function optionalFiniteNumber(value: unknown, fallback: number, label: string): 
   return value
 }
 
-function parseReducer(value: unknown, fallback: ProbeReducer): ProbeReducer {
-  if (value === undefined) return fallback
-  if (value === "last" || value === "tail_mean" || value === "peak_to_peak" || value === "frequency_hz") {
-    return value
-  }
-  throw new Error("simulation reducer must be last, tail_mean, peak_to_peak, or frequency_hz")
-}
-
-function parseSimulationDefinition(value: unknown): SimulationExtractionDefinition {
+export function parseSimulationDefinition(value: unknown): SimulationExtractionDefinition {
   if (!isRecord(value)) {
     throw new Error(
       "benchmark has no server-verifiable simulation extraction; add simulation.kind and probe mapping",
     )
   }
   if (value.kind === "transient_voltage") {
+    if (value.x_axis !== "time_ms") {
+      throw new Error('simulation.x_axis must be "time_ms" for transient waveform benchmarks')
+    }
     return {
       kind: "transient_voltage",
+      x_axis: "time_ms",
       probe_name: requiredString(value.probe_name, "simulation.probe_name"),
+      dut_spice_node: requiredString(value.dut_spice_node, "simulation.dut_spice_node"),
       scale: optionalFiniteNumber(value.scale, 1, "simulation.scale"),
       offset: optionalFiniteNumber(value.offset, 0, "simulation.offset"),
     }
   }
-  if (value.kind === "probe_sweep") {
-    throw new Error(
-      "simulation.kind probe_sweep is obsolete: use parameter_sweep with one DUT and injected props; do not duplicate the circuit for sweep points",
-    )
-  }
-  if (value.kind === "parameter_sweep") {
-    if (!Array.isArray(value.points) || value.points.length < 2) {
-      throw new Error("simulation.points must contain at least two parameter-sweep points")
-    }
-    return {
-      kind: "parameter_sweep",
-      points: value.points.map((point, index) => {
-        if (!isRecord(point)) throw new Error(`simulation point ${index + 1} must be an object`)
-        if (typeof point.x !== "number" || !Number.isFinite(point.x)) {
-          throw new Error(`simulation point ${index + 1} has an invalid x value`)
-        }
-        return {
-          x: point.x,
-          props: (() => {
-            if (!isRecord(point.props))
-              throw new Error(`simulation point ${index + 1} props must be an object`)
-            return point.props as Record<string, JsonValue>
-          })(),
-        }
-      }),
-      probe_name: requiredString(value.probe_name, "simulation.probe_name"),
-      reducer: parseReducer(value.reducer, "tail_mean"),
-      scale: optionalFiniteNumber(value.scale, 1, "simulation.scale"),
-      offset: optionalFiniteNumber(value.offset, 0, "simulation.offset"),
-    }
-  }
-  throw new Error("simulation.kind must be transient_voltage or parameter_sweep")
-}
-
-export async function getSimulationBuildPlan(
-  model_dir: string,
-  benchmark_id: string,
-): Promise<Array<{ run_id: string; x?: number; props?: Record<string, JsonValue> }>> {
-  const definition = await readSimulationDefinition(model_dir, benchmark_id)
-  if (definition.kind !== "parameter_sweep") return [{ run_id: "default" }]
-  return definition.points.map((point, index) => ({
-    run_id: `point-${String(index).padStart(3, "0")}`,
-    x: point.x,
-    props: point.props,
-  }))
+  throw new Error(
+    'simulation.kind must be "transient_voltage"; only datasheet graphs whose x-axis is elapsed time are supported',
+  )
 }
 
 export async function getSimulationRunCount(model_dir: string): Promise<number> {
@@ -166,17 +119,16 @@ export async function getSimulationRunCount(model_dir: string): Promise<number> 
   if (!isRecord(manifest) || !Array.isArray(manifest.benchmarks) || manifest.benchmarks.length === 0) {
     throw new Error("benchmarks.json has no benchmark list")
   }
-  let run_count = 0
   for (const benchmark of manifest.benchmarks) {
     if (!isRecord(benchmark) || typeof benchmark.id !== "string") {
       throw new Error("benchmarks.json contains an invalid benchmark")
     }
-    run_count += (await getSimulationBuildPlan(model_dir, benchmark.id)).length
+    await readSimulationDefinition(model_dir, benchmark.id)
   }
-  return run_count
+  return manifest.benchmarks.length
 }
 
-async function readSimulationDefinition(
+export async function readSimulationDefinition(
   model_dir: string,
   benchmark_id: string,
 ): Promise<SimulationExtractionDefinition> {
@@ -191,18 +143,37 @@ async function readSimulationDefinition(
   return parseSimulationDefinition(benchmark.simulation)
 }
 
+export async function validateSimulationDefinitions(
+  model_dir: string,
+  benchmark_ids: string[],
+): Promise<void> {
+  await Promise.all(benchmark_ids.map((benchmark_id) => readSimulationDefinition(model_dir, benchmark_id)))
+}
+
+function normalizeCircuitErrorMessage(element: Record<string, unknown>): string {
+  const raw = typeof element.message === "string" ? element.message : String(element.type)
+  return raw.split(/\s+Details:\s+Props:/i)[0]!.trim()
+}
+
+export function getCircuitBuildDiagnostics(value: unknown): CircuitBuildDiagnostics {
+  if (!isCircuitJson(value)) throw new Error("simulation did not produce Circuit JSON")
+  const source_errors = new Set<string>()
+  const simulation_errors = new Set<string>()
+  for (const element of value) {
+    if (!isRecord(element) || typeof element.type !== "string" || !element.type.endsWith("_error")) continue
+    const message = normalizeCircuitErrorMessage(element)
+    if (element.type.startsWith("source_")) source_errors.add(message)
+    if (element.type.startsWith("simulation_")) simulation_errors.add(message)
+  }
+  return { source_errors: [...source_errors], simulation_errors: [...simulation_errors] }
+}
+
 function parseSimulationOutput(value: unknown): { graphs: SimulationGraph[]; errors: string[] } {
   if (!isCircuitJson(value)) throw new Error("simulation did not produce Circuit JSON")
-  const errors: string[] = []
+  const diagnostics = getCircuitBuildDiagnostics(value)
   const graphs: SimulationGraph[] = []
   for (const element of value) {
     if (!isRecord(element) || typeof element.type !== "string") continue
-    const blocks_simulation = element.type.startsWith("simulation_") || element.type.startsWith("source_")
-    if (blocks_simulation && element.type.endsWith("_error")) {
-      errors.push(
-        "message" in element && typeof element.message === "string" ? element.message : element.type,
-      )
-    }
     if (element.type !== "simulation_transient_voltage_graph") continue
     if (
       typeof element.name !== "string" ||
@@ -225,20 +196,20 @@ function parseSimulationOutput(value: unknown): { graphs: SimulationGraph[]; err
       voltage_levels: element.voltage_levels as number[],
     })
   }
-  return { graphs, errors }
+  return { graphs, errors: [...diagnostics.source_errors, ...diagnostics.simulation_errors] }
 }
 
 function normalizeModelSource(source: string): string {
   return source.replace(/\r\n?/g, "\n").trim()
 }
 
-function parseSubcircuitPinSets(model_source: string): string[][] {
+function parseSubcircuits(model_source: string): Array<{ name: string; pins: string[] }> {
   const lines = model_source.replace(/\r\n?/g, "\n").split("\n")
-  const pin_sets: string[][] = []
+  const subcircuits: Array<{ name: string; pins: string[] }> = []
   for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index]!.match(/^\s*\.\s*subckt\s+\S+(?:\s+(.*))?$/i)
+    const match = lines[index]!.match(/^\s*\.\s*subckt\s+(\S+)(?:\s+(.*))?$/i)
     if (!match) continue
-    const tokens = (match[1] ?? "").trim().split(/\s+/).filter(Boolean)
+    const tokens = (match[2] ?? "").trim().split(/\s+/).filter(Boolean)
     while (index + 1 < lines.length) {
       const continuation = lines[index + 1]!.match(/^\s*\+\s*(.*)$/)
       if (!continuation) break
@@ -248,9 +219,12 @@ function parseSubcircuitPinSets(model_source: string): string[][] {
     const parameter_index = tokens.findIndex(
       (token) => /^params?:/i.test(token) || token.includes("=") || /^[;$]/.test(token),
     )
-    pin_sets.push(parameter_index < 0 ? tokens : tokens.slice(0, parameter_index))
+    subcircuits.push({
+      name: match[1]!,
+      pins: parameter_index < 0 ? tokens : tokens.slice(0, parameter_index),
+    })
   }
-  return pin_sets
+  return subcircuits
 }
 
 function assertNoSyntheticBenchmarkChannel(model_source: string): void {
@@ -302,6 +276,7 @@ function assertCanonicalDutSimulation(
   circuit_json: AnyCircuitElement[],
   model_source: string,
   probe_name: string,
+  dut_spice_node: string,
 ): void {
   const records = circuit_json.map((element) => element as unknown).filter(isRecord)
   const dut_components = records.filter(
@@ -345,14 +320,16 @@ function assertCanonicalDutSimulation(
   ) {
     throw new Error("DUT SPICE pin mapping does not resolve exclusively to DUT ports")
   }
-  const normalized_mapping = mapped_spice_pins.map((pin) => pin.toLowerCase()).sort()
-  const has_exact_subcircuit_mapping = parseSubcircuitPinSets(model_source).some(
-    (pins) =>
-      pins.length > 0 &&
-      JSON.stringify(pins.map((pin) => pin.toLowerCase()).sort()) === JSON.stringify(normalized_mapping),
-  )
-  if (!has_exact_subcircuit_mapping) {
-    throw new Error("DUT SPICE pin mapping must cover every .SUBCKT pin exactly once")
+  const first_subcircuit = parseSubcircuits(model_source)[0]
+  const sorted_mapping = [...mapped_spice_pins].sort()
+  if (
+    !first_subcircuit ||
+    first_subcircuit.pins.length === 0 ||
+    JSON.stringify([...first_subcircuit.pins].sort()) !== JSON.stringify(sorted_mapping)
+  ) {
+    throw new Error(
+      "DUT SPICE pin mapping must cover every .SUBCKT pin in the first declaration exactly once with matching case",
+    )
   }
 
   const probes = records.filter(
@@ -383,48 +360,51 @@ function assertCanonicalDutSimulation(
     ]
     connectivity.connect(connected)
   }
-  if (![...dut_port_ids].some((port_id) => connectivity.connected(signal_key, portKey(port_id)))) {
-    throw new Error(`${probe_name} is not electrically connected to the canonical DUT`)
+  const expected_mapping = Object.entries(spice_model.spice_pin_to_source_port_map).find(
+    ([spice_pin]) => spice_pin.toLowerCase() === dut_spice_node.toLowerCase(),
+  )
+  const expected_port_id = expected_mapping?.[1]
+  if (typeof expected_port_id !== "string") {
+    throw new Error(`simulation.dut_spice_node ${dut_spice_node} is not mapped by the canonical DUT`)
+  }
+  if (!connectivity.connected(signal_key, portKey(expected_port_id))) {
+    throw new Error(
+      `${probe_name} must measure canonical DUT SPICE node ${dut_spice_node}, not another DUT pin`,
+    )
+  }
+
+  const voltage_source_endpoint_keys = records
+    .filter((element) => element.type === "simulation_voltage_source")
+    .flatMap((source) => {
+      const keys: string[] = []
+      for (const field of [
+        "positive_source_port_id",
+        "negative_source_port_id",
+        "terminal1_source_port_id",
+        "terminal2_source_port_id",
+      ] as const) {
+        if (typeof source[field] === "string") keys.push(portKey(source[field]))
+      }
+      for (const field of [
+        "positive_source_net_id",
+        "negative_source_net_id",
+        "terminal1_source_net_id",
+        "terminal2_source_net_id",
+      ] as const) {
+        if (typeof source[field] === "string") keys.push(netKey(source[field]))
+      }
+      return keys
+    })
+  if (voltage_source_endpoint_keys.some((endpoint) => connectivity.connected(signal_key, endpoint))) {
+    throw new Error(`${probe_name} is tied directly to an independent voltage source`)
   }
 }
 
 function requireGraph(graphs: SimulationGraph[], probe_name: string): SimulationGraph {
   const matches = graphs.filter((candidate) => candidate.name === probe_name)
   if (matches.length === 0) throw new Error(`simulation produced no voltage graph named ${probe_name}`)
-  if (matches.length > 1)
-    throw new Error(
-      `simulation produced multiple voltage graphs named ${probe_name}; parameter sweeps require one DUT and one common probe`,
-    )
+  if (matches.length > 1) throw new Error(`simulation produced multiple voltage graphs named ${probe_name}`)
   return matches[0]!
-}
-
-function reduceGraph(graph: SimulationGraph, reducer: ProbeReducer): number {
-  if (reducer === "last") return graph.voltage_levels.at(-1)!
-  const tail_start = Math.floor(graph.voltage_levels.length * 0.8)
-  const tail = graph.voltage_levels.slice(tail_start)
-  if (reducer === "tail_mean") return tail.reduce((sum, value) => sum + value, 0) / tail.length
-  if (reducer === "peak_to_peak") return Math.max(...tail) - Math.min(...tail)
-
-  const search_start = Math.floor(graph.voltage_levels.length * 0.25)
-  const levels = graph.voltage_levels.slice(search_start)
-  const timestamps = graph.timestamps_ms.slice(search_start)
-  const minimum = Math.min(...levels)
-  const maximum = Math.max(...levels)
-  if (maximum - minimum <= 1e-12) throw new Error(`${graph.name} has no measurable oscillation`)
-  const threshold = (minimum + maximum) / 2
-  const crossings: number[] = []
-  for (let index = 1; index < levels.length; index += 1) {
-    const left = levels[index - 1]!
-    const right = levels[index]!
-    if (left >= threshold || right < threshold || right === left) continue
-    const ratio = (threshold - left) / (right - left)
-    crossings.push(timestamps[index - 1]! + ratio * (timestamps[index]! - timestamps[index - 1]!))
-  }
-  if (crossings.length < 2) throw new Error(`${graph.name} has too few rising edges for frequency`)
-  const periods = crossings.slice(1).map((crossing, index) => crossing - crossings[index]!)
-  const average_period_ms = periods.reduce((sum, value) => sum + value, 0) / periods.length
-  if (!(average_period_ms > 0)) throw new Error(`${graph.name} has an invalid oscillation period`)
-  return 1_000 / average_period_ms
 }
 
 function toCsv(points: Array<{ x: number; y: number }>): string {
@@ -494,12 +474,25 @@ async function readTrustedReport(model_dir: string): Promise<SimulationValidatio
         !isRecord(benchmark) ||
         typeof benchmark.benchmark_id !== "string" ||
         typeof benchmark.passed !== "boolean" ||
+        (benchmark.status !== undefined &&
+          benchmark.status !== "building" &&
+          benchmark.status !== "passed" &&
+          benchmark.status !== "failed") ||
         typeof benchmark.generated_at !== "string",
     )
   ) {
     return undefined
   }
   return value as unknown as SimulationValidationReport
+}
+
+export async function getSimulationBenchmarkVerification(
+  model_dir: string,
+  benchmark_id: string,
+): Promise<SimulationBenchmarkVerification | undefined> {
+  assertSafeBenchmarkId(benchmark_id)
+  const report = await readTrustedReport(model_dir)
+  return report?.benchmarks.find((benchmark) => benchmark.benchmark_id === benchmark_id)
 }
 
 async function writeArtifactCopies(input: {
@@ -546,11 +539,86 @@ export async function clearVerifiedSimulationResults(model_dir: string): Promise
   ])
 }
 
+export async function verifyPartialSimulationBenchmark(input: {
+  model_dir: string
+  benchmark_id: string
+  source_signature?: string
+  circuit_json_paths: Array<{ path: string }>
+}): Promise<SimulationBenchmarkVerification> {
+  const generated_at = new Date().toISOString()
+  assertSafeBenchmarkId(input.benchmark_id)
+  const definition = await readSimulationDefinition(input.model_dir, input.benchmark_id)
+  const source_path = join(input.model_dir, "benchmarks", `${input.benchmark_id}.circuit.tsx`)
+  const supplied_paths = [...input.circuit_json_paths]
+  if (supplied_paths.length === 0) throw new Error("partial validation has no simulator output")
+
+  if (supplied_paths.length !== 1) {
+    throw new Error("transient waveform validation requires exactly one simulator output")
+  }
+  const paths = supplied_paths
+  const [source_text, model_source, ...circuit_texts] = await Promise.all([
+    readFile(source_path, "utf8"),
+    readFile(join(input.model_dir, "model.lib"), "utf8"),
+    ...paths.map(({ path }) => readFile(path, "utf8")),
+  ])
+  const circuit_jsons = circuit_texts.map((text) => JSON.parse(text) as unknown)
+  if (circuit_jsons.some((json) => !isCircuitJson(json))) {
+    throw new Error("partial simulation did not produce valid Circuit JSON")
+  }
+  const parsed = circuit_jsons.map((json) => parseSimulationOutput(json))
+  const errors = [...new Set(parsed.flatMap(({ errors }) => errors))]
+  if (errors.length > 0) throw new Error(errors.join("; "))
+  assertNoSyntheticBenchmarkChannel(model_source)
+  for (const circuit of circuit_jsons) {
+    assertCanonicalDutSimulation(
+      circuit as AnyCircuitElement[],
+      model_source,
+      definition.probe_name,
+      definition.dut_spice_node,
+    )
+  }
+
+  const graph = requireGraph(parsed[0]!.graphs, definition.probe_name)
+  const points = graph.timestamps_ms.map((x, index) => ({
+    x,
+    y: graph.voltage_levels[index]! * definition.scale + definition.offset,
+  }))
+  const text = toCsv(points)
+  const trusted_result_file = join(
+    getValidationRoot(input.model_dir),
+    "partial-results",
+    `${input.benchmark_id}.csv`,
+  )
+  const diagnostic_result_file = join(input.model_dir, "results", "partial", `${input.benchmark_id}.csv`)
+  await Promise.all([
+    writeTextAtomically(trusted_result_file, text),
+    writeTextAtomically(diagnostic_result_file, text),
+  ])
+  const artifact = await writeArtifactCopies({
+    model_dir: input.model_dir,
+    benchmark_id: input.benchmark_id,
+    circuit_text: circuit_texts[0]!,
+    source_text,
+  })
+  return {
+    benchmark_id: input.benchmark_id,
+    passed: false,
+    status: "building",
+    generated_at,
+    ...artifact,
+    source_signature:
+      input.source_signature ??
+      (await getModelSimulationSourceSignature(input.model_dir, input.benchmark_id)),
+    partial_result_file: relative(getValidationRoot(input.model_dir), trusted_result_file),
+    partial_sha256: hashText(text),
+  }
+}
+
 export async function verifySimulationBenchmark(input: {
   model_dir: string
   benchmark_id: string
   source_signature?: string
-  circuit_json_paths?: Array<{ path: string; x: number }>
+  circuit_json_paths?: Array<{ path: string }>
 }): Promise<SimulationBenchmarkVerification> {
   const generated_at = new Date().toISOString()
   let artifact: Partial<SimulationBenchmarkVerification> = {}
@@ -559,7 +627,14 @@ export async function verifySimulationBenchmark(input: {
     const job_dir = dirname(input.model_dir)
     const source_path = join(input.model_dir, "benchmarks", `${input.benchmark_id}.circuit.tsx`)
     const circuit_json_path = join(job_dir, "dist", "spice", "benchmarks", input.benchmark_id, "circuit.json")
-    const paths = input.circuit_json_paths?.length ? input.circuit_json_paths : [{ path: circuit_json_path }]
+    const definition = await readSimulationDefinition(input.model_dir, input.benchmark_id)
+    const supplied_paths: Array<{ path: string }> = input.circuit_json_paths?.length
+      ? input.circuit_json_paths
+      : [{ path: circuit_json_path }]
+    if (supplied_paths.length !== 1) {
+      throw new Error("transient waveform validation requires exactly one simulator output")
+    }
+    const paths = supplied_paths
     const [source_text, model_source, ...circuit_texts] = await Promise.all([
       readFile(source_path, "utf8"),
       readFile(join(input.model_dir, "model.lib"), "utf8"),
@@ -582,31 +657,24 @@ export async function verifySimulationBenchmark(input: {
         (await getModelSimulationSourceSignature(input.model_dir, input.benchmark_id)),
     }
 
-    const definition = await readSimulationDefinition(input.model_dir, input.benchmark_id)
     const parsed = circuit_jsons.map((json) => parseSimulationOutput(json))
-    const errors = parsed.flatMap(({ errors }) => errors)
+    const errors = [...new Set(parsed.flatMap(({ errors }) => errors))]
     if (errors.length > 0) throw new Error(errors.join("; "))
     assertNoSyntheticBenchmarkChannel(model_source)
     for (const circuit of circuit_jsons) {
-      assertCanonicalDutSimulation(circuit as AnyCircuitElement[], model_source, definition.probe_name)
+      assertCanonicalDutSimulation(
+        circuit as AnyCircuitElement[],
+        model_source,
+        definition.probe_name,
+        definition.dut_spice_node,
+      )
     }
 
-    const points =
-      definition.kind === "transient_voltage"
-        ? (() => {
-            const graph = requireGraph(parsed[0]!.graphs, definition.probe_name)
-            return graph.timestamps_ms.map((x, index) => ({
-              x,
-              y: graph.voltage_levels[index]! * definition.scale + definition.offset,
-            }))
-          })()
-        : definition.points.map((point, index) => ({
-            x: point.x,
-            y:
-              reduceGraph(requireGraph(parsed[index]!.graphs, definition.probe_name), definition.reducer) *
-                definition.scale +
-              definition.offset,
-          }))
+    const graph = requireGraph(parsed[0]!.graphs, definition.probe_name)
+    const points = graph.timestamps_ms.map((x, index) => ({
+      x,
+      y: graph.voltage_levels[index]! * definition.scale + definition.offset,
+    }))
     const text = toCsv(points)
     const trusted_result_file = join(
       getVerifiedResultsDirectory(input.model_dir),
@@ -631,6 +699,7 @@ export async function verifySimulationBenchmark(input: {
     return {
       benchmark_id: input.benchmark_id,
       passed: true,
+      status: "passed",
       generated_at,
       ...artifact,
       verified_result_file: relative(getValidationRoot(input.model_dir), trusted_result_file),
@@ -640,6 +709,7 @@ export async function verifySimulationBenchmark(input: {
     return {
       benchmark_id: input.benchmark_id,
       passed: false,
+      status: "failed",
       generated_at,
       ...artifact,
       error_message: error instanceof Error ? error.message : String(error),
@@ -696,6 +766,7 @@ export async function getVerifiedSimulationArtifact(
   if (!isCircuitJson(circuit_json)) return undefined
 
   let result_text: string | undefined
+  let result_file: string | undefined
   if (result.passed) {
     if (typeof result.verified_result_file !== "string" || typeof result.sha256 !== "string") {
       return undefined
@@ -704,6 +775,17 @@ export async function getVerifiedSimulationArtifact(
     if (!result_path) return undefined
     result_text = await readFile(result_path, "utf8")
     if (hashText(result_text) !== result.sha256) return undefined
+    result_file = `results/verified/${benchmark_id}.csv`
+  } else if (
+    result.status === "building" &&
+    typeof result.partial_result_file === "string" &&
+    typeof result.partial_sha256 === "string"
+  ) {
+    const result_path = resolveInside(trusted_root, result.partial_result_file)
+    if (!result_path) return undefined
+    result_text = await readFile(result_path, "utf8")
+    if (hashText(result_text) !== result.partial_sha256) return undefined
+    result_file = `results/partial/${benchmark_id}.csv`
   }
   return {
     benchmark_id,
@@ -713,9 +795,10 @@ export async function getVerifiedSimulationArtifact(
     source_signature: result.source_signature,
     code,
     circuit_json,
-    result_file: result.passed ? `results/verified/${benchmark_id}.csv` : undefined,
+    result_file,
     result_text,
     error_message: result.error_message,
+    status: result.status ?? (result.passed ? "passed" : "failed"),
   }
 }
 
@@ -745,6 +828,14 @@ export async function hasCompleteVerifiedSimulationReport(model_dir: string): Pr
   ) {
     return false
   }
+  const definitions_are_current = await Promise.all(
+    benchmark_ids.map((benchmark_id) =>
+      readSimulationDefinition(model_dir, benchmark_id)
+        .then(() => true)
+        .catch(() => false),
+    ),
+  )
+  if (definitions_are_current.some((is_current) => !is_current)) return false
   const artifacts = await Promise.all(
     report.benchmarks.map(async (benchmark) => {
       const [artifact, current_signature] = await Promise.all([

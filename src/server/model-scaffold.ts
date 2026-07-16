@@ -20,8 +20,9 @@ Work only inside this directory. The source files are:
 - \`model-progress.json\`: your structured live progress checkpoint, streamed to
   the user by the server.
 
-Your task has an untimed setup phase followed by a time-budgeted refinement
-phase. Setup and waiting for component.circuit.tsx do not consume effort. Every
+Your task has untimed evidence setup, component waiting, and benchmark-finalization
+phases followed by a time-budgeted refinement phase. Those untimed phases do not
+consume effort. Every
 effort level uses the same setup, locked benchmarks, scorer, and refinement loop;
 extra effort only permits more refinement iterations.
 
@@ -34,24 +35,44 @@ extra effort only permits more refinement iterations.
    If your runtime has no image-viewing tool, do not pretend to inspect pixels:
    extract vector paths/SVG geometry where possible, use OCR only for labels,
    and record the method and uncertainty in the evidence notes.
-2. Create a complete evidence package for every useful electrical graph before
-   fitting. Digitize graph data into two-column CSV files with an \`x,y\` header.
-   Write \`benchmark-draft.json\` with graph sources, conditions, and proposed
-   tolerances, then write \`setup-complete.json\`. Do not create or tune a model
-   during setup.
-3. When component.circuit.tsx becomes available, verify its pinout and convert the
-   draft into locked \`benchmarks.json\` before tuning the model. The benchmark set,
-   conditions, tolerances, and critical flags must not be weakened to improve a
-   score. When the first refinement pass exits, the server snapshots the complete
-   manifest, evidence CSVs, and benchmark TSX outside this workspace. Later passes
-   must change only the model and its documentation; any benchmark drift is rejected.
-4. Create a baseline model and one executable tscircuit test bench per benchmark.
+2. Create executable evidence only for datasheet graphs whose printed x-axis is
+   time. Digitize each complete time waveform into a two-column CSV with an
+   \`x,y\` header, where x is elapsed time in milliseconds. Do not digitize,
+   draft, or preserve executable benchmark definitions for static curves whose
+   x-axis is voltage, current, load, temperature, frequency, or another
+   parameter. Write \`benchmark-draft.json\` with only the eligible time-waveform
+   sources, conditions, and proposed tolerances, then write
+   \`setup-complete.json\`. Do not create or tune a model during setup.
+3. When component.circuit.tsx becomes available, the server starts a separate,
+   untimed benchmark-finalization pass. During that pass, verify the pinout and
+   convert the draft into \`benchmarks.json\` plus one executable tscircuit test
+   bench per benchmark. Do not create, tune, or run a model in this pass. When the
+   pass exits, the server snapshots the manifest, evidence CSVs, and benchmark TSX
+   outside this workspace before any refinement is allowed to begin.
+4. Only after the server reports that the benchmark lock exists, create a baseline
+   model. The benchmark set, conditions, tolerances, critical flags, evidence, and
+   test benches are immutable during modeling; any drift is rejected. If server
+   validation later detects a structural harness defect, the server may pause the
+   timed segment, discard every model artifact, and start a bounded benchmark-only
+   recovery pass. In that pass only \`benchmarks/*.circuit.tsx\` may change; the
+   manifest, evidence, conditions, weights, critical flags, tolerances, and
+   transient waveform definitions remain byte-locked. A successful repair creates a new audited lock
+   generation and model refinement restarts from a clean time boundary.
    Every locked benchmark must include the server-verifiable \`simulation\`
    extraction mapping described below. Write the first usable baseline immediately to canonical
    \`model.lib\`, with its manifest, integration component, and model card, before
    starting the full simulation suite. Keep trial revisions under
    \`candidates/<revision>/model.lib\`. When you want to run or refresh a viewer,
-   use \`tsci build benchmarks/<benchmark-id>.circuit.tsx --ignore-warnings\`.
+   use \`tsci build benchmarks/<benchmark-id>.circuit.tsx --ignore-warnings
+   --disable-pcb --routing-disabled --disable-parts-engine\`. The project runtime
+   config preserves the ngspice engine while these flags skip unrelated PCB,
+   routing, and parts-engine work.
+   Do not duplicate the server's exhaustive suite. After the first usable baseline
+   is checkpointed, run only the smallest local smoke or targeted diagnostic needed
+   to catch syntax/convergence mistakes, then exit promptly. The server immediately
+   runs every benchmark once in a bounded pool, publishes each complete transient
+   waveform against its reference as soon as that simulation finishes, and returns exact failures
+   for the next correction pass.
    The embedded \`<analogsimulation>\` runs ngspice and saves Circuit JSON under
    \`../dist/spice/benchmarks/<benchmark-id>/circuit.json\`. The UI only reads
    saved output and never executes TSX. \`tsci simulate analog\` may be useful for
@@ -59,17 +80,19 @@ extra effort only permits more refinement iterations.
 5. Candidate CSVs are diagnostic only: never copy, resample, or fit reference
    points directly into a result CSV. The server deletes \`results/verified\`,
    reruns every tscircuit simulation, extracts simulator graphs itself, and scores
-   only that server-owned data. Run \`bun score-benchmarks.ts\` after every candidate.
+   only that server-owned data. Use server validation artifacts as the authoritative
+   score; locally rerun only affected benchmarks before checkpointing a correction.
    Promote a candidate only
    when it improves, in order: syntax/pin validity, critical tests passing,
    convergence failures, worst error, weighted score, and model simplicity.
-6. Only after component.circuit.tsx is available, the server starts the refinement
-   timer. Re-read \`run-control.json\`. While enough time remains for a full iteration and
-   finalization, diagnose the largest residual, refine, simulate the entire locked
-   suite, score, and checkpoint the champion. Prefer bounded numeric parameter
+6. Only after the benchmark lock exists, the server starts the refinement timer.
+   Re-read \`run-control.json\`. While refinement time remains, diagnose the largest
+   residual, refine the affected behavior, run a bounded diagnostic, and checkpoint
+   the champion for the next untimed server validation pass. Prefer bounded numeric parameter
    tuning before changing topology.
-7. Reserve the stated finalization time. Finish by running the entire suite for the
-   champion, running the scorer, and writing all required deliverables. Do not exit
+7. Independent server validation and scoring pause the refinement timer; do not
+   reserve effort for them. Finish by checkpointing the champion and all required
+   deliverables. Do not exit
    while a known simulation or score is failing; the server will return validation
    feedback and continue the agent until everything passes or effort expires. Never wait
    until the deadline to save the current champion. \`model.lib\` must always be
@@ -77,7 +100,8 @@ extra effort only permits more refinement iterations.
 
 ## Required deliverables
 
-- \`model.lib\`: the canonical champion model, containing a .SUBCKT or .MODEL.
+- \`model.lib\`: the canonical champion model, whose first declaration is the
+  manifest-named .SUBCKT. Additional helper .SUBCKTs may follow it.
 - \`model-manifest.json\`: model identity, dialect, entry name, revision, simulator,
   generated time, and explicit component-pin to SPICE-node mapping.
 - \`component-with-model.circuit.tsx\`: a reusable default-exported tscircuit
@@ -183,38 +207,41 @@ workspace and every referenced CSV contains numeric \`x,y\` rows:
     "reference_file": "evidence/curves/stable-id.csv",
     "result_file": "results/champion/stable-id.csv",
     "simulation": {
-      "kind": "parameter_sweep",
+      "kind": "transient_voltage",
+      "x_axis": "time_ms",
       "probe_name": "RESULT",
-      "reducer": "tail_mean",
-      "points": [
-        { "x": 0, "props": { "sweepValue": 0 } },
-        { "x": 1, "props": { "sweepValue": 1 } }
-      ]
+      "dut_spice_node": "OUT",
+      "scale": 1,
+      "offset": 0
     }
   }]
 }
 \`\`\`
 
-Use \`simulation.kind: "transient_voltage"\` with \`probe_name\`, optional
-\`scale\`, and optional \`offset\` when the reference x axis is elapsed time in
-milliseconds. For a parameter sweep, use \`kind: "parameter_sweep"\`. The
-benchmark must contain exactly one DUT and one common voltage probe. Export a
-props-based benchmark (for example \`function Benchmark({ sweepValue = 0 })\`) and
-the server runs that same TSX once per point using tscircuit's \`--inject-props\`
-build option. Never clone the DUT, groups, sources, or probes for sweep points,
-and never use RESULT_0/RESULT_1-style probe sets. Points contain JSON-safe
-\`props\`. Points support \`last\`, \`tail_mean\`, \`peak_to_peak\`, or
-\`frequency_hz\` reducers plus optional scale and offset. Convert currents or
+Only \`simulation.kind: "transient_voltage"\` is supported. Set
+\`simulation.x_axis\` to \`"time_ms"\`; every reference CSV x value is elapsed
+simulation time in milliseconds. Use \`probe_name\`, \`dut_spice_node\`, and
+optional \`scale\` and \`offset\`. Static parameter curves are not executable
+benchmarks in this workflow. The benchmark must contain exactly one DUT and one
+voltage probe, and one simulation produces the entire comparison waveform.
+\`dut_spice_node\` is the exact canonical \`.SUBCKT\` pin whose behavior the
+probe measures. The probe must resolve to that DUT pin and must not be tied
+directly to an independent voltage source. Never clone the DUT, groups, sources,
+or probes to manufacture graph points. Convert currents or
 other quantities into probe voltages with explicit sense elements and document
 the conversion. Every probe must measure behavior caused by the DUT model; never
 hardcode reference y values into sources or the test bench.
 
 Every benchmark must import \`../component-with-model.circuit\`, instantiate exactly
 one model component with \`name="DUT"\`, declare the named \`<voltageprobe>\`, and
-run \`<analogsimulation spiceEngine="ngspice" ... />\`. Every parameter-sweep prop
-key in benchmarks.json must be consumed by the TSX benchmark. The server verifies
+run \`<analogsimulation spiceEngine="ngspice" ... />\`. The server verifies
 from Circuit JSON that DUT owns the canonical model.lib subcircuit and that the
 named probe is electrically connected to DUT.
+Set the probe's \`connectsTo\` to a direct DUT port selector such as
+\`.DUT > .VOUT\` (or \`DUT.pin2\` for numbered component pins), never a bare net
+such as \`net.VOUT\`; tscircuit cannot resolve a voltage probe's simulation source
+from a net-only target. The selected DUT port must correspond to
+\`simulation.dut_spice_node\` through the canonical model pin mapping.
 
 Never repurpose physical component pins as benchmark selectors, curve indices,
 telemetry channels, or generic metric outputs. Model pins must retain their
@@ -223,6 +250,10 @@ device model and is rejected even when its numeric curves match the references.
 
 Do not claim PSpice validation unless the model was executed by PSpice. A model
 tested only with ngspice must say so explicitly even if it uses portable syntax.
+Do not label a model or application region as validated in model.lib or model-card.md;
+only the server may add that status after the complete locked suite passes.
+For \`<analogsimulation>\`, omit \`simulationType\` or set it exactly to
+\`"spice_transient_analysis"\`; \`"transient"\` is not a valid tscircuit prop value.
 `
 
 export async function writeModelScaffold(input: { job_dir: string; model_dir: string }): Promise<void> {
@@ -248,16 +279,23 @@ export async function copyComponentIntoModelWorkspace(input: {
   job_dir: string
   model_dir: string
 }): Promise<void> {
-  await copyFile(join(input.job_dir, "index.circuit.tsx"), join(input.model_dir, "component.circuit.tsx"))
+  const preserved_original = join(input.job_dir, "component.circuit.tsx")
+  const source_file = (await Bun.file(preserved_original).exists())
+    ? preserved_original
+    : join(input.job_dir, "index.circuit.tsx")
+  await copyFile(source_file, join(input.model_dir, "component.circuit.tsx"))
 }
 
 export function buildModelSetupPrompt(): string {
   return `Prepare the untimed evidence and benchmark-reference package for a SPICE behavioral model.
 
 Read AGENTS.md first. Analyze datasheet.pdf, render and inspect every relevant
-electrical graph, digitize reference curves, record operating conditions and
-provenance, and write benchmark-draft.json. This phase runs in parallel with the
-component agent, so component.circuit.tsx may not exist yet.
+electrical graph, but digitize and draft only graphs whose printed x-axis is
+time. Each eligible reference CSV must contain the complete waveform with elapsed
+time in milliseconds as x. Ignore static curves whose x-axis is a swept voltage,
+current, load, temperature, frequency, or other parameter. Record operating
+conditions and provenance and write benchmark-draft.json. This phase runs in
+parallel with the component agent, so component.circuit.tsx may not exist yet.
 
 Create model-progress.json immediately, then update it throughout extraction,
 graph digitization, and benchmark drafting as specified in AGENTS.md.
@@ -269,22 +307,75 @@ with a version, completion timestamp, evidence-file count, and draft-benchmark
 count, then exit. The server will wait for and provide the component.`
 }
 
+export function buildModelBenchmarkPrompt(
+  validation_feedback?: string,
+  options: { locked_circuit_repair?: boolean } = {},
+): string {
+  const correction = validation_feedback
+    ? `
+
+The server rejected the previous benchmark suite${
+        options.locked_circuit_repair ? " after detecting a structural circuit defect" : " before locking it"
+      }. Correct the executable benchmark circuit using this exact validation feedback:
+
+<server-benchmark-validation-feedback>
+${validation_feedback}
+</server-benchmark-validation-feedback>
+
+Do not weaken, remove, or replace benchmarks to avoid the error. ${
+        options.locked_circuit_repair
+          ? "The server will reject any change outside benchmarks/*.circuit.tsx: do not edit benchmarks.json, evidence, conditions, weights, critical flags, tolerances, or transient waveform definitions."
+          : "Preserve the draft's evidence, conditions, weights, critical flags, and tolerances while repairing the manifest or executable testbench contract."
+      } Then exit for another server validation pass.`
+    : ""
+  return `Finalize and freeze the benchmark suite for this SPICE behavioral-model run.
+
+The authoritative component.circuit.tsx is now available. Read AGENTS.md,
+benchmark-draft.json, component.circuit.tsx, and the evidence package. Create the
+complete benchmarks.json manifest and exactly one benchmarks/<id>.circuit.tsx per
+benchmark. Every benchmark must declare its server-verifiable simulation mapping,
+including probe_name and dut_spice_node, and must cite immutable evidence under
+evidence/. Update model-progress.json while working.
+
+Accept only drafts whose reference x-axis is time. Every accepted benchmark
+must use simulation.kind \`"transient_voltage"\`, simulation.x_axis \`"time_ms"\`,
+and one analog transient run that emits the complete comparison waveform.
+
+Omit the analogsimulation \`simulationType\` prop or set it exactly to
+\`"spice_transient_analysis"\`. Before committing the lock, the server performs
+static contract validation and source compilation without running ngspice. The
+actual model-backed simulations run only during refinement and independent
+validation, when a canonical model exists.
+
+This is an untimed benchmark-only pass. Do not create or modify model.lib,
+model-manifest.json, component-with-model.circuit.tsx, candidates/,
+iteration-history.json, model-card.md, validation-report.json, or any simulated
+result CSV. Do not fit, tune, or run a model. Exit as soon as the complete
+benchmark suite is ready; the server will validate and lock it before refinement.${correction}`
+}
+
 export function buildModelAgentPrompt(): string {
   return `Develop and validate the ngspice-tested SPICE behavioral model in this workspace.
 
-The untimed setup phase is complete and the authoritative
-component.circuit.tsx is now available. The refinement timer is running. Read
-AGENTS.md, benchmark-draft.json, component.circuit.tsx, and run-control.json
-first. Lock the complete benchmark suite, then follow the simulation,
-deterministic scoring, champion-promotion, and checkpoint workflow.
+The untimed setup phase is complete, the authoritative component.circuit.tsx is
+available, and the server has already locked the complete benchmark suite. The
+refinement timer is running. Read AGENTS.md,
+benchmarks.json, component.circuit.tsx, and run-control.json first. Do not modify
+benchmarks.json, benchmark TSX, or evidence. Follow the simulation, deterministic
+scoring, champion-promotion, and checkpoint workflow.
 Continue the existing model-progress.json sequence and update it before and after
 every benchmark simulation, score, candidate decision, and champion promotion.
 Re-read run-control.json before every refinement iteration because the user may
 extend the time budget while you work. Use the available time to improve the
 same locked benchmark suite; do not reduce tests or loosen tolerances.
 Run or refresh saved viewer output with
-\`tsci build benchmarks/<benchmark-id>.circuit.tsx --ignore-warnings\`. The UI only reads
+\`tsci build benchmarks/<benchmark-id>.circuit.tsx --ignore-warnings
+--disable-pcb --routing-disabled --disable-parts-engine\`. The project runtime
+config preserves ngspice while skipping unrelated PCB work. The UI only reads
 persisted Circuit JSON and will not execute the TSX for you.
+Never add, copy, or temporarily write circuit files under \`benchmarks/\`. Each
+locked benchmark is already a complete time-domain simulation; build the affected
+benchmark directly for a targeted diagnostic.
 
 If champion artifacts already exist, continue from them and preserve their
 history. If a server-owned benchmark lock already exists, do not edit
@@ -292,6 +383,9 @@ benchmarks.json, benchmark TSX, or evidence CSVs; correction passes may change
 only model artifacts and documentation. Keep a usable champion checkpoint at all times. Finish with every
 required artifact and a freshly generated validation-report.json. If
 validation-feedback.md exists, inspect it together with simulation-validation.json
-and validation-artifacts, fix every item, and rerun the locked suite.
+and validation-artifacts, fix every item, run only the affected local diagnostics,
+and return the checkpoint to the server without repeating its exhaustive suite.
+Describe model-card.md regions as intended or agent-tested, not server-validated;
+the server owns the final validation claim.
 Do not stop at a prose report and do not exit knowingly below 100% validation.`
 }

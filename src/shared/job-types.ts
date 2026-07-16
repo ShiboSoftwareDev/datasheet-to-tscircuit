@@ -143,6 +143,9 @@ export interface ModelProgress {
     current?: string
     completed?: number
     total?: number
+    draft_total?: number
+    locked_total?: number
+    omitted?: number
   }
   champion?: {
     revision?: string
@@ -183,6 +186,7 @@ export interface ModelReferencePreview {
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]
   result_points?: ModelCurvePoint[]
+  result_status?: "partial" | "verified"
   is_stale?: boolean
   updated_at: string
 }

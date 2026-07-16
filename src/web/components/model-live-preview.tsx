@@ -43,6 +43,14 @@ function ModelCode({ preview }: { preview: ModelCircuitPreviewData }) {
 }
 
 function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) {
+  const title =
+    preview?.build_status === "building"
+      ? "Building circuit"
+      : preview?.build_status === "failed"
+        ? "Circuit build failed"
+        : preview
+          ? "Waiting for a saved circuit run"
+          : "Waiting for benchmark TSX"
   return (
     <div className="model-preview-placeholder">
       {preview?.build_status === "building" ? (
@@ -50,12 +58,14 @@ function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) 
       ) : (
         <FlaskConical size={25} />
       )}
-      <strong>{preview ? "Waiting for a saved circuit run" : "Waiting for benchmark TSX"}</strong>
+      <strong>{title}</strong>
       <p>
         {preview?.error_message ??
-          (preview
-            ? "The source is available below. The agent or validation workflow must run it before viewers appear."
-            : "This appears as soon as the agent writes its first benchmark circuit.")}
+          (preview?.build_status === "building"
+            ? "tsci is building this benchmark. The viewer will use the first persisted Circuit JSON output."
+            : preview
+              ? "The source is ready. The server automatically runs one preview point per benchmark when a model checkpoint enters validation; the viewer appears from the first persisted result."
+              : "This appears as soon as the agent writes its first benchmark circuit.")}
       </p>
       {preview?.code && (
         <pre>
@@ -84,6 +94,11 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
         )}
       </header>
       <div className="model-runframe-shell">
+        {preview?.circuit_json && preview.error_message && (
+          <p className="model-preview-build-error" role="alert">
+            {preview.error_message}
+          </p>
+        )}
         {!preview?.circuit_json ? (
           <CircuitPlaceholder preview={preview} />
         ) : (
@@ -221,7 +236,12 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
             ))}
           </g>
           <polyline className="reference-line" points={reference_path} />
-          {result_path && <polyline className="result-line" points={result_path} />}
+          {result_path && (
+            <polyline
+              className={`result-line${preview.result_status === "partial" ? " result-line-partial" : ""}`}
+              points={result_path}
+            />
+          )}
           <g className="reference-axis-labels">
             <text x="38" y="328" textAnchor="start">
               {formatAxisValue(displayed_x_min)}
@@ -243,7 +263,8 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
           </span>
           {preview.result_points && (
             <span className="result-series">
-              <i /> Server-verified model{preview.is_stale ? " (older source)" : ""}
+              <i /> {preview.result_status === "partial" ? "Validated waveform" : "Server-verified model"}
+              {preview.is_stale ? " (older source)" : ""}
             </span>
           )}
           {!preview.result_points && (

@@ -119,3 +119,36 @@ test("ModelRunStore preserves persisted active-segment effort across a restart",
 
   await rm(model_dir, { recursive: true, force: true })
 })
+
+test("ModelRunStore keeps validation untimed and can restart a clean segment", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-validation-profile-"))
+  const store = new ModelRunStore()
+  store.createModelRun({
+    model_run_id: "model_validation_profile",
+    job_id: "job_validation_profile",
+    model_dir,
+    effort_multiplier: 1,
+    base_effort_ms: 300_000,
+  })
+
+  expect(store.getFinalizationReserveMs("model_validation_profile")).toBe(0)
+  store.setValidationProfile("model_validation_profile", {
+    simulation_run_count: 10_000,
+    canary_duration_ms: 20_000,
+  })
+  expect(store.getFinalizationReserveMs("model_validation_profile")).toBe(0)
+  const control = JSON.parse(await Bun.file(join(model_dir, "run-control.json")).text())
+  expect(control.finalization_reserve_ms).toBe(0)
+
+  store.startSegment("model_validation_profile")
+  await Bun.sleep(5)
+  const paused = store.pauseSegment("model_validation_profile")
+  expect(paused.segment_started_at).toBeUndefined()
+  expect(paused.elapsed_time_ms).toBeGreaterThan(0)
+  const restarted = store.restartSegment("model_validation_profile")
+  expect(restarted.status).toBe("running")
+  expect(restarted.elapsed_time_ms).toBe(0)
+  expect(restarted.segment_started_at).toBeDefined()
+
+  await rm(model_dir, { recursive: true, force: true })
+})

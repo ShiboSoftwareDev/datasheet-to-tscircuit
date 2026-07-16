@@ -48,6 +48,9 @@ export function parseModelProgress(value: unknown): ModelProgress {
   if (typeof value.updated_at !== "string" || !value.updated_at.trim()) {
     throw new Error("model-progress.json has no updated_at")
   }
+  if (!Number.isFinite(Date.parse(value.updated_at))) {
+    throw new Error("model-progress.json has an invalid updated_at")
+  }
 
   const evidence = isRecord(value.evidence)
     ? {
@@ -62,6 +65,9 @@ export function parseModelProgress(value: unknown): ModelProgress {
         current: typeof value.benchmark.current === "string" ? value.benchmark.current : undefined,
         completed: optionalCount(value.benchmark.completed),
         total: optionalCount(value.benchmark.total),
+        draft_total: optionalCount(value.benchmark.draft_total),
+        locked_total: optionalCount(value.benchmark.locked_total),
+        omitted: optionalCount(value.benchmark.omitted),
       }
     : undefined
   const champion = isRecord(value.champion)
@@ -112,10 +118,47 @@ export function startModelProgressMonitor(input: {
         const parsed_progress = parseModelProgress(JSON.parse(text) as unknown)
         const current_sequence =
           input.model_run_store.getModelRun(input.model_run_id)?.progress?.sequence ?? -1
-        const progress =
+        const sequenced_progress =
           parsed_progress.sequence <= current_sequence
             ? { ...parsed_progress, sequence: current_sequence + 1 }
             : parsed_progress
+        const current_progress = input.model_run_store.getModelRun(input.model_run_id)?.progress
+        const terminal_agent_phase = new Set<ModelProgressPhase>([
+          "complete",
+          "timed_out",
+          "failed",
+          "cancelled",
+        ]).has(sequenced_progress.phase)
+        const current_phase = current_progress?.phase
+        const safe_phase =
+          terminal_agent_phase &&
+          current_phase &&
+          !new Set<ModelProgressPhase>(["complete", "timed_out", "failed", "cancelled"]).has(current_phase)
+            ? current_phase
+            : sequenced_progress.phase
+        const locked_total = current_progress?.benchmark?.locked_total
+        const progress: ModelProgress = {
+          ...sequenced_progress,
+          phase: safe_phase,
+          // Agent clocks can drift or write a future timestamp. The server receipt
+          // time is authoritative for UI freshness and history ordering.
+          updated_at: new Date().toISOString(),
+          benchmark: {
+            ...sequenced_progress.benchmark,
+            ...(locked_total === undefined
+              ? {}
+              : {
+                  total: locked_total,
+                  completed:
+                    sequenced_progress.benchmark?.completed === undefined
+                      ? undefined
+                      : Math.min(sequenced_progress.benchmark.completed, locked_total),
+                  locked_total,
+                  draft_total: current_progress?.benchmark?.draft_total,
+                  omitted: current_progress?.benchmark?.omitted,
+                }),
+          },
+        }
         last_text = text
         input.model_run_store.updateProgress(input.model_run_id, progress)
       } catch {

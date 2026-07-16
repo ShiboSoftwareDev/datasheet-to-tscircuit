@@ -176,7 +176,9 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
           </span>
           <span className="model-option-copy">
             <strong>Create SPICE behavioral model</strong>
-            <small>Validated with ngspice; starts reference setup alongside component generation.</small>
+            <small>
+              Validated with ngspice; evidence setup and benchmark locking run outside the refinement budget.
+            </small>
           </span>
           <i aria-hidden="true">
             <b />
