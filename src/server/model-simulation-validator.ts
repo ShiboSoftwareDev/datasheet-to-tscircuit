@@ -155,6 +155,18 @@ function normalizeCircuitErrorMessage(element: Record<string, unknown>): string 
   return raw.split(/\s+Details:\s+Props:/i)[0]!.trim()
 }
 
+export function getAllCircuitErrors(value: unknown): string[] {
+  if (!isCircuitJson(value)) throw new Error("build did not produce Circuit JSON")
+  const errors = new Set<string>()
+  for (const element of value) {
+    if (!isRecord(element) || typeof element.type !== "string" || !element.type.endsWith("_error")) {
+      continue
+    }
+    errors.add(`${element.type}: ${normalizeCircuitErrorMessage(element)}`)
+  }
+  return [...errors]
+}
+
 export function getCircuitBuildDiagnostics(value: unknown): CircuitBuildDiagnostics {
   if (!isCircuitJson(value)) throw new Error("simulation did not produce Circuit JSON")
   const source_errors = new Set<string>()

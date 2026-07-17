@@ -32,6 +32,9 @@ test("job create accepts a PDF and starts the injected background runner", async
   expect(body.job.file_name).toBe("sensor.pdf")
   expect(started_job_id).toBe(body.job.job_id)
   expect(await Bun.file(join(jobs_root, body.job.job_id, "datasheet.pdf")).exists()).toBe(true)
+  expect(await Bun.file(join(jobs_root, body.job.job_id, "AGENTS.md")).text()).toContain(
+    "typical-application-plan.json",
+  )
 
   await rm(jobs_root, { recursive: true, force: true })
 })

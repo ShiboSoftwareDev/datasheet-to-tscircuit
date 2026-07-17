@@ -82,7 +82,7 @@ export async function deleteJob(job_id: string): Promise<void> {
   if (!response.ok) throw new Error(await readApiError(response))
 }
 
-export function getJobFileUrl(job_id: string, file: "component" | "log"): string {
+export function getJobFileUrl(job_id: string, file: "component" | "typical_application" | "log"): string {
   return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}`
 }
 

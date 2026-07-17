@@ -407,37 +407,53 @@ export function startModelArtifactMonitor(input: {
   let sync_in_flight: Promise<void> | undefined
   let preview_signature: string | undefined
 
-  const sync = async () => {
-    if (is_stopped) return
-    if (sync_in_flight) return sync_in_flight
-    sync_in_flight = (async () => {
-      const current_run = input.model_run_store.getModelRun(input.model_run_id)
-      const current_benchmark = current_run?.progress?.benchmark?.current
-      const preview_options = await listModelPreviewOptions(input.model_dir)
-      input.model_run_store.updatePreviewOptions(input.model_run_id, preview_options)
-      const normalized_current = current_benchmark?.replace(/\.circuit\.tsx$/i, "")
-      const benchmark_id = preview_options.some((option) => option.benchmark_id === normalized_current)
-        ? normalized_current
-        : preview_options[0]?.benchmark_id
-      if (!benchmark_id) return
-      const selected = await loadModelSelectedPreview({ model_dir: input.model_dir, benchmark_id })
-      if (!selected) return
+  const performSync = async () => {
+    const current_run = input.model_run_store.getModelRun(input.model_run_id)
+    const current_benchmark = current_run?.progress?.benchmark?.current
+    const preview_options = await listModelPreviewOptions(input.model_dir)
+    input.model_run_store.updatePreviewOptions(input.model_run_id, preview_options)
+    const normalized_current = current_benchmark?.replace(/\.circuit\.tsx$/i, "")
+    const benchmark_id = preview_options.some((option) => option.benchmark_id === normalized_current)
+      ? normalized_current
+      : preview_options[0]?.benchmark_id
+    if (!benchmark_id) return
+    const selected = await loadModelSelectedPreview({ model_dir: input.model_dir, benchmark_id })
+    if (!selected) return
 
-      const signature = JSON.stringify(selected)
-      if (signature !== preview_signature) {
-        preview_signature = signature
-        input.model_run_store.updatePreviews(input.model_run_id, selected)
-      }
-    })()
-    try {
-      await sync_in_flight
-    } finally {
-      sync_in_flight = undefined
+    const signature = JSON.stringify(selected)
+    if (signature !== preview_signature) {
+      preview_signature = signature
+      input.model_run_store.updatePreviews(input.model_run_id, selected)
     }
   }
 
-  const timer = setInterval(() => void sync(), input.interval_ms ?? 750)
-  void sync()
+  const startSync = (): Promise<void> => {
+    const running = (async () => {
+      try {
+        await performSync()
+      } finally {
+        sync_in_flight = undefined
+      }
+    })()
+    sync_in_flight = running
+    return running
+  }
+
+  const sync = async () => {
+    if (is_stopped) return
+    const active_sync = sync_in_flight
+    if (active_sync) await active_sync
+    if (is_stopped) return
+    await (sync_in_flight ?? startSync())
+  }
+
+  const poll = () => {
+    if (is_stopped || sync_in_flight) return
+    void startSync()
+  }
+
+  const timer = setInterval(poll, input.interval_ms ?? 750)
+  poll()
   return {
     sync,
     stop: () => {

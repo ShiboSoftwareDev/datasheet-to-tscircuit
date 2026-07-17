@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { JobStore } from "@/server/job-store"
+import type { Job } from "@/shared/job-types"
 
 test("JobStore streams updates and persists every log chunk", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-store-"))
@@ -12,11 +13,18 @@ test("JobStore streams updates and persists every log chunk", async () => {
   const unsubscribe = job_store.subscribe("job_1", (job_event) => event_types.push(job_event.event_type))
 
   await job_store.appendLog("job_1", "stderr", "[tool] read datasheet.pdf\n")
-  job_store.updateJob("job_1", { display_status: "building" })
+  job_store.updateJob("job_1", {
+    display_status: "agent_running",
+    component_ready: true,
+    component_code: "export default () => <chip />",
+    circuit_json: [{ type: "source_component", source_component_id: "part" }] as Job["circuit_json"],
+  })
 
   expect(event_types).toEqual(["log", "job_updated"])
   expect(job_store.getJob("job_1")?.logs).toHaveLength(1)
+  expect(job_store.getJob("job_1")?.component_ready).toBe(true)
   expect(await readFile(join(job_dir, "agent.log"), "utf8")).toContain("[tool] read datasheet.pdf")
+  expect(JSON.parse(await readFile(join(job_dir, "job.json"), "utf8")).component_ready).toBe(true)
 
   unsubscribe?.()
   await rm(job_dir, { recursive: true, force: true })

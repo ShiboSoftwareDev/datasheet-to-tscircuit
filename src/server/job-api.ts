@@ -338,6 +338,14 @@ function getJobFile(request_url: URL, context: JobApiContext): Response {
       },
     })
   }
+  if (file_kind === "typical_application") {
+    return new Response(Bun.file(join(job_dir, "typical-application.circuit.tsx")), {
+      headers: {
+        "Content-Disposition": 'attachment; filename="typical-application.circuit.tsx"',
+        "Content-Type": "text/typescript; charset=utf-8",
+      },
+    })
+  }
   if (file_kind === "log") {
     return new Response(Bun.file(join(job_dir, "agent.log")), {
       headers: {
@@ -346,7 +354,7 @@ function getJobFile(request_url: URL, context: JobApiContext): Response {
       },
     })
   }
-  return errorResponse("invalid_file", "file must be component or log.", 400)
+  return errorResponse("invalid_file", "file must be component, typical_application, or log.", 400)
 }
 
 export function createJobApiHandler(context: JobApiContext) {

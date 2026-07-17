@@ -49,6 +49,8 @@ export async function createAppServer(options: AppServerOptions = {}) {
     job_store,
     model_run_store,
     agent_bin: process.env.TSCI_AGENT_BIN ?? join(root_dir, "node_modules", ".bin", "tsci-agent"),
+    agent_event_runner:
+      process.env.TSCI_AGENT_EVENT_RUNNER ?? join(root_dir, "src", "server", "structured-agent-runner.ts"),
     tsci_bin: process.env.TSCI_BIN ?? join(root_dir, "node_modules", ".bin", "tsci"),
   }
   const handleModelRunApiRequest = createModelRunApiHandler(runner_context)

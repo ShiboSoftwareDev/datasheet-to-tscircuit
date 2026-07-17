@@ -37,8 +37,11 @@ export interface RestoreJobInput extends CreateJobInput {
   has_errors: boolean
   error_message?: string
   logs: JobLog[]
+  component_ready?: boolean
   component_code?: string
   circuit_json?: Job["circuit_json"]
+  typical_application_code?: string
+  typical_application_circuit_json?: Job["typical_application_circuit_json"]
 }
 
 export type JobUpdate = Partial<
@@ -49,8 +52,11 @@ export type JobUpdate = Partial<
     | "has_errors"
     | "error_message"
     | "completed_at"
+    | "component_ready"
     | "component_code"
     | "circuit_json"
+    | "typical_application_code"
+    | "typical_application_circuit_json"
   >
 >
 
@@ -65,8 +71,11 @@ function getPublicJob(job_record: JobRecord): Job {
     has_errors: job_record.has_errors,
     error_message: job_record.error_message,
     logs: [...job_record.logs],
+    component_ready: job_record.component_ready,
     component_code: job_record.component_code,
     circuit_json: job_record.circuit_json,
+    typical_application_code: job_record.typical_application_code,
+    typical_application_circuit_json: job_record.typical_application_circuit_json,
   }
 }
 
@@ -242,6 +251,7 @@ export class JobStore {
           has_errors: job_record.has_errors,
           error_message: job_record.error_message,
           additional_instructions: job_record.additional_instructions,
+          component_ready: job_record.component_ready,
         },
         null,
         2,

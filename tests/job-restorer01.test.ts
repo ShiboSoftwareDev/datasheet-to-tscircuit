@@ -39,13 +39,24 @@ test("persisted component and model jobs survive a server restart and deletion r
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-restore-"))
   const job_dir = join(jobs_root, "job_restore")
   const model_dir = join(job_dir, "spice")
-  await mkdir(join(job_dir, "dist", "index"), { recursive: true })
+  await Promise.all([
+    mkdir(join(job_dir, "dist", "index"), { recursive: true }),
+    mkdir(join(job_dir, "dist", "typical-application"), { recursive: true }),
+  ])
   await Promise.all([
     Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nrestore fixture"),
     Bun.write(join(job_dir, "index.circuit.tsx"), "export default () => <board />\n"),
     Bun.write(
+      join(job_dir, "typical-application.circuit.tsx"),
+      'import Component from "./index.circuit"\nexport default () => <board><Component /></board>\n',
+    ),
+    Bun.write(
       join(job_dir, "dist", "index", "circuit.json"),
       JSON.stringify([{ type: "source_component", source_component_id: "restored" }]),
+    ),
+    Bun.write(
+      join(job_dir, "dist", "typical-application", "circuit.json"),
+      JSON.stringify([{ type: "source_component", source_component_id: "application" }]),
     ),
   ])
 
@@ -82,8 +93,12 @@ test("persisted component and model jobs survive a server restart and deletion r
   expect(restored).toEqual({ jobs_restored: 1, model_runs_restored: 1 })
   expect(restored_jobs.getJob("job_restore")?.file_name).toBe("original-sensor.pdf")
   expect(restored_jobs.getJob("job_restore")?.display_status).toBe("complete")
+  expect(restored_jobs.getJob("job_restore")?.component_ready).toBe(true)
   expect(restored_jobs.getJob("job_restore")?.logs[0]?.message).toBe("Original component log\n")
   expect(restored_jobs.getJob("job_restore")?.circuit_json?.[0]?.type).toBe("source_component")
+  expect(restored_jobs.getJob("job_restore")?.typical_application_circuit_json?.[0]?.type).toBe(
+    "source_component",
+  )
 
   const restored_model = restored_models.getModelRunForJob("job_restore")
   expect(restored_model?.model_run_id).toBe("model_restore")

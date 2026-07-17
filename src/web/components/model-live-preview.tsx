@@ -1,3 +1,4 @@
+import type { TabId } from "@tscircuit/runframe"
 import { Activity, AlertTriangle, Check, Clipboard, Code2, FlaskConical, LoaderCircle } from "lucide-react"
 import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import type {
@@ -76,7 +77,32 @@ function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) 
   )
 }
 
+export function getRunframeCircuitJson(
+  active_tab: TabId,
+  live_circuit_json: ModelCircuitPreviewData["circuit_json"],
+  code_tab_circuit_json: ModelCircuitPreviewData["circuit_json"],
+): ModelCircuitPreviewData["circuit_json"] {
+  return active_tab === "code" && code_tab_circuit_json !== undefined
+    ? code_tab_circuit_json
+    : live_circuit_json
+}
+
 function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData }) {
+  const [active_tab, setActiveTab] = useState<TabId>("analog_simulation")
+  // Runframe leaves Code whenever the Circuit JSON prop changes. Keep the snapshot
+  // that was visible on entry, then reveal the newest live data on a visual tab.
+  const [code_tab_circuit_json, setCodeTabCircuitJson] = useState(preview?.circuit_json)
+  const runframe_circuit_json = getRunframeCircuitJson(
+    active_tab,
+    preview?.circuit_json,
+    code_tab_circuit_json,
+  )
+
+  const handleActiveTabChange = (tab: TabId) => {
+    if (tab === "code") setCodeTabCircuitJson(preview?.circuit_json)
+    setActiveTab(tab)
+  }
+
   return (
     <section className="workspace-card model-circuit-preview" aria-label="Live model circuit preview">
       <header className="card-toolbar">
@@ -98,16 +124,16 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
             {preview.error_message}
           </p>
         )}
-        {!preview?.circuit_json ? (
+        {!preview || !runframe_circuit_json ? (
           <CircuitPlaceholder preview={preview} />
         ) : (
           <Suspense fallback={<CircuitPlaceholder preview={preview} />}>
             <CircuitJsonPreview
-              key={`${preview.source_file}:${preview.updated_at}:model-tabs-v2`}
-              circuitJson={preview.circuit_json}
+              circuitJson={runframe_circuit_json}
               code={preview.code}
               showCodeTab
               codeTabContent={<ModelCode preview={preview} />}
+              onActiveTabChange={handleActiveTabChange}
               availableTabs={["code", "schematic", "analog_simulation"]}
               defaultActiveTab="analog_simulation"
               defaultTab="analog_simulation"
@@ -399,7 +425,10 @@ export function ModelLivePreview({
         {error_message && <small role="alert">{error_message}</small>}
       </div>
       <div className="model-preview-grid">
-        <ModelCircuitPreview preview={displayed_circuit} />
+        <ModelCircuitPreview
+          key={`${selected_benchmark_id ?? "live"}:${displayed_circuit?.source_file ?? "pending"}`}
+          preview={displayed_circuit}
+        />
         <ReferenceGraph preview={displayed_reference} />
       </div>
     </div>

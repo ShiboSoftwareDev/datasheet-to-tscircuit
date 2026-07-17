@@ -2,7 +2,13 @@ import { expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { parseBenchmarkManifest, scoreModelBenchmarks } from "@/server/model-scorer"
+import {
+  parseBenchmarkManifest,
+  renderModelBenchmarkComparisonSvg,
+  scoreModelBenchmarks,
+  scoreSingleModelBenchmark,
+} from "@/server/model-scorer"
+import { writeModelScaffold } from "@/server/model-scaffold"
 
 test("model scorer evaluates every locked benchmark from numeric CSV data", async () => {
   const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-scorer-"))
@@ -67,7 +73,86 @@ test("model scorer evaluates every locked benchmark from numeric CSV data", asyn
   expect(report.benchmarks[0]?.normalized_rmse).toBe(0)
   expect(report.benchmarks[1]?.passed).toBe(false)
 
+  const transfer = await scoreSingleModelBenchmark(model_dir, "transfer")
+  const comparison_svg = await renderModelBenchmarkComparisonSvg(model_dir, "transfer")
+  expect(transfer.passed).toBe(true)
+  expect(comparison_svg).toContain("Transfer curve")
+  expect(comparison_svg).toContain("Datasheet reference")
+  expect(comparison_svg).toContain("Simulation result")
+  expect(comparison_svg).toContain("PASS")
+
   await rm(model_dir, { recursive: true, force: true })
+})
+
+test("targeted benchmark helper extracts and overlays one saved simulator trace", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-diagnostic-"))
+  const model_dir = join(job_dir, "spice")
+  const circuit_json_file = join(job_dir, "dist", "spice", "benchmarks", "transfer", "circuit.json")
+  try {
+    await Promise.all([
+      mkdir(model_dir, { recursive: true }),
+      mkdir(join(model_dir, "evidence"), { recursive: true }),
+      mkdir(join(circuit_json_file, ".."), { recursive: true }),
+      Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nfixture"),
+    ])
+    await writeModelScaffold({ job_dir, model_dir })
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmarks.json"),
+        JSON.stringify({
+          version: 1,
+          locked_at: new Date().toISOString(),
+          benchmarks: [
+            {
+              id: "transfer",
+              title: "Transfer curve",
+              source: { page: 4 },
+              critical: true,
+              weight: 1,
+              tolerance: 0.05,
+              reference_file: "evidence/transfer.csv",
+              result_file: "results/champion/transfer.csv",
+              simulation: {
+                kind: "transient_voltage",
+                x_axis: "time_ms",
+                probe_name: "RESULT",
+                dut_spice_node: "OUT",
+              },
+            },
+          ],
+        }),
+      ),
+      Bun.write(join(model_dir, "evidence", "transfer.csv"), "x,y\n0,0\n1,1\n2,2\n"),
+      Bun.write(
+        circuit_json_file,
+        JSON.stringify([
+          {
+            type: "simulation_transient_voltage_graph",
+            name: "RESULT",
+            timestamps_ms: [0, 1, 2],
+            voltage_levels: [0, 1, 2],
+          },
+        ]),
+      ),
+    ])
+
+    const process = Bun.spawn(["bun", "score-benchmark.ts", "transfer"], {
+      cwd: model_dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exit_code, stderr] = await Promise.all([process.exited, new Response(process.stderr).text()])
+    expect(stderr).toBe("")
+    expect(exit_code).toBe(0)
+    expect(
+      JSON.parse(await Bun.file(join(model_dir, "diagnostics", "transfer", "comparison.json")).text()).passed,
+    ).toBe(true)
+    const comparison_svg = await Bun.file(join(model_dir, "diagnostics", "transfer", "comparison.svg")).text()
+    expect(comparison_svg).toContain("Datasheet reference")
+    expect(await Bun.file(join(model_dir, "results", "champion", "transfer.csv")).exists()).toBe(false)
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
 })
 
 test("benchmark manifests accept only complete time-domain waveform definitions", async () => {

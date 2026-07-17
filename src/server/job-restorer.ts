@@ -72,11 +72,17 @@ function isCircuitJson(value: unknown): value is Job["circuit_json"] {
   )
 }
 
-async function readRestoredCircuitJson(job_dir: string): Promise<Job["circuit_json"] | undefined> {
-  const candidates = [
-    join(job_dir, "dist", "spice", "component-with-model", "circuit.json"),
-    join(job_dir, "dist", "index", "circuit.json"),
-  ]
+async function readRestoredCircuitJson(
+  job_dir: string,
+  artifact: "component" | "typical_application",
+): Promise<Job["circuit_json"] | undefined> {
+  const candidates =
+    artifact === "component"
+      ? [
+          join(job_dir, "dist", "spice", "component-with-model", "circuit.json"),
+          join(job_dir, "dist", "index", "circuit.json"),
+        ]
+      : [join(job_dir, "dist", "typical-application", "circuit.json")]
   for (const candidate of candidates) {
     const value = await readJson(candidate)
     if (isCircuitJson(value)) return value
@@ -98,11 +104,21 @@ async function restoreJobDirectory(input: {
   job_store: JobStore
 }): Promise<Job | undefined> {
   if (!(await Bun.file(join(input.job_dir, "datasheet.pdf")).exists())) return undefined
-  const [snapshot, logs, component_code, circuit_json, directory_stat] = await Promise.all([
+  const [
+    snapshot,
+    logs,
+    component_code,
+    circuit_json,
+    typical_application_code,
+    typical_application_circuit_json,
+    directory_stat,
+  ] = await Promise.all([
     readJson(join(input.job_dir, "job.json")),
     readPersistedLogs(join(input.job_dir, "agent.log")),
     readFile(join(input.job_dir, "index.circuit.tsx"), "utf8").catch(() => undefined),
-    readRestoredCircuitJson(input.job_dir),
+    readRestoredCircuitJson(input.job_dir, "component"),
+    readFile(join(input.job_dir, "typical-application.circuit.tsx"), "utf8").catch(() => undefined),
+    readRestoredCircuitJson(input.job_dir, "typical_application"),
     stat(input.job_dir),
   ])
   const saved = isRecord(snapshot) ? snapshot : undefined
@@ -110,7 +126,12 @@ async function restoreJobDirectory(input: {
     typeof saved?.display_status === "string" && JOB_STATUSES.has(saved.display_status as JobDisplayStatus)
       ? (saved.display_status as JobDisplayStatus)
       : undefined
-  const has_complete_artifact = Boolean(component_code?.includes("export default") && circuit_json)
+  const component_ready = Boolean(component_code?.includes("export default") && circuit_json)
+  const has_complete_artifact = Boolean(
+    component_ready &&
+      typical_application_code?.includes("export default") &&
+      typical_application_circuit_json,
+  )
   const interrupted = !saved_status || ACTIVE_JOB_STATUSES.has(saved_status)
   const display_status: JobDisplayStatus = interrupted
     ? has_complete_artifact
@@ -146,8 +167,11 @@ async function restoreJobDirectory(input: {
     has_errors: display_status === "failed" || Boolean(saved?.has_errors),
     error_message,
     logs,
+    component_ready,
     component_code,
     circuit_json,
+    typical_application_code,
+    typical_application_circuit_json,
   })
 }
 

@@ -963,6 +963,54 @@ a {
   flex-direction: column;
 }
 
+.component-page .preview-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-tabs {
+  display: flex;
+  min-height: 47px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  border-bottom: 1px solid #e7e7e3;
+  background: #fff;
+}
+
+.artifact-tabs button {
+  display: inline-flex;
+  height: 31px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: #777b80;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.artifact-tabs button:hover {
+  color: #3f4954;
+  background: #f5f6f6;
+}
+
+.artifact-tabs button.active {
+  color: #2864a6;
+  background: #edf4fd;
+}
+
+.artifact-tabs button i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 0 3px rgba(64, 135, 217, 0.12);
+}
+
 .component-page .terminal-window {
   height: auto;
   min-height: 0;
@@ -970,6 +1018,7 @@ a {
 }
 
 .component-page .viewer-shell {
+  flex: 1;
   height: 100%;
   min-height: 0;
 }

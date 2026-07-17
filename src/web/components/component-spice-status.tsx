@@ -32,7 +32,7 @@ export function ComponentSpiceStatus({ job }: { job: Job }) {
     retry,
   } = useModelRun(job.job_id)
 
-  if (job.display_status !== "complete") return null
+  if (!job.component_ready && job.display_status !== "complete") return null
 
   const is_generating = Boolean(model_run && !model_run.is_complete)
   const is_validated = hasValidatedSpiceModel(model_run)

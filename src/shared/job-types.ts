@@ -27,8 +27,11 @@ export interface Job {
   has_errors: boolean
   error_message?: string
   logs: JobLog[]
+  component_ready?: boolean
   component_code?: string
   circuit_json?: AnyCircuitElement[]
+  typical_application_code?: string
+  typical_application_circuit_json?: AnyCircuitElement[]
 }
 
 export type JobSummary = Pick<

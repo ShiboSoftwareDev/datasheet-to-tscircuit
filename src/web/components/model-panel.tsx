@@ -15,6 +15,7 @@ import {
 import { useEffect, useState } from "react"
 import type { Job, ModelProgressPhase, ModelRun, ModelRunStatus } from "@/shared/job-types"
 import { getModelRunFileUrl } from "../api"
+import { getChampionValidationCopy } from "../model-validation-copy"
 import { useModelRun } from "../use-model-run"
 import { AgentLogViewer } from "./agent-log-viewer"
 import { ModelLivePreview } from "./model-live-preview"
@@ -202,11 +203,8 @@ function LiveProgress({ model_run }: { model_run: ModelRun }) {
               )}
               {champion?.passing !== undefined && (
                 <div>
-                  <span>Champion passing</span>
-                  <strong>
-                    {champion.passing}
-                    {champion.total !== undefined ? `/${champion.total}` : ""}
-                  </strong>
+                  <span>Champion validation</span>
+                  <strong>{getChampionValidationCopy(model_run.validation)}</strong>
                 </div>
               )}
               {champion?.score !== undefined && (

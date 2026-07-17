@@ -3,19 +3,31 @@ import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { JobStore } from "@/server/job-store"
+import { getTypicalApplicationConnectivityErrors } from "@/server/job-artifact-validator"
+import { ModelRunStore } from "@/server/model-run-store"
+import {
+  classifyFatalSimulationFailure,
+  compareTimeShiftedResults,
+  findSuspiciousBenchmarkConditioning,
+  getFatalSimulationProcessFailure,
+  getBenchmarkApplicationPlan,
+  isTransientAgentTransportFailure,
+  modelUsesAbsoluteTime,
+  parseModelManifest,
+  preflightNgspice,
+  restoreLastPromotedModelCheckpoint,
+  runModel,
+  shiftNamedResistorResistance,
+  shiftLiteralPulseDelays,
+  stripAnalogSimulationForStructuralCheck,
+  validateAbsoluteTimeShift,
+  validateManifestAgainstModel,
+} from "@/server/model-runner"
 import {
   buildModelAgentPrompt,
   buildModelBenchmarkPrompt,
   buildModelSetupPrompt,
 } from "@/server/model-scaffold"
-import {
-  parseModelManifest,
-  preflightNgspice,
-  runModel,
-  stripAnalogSimulationForStructuralCheck,
-  validateManifestAgainstModel,
-} from "@/server/model-runner"
-import { ModelRunStore } from "@/server/model-run-store"
 
 const lockedBenchmarkSource = `import Component from "../component-with-model.circuit"
 
@@ -54,9 +66,18 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(prompt).toContain("do not reduce tests or loosen tolerances")
   expect(prompt).toContain("100% validation")
   expect(prompt).toContain("tsci build benchmarks/<benchmark-id>.circuit.tsx --ignore-warnings")
+  expect(prompt).toContain("--simulation-svgs")
+  expect(prompt).toContain("render-svg-to-png.ts")
+  expect(prompt).toContain("score-benchmark.ts")
+  expect(prompt).toContain("comparison.svg")
+  expect(prompt).toContain("built-in `read` tool")
+  expect(prompt).toContain("visual review is required")
   expect(prompt).toContain("UI only reads")
   expect(prompt).toContain("validation-artifacts")
   expect(prompt).toContain("complete time-domain simulation")
+  expect(prompt).toContain("Do not encode the digitized reference curve")
+  expect(prompt).toContain("Do not create narrow voltage")
+  expect(prompt).toContain("hidden stimulus-shift simulation")
   expect(prompt).not.toContain(".SUBCKT or .MODEL")
   const setup_prompt = buildModelSetupPrompt()
   expect(setup_prompt).toContain("untimed evidence")
@@ -64,17 +85,342 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(setup_prompt).toContain("setup-complete.json")
   expect(setup_prompt).toContain("model-progress.json")
   expect(setup_prompt).toContain("time in milliseconds as x")
+  expect(setup_prompt).toContain("call the built-in `read` tool on every graph PNG")
   const benchmark_prompt = buildModelBenchmarkPrompt()
   expect(benchmark_prompt).toContain("benchmark-only pass")
   expect(benchmark_prompt).toContain("dut_spice_node")
   expect(benchmark_prompt).toContain('simulation.x_axis \`"time_ms"\`')
   expect(benchmark_prompt).toContain("Do not create or modify model.lib")
+  expect(benchmark_prompt).toContain("server-owned stub model")
   const corrected_benchmark_prompt = buildModelBenchmarkPrompt(
     "Benchmark transfer voltage probe RESULT must connect directly to a DUT port",
   )
   expect(corrected_benchmark_prompt).toContain("server-benchmark-validation-feedback")
   expect(corrected_benchmark_prompt).toContain("must connect directly to a DUT port")
   expect(corrected_benchmark_prompt).toContain("Do not weaken, remove, or replace benchmarks")
+})
+
+test("cancellation restoration replaces an unpromoted candidate with the last promoted champion", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-restore-"))
+  const promoted_source = ".subckt PART IN OUT\nR1 IN OUT 1k\n.ends PART\n"
+  const unpromoted_source = ".subckt PART IN OUT\nR1 IN OUT 2k\n.ends PART\n"
+  try {
+    await Promise.all([
+      mkdir(join(model_dir, "candidates", "r0001"), { recursive: true }),
+      mkdir(join(model_dir, "candidates", "r0002"), { recursive: true }),
+    ])
+    await Promise.all([
+      Bun.write(join(model_dir, "candidates", "r0001", "model.lib"), promoted_source),
+      Bun.write(join(model_dir, "candidates", "r0002", "model.lib"), unpromoted_source),
+      Bun.write(join(model_dir, "model.lib"), unpromoted_source),
+      Bun.write(
+        join(model_dir, "model-manifest.json"),
+        JSON.stringify({
+          version: 1,
+          part_number: "PART",
+          dialect: "portable",
+          entry_name: "PART",
+          model_file: "model.lib",
+          // The agent may edit canonical model.lib without advancing this manifest.
+          // Restoration must still use the immutable promoted candidate snapshot.
+          revision: "r0001",
+          simulator: "ngspice",
+          generated_at: new Date().toISOString(),
+          pins: [
+            { component_pin: "pin1", spice_node: "IN" },
+            { component_pin: "pin2", spice_node: "OUT" },
+          ],
+        }),
+      ),
+      Bun.write(
+        join(model_dir, "iteration-history.json"),
+        JSON.stringify([
+          { revision: "r0001", status: "promoted_candidate" },
+          { revision: "r0002", decision: "candidate tested" },
+        ]),
+      ),
+    ])
+
+    expect(await restoreLastPromotedModelCheckpoint(model_dir)).toBe("r0001")
+    expect(await Bun.file(join(model_dir, "model.lib")).text()).toBe(promoted_source)
+    expect(JSON.parse(await Bun.file(join(model_dir, "model-manifest.json")).text()).revision).toBe("r0001")
+    const integrated_component = await Bun.file(join(model_dir, "component-with-model.circuit.tsx")).text()
+    expect(integrated_component).toContain("R1 IN OUT 1k")
+    expect(integrated_component).not.toContain("R1 IN OUT 2k")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("absolute-TIME gate ignores comments and detects executable expressions", () => {
+  expect(modelUsesAbsoluteTime("* TIME documents a delay\n.subckt PART IN OUT\nR1 IN OUT 1k\n.ends\n")).toBe(
+    false,
+  )
+  expect(modelUsesAbsoluteTime(".subckt PART IN OUT\nB1 OUT 0 V={TIME > 1m ? V(IN) : 0}\n.ends PART\n")).toBe(
+    true,
+  )
+})
+
+test("model integrity review rejects enumerated narrow benchmark operating-point windows", () => {
+  const benchmark_conditioned_model = `.subckt PART MODE OUT
+B1 OUT 0 V={V(MODE)>2.495 & V(MODE)<2.505 ? 1 : 0}
+B2 N2 0 V={V(MODE)>3.295 & V(MODE)<3.305 ? 2 : 0}
+B3 N3 0 V={V(MODE)>4.995 & V(MODE)<5.005 ? 3 : 0}
+.ends PART
+`
+  expect(findSuspiciousBenchmarkConditioning(benchmark_conditioned_model)).toHaveLength(1)
+  expect(findSuspiciousBenchmarkConditioning(benchmark_conditioned_model)[0]).toContain(
+    "narrow conditional windows",
+  )
+
+  const alternate_syntax_model = `.subckt PART MODE OUT
+B1 OUT 0 V={2.495 < V(MODE) && V(MODE) < 2.505 ? 1 : 0}
+B2 N2 0 V={abs(V(MODE)-3.3)<0.005 ? 2 : 0}
+B3 N3 0 V={V(MODE)>4.995 && V(MODE)<5.005 ? 3 : 0}
+.ends PART
+`
+  expect(findSuspiciousBenchmarkConditioning(alternate_syntax_model)).toHaveLength(1)
+
+  const exact_selection_model = `.subckt PART MODE OUT
+B1 OUT 0 V={V(MODE)==2.5 ? 1 : V(MODE)==3.3 ? 2 : V(MODE)==5 ? 3 : 0}
+.ends PART
+`
+  expect(findSuspiciousBenchmarkConditioning(exact_selection_model)[0]).toContain("exact operating points")
+
+  const causal_threshold_model = `.subckt PART ENABLE OUT
+B1 OUT 0 V={V(ENABLE)>2.4 ? V(ENABLE) : 0}
+.ends PART
+`
+  expect(findSuspiciousBenchmarkConditioning(causal_threshold_model)).toEqual([])
+})
+
+test("literal pulse delays and simulation duration can be shifted without changing the benchmark", () => {
+  const source = `<board>
+  <voltagesource pulseDelay="0.5ms" />
+  <voltagesource pulseDelay="750us" />
+  <analogsimulation duration="2ms" timePerStep="10us" />
+</board>`
+  const shifted = shiftLiteralPulseDelays(source, 0.137)
+  expect(shifted?.first_pulse_delay_ms).toBe(0.5)
+  expect(shifted?.original_duration_ms).toBe(2)
+  expect(shifted?.source).toContain('pulseDelay="0.637ms"')
+  expect(shifted?.source).toContain('pulseDelay="0.887ms"')
+  expect(shifted?.source).toContain('duration="2.137ms"')
+  expect(shifted?.source).toContain('timePerStep="10us"')
+})
+
+test("feedback integrity helper perturbs only the named divider resistor", () => {
+  const source = `<board>
+  <resistor name="R1" resistance="511k" />
+  <resistor name="R2" resistance="91k" />
+</board>`
+  const shifted = shiftNamedResistorResistance(source, "R1", 1.05)
+  expect(shifted?.original_ohms).toBe(511_000)
+  expect(shifted?.shifted_ohms).toBe(536_550)
+  expect(shifted?.source).toContain('name="R1" resistance="536550ohm"')
+  expect(shifted?.source).toContain('name="R2" resistance="91k"')
+})
+
+test("benchmark application gate preserves feedback and PG wiring while allowing control fixtures", () => {
+  const plan = getBenchmarkApplicationPlan({
+    version: 2,
+    title: "Buck-boost typical application",
+    description: "External feedback and power-good networks",
+    source_references: [{ page: 21, figure: "Figure 10-1" }],
+    components: [
+      { reference: "U1", kind: "converter" },
+      { reference: "R1", kind: "resistor", value: "511k" },
+      { reference: "R2", kind: "resistor", value: "100k" },
+      { reference: "R3", kind: "resistor", value: "100k" },
+      { reference: "R4", kind: "resistor", value: "100k" },
+    ],
+    connections: [
+      { net: "VOUT", pins: ["U1.VOUT", "R1.pin1"] },
+      { net: "FB", pins: ["U1.FB", "R1.pin2", "R2.pin1"] },
+      { net: "GND", pins: ["U1.GND", "R2.pin2"] },
+      { net: "VIN", pins: ["U1.VIN", "R3.pin1", "R4.pin1"] },
+      { net: "PG", pins: ["U1.PG", "R3.pin2"] },
+      { net: "EN", pins: ["U1.EN", "R4.pin2"] },
+    ],
+  })
+  expect(plan.components.map((component) => component.reference)).toEqual(["DUT", "R1", "R2", "R3"])
+  expect(plan.connections.some((connection) => connection.net === "EN")).toBe(false)
+  expect(plan.connections.find((connection) => connection.net === "VIN")?.pins).toEqual([
+    "DUT.VIN",
+    "R3.pin1",
+  ])
+
+  const wrong_pg_circuit = [
+    { type: "source_component", source_component_id: "dut", name: "DUT" },
+    { type: "source_component", source_component_id: "r1", name: "R1" },
+    { type: "source_component", source_component_id: "r2", name: "R2" },
+    { type: "source_component", source_component_id: "r3", name: "R3" },
+    ...[
+      ["dut_vout", "dut", "VOUT", "vout"],
+      ["dut_fb", "dut", "FB", "fb"],
+      ["dut_gnd", "dut", "GND", "gnd"],
+      ["dut_vin", "dut", "VIN", "vin"],
+      ["dut_pg", "dut", "PG", "pg"],
+      ["r1_1", "r1", "pin1", "vout"],
+      ["r1_2", "r1", "pin2", "fb"],
+      ["r2_1", "r2", "pin1", "fb"],
+      ["r2_2", "r2", "pin2", "gnd"],
+      ["r3_1", "r3", "pin1", "vout"],
+      ["r3_2", "r3", "pin2", "pg"],
+    ].map(([source_port_id, source_component_id, name, key]) => ({
+      type: "source_port",
+      source_port_id,
+      source_component_id,
+      name,
+      subcircuit_connectivity_map_key: key,
+    })),
+  ] as any
+  expect(getTypicalApplicationConnectivityErrors(plan, wrong_pg_circuit)).toContain(
+    "VIN: expected pins are not electrically connected: DUT.VIN, R3.pin1",
+  )
+})
+
+test("stimulus-shift comparison distinguishes causal and absolute-time waveforms", () => {
+  const original = [
+    { x: 0, y: 0 },
+    { x: 0.5, y: 0 },
+    { x: 0.75, y: 1 },
+    { x: 1, y: 1 },
+  ]
+  const causal = compareTimeShiftedResults({
+    original,
+    shifted: [
+      { x: 0, y: 0 },
+      { x: 0.637, y: 0 },
+      { x: 0.887, y: 1 },
+      { x: 1.137, y: 1 },
+    ],
+    shift_ms: 0.137,
+    first_pulse_delay_ms: 0.5,
+  })
+  expect(causal.passed).toBe(true)
+
+  const absolute = compareTimeShiftedResults({
+    original,
+    shifted: original,
+    shift_ms: 0.137,
+    first_pulse_delay_ms: 0.5,
+  })
+  expect(absolute.passed).toBe(false)
+})
+
+test("fatal ngspice output is recognized even when tsci exits zero", () => {
+  expect(
+    getFatalSimulationProcessFailure(
+      "Circuit JSON written\nFatal error: instance vsimulation_voltage_source_0 is a shorted VSRC\n",
+    ),
+  ).toContain("shorted VSRC")
+  expect(
+    classifyFatalSimulationFailure("Fatal error: instance vsimulation_voltage_source_0 is a shorted VSRC"),
+  ).toBe("benchmark_structure")
+  expect(classifyFatalSimulationFailure("Fatal error: timestep too small")).toBe("simulation")
+  expect(getFatalSimulationProcessFailure("Build complete\n0 simulation errors\n")).toBeUndefined()
+})
+
+test("temporary agent transport failures are retryable but model errors are not", () => {
+  expect(isTransientAgentTransportFailure("Connection error: socket hang up")).toBe(true)
+  expect(isTransientAgentTransportFailure("HTTP 503 Service Unavailable")).toBe(true)
+  expect(isTransientAgentTransportFailure("Error: model.lib has invalid syntax")).toBe(false)
+})
+
+test("absolute-TIME models receive one shifted simulation after nominal results exist", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-time-shift-"))
+  const model_dir = join(job_dir, "spice")
+  const tsci_path = join(job_dir, "shift-tsci")
+  await Promise.all([
+    mkdir(join(model_dir, "benchmarks"), { recursive: true }),
+    mkdir(join(job_dir, ".model-validation", "results"), { recursive: true }),
+  ])
+  await Promise.all([
+    Bun.write(
+      join(model_dir, "model.lib"),
+      ".subckt PART IN OUT\nBOUT OUT 0 V={TIME > 0.5m ? V(IN) : 0}\n.ends PART\n",
+    ),
+    Bun.write(
+      join(model_dir, "benchmarks", "startup.circuit.tsx"),
+      `import Component from "../component-with-model.circuit"
+export default () => <board><Component name="DUT" /><voltagesource pulseDelay="0.5ms" /><voltageprobe name="RESULT" connectsTo="DUT.pin2" /><analogsimulation duration="1ms" timePerStep="0.01ms" spiceEngine="ngspice" /></board>
+`,
+    ),
+    Bun.write(
+      join(model_dir, "benchmarks.json"),
+      JSON.stringify({
+        version: 1,
+        locked_at: new Date().toISOString(),
+        benchmarks: [
+          {
+            id: "startup",
+            title: "Startup",
+            source: { page: 1 },
+            critical: true,
+            weight: 1,
+            tolerance: 0.1,
+            reference_file: "evidence/startup.csv",
+            result_file: "results/champion/startup.csv",
+            simulation: {
+              kind: "transient_voltage",
+              x_axis: "time_ms",
+              probe_name: "RESULT",
+              dut_spice_node: "OUT",
+            },
+          },
+        ],
+      }),
+    ),
+    Bun.write(join(job_dir, ".model-validation", "results", "startup.csv"), "x,y\n0,0\n0.5,0\n0.75,1\n1,1\n"),
+    Bun.write(join(job_dir, "shift-mode.txt"), "causal"),
+    Bun.write(
+      tsci_path,
+      `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const jobDir = ${JSON.stringify(job_dir)}
+const target = Bun.argv.slice(2)[1] ?? ""
+const match = target.match(/^server-time-shift\\/(.+)\\.circuit\\.tsx$/)
+if (!match) process.exit(9)
+const source = await Bun.file(jobDir + "/spice/" + target).text()
+const shiftedDelay = Number(source.match(/pulseDelay="([0-9.]+)ms"/)?.[1])
+const duration = Number(source.match(/duration="([0-9.]+)ms"/)?.[1])
+const mode = (await Bun.file(jobDir + "/shift-mode.txt").text()).trim()
+const eventDelay = mode === "causal" ? shiftedDelay : 0.5
+const output = jobDir + "/dist/spice/server-time-shift/" + match[1]
+await mkdir(output, { recursive: true })
+await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "RESULT", timestamps_ms: [0, eventDelay, eventDelay + 0.25, duration], voltage_levels: [0, 0, 1, 1] }]))
+`,
+    ),
+  ])
+  await chmod(tsci_path, 0o755)
+  try {
+    const causal = await validateAbsoluteTimeShift({
+      job_dir,
+      model_dir,
+      tsci_bin: tsci_path,
+      signal: new AbortController().signal,
+      append: async () => undefined,
+      shift_ratio: 0.137,
+    })
+    expect(causal.required).toBe(true)
+    expect(causal.passed).toBe(true)
+
+    await Bun.write(join(job_dir, "shift-mode.txt"), "absolute")
+    const absolute = await validateAbsoluteTimeShift({
+      job_dir,
+      model_dir,
+      tsci_bin: tsci_path,
+      signal: new AbortController().signal,
+      append: async () => undefined,
+      shift_ratio: 0.137,
+    })
+    expect(absolute.required).toBe(true)
+    expect(absolute.passed).toBe(false)
+    expect(absolute.error_message).toContain("did not follow the shifted stimulus")
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
 })
 
 test("model manifests cannot claim an unexecuted simulator", () => {
@@ -194,7 +540,7 @@ export default { platformConfig: { spiceEngineMap: { ngspice: ngspiceSpiceEngine
   } finally {
     await rm(job_dir, { recursive: true, force: true })
   }
-}, 30_000)
+}, 90_000)
 
 test("model manifests must select the first SUBCKT with exact pin names", () => {
   const manifest = parseModelManifest({
@@ -351,6 +697,9 @@ await Bun.write(attemptFile, String(attempt))
 if (attempt === 2 && prompt.includes("must connect directly to a DUT port")) {
   await Bun.write(dir + "/../benchmark-feedback-seen.txt", "yes")
 }
+if (attempt === 3 && prompt.includes("Shorted voltage source V1")) {
+  await Bun.write(dir + "/../benchmark-preflight-feedback-seen.txt", "yes")
+}
 await mkdir(dir + "/benchmarks", { recursive: true })
 await mkdir(dir + "/evidence/curves", { recursive: true })
 const validSource = ${JSON.stringify(lockedBenchmarkSource)}
@@ -359,7 +708,29 @@ await Bun.write(dir + "/benchmarks.json", JSON.stringify({ version: 1, locked_at
 await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
 `,
     ),
-    Bun.write(tsci_path, provisionalBenchmarkBuildSource),
+    Bun.write(
+      tsci_path,
+      `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const target = Bun.argv.slice(2)[1] ?? ""
+if (target === "server-ngspice-preflight.circuit.tsx") {
+  const output = process.cwd() + "/../dist/spice/server-ngspice-preflight"
+  await mkdir(output, { recursive: true })
+  await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "RESULT", timestamps_ms: [0, 0.01], voltage_levels: [1, 1] }]))
+  process.exit(0)
+}
+const benchmarkId = target.split("/").at(-1)?.replace(/\\.circuit\\.tsx$/, "")
+if (!benchmarkId) process.exit(2)
+const output = process.cwd() + "/../dist/spice/benchmarks/" + benchmarkId
+await mkdir(output, { recursive: true })
+const wrapper = await Bun.file(process.cwd() + "/component-with-model.circuit.tsx").text().catch(() => "")
+const attempt = Number(await Bun.file(process.cwd() + "/../benchmark-correction-attempt.txt").text().catch(() => "0"))
+const circuit = wrapper.includes("SERVER_BENCHMARK_STUB") && attempt === 2
+  ? [{ type: "simulation_unknown_experiment_error", message: "Shorted voltage source V1" }]
+  : []
+await Bun.write(output + "/circuit.json", JSON.stringify(circuit))
+`,
+    ),
   ])
   await Promise.all([chmod(agent_path, 0o755), chmod(tsci_path, 0o755)])
 
@@ -381,8 +752,9 @@ await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
     { job_store, model_run_store, agent_bin: agent_path, tsci_bin: tsci_path },
   )
 
-  expect(await Bun.file(join(job_dir, "benchmark-correction-attempt.txt")).text()).toBe("2")
+  expect(await Bun.file(join(job_dir, "benchmark-correction-attempt.txt")).text()).toBe("3")
   expect(await Bun.file(join(job_dir, "benchmark-feedback-seen.txt")).text()).toBe("yes")
+  expect(await Bun.file(join(job_dir, "benchmark-preflight-feedback-seen.txt")).text()).toBe("yes")
   expect(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).exists()).toBe(true)
   expect(
     model_run_store
@@ -506,7 +878,11 @@ console.log("simulation ok")
   expect(waiting_run?.progress?.phase).toBe("waiting_for_component")
   expect(waiting_run?.progress?.evidence?.graphs_digitized).toBe(1)
 
-  job_store.updateJob("job_1", { display_status: "complete", is_complete: true })
+  job_store.updateJob("job_1", {
+    display_status: "agent_running",
+    is_complete: false,
+    component_ready: true,
+  })
   await run_promise
 
   const model_run = model_run_store.getModelRun("model_1")
@@ -515,6 +891,8 @@ console.log("simulation ok")
   expect(model_run?.validation?.all_passed).toBe(true)
   expect(model_run?.iteration).toBe(1)
   expect(model_run?.model_source).toContain(".subckt SENSOR")
+  expect(job_store.getJob("job_1")?.is_complete).toBe(false)
+  expect(job_store.getJob("job_1")?.component_ready).toBe(true)
   expect(job_store.getJob("job_1")?.component_code).toContain("spicemodel")
   expect(job_store.getJob("job_1")?.component_code).toContain("const modelSource")
   expect(job_store.getJob("job_1")?.component_code).toContain("ComponentProps<typeof Component>")
@@ -530,6 +908,7 @@ console.log("simulation ok")
   expect(tsci_calls).toContain("--routing-disabled")
   expect(tsci_calls).toContain("--disable-parts-engine")
   expect(tsci_calls).not.toContain("simulate analog")
+  expect(tsci_calls).not.toContain("server-time-shift")
   expect(
     await Bun.file(join(job_dir, ".model-validation", "benchmarks", "transfer", "circuit.json")).exists(),
   ).toBe(true)

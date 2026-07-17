@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  getAllCircuitErrors,
   getCircuitBuildDiagnostics,
   getVerifiedSimulationArtifact,
   getVerifiedResultFile,
@@ -46,6 +47,20 @@ test("circuit diagnostics treat semantic source errors as failures even when a b
 
   expect(diagnostics.source_errors).toEqual(['Invalid props for analogsimulation "SIM": simulationType'])
   expect(diagnostics.simulation_errors).toEqual([])
+})
+
+test("clean artifact validation reports every unique Circuit JSON error type", () => {
+  const errors = getAllCircuitErrors([
+    { type: "pcb_pad_pad_clearance_error", message: "C1 overlaps U1" },
+    { type: "pcb_pad_pad_clearance_error", message: "C1 overlaps U1" },
+    { type: "source_failed_to_create_component_error", message: "Invalid footprint" },
+    { type: "source_component", source_component_id: "part", name: "U1" },
+  ])
+
+  expect(errors).toEqual([
+    "pcb_pad_pad_clearance_error: C1 overlaps U1",
+    "source_failed_to_create_component_error: Invalid footprint",
+  ])
 })
 
 test("simulation verification rejects solver errors and hashes extracted simulator curves", async () => {

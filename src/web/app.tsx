@@ -1,7 +1,7 @@
 import { Boxes, FlaskConical, LoaderCircle, WandSparkles } from "lucide-react"
 import { useEffect, useState } from "react"
 import { AgentLogs } from "./components/agent-logs"
-import { CircuitPreview } from "./components/circuit-preview"
+import { CircuitPreview, type ComponentPreviewTab } from "./components/circuit-preview"
 import { ModelPanel } from "./components/model-panel"
 import { TaskSidebar } from "./components/task-sidebar"
 import { UploadPanel } from "./components/upload-panel"
@@ -42,6 +42,7 @@ export default function App() {
   } = useActiveJob()
   const [is_sidebar_collapsed, setIsSidebarCollapsed] = useState(getInitialSidebarState)
   const [workspace_tab, setWorkspaceTab] = useState<"component" | "model">(getInitialWorkspaceTab)
+  const [component_preview_tab, setComponentPreviewTab] = useState<ComponentPreviewTab>("pcb")
 
   useEffect(() => {
     try {
@@ -124,7 +125,11 @@ export default function App() {
                     on_cancel={() => cancelTask(job.job_id)}
                   />
                   <div className="preview-column">
-                    <CircuitPreview job={job} />
+                    <CircuitPreview
+                      job={job}
+                      active_tab={component_preview_tab}
+                      on_active_tab_change={setComponentPreviewTab}
+                    />
                   </div>
                 </div>
               ) : (
