@@ -1,4 +1,4 @@
-import { Download, Square, Terminal } from "lucide-react"
+import { Download, Square, Terminal, X } from "lucide-react"
 import type { Job } from "@/shared/job-types"
 import { getJobFileUrl } from "../api"
 import { AgentLogViewer } from "./agent-log-viewer"
@@ -7,10 +7,12 @@ export function AgentLogs({
   job,
   is_stopping,
   on_cancel,
+  on_close,
 }: {
   job: Job
   is_stopping: boolean
   on_cancel: () => void
+  on_close: () => void
 }) {
   const is_running = !job.is_complete
 
@@ -40,6 +42,15 @@ export function AgentLogs({
           >
             <Download size={15} />
           </a>
+          <button
+            className="terminal-close-button"
+            type="button"
+            aria-label="Close agent terminal"
+            title="Close agent terminal"
+            onClick={on_close}
+          >
+            <X size={18} />
+          </button>
         </div>
       </header>
       <AgentLogViewer

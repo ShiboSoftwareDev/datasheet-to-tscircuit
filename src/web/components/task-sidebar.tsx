@@ -3,7 +3,6 @@ import {
   FlaskConical,
   LoaderCircle,
   PanelLeftClose,
-  PanelLeftOpen,
   Plus,
   RotateCcw,
   Square,
@@ -119,7 +118,7 @@ interface TaskSidebarProps {
   jobs: JobSummary[]
   active_job_id?: string
   action_error?: string
-  is_collapsed: boolean
+  is_open: boolean
   cancelling_job_ids: Set<string>
   retrying_job_ids: Set<string>
   deleting_job_ids: Set<string>
@@ -135,7 +134,7 @@ export function TaskSidebar({
   jobs,
   active_job_id,
   action_error,
-  is_collapsed,
+  is_open,
   cancelling_job_ids,
   retrying_job_ids,
   deleting_job_ids,
@@ -147,17 +146,17 @@ export function TaskSidebar({
   on_delete_task,
 }: TaskSidebarProps) {
   return (
-    <aside className="task-sidebar" aria-label="Conversion tasks">
+    <aside className="task-sidebar" aria-label="Conversion tasks" aria-hidden={!is_open} inert={!is_open}>
       <div className="sidebar-brand">
         <Brand on_home={on_new_task} />
         <button
           className="sidebar-toggle"
           type="button"
-          aria-label={is_collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={is_collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label="Close sidebar"
+          title="Close sidebar"
           onClick={on_toggle}
         >
-          {is_collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+          <PanelLeftClose size={18} />
         </button>
       </div>
 

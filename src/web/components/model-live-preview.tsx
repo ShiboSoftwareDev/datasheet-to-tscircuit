@@ -104,20 +104,7 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
   }
 
   return (
-    <section className="workspace-card model-circuit-preview" aria-label="Live model circuit preview">
-      <header className="card-toolbar">
-        <div className="toolbar-title">
-          <Activity size={16} />
-          <span>{preview?.source_file ?? "Live benchmark circuit"}</span>
-        </div>
-        {preview && (
-          <small>
-            {preview.build_status.replace("_", " ")}
-            {preview.snapshot_origin === "server_validation" ? " · verified snapshot" : ""}
-            {preview.snapshot_origin === "workspace" ? " · saved workspace run" : ""}
-          </small>
-        )}
-      </header>
+    <section className="model-preview-pane model-circuit-preview" aria-label="Live model circuit preview">
       <div className="model-runframe-shell">
         {preview?.circuit_json && preview.error_message && (
           <p className="model-preview-build-error" role="alert">
@@ -138,6 +125,7 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
               defaultActiveTab="analog_simulation"
               defaultTab="analog_simulation"
               showJsonTab={false}
+              hideSchematicInAnalogSimulation
               showRenderLogTab={false}
               showFileMenu={false}
               allowSelectingVersion={false}
@@ -188,12 +176,7 @@ function formatAxisValue(value: number): string {
 function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
   if (!preview) {
     return (
-      <section className="workspace-card model-reference-card" aria-label="Datasheet reference graph">
-        <header className="card-toolbar">
-          <div className="toolbar-title">
-            <FlaskConical size={16} /> Reference graph
-          </div>
-        </header>
+      <section className="model-preview-pane model-reference-card" aria-label="Datasheet reference graph">
         <div className="model-reference-empty">
           <FlaskConical size={25} />
           <strong>Waiting for digitized evidence</strong>
@@ -253,14 +236,7 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
         : "Server-verified model"
 
   return (
-    <section className="workspace-card model-reference-card" aria-label="Datasheet reference graph">
-      <header className="card-toolbar">
-        <div className="toolbar-title">
-          <FlaskConical size={16} />
-          <span title={preview.title}>{preview.title}</span>
-        </div>
-        <small>{preview.source_file}</small>
-      </header>
+    <section className="model-preview-pane model-reference-card" aria-label="Datasheet reference graph">
       <div className="model-reference-plot">
         {comparison_is_deprecated && preview.result_points && (
           <div className="model-comparison-warning" role="status">
@@ -271,56 +247,54 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
             </span>
           </div>
         )}
-        <svg viewBox="0 0 650 340" role="img" aria-label={`${preview.title} reference curve`}>
-          <g className="reference-grid">
-            {[0, 1, 2, 3, 4].map((tick) => (
-              <line key={`horizontal-${tick}`} x1="38" x2="630" y1={14 + tick * 73} y2={14 + tick * 73} />
-            ))}
-            {[0, 1, 2, 3, 4].map((tick) => (
-              <line key={`vertical-${tick}`} x1={38 + tick * 148} x2={38 + tick * 148} y1="14" y2="306" />
-            ))}
-          </g>
-          <polyline className="reference-line" points={reference_path} />
-          {result_path && (
-            <polyline
-              className={`result-line${comparison_is_unverified ? " result-line-unverified" : ""}${preview.result_status === "partial" ? " result-line-partial" : ""}${comparison_is_deprecated ? " result-line-deprecated" : ""}`}
-              points={result_path}
-            />
-          )}
-          <g className="reference-axis-labels">
-            <text x="38" y="328" textAnchor="start">
-              {formatAxisValue(displayed_x_min)}
-            </text>
-            <text x="630" y="328" textAnchor="end">
-              {formatAxisValue(displayed_x_max)}
-            </text>
-            <text x="30" y="21" textAnchor="end">
-              {formatAxisValue(displayed_y_max)}
-            </text>
-            <text x="30" y="309" textAnchor="end">
-              {formatAxisValue(displayed_y_min)}
-            </text>
-          </g>
-        </svg>
-        <div className="reference-legend">
-          <span className="reference-series">
-            <i /> Datasheet reference
-          </span>
-          {preview.result_points && (
-            <span
-              className={`result-series${comparison_is_unverified ? " unverified" : ""}${comparison_is_deprecated ? " deprecated" : ""}`}
-            >
-              <i />
-              {result_label}
+        <div className="reference-graph-content">
+          <svg viewBox="0 0 650 340" role="img" aria-label={`${preview.title} reference curve`}>
+            <g className="reference-grid">
+              {[0, 1, 2, 3, 4].map((tick) => (
+                <line key={`horizontal-${tick}`} x1="38" x2="630" y1={14 + tick * 73} y2={14 + tick * 73} />
+              ))}
+              {[0, 1, 2, 3, 4].map((tick) => (
+                <line key={`vertical-${tick}`} x1={38 + tick * 148} x2={38 + tick * 148} y1="14" y2="306" />
+              ))}
+            </g>
+            <polyline className="reference-line" points={reference_path} />
+            {result_path && (
+              <polyline
+                className={`result-line${comparison_is_unverified ? " result-line-unverified" : ""}${preview.result_status === "partial" ? " result-line-partial" : ""}${comparison_is_deprecated ? " result-line-deprecated" : ""}`}
+                points={result_path}
+              />
+            )}
+            <g className="reference-axis-labels">
+              <text x="38" y="328" textAnchor="start">
+                {formatAxisValue(displayed_x_min)}
+              </text>
+              <text x="630" y="328" textAnchor="end">
+                {formatAxisValue(displayed_x_max)}
+              </text>
+              <text x="30" y="21" textAnchor="end">
+                {formatAxisValue(displayed_y_max)}
+              </text>
+              <text x="30" y="309" textAnchor="end">
+                {formatAxisValue(displayed_y_min)}
+              </text>
+            </g>
+          </svg>
+          <div className="reference-legend">
+            <span className="reference-series">
+              <i /> Datasheet reference
             </span>
-          )}
-          {!preview.result_points && (
-            <span className="model-result-pending">Model result pending verification</span>
-          )}
-          <small>
-            {preview.x_scale === "log" ? "log x" : "linear x"} ·{" "}
-            {preview.y_scale === "log" ? "log y" : "linear y"}
-          </small>
+            {preview.result_points && (
+              <span
+                className={`result-series${comparison_is_unverified ? " unverified" : ""}${comparison_is_deprecated ? " deprecated" : ""}`}
+              >
+                <i />
+                {result_label}
+              </span>
+            )}
+            {!preview.result_points && (
+              <span className="model-result-pending">Model result pending verification</span>
+            )}
+          </div>
         </div>
       </div>
     </section>
@@ -345,42 +319,48 @@ export function ModelLivePreview({
     const source_name = circuit_preview?.source_file.split("/").at(-1)
     return source_name?.replace(/\.circuit\.tsx$/i, "")
   }, [circuit_preview?.source_file, reference_preview?.benchmark_id])
-  const [selected_benchmark_id, setSelectedBenchmarkId] = useState<string>()
-  const [loaded_preview, setLoadedPreview] = useState<{
-    benchmark_id: string
-    preview: ModelSelectedPreview
-  }>()
-  const [is_loading, setIsLoading] = useState(false)
-  const [error_message, setErrorMessage] = useState<string>()
+  const preview_option_key = preview_options.map((option) => option.benchmark_id).join("\u0000")
+  const [loaded_previews, setLoadedPreviews] = useState<Record<string, ModelSelectedPreview>>({})
+  const [load_errors, setLoadErrors] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    setSelectedBenchmarkId((current) => {
-      if (current && preview_options.some((option) => option.benchmark_id === current)) return current
-      if (live_benchmark_id && preview_options.some((option) => option.benchmark_id === live_benchmark_id)) {
-        return live_benchmark_id
-      }
-      return preview_options[0]?.benchmark_id
-    })
-  }, [live_benchmark_id, preview_options])
-
-  useEffect(() => {
-    if (!selected_benchmark_id) return
+    const benchmark_ids = preview_option_key ? preview_option_key.split("\u0000") : []
+    if (benchmark_ids.length === 0) {
+      setLoadedPreviews({})
+      setLoadErrors({})
+      return
+    }
     let cancelled = false
     let interval: number | undefined
     const load = async () => {
-      try {
-        setIsLoading(true)
-        const preview = await getModelSelectedPreview(job_id, selected_benchmark_id)
-        if (cancelled) return
-        setLoadedPreview({ benchmark_id: selected_benchmark_id, preview })
-        setErrorMessage(undefined)
-      } catch (error) {
-        if (!cancelled) {
-          setErrorMessage(error instanceof Error ? error.message : "Could not load this benchmark preview.")
+      const results = await Promise.all(
+        benchmark_ids.map(async (benchmark_id) => {
+          try {
+            return { benchmark_id, preview: await getModelSelectedPreview(job_id, benchmark_id) }
+          } catch (error) {
+            return {
+              benchmark_id,
+              error: error instanceof Error ? error.message : "Could not load this benchmark preview.",
+            }
+          }
+        }),
+      )
+      if (cancelled) return
+      setLoadedPreviews((current) => {
+        const next: Record<string, ModelSelectedPreview> = {}
+        for (const result of results) {
+          const preview = result.preview
+          const current_preview = current[result.benchmark_id]
+          if (preview) next[result.benchmark_id] = preview
+          else if (current_preview) next[result.benchmark_id] = current_preview
         }
-      } finally {
-        if (!cancelled) setIsLoading(false)
+        return next
+      })
+      const next_errors: Record<string, string> = {}
+      for (const result of results) {
+        if (result.error) next_errors[result.benchmark_id] = result.error
       }
+      setLoadErrors(next_errors)
     }
     void load()
     if (!is_complete) interval = window.setInterval(() => void load(), 2_000)
@@ -388,49 +368,55 @@ export function ModelLivePreview({
       cancelled = true
       if (interval !== undefined) window.clearInterval(interval)
     }
-  }, [is_complete, job_id, selected_benchmark_id])
+  }, [is_complete, job_id, preview_option_key])
 
-  const loaded =
-    loaded_preview && loaded_preview.benchmark_id === selected_benchmark_id
-      ? loaded_preview.preview
-      : undefined
-  const can_use_live_preview = !selected_benchmark_id || selected_benchmark_id === live_benchmark_id
-  const displayed_circuit = loaded?.circuit_preview ?? (can_use_live_preview ? circuit_preview : undefined)
-  const displayed_reference =
-    loaded?.reference_preview ?? (can_use_live_preview ? reference_preview : undefined)
-  const selected_option = preview_options.find((option) => option.benchmark_id === selected_benchmark_id)
+  const preview_entries: Array<{ benchmark_id: string; title: string }> =
+    preview_options.length > 0
+      ? preview_options
+      : [
+          {
+            benchmark_id: live_benchmark_id ?? "live",
+            title: reference_preview?.title ?? "Simulation comparison",
+          },
+        ]
 
   return (
-    <div className="model-preview-workspace">
-      <div className="model-preview-selector">
-        <label>
-          <span>Benchmark circuit</span>
-          <select
-            value={selected_benchmark_id ?? ""}
-            disabled={preview_options.length === 0}
-            onChange={(event) => setSelectedBenchmarkId(event.target.value)}
+    <section className="model-preview-list" aria-label="SPICE benchmark comparisons">
+      {preview_entries.map((entry) => {
+        const loaded = loaded_previews[entry.benchmark_id]
+        const can_use_live_preview = entry.benchmark_id === live_benchmark_id || entry.benchmark_id === "live"
+        const displayed_circuit =
+          loaded?.circuit_preview ?? (can_use_live_preview ? circuit_preview : undefined)
+        const displayed_reference =
+          loaded?.reference_preview ?? (can_use_live_preview ? reference_preview : undefined)
+
+        return (
+          <section
+            className="workspace-card model-preview-workspace"
+            aria-label={`${entry.title} simulation comparison`}
+            key={entry.benchmark_id}
           >
-            {preview_options.length === 0 && <option value="">Waiting for circuits…</option>}
-            {preview_options.map((option) => (
-              <option value={option.benchmark_id} key={option.benchmark_id}>
-                {option.title}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="model-selected-reference" title={selected_option?.reference_file}>
-          Reference: {selected_option?.reference_file ?? "waiting for digitized evidence"}
-        </span>
-        {is_loading && <LoaderCircle className="spin model-selector-loader" size={14} />}
-        {error_message && <small role="alert">{error_message}</small>}
-      </div>
-      <div className="model-preview-grid">
-        <ModelCircuitPreview
-          key={`${selected_benchmark_id ?? "live"}:${displayed_circuit?.source_file ?? "pending"}`}
-          preview={displayed_circuit}
-        />
-        <ReferenceGraph preview={displayed_reference} />
-      </div>
-    </div>
+            <header className="card-toolbar model-preview-toolbar">
+              <div className="toolbar-title">
+                <Activity size={16} />
+                <span title={entry.title}>{entry.title}</span>
+              </div>
+            </header>
+            {load_errors[entry.benchmark_id] && !loaded && (
+              <p className="model-preview-load-error" role="alert">
+                {load_errors[entry.benchmark_id]}
+              </p>
+            )}
+            <div className="model-preview-grid">
+              <ModelCircuitPreview
+                key={`${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
+                preview={displayed_circuit}
+              />
+              <ReferenceGraph preview={displayed_reference} />
+            </div>
+          </section>
+        )
+      })}
+    </section>
   )
 }

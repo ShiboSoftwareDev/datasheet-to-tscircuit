@@ -1,7 +1,8 @@
+import * as Dialog from "@radix-ui/react-dialog"
+import * as Popover from "@radix-ui/react-popover"
 import {
-  Activity,
-  AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   Download,
   FileCode2,
@@ -11,12 +12,12 @@ import {
   RotateCcw,
   Square,
   Terminal,
+  X,
 } from "lucide-react"
 import { useEffect, useState } from "react"
 import type { Job, ModelProgressPhase, ModelRun, ModelRunStatus } from "@/shared/job-types"
 import { getModelRunFileUrl } from "../api"
-import { getChampionValidationCopy } from "../model-validation-copy"
-import { useModelRun } from "../use-model-run"
+import type { useModelRun } from "../use-model-run"
 import { AgentLogViewer } from "./agent-log-viewer"
 import { ModelLivePreview } from "./model-live-preview"
 
@@ -85,300 +86,183 @@ function getElapsedTime(model_run: ModelRun, now: number): number {
   return model_run.elapsed_time_ms + (Number.isFinite(segment_start) ? Math.max(0, now - segment_start) : 0)
 }
 
-function ModelRunLogs({ model_run }: { model_run: ModelRun }) {
-  return (
-    <section className="model-subcard model-log-card" aria-label="SPICE model agent logs">
-      <header>
-        <span>
-          <Terminal size={15} /> Model agent
-        </span>
-        <a href={getModelRunFileUrl(model_run.job_id, "log")} aria-label="Download model log">
-          <Download size={14} /> Log
-        </a>
-      </header>
-      <AgentLogViewer
-        className="model-terminal"
-        empty_message="Waiting for the model agent…"
-        is_running={!model_run.is_complete}
-        logs={model_run.logs}
-      />
-    </section>
-  )
-}
-
 function formatProgressTime(value: string): string {
   const date = new Date(value)
   if (!Number.isFinite(date.valueOf())) return "now"
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
 }
 
-function LiveProgress({ model_run }: { model_run: ModelRun }) {
-  const progress = model_run.progress
-  const history = model_run.progress_history.slice(-6).reverse()
-  const evidence = progress?.evidence
-  const benchmark = progress?.benchmark
-  const champion = progress?.champion
-  const has_metrics = Boolean(
-    progress?.iteration !== undefined ||
-      evidence?.pages_reviewed !== undefined ||
-      evidence?.graphs_found !== undefined ||
-      evidence?.graphs_digitized !== undefined ||
-      evidence?.benchmark_drafts !== undefined ||
-      benchmark?.completed !== undefined ||
-      benchmark?.locked_total !== undefined ||
-      champion?.passing !== undefined,
-  )
+function getModelError(model_run: ModelRun): string {
+  const reported_error =
+    model_run.progress?.champion?.score ?? model_run.progress?.champion?.worst_normalized_error
+  if (reported_error !== undefined) return `${(reported_error * 100).toFixed(1)}%`
+
+  const validation_errors = model_run.validation?.benchmarks
+    .map((benchmark) => benchmark.normalized_rmse)
+    .filter((error): error is number => error !== undefined)
+  if (validation_errors?.length) return `${(Math.max(...validation_errors) * 100).toFixed(1)}%`
+  return model_run.has_errors ? "Failed" : "Pending"
+}
+
+function PreviousTasks({ model_run, current_task }: { model_run: ModelRun; current_task: string }) {
+  const history = model_run.progress_history
+    .filter((event) => event.sequence !== model_run.progress?.sequence)
+    .slice(-8)
+    .reverse()
 
   return (
-    <div className="model-live-panel" aria-label="Live model progress">
-      {!progress ? (
-        <p className="model-muted-copy" aria-live="polite">
-          Waiting for the first progress checkpoint…
-        </p>
-      ) : (
-        <div className="model-live-body" aria-live="polite">
-          <div className="model-current-progress">
-            <span>{getProgressPhaseCopy(model_run)}</span>
-            <strong>{progress.message}</strong>
-            <small>
-              Updated {formatProgressTime(progress.updated_at)} · checkpoint {progress.sequence}
-            </small>
-          </div>
-
-          {has_metrics && (
-            <div className="model-live-metrics">
-              {evidence?.pages_reviewed !== undefined && (
-                <div>
-                  <span>Pages reviewed</span>
-                  <strong>{evidence.pages_reviewed}</strong>
-                </div>
-              )}
-              {evidence?.graphs_found !== undefined && (
-                <div>
-                  <span>Graphs found</span>
-                  <strong>{evidence.graphs_found}</strong>
-                </div>
-              )}
-              {evidence?.graphs_digitized !== undefined && (
-                <div>
-                  <span>Graphs digitized</span>
-                  <strong>{evidence.graphs_digitized}</strong>
-                </div>
-              )}
-              {evidence?.benchmark_drafts !== undefined && (
-                <div>
-                  <span>Benchmark drafts</span>
-                  <strong>{evidence.benchmark_drafts}</strong>
-                </div>
-              )}
-              {progress.iteration !== undefined && (
-                <div>
-                  <span>Iteration</span>
-                  <strong>{progress.iteration}</strong>
-                </div>
-              )}
-              {benchmark?.completed !== undefined && (
-                <div>
-                  <span>Benchmarks run</span>
-                  <strong>
-                    {benchmark.completed}
-                    {benchmark.total !== undefined ? `/${benchmark.total}` : ""}
-                  </strong>
-                </div>
-              )}
-              {benchmark?.locked_total !== undefined && (
-                <div>
-                  <span>Executable benchmarks</span>
-                  <strong>
-                    {benchmark.locked_total}
-                    {benchmark.draft_total !== undefined ? `/${benchmark.draft_total} drafts` : ""}
-                  </strong>
-                </div>
-              )}
-              {benchmark?.omitted !== undefined && benchmark.omitted > 0 && (
-                <div>
-                  <span>Evidence-only drafts</span>
-                  <strong>{benchmark.omitted}</strong>
-                </div>
-              )}
-              {champion?.passing !== undefined && (
-                <div>
-                  <span>Champion validation</span>
-                  <strong>{getChampionValidationCopy(model_run.validation)}</strong>
-                </div>
-              )}
-              {champion?.score !== undefined && (
-                <div>
-                  <span>Weighted error</span>
-                  <strong>{(champion.score * 100).toFixed(1)}%</strong>
-                </div>
-              )}
-            </div>
-          )}
-
-          {(benchmark?.current || champion?.revision) && (
-            <div className="model-live-detail">
-              {benchmark?.current && (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          className="model-header-stat model-current-task-stat model-history-trigger"
+          type="button"
+          disabled={history.length === 0}
+          title={history.length === 0 ? "No previous tasks" : "Show previous tasks"}
+        >
+          <span>Current task</span>
+          <span className="model-current-task-row">
+            <strong title={current_task}>{current_task}</strong>
+            <ChevronDown size={18} />
+          </span>
+          <small>
+            {getProgressPhaseCopy(model_run)}
+            {model_run.progress ? ` · updated ${formatProgressTime(model_run.progress.updated_at)}` : ""}
+          </small>
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content className="model-history-popover" align="start" side="bottom" sideOffset={3}>
+          <header>
+            <strong>Previous tasks</strong>
+            <small>{history.length} recent</small>
+          </header>
+          <ol>
+            {history.map((event) => (
+              <li key={`${event.sequence}-${event.updated_at}`}>
+                <i />
                 <span>
-                  Current benchmark <strong>{benchmark.current}</strong>
+                  <strong>{PROGRESS_PHASE_COPY[event.phase]}</strong>
+                  <small>{event.message}</small>
                 </span>
-              )}
-              {champion?.revision && (
-                <span>
-                  Champion <strong>{champion.revision}</strong>
-                  {champion.worst_normalized_error !== undefined &&
-                    ` · worst error ${(champion.worst_normalized_error * 100).toFixed(1)}%`}
-                </span>
-              )}
-            </div>
-          )}
-
-          {history.length > 0 && (
-            <ol className="model-progress-history" aria-label="Recent progress checkpoints">
-              {history.map((event) => (
-                <li key={`${event.sequence}-${event.updated_at}`}>
-                  <i />
-                  <span>
-                    <strong>{PROGRESS_PHASE_COPY[event.phase]}</strong>
-                    <small>{event.message}</small>
-                  </span>
-                  <time dateTime={event.updated_at}>{formatProgressTime(event.updated_at)}</time>
-                </li>
-              ))}
-            </ol>
-          )}
-        </div>
-      )}
-    </div>
+                <time dateTime={event.updated_at}>{formatProgressTime(event.updated_at)}</time>
+              </li>
+            ))}
+          </ol>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 
-function ValidationSummary({ model_run }: { model_run: ModelRun }) {
-  const validation = model_run.validation
-  if (!validation) return null
+function ModelSourceDialog({ model_run }: { model_run: ModelRun }) {
+  return (
+    <Dialog.Root>
+      <Dialog.Trigger asChild>
+        <button type="button" disabled={!model_run.model_source}>
+          <FileCode2 size={14} /> {model_run.model_source ? "View model" : "Model pending"}
+        </button>
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="model-dialog-overlay" />
+        <Dialog.Content className="model-dialog-content">
+          <header>
+            <div>
+              <Dialog.Title>SPICE model</Dialog.Title>
+              <Dialog.Description>
+                model.lib{model_run.manifest?.dialect ? ` · ${model_run.manifest.dialect}` : ""}
+              </Dialog.Description>
+            </div>
+            <div className="model-dialog-actions">
+              <a href={getModelRunFileUrl(model_run.job_id, "model")}>
+                <Download size={14} /> Download
+              </a>
+              <Dialog.Close asChild>
+                <button type="button" aria-label="Close model dialog" title="Close model dialog">
+                  <X size={16} />
+                </button>
+              </Dialog.Close>
+            </div>
+          </header>
+          <pre className="model-source-code">
+            <code>{model_run.model_source}</code>
+          </pre>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+export function ModelAgentLogs({
+  model_run_state,
+  on_close,
+}: {
+  model_run_state: ReturnType<typeof useModelRun>
+  on_close: () => void
+}) {
+  const { model_run, is_loading, is_cancelling, error_message, cancel } = model_run_state
+  const is_running = Boolean(model_run && !model_run.is_complete)
+  const empty_message = is_loading
+    ? "Loading the SPICE model agent…"
+    : error_message
+      ? error_message
+      : "No SPICE model run is available yet."
 
   return (
-    <section className="model-validation-card">
-      <header>
-        <span>
-          <FlaskConical size={15} /> Validation
-        </span>
-        <strong>
-          {validation.passing_count}/{validation.benchmark_count} passing
-        </strong>
-      </header>
-      <div className="benchmark-list">
-        {validation.benchmarks.map((benchmark) => (
-          <div
-            className={`benchmark-row ${benchmark.passed ? "passed" : "failed"}`}
-            key={benchmark.benchmark_id}
-          >
-            {benchmark.passed ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
-            <span>
-              <strong>{benchmark.title}</strong>
-              <small>
-                {benchmark.error_message ??
-                  `NRMSE ${((benchmark.normalized_rmse ?? 0) * 100).toFixed(1)}% · limit ${(benchmark.tolerance * 100).toFixed(1)}%${benchmark.critical ? " · critical" : ""}`}
-              </small>
+    <section className="workspace-card logs-card" aria-label="SPICE model agent logs">
+      <header className="card-toolbar dark-toolbar">
+        <div className="toolbar-title">
+          <Terminal size={16} />
+          <span>SPICE model agent</span>
+        </div>
+        <div className="toolbar-actions">
+          {is_running && (
+            <span className="run-indicator">
+              <i /> {is_cancelling ? "STOPPING…" : "RUNNING"}
             </span>
-          </div>
-        ))}
-      </div>
-    </section>
-  )
-}
-
-function ModelSummaryTabs({ model_run }: { model_run: ModelRun }) {
-  const [active_tab, setActiveTab] = useState<"progress" | "model">("progress")
-
-  return (
-    <section className="model-subcard model-summary-tabs" aria-label="SPICE model progress and output">
-      <header className="model-summary-tabs-header">
-        <div className="model-summary-tab-list" role="tablist" aria-label="SPICE model details">
-          <button
-            id="model-progress-tab"
-            className={active_tab === "progress" ? "active" : ""}
-            type="button"
-            role="tab"
-            aria-selected={active_tab === "progress"}
-            aria-controls="model-progress-panel"
-            onClick={() => setActiveTab("progress")}
-          >
-            <Activity size={14} /> Progress
-          </button>
-          <button
-            id="model-output-tab"
-            className={active_tab === "model" ? "active" : ""}
-            type="button"
-            role="tab"
-            aria-selected={active_tab === "model"}
-            aria-controls="model-output-panel"
-            onClick={() => setActiveTab("model")}
-          >
-            <FileCode2 size={14} /> Model
-          </button>
-        </div>
-        {active_tab === "progress" && !model_run.is_complete && (
-          <strong className="model-live-indicator">
-            <i /> Live
-          </strong>
-        )}
-      </header>
-
-      {active_tab === "progress" ? (
-        <div
-          id="model-progress-panel"
-          className="model-summary-tab-panel"
-          role="tabpanel"
-          aria-labelledby="model-progress-tab"
-        >
-          <LiveProgress model_run={model_run} />
-          <ValidationSummary model_run={model_run} />
-        </div>
-      ) : (
-        <div
-          id="model-output-panel"
-          className="model-summary-tab-panel model-output-panel"
-          role="tabpanel"
-          aria-labelledby="model-output-tab"
-        >
-          {model_run.model_source ? (
-            <>
-              <div className="model-output-toolbar">
-                <span>model.lib · {model_run.manifest?.dialect}</span>
-                <div className="model-downloads">
-                  <a href={getModelRunFileUrl(model_run.job_id, "model")}>
-                    <Download size={13} /> Model
-                  </a>
-                  <a href={getModelRunFileUrl(model_run.job_id, "component")}>
-                    <Download size={13} /> Component
-                  </a>
-                  <a href={getModelRunFileUrl(model_run.job_id, "report")}>
-                    <Download size={13} /> Report
-                  </a>
-                  <a href={getModelRunFileUrl(model_run.job_id, "model_card")}>
-                    <Download size={13} /> Model card
-                  </a>
-                </div>
-              </div>
-              <pre className="model-source-code">
-                <code>{model_run.model_source}</code>
-              </pre>
-            </>
-          ) : (
-            <div className="model-output-empty">
-              <FileCode2 size={24} />
-              <strong>Waiting for the first model</strong>
-              <p>The generated model source will appear here as soon as the agent saves a candidate.</p>
-            </div>
           )}
+          {is_running && (
+            <button className="stop-run-button" type="button" disabled={is_cancelling} onClick={cancel}>
+              <Square size={9} fill="currentColor" />
+              {is_cancelling ? "Stopping…" : "Stop run"}
+            </button>
+          )}
+          {model_run && (
+            <a
+              className="toolbar-icon-link"
+              href={getModelRunFileUrl(model_run.job_id, "log")}
+              aria-label="Download complete SPICE model log"
+            >
+              <Download size={15} />
+            </a>
+          )}
+          <button
+            className="terminal-close-button"
+            type="button"
+            aria-label="Close agent terminal"
+            title="Close agent terminal"
+            onClick={on_close}
+          >
+            <X size={18} />
+          </button>
         </div>
-      )}
+      </header>
+      <AgentLogViewer
+        className="terminal-window"
+        empty_message={empty_message}
+        is_running={is_running}
+        logs={model_run?.logs ?? []}
+      />
     </section>
   )
 }
 
-export function ModelPanel({ job }: { job: Job }) {
+export function ModelPanel({
+  job,
+  model_run_state,
+}: {
+  job: Job
+  model_run_state: ReturnType<typeof useModelRun>
+}) {
   const {
     model_run,
     is_loading,
@@ -391,7 +275,7 @@ export function ModelPanel({ job }: { job: Job }) {
     extend,
     cancel,
     retry,
-  } = useModelRun(job.job_id)
+  } = model_run_state
   const [effort, setEffort] = useState(1)
   const [now, setNow] = useState(Date.now())
 
@@ -421,7 +305,7 @@ export function ModelPanel({ job }: { job: Job }) {
           is ready, a separate untimed pass finalizes the benchmark suite; the server locks it before starting
           the time-budgeted refinement loop.
         </p>
-        <div className="effort-picker" role="group" aria-label="Modeling effort">
+        <fieldset className="effort-picker" aria-label="Modeling effort">
           {[1, 2, 4, 8].map((value) => (
             <button
               className={effort === value ? "selected" : ""}
@@ -433,7 +317,7 @@ export function ModelPanel({ job }: { job: Job }) {
               <small>{value === 1 ? "Baseline time" : `${value}× iteration time`}</small>
             </button>
           ))}
-        </div>
+        </fieldset>
         {error_message && (
           <p className="form-error" role="alert">
             {error_message}
@@ -467,6 +351,7 @@ export function ModelPanel({ job }: { job: Job }) {
     model_run.status === "queued" ||
     model_run.status === "setting_up" ||
     model_run.status === "waiting_for_component"
+  const current_task = model_run.error_message ?? model_run.progress?.message ?? getStatusCopy(model_run)
 
   return (
     <div className="model-workspace">
@@ -485,12 +370,18 @@ export function ModelPanel({ job }: { job: Job }) {
               {getStatusCopy(model_run)}
             </span>
           </div>
-          <p>
-            {model_run.error_message ??
-              "The fixed workflow and benchmark suite are unchanged across effort levels."}
-          </p>
         </div>
+
+        <section className="model-header-stats" aria-label="Current model statistics">
+          <div className="model-header-stat model-error-stat">
+            <span>Error</span>
+            <strong>{getModelError(model_run)}</strong>
+          </div>
+          <PreviousTasks model_run={model_run} current_task={current_task} />
+        </section>
+
         <div className="model-header-actions">
+          <ModelSourceDialog model_run={model_run} />
           {model_run.status === "failed" && (
             <button type="button" disabled={is_retrying} onClick={retry}>
               {is_retrying ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}
@@ -510,23 +401,23 @@ export function ModelPanel({ job }: { job: Job }) {
             </button>
           )}
         </div>
-      </section>
 
-      <section className="model-progress-card">
-        <div className="model-progress-copy">
-          <span>
-            <Clock3 size={14} />
-            {is_untimed
-              ? "Refinement timer not started"
-              : `${formatDuration(elapsed_time)} / ${formatDuration(model_run.allocated_time_ms)}`}
-          </span>
-          <span>
-            {model_run.effort_multiplier}× effort
-            {!is_untimed && ` · iteration ${model_run.iteration}`}
-          </span>
-        </div>
-        <div className="model-progress-track">
-          <i style={{ width: `${progress}%` }} />
+        <div className="model-header-progress">
+          <div className="model-progress-copy">
+            <span>
+              <Clock3 size={14} />
+              {is_untimed
+                ? "Refinement timer not started"
+                : `${formatDuration(elapsed_time)} / ${formatDuration(model_run.allocated_time_ms)}`}
+            </span>
+            <span>
+              {model_run.effort_multiplier}× effort
+              {!is_untimed && ` · iteration ${model_run.iteration}`}
+            </span>
+          </div>
+          <div className="model-progress-track">
+            <i style={{ width: `${progress}%` }} />
+          </div>
         </div>
       </section>
 
@@ -535,11 +426,6 @@ export function ModelPanel({ job }: { job: Job }) {
           {error_message}
         </p>
       )}
-
-      <div className="model-grid">
-        <ModelRunLogs model_run={model_run} />
-        <ModelSummaryTabs model_run={model_run} />
-      </div>
 
       <ModelLivePreview
         job_id={job.job_id}

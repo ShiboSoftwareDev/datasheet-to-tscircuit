@@ -1,6 +1,6 @@
 import type { TabId } from "@tscircuit/runframe"
 import { Boxes, CircuitBoard, LoaderCircle } from "lucide-react"
-import { lazy, Suspense, useEffect, useState } from "react"
+import { lazy, Suspense, useState } from "react"
 import type { Job } from "@/shared/job-types"
 import { CodePanel } from "./code-panel"
 
@@ -112,30 +112,32 @@ export function CircuitPreview({
 }) {
   const [artifact, setArtifact] = useState<ComponentArtifact>("component")
 
-  useEffect(() => setArtifact("component"), [job.job_id])
-
   return (
     <section className="workspace-card preview-card" aria-label="Component and typical application preview">
       <div className="artifact-tabs" role="tablist" aria-label="Component artifacts">
-        <button
-          className={artifact === "component" ? "active" : ""}
-          type="button"
-          role="tab"
-          aria-selected={artifact === "component"}
-          onClick={() => setArtifact("component")}
-        >
-          <Boxes size={14} /> Component
-        </button>
-        <button
-          className={artifact === "typical_application" ? "active" : ""}
-          type="button"
-          role="tab"
-          aria-selected={artifact === "typical_application"}
-          onClick={() => setArtifact("typical_application")}
-        >
-          <CircuitBoard size={14} /> Typical application
-          {!job.typical_application_circuit_json && !job.is_complete && <i aria-label="In progress" />}
-        </button>
+        <div className="artifact-tab-group">
+          <button
+            className={artifact === "component" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={artifact === "component"}
+            onClick={() => setArtifact("component")}
+          >
+            <Boxes size={14} /> Component
+          </button>
+        </div>
+        <div className="artifact-tab-group">
+          <button
+            className={artifact === "typical_application" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={artifact === "typical_application"}
+            onClick={() => setArtifact("typical_application")}
+          >
+            <CircuitBoard size={14} /> Typical application
+            {!job.typical_application_circuit_json && !job.is_complete && <i title="In progress" />}
+          </button>
+        </div>
       </div>
       <div className="viewer-shell">
         <ArtifactRunframe
