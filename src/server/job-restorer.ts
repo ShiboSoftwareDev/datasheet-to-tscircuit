@@ -172,6 +172,8 @@ async function restoreJobDirectory(input: {
     circuit_json,
     typical_application_code,
     typical_application_circuit_json,
+    validation: isRecord(saved?.validation) ? (saved.validation as unknown as Job["validation"]) : undefined,
+    provenance: isRecord(saved?.provenance) ? (saved.provenance as unknown as Job["provenance"]) : undefined,
   })
 }
 

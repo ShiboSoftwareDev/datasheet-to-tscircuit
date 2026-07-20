@@ -717,11 +717,13 @@ async function preflightBenchmarkHarnesses(input: {
   })
   try {
     const application_plan_path = join(input.model_dir, "typical-application-plan.json")
-    const benchmark_application_plan = (await Bun.file(application_plan_path).exists())
-      ? getBenchmarkApplicationPlan(
-          parseTypicalApplicationPlan(JSON.parse(await readFile(application_plan_path, "utf8")) as unknown),
-        )
+    const parsed_application_plan = (await Bun.file(application_plan_path).exists())
+      ? parseTypicalApplicationPlan(JSON.parse(await readFile(application_plan_path, "utf8")) as unknown)
       : undefined
+    const benchmark_application_plan =
+      parsed_application_plan?.availability === "documented"
+        ? getBenchmarkApplicationPlan(parsed_application_plan)
+        : undefined
     const benchmark_files = await listModelBenchFiles(input.model_dir)
     await input.append(
       "system",

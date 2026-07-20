@@ -42,6 +42,8 @@ export interface RestoreJobInput extends CreateJobInput {
   circuit_json?: Job["circuit_json"]
   typical_application_code?: string
   typical_application_circuit_json?: Job["typical_application_circuit_json"]
+  validation?: Job["validation"]
+  provenance?: Job["provenance"]
 }
 
 export type JobUpdate = Partial<
@@ -57,6 +59,8 @@ export type JobUpdate = Partial<
     | "circuit_json"
     | "typical_application_code"
     | "typical_application_circuit_json"
+    | "validation"
+    | "provenance"
   >
 >
 
@@ -76,6 +80,8 @@ function getPublicJob(job_record: JobRecord): Job {
     circuit_json: job_record.circuit_json,
     typical_application_code: job_record.typical_application_code,
     typical_application_circuit_json: job_record.typical_application_circuit_json,
+    validation: job_record.validation,
+    provenance: job_record.provenance,
   }
 }
 
@@ -241,7 +247,7 @@ export class JobStore {
       join(job_record.job_dir, "job.json"),
       `${JSON.stringify(
         {
-          version: 1,
+          version: 2,
           job_id: job_record.job_id,
           file_name: job_record.file_name,
           created_at: job_record.created_at,
@@ -252,6 +258,8 @@ export class JobStore {
           error_message: job_record.error_message,
           additional_instructions: job_record.additional_instructions,
           component_ready: job_record.component_ready,
+          validation: job_record.validation,
+          provenance: job_record.provenance,
         },
         null,
         2,

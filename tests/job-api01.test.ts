@@ -230,6 +230,7 @@ test("deleting an active task stops its process before removing the job", async 
   const job_dir = join(jobs_root, "job_active")
   const agent_path = join(job_dir, "slow-agent")
   await mkdir(job_dir, { recursive: true })
+  await Bun.write(join(job_dir, "datasheet.pdf"), "fake datasheet")
   await Bun.write(
     agent_path,
     `#!/usr/bin/env bun

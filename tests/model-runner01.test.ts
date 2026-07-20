@@ -223,7 +223,8 @@ test("feedback integrity helper perturbs only the named divider resistor", () =>
 
 test("benchmark application gate preserves feedback and PG wiring while allowing control fixtures", () => {
   const plan = getBenchmarkApplicationPlan({
-    version: 2,
+    version: 3,
+    availability: "documented",
     title: "Buck-boost typical application",
     description: "External feedback and power-good networks",
     source_references: [{ page: 21, figure: "Figure 10-1" }],

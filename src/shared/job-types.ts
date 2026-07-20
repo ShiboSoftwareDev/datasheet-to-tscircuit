@@ -17,6 +17,40 @@ export interface JobLog {
   message: string
 }
 
+export type JobValidationStatus =
+  | "pending"
+  | "passed"
+  | "failed"
+  | "inconclusive"
+  | "human_review_required"
+  | "not_applicable"
+
+export interface JobValidation {
+  evidence: JobValidationStatus
+  component_build: JobValidationStatus
+  component_drc: JobValidationStatus
+  footprint: JobValidationStatus
+  pinout: JobValidationStatus
+  component_schematic: JobValidationStatus
+  component_visual: JobValidationStatus
+  application_build: JobValidationStatus
+  application_connectivity: JobValidationStatus
+  application_schematic: JobValidationStatus
+  application_visual: JobValidationStatus
+}
+
+export interface JobProvenance {
+  source_commit: string
+  bun_version: string
+  tscircuit_version: string
+  tsci_agent_version: string
+  agent_model: string
+  agent_settings: string
+  datasheet_sha256: string
+  dependency_lock_sha256?: string
+  prompt_sha256: Record<string, string>
+}
+
 export interface Job {
   job_id: string
   file_name: string
@@ -32,6 +66,8 @@ export interface Job {
   circuit_json?: AnyCircuitElement[]
   typical_application_code?: string
   typical_application_circuit_json?: AnyCircuitElement[]
+  validation?: JobValidation
+  provenance?: JobProvenance
 }
 
 export type JobSummary = Pick<

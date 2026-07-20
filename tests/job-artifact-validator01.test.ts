@@ -5,11 +5,57 @@ import { join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 import { AGENT_EVENT_PROTOCOL, type TrustedAgentEvent } from "@/server/agent-event-protocol"
 import {
+  getApplicationSchematicErrors,
   getFootprintPlanErrors,
   getTypicalApplicationComponentValueErrors,
   getTypicalApplicationConnectivityErrors,
+  getTypicalApplicationSourceErrors,
   validateVisualInspection,
 } from "@/server/job-artifact-validator"
+
+test("application source gate rejects only standalone netlabel JSX elements", () => {
+  expect(
+    getTypicalApplicationSourceErrors(
+      '<board><netlabel net="VIN" /><trace from=".U1 > .VIN" to="net.VIN" /></board>',
+    ),
+  ).toEqual(["Typical application source must not instantiate <netlabel> elements"])
+  expect(
+    getTypicalApplicationSourceErrors(
+      '<board><netalias net="VIN" /><trace from=".U1 > .VIN" to="net.VIN" schDisplayLabel="VIN" /></board>',
+    ),
+  ).toEqual([])
+  expect(getTypicalApplicationSourceErrors('<trace from=".U1 > .VIN" to={sel.net.VIN} />')).toEqual([])
+})
+
+test("compiled application schematic gate allows labels but rejects complexity-scaled long wires", () => {
+  const circuit = [
+    ...Array.from({ length: 7 }, (_, index) => ({
+      type: "schematic_component",
+      schematic_component_id: `component-${index}`,
+      source_component_id: `source-${index}`,
+      center: { x: index, y: 0 },
+    })),
+    { type: "schematic_net_label", schematic_net_label_id: "label-1", text: "VIN" },
+    {
+      type: "schematic_trace",
+      schematic_trace_id: "trace-1",
+      edges: [{ from: { x: -5, y: 0 }, to: { x: 4.5, y: 0 } }],
+    },
+  ] as unknown as AnyCircuitElement[]
+  const errors = getApplicationSchematicErrors(circuit)
+  expect(errors).toHaveLength(1)
+  expect(errors[0]).toContain("is 9.50 units long")
+
+  expect(
+    getApplicationSchematicErrors([
+      { type: "schematic_component", center: { x: 0, y: 0 } },
+      {
+        type: "schematic_trace",
+        edges: [{ from: { x: 0, y: 0 }, to: { x: 3, y: 0 } }],
+      },
+    ] as unknown as AnyCircuitElement[]),
+  ).toEqual([])
+})
 
 const connectivityPlan = {
   components: [{ reference: "U1" }, { reference: "R3" }],
@@ -79,6 +125,20 @@ test("footprint gate catches a special pad whose width was copied from the ordin
   ] as unknown as AnyCircuitElement[]
 
   expect(getFootprintPlanErrors(plan, circuit)).toEqual(["Pin 8: width 0.9 mm (expected 1.3 mm)"])
+})
+
+test("footprint gate validates unassigned mechanical copper without inventing an electrical pin", () => {
+  const plan = {
+    version: 1 as const,
+    view: "pcb_top" as const,
+    source_references: [{ page: 4 }],
+    pads: [{ pin: null, kind: "smt" as const, x: 0, y: 2, width: 1.2, height: 1.2 }],
+  }
+  const circuit = [
+    { type: "pcb_smtpad", x: 0, y: 2, width: 1.2, height: 1.2 },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getFootprintPlanErrors(plan, circuit)).toEqual([])
 })
 
 test("application value gate catches a changed feedback-divider value", () => {

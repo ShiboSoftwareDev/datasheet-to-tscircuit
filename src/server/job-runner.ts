@@ -1,14 +1,26 @@
-import { cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { appendFile, cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join, relative, resolve } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
-import type { JobLogStream } from "@/shared/job-types"
+import type { JobLogStream, JobValidation } from "@/shared/job-types"
 import { type TrustedAgentEvent, parseTrustedAgentEvent } from "./agent-event-protocol"
+import {
+  type ComponentEvidence,
+  getComponentEvidenceBlockingReasons,
+  getFootprintEvidenceErrors,
+  getIndependentComponentEvidenceErrors,
+  getPinoutEvidenceErrors,
+  parseComponentEvidence,
+} from "./component-evidence"
+import { createComponentSchematicPlan, getComponentSchematicPlanErrors } from "./component-schematic-plan"
 import {
   type ExpectedApplicationConnection,
   type ExpectedFootprintPad,
   type FootprintPlan,
+  getApplicationSchematicErrors,
   getFootprintPlanErrors,
+  getTypicalApplicationSourceErrors,
   getTypicalApplicationComponentValueErrors,
   getTypicalApplicationConnectivityErrors,
   validateAgentImageReads,
@@ -17,6 +29,7 @@ import {
 } from "./job-artifact-validator"
 import type { JobStore } from "./job-store"
 import { getAllCircuitErrors } from "./model-simulation-validator"
+import { getPinnedTscircuitVersion } from "./runtime-versions"
 
 export interface JobRunnerContext {
   job_store: JobStore
@@ -140,6 +153,8 @@ async function runStructuredAgentPhase(input: {
   cwd: string
   signal: AbortSignal
   append: StreamProcessInput["on_chunk"]
+  event_log_file?: string
+  event_phase?: string
 }): Promise<TrustedAgentEvent[]> {
   const events: TrustedAgentEvent[] = []
   let stdout_buffer = ""
@@ -156,6 +171,17 @@ async function runStructuredAgentPhase(input: {
     }
     last_sequence = event.sequence
     events.push(event)
+    if (input.event_log_file) {
+      await appendFile(
+        input.event_log_file,
+        `${JSON.stringify({
+          recorded_at: new Date().toISOString(),
+          phase: input.event_phase ?? "agent",
+          event,
+        })}\n`,
+        "utf8",
+      )
+    }
     await renderTrustedAgentEvent(event, input.append)
   }
 
@@ -192,55 +218,94 @@ export function buildAgentPrompt(additional_instructions?: string): string {
     ? `\nAdditional context from the user:\n${additional_instructions.trim()}\n`
     : ""
 
-  return `Complete phase 1 of the datasheet conversion from datasheet.pdf: create a
-production-quality tscircuit TSX component and collect its typical-application evidence.
+  return `Complete the evidence-extraction phase for datasheet.pdf. Do not create or modify any
+circuit TSX file in this phase. The server will approve and lock the evidence before code generation.
 
-Read AGENTS.md first and follow it. Inspect the PDF carefully, including the pinout
-tables and package mechanical drawings by rendering relevant pages to PNG and
-opening them with the \`read\` tool. Replace index.circuit.tsx with the final
-default-exported component, then build PCB/footprint and schematic visual outputs
-as required by AGENTS.md. Use \`read\` on both PNGs, correct visual defects, and
-rerender before finishing. Keep schematic labels and aliases compact and readable;
-shorten or remove aliases that overlap, rotate awkwardly, or make the symbol
-excessively wide. Run tsci build index.circuit.tsx and correct any generation
-errors. Before coding the footprint, record a pad-by-pad dimensional checklist
-from the datasheet land-pattern drawing: pad count, pin numbers, width, height,
-pitch, side/orientation, and pin-1 marker. Compare the generated PCB render back
-to that checklist and the rendered datasheet image. The land-pattern drawing is
-the PCB top/copper view; do not mirror it from a package-bottom view. Do not invent exposed-metal
-pads or swap dimensions inferred from dimension-leader lines. Do not use
-placementDrcChecksDisabled, routingDisabled, --ignore-placement-drc, or similar
-settings to hide clearance, placement, or routing defects. Do not stop at a prose report: the TSX file, inspected
-footprint and schematic renders, and a successful preview build are the
-deliverables. Also write \`footprint-plan.json\` with schema
-\`{ "version": 1, "view": "pcb_top", "source_references": [{ "page": number,
-"figure": string? }], "pads": [{ "pin": string, "kind": "smt" | "plated_hole",
-"x": number, "y": number, "width": number, "height": number,
-"hole_width": number?, "hole_height": number? }] }\`. All dimensions and coordinates
-are millimeters relative to the package origin in the PCB top view. Include every
-copper pad exactly once; for repeated pads on one pin, repeat the pin value.
-Save the final land-pattern reference crop as
-\`visual-reference/land-pattern.png\`. After the final component build, use \`read\`
-on that image, \`dist/index/pcb.png\`, and \`dist/index/schematic.png\`, then write
-\`component-visual-inspection.json\` with
-\`{ "version": 1, "status": "passed", "reference_image":
-"visual-reference/land-pattern.png", "pcb_image": "dist/index/pcb.png",
-"schematic_image": "dist/index/schematic.png" }\`. Never record passed if any
-image was omitted or its pixels were unavailable; report inconclusive and stop.
-Write the inspection JSON with the built-in write tool. After the final build, the
-only allowed shell command is the single render-svg-to-png command needed to create
-the schematic PNG.
+Read AGENTS.md first. Extract text with pdftotext -layout and select candidate pages by matching
+general section terms such as pin functions, terminal functions, package information, mechanical
+data, recommended land pattern, board layout, and typical application. Sort candidate pages by PDF
+page number. Render every selected page at exactly 200 DPI with deterministic filenames under
+visual-reference/pages/, then inspect the pixels with the built-in read tool. Page numbers in JSON
+are one-based PDF page numbers, not printed document folios.
 
-At the same time, locate the datasheet's primary typical application and write
-typical-application-plan.json with its cited page/figure, operating context,
-external components and values, and exact connections as required by AGENTS.md.
-The plan schema version is 2.
-Each connection must be a structured net object such as
-\`{ "net": "VIN", "pins": ["U1.VIN", "C1.pin1"] }\`; use exact
-\`component.port\` endpoints that can be checked against Circuit JSON.
-Do not create typical-application.circuit.tsx in this phase. The server must first
-build and publish index.circuit.tsx so downstream SPICE generation can safely
-import the finalized component.${user_context}`
+Write component-evidence.json with this schema:
+{ "version": 1, "status": "resolved" | "human_review_required",
+  "part_number": evidenceField<string>, "ordering_code": evidenceField<string>?,
+  "package": { "name": evidenceField<string>, "code": evidenceField<string>?,
+    "pin_count": evidenceField<number> },
+  "pinout": { "pins": [{ "number": string, "labels": string[],
+      "role": "power_input" | "power_output" | "ground" | "input" | "output" |
+        "bidirectional" | "passive" | "no_connect" | "other", "description": string?,
+      "sources": evidenceSource[] }] },
+  "footprint": { "view": "pcb_top", "units": "mm",
+    "drawing_orientation": evidenceField<"pcb_top" | "package_top" |
+      "package_bottom" | "side" | "unknown">,
+    "pads": [{ "pin": string | null, "kind": "smt" | "plated_hole", "x": number,
+      "y": number, "width": number, "height": number, "hole_width": number?,
+      "hole_height": number?, "sources": evidenceSource[] }] },
+  "unresolved_ambiguities": string[] }
+where evidenceField<T> is { "value": T, "sources": evidenceSource[] } and evidenceSource is
+{ "page": number, "figure": string?, "method": "pdf_text" | "pdf_visual" | "calculated" |
+  "package_standard", "confidence": "high" | "medium" | "low", "image": string?,
+  "render_dpi": number?, "note": string? }. Visual sources must name the inspected PNG and record
+200 DPI. Every identity, package, pin-table, orientation, and pad field needs a precise source.
+
+Resolve the exact orderable part/package combination. Do not combine pin tables or dimensions from
+different order codes. Use only an explicitly identified PCB-top copper land pattern. A package
+outline, package-bottom view, stencil aperture, or generic footprint-library name is not equivalent.
+Record every copper pad, including repeated pads on one electrical pin. Use null only for a
+mechanical copper pad that has no electrical pin. Coordinates and dimensions
+are millimeters about the land-pattern origin. Derive center coordinates only from cited dimensions
+and record the formula in a source note. Never choose between conflicting dimension leaders by
+appearance alone. If the exact package, orientation, pin mapping, a required dimension, or any
+conflict cannot be resolved, set status to human_review_required and describe it; do not guess.
+Classify each pin role from its cited electrical function. The role describes the pin, not a desired
+schematic side; use other only when none of the explicit electrical roles applies.
+
+Also write footprint-plan.json version 1 from the same evidence, and typical-application-plan.json:
+{ "version": 3, "availability": "documented" | "not_present", "title": string,
+  "description": string, "source_references": [{ "page": number, "figure": string? }],
+  "searched_sections": string[]?, "components": [{ "reference": string, "kind": string,
+  "value": string?, "purpose": string? }],
+  "connections": [{ "net": string, "pins": [string, string, ...] }] }.
+Set availability to documented and include cited sources, components, values, and complete
+structured nets using exact component.port endpoints when the PDF contains an application. If a
+systematic section search finds none, set availability to not_present, keep components and
+connections empty, list every searched heading in searched_sections, cite the searched datasheet
+pages, and explain the result; never invent a reference circuit. Save the inspected land pattern as
+visual-reference/land-pattern.png. For a
+documented application, save and read visual-reference/typical-application.png. For not_present,
+only the land-pattern image is required. Do not create component-visual-inspection.json or run tsci
+in this phase.${user_context}`
+}
+
+export function buildComponentPrompt(additional_instructions?: string): string {
+  const user_context = additional_instructions?.trim()
+    ? `\nAdditional context from the user:\n${additional_instructions.trim()}\n`
+    : ""
+
+  return `Generate the reusable tscircuit component from the server-approved evidence. Read AGENTS.md,
+component-evidence.json, component-schematic-plan.json, and footprint-plan.json. Treat those files,
+typical-application-plan.json,
+and all existing files under visual-reference/ as read-only. Do not open, extract, render, search,
+or otherwise access datasheet.pdf or datasheet.txt;
+the approved JSON and reference PNG are the only allowed datasheet inputs in this phase.
+
+Replace index.circuit.tsx with a production-quality, default-exported component. Implement the exact
+part number, complete pin table, PCB-top pad geometry, and orientation from component-evidence.json.
+Implement component-schematic-plan.json.schPinArrangement exactly; it is a server-derived,
+deterministic layout contract based on independently agreed pin roles.
+Do not substitute a generic library footprint unless its generated pad geometry exactly matches the
+approved evidence. Keep schematic labels and aliases compact and readable. Do not use
+placementDrcChecksDisabled, routingDisabled, --ignore-placement-drc, or similar suppression.
+
+Run tsci build index.circuit.tsx --ignore-warnings --pcb-png --schematic-svgs, render the schematic
+SVG, and inspect visual-reference/land-pattern.png, dist/index/pcb.png, and
+dist/index/schematic.png with read after the final build. Correct defects and rebuild as needed.
+Finally write component-visual-inspection.json version 1 with status passed and those exact paths.
+If pixels are unavailable or the render conflicts with the evidence, record inconclusive and stop.
+After the final build, run no shell command except the one schematic SVG-to-PNG render command. Do
+not create typical-application.circuit.tsx.${user_context}`
 }
 
 export function buildTypicalApplicationPrompt(additional_instructions?: string): string {
@@ -252,7 +317,11 @@ export function buildTypicalApplicationPrompt(additional_instructions?: string):
 built index.circuit.tsx and published it as ready; SPICE generation may now use it.
 
 Read AGENTS.md and typical-application-plan.json first. Treat index.circuit.tsx,
-component.circuit.tsx, footprint-plan.json, and typical-application-plan.json as read-only. Create
+component.circuit.tsx, component-evidence.json, component-schematic-plan.json,
+footprint-plan.json, and
+typical-application-plan.json as read-only. Do not open, extract, render, search, or otherwise access
+datasheet.pdf or datasheet.txt; the approved JSON and reference PNG are the only allowed datasheet
+inputs in this phase. Create
 typical-application.circuit.tsx
 as a default-exported tscircuit circuit that imports the generated component from
 "./index.circuit" and implements the cited datasheet application faithfully. Use
@@ -260,8 +329,13 @@ the recorded external component values, connections, and operating context. Do
 not replace the generated component with a generic chip or duplicate its
 definition.
 
+Never instantiate a standalone <netlabel> element. Net selectors such as "net.*" and "sel.net.*",
+net-connected traces, trace schDisplayLabel props, and compiled schematic net-label records are
+allowed. Arrange components compactly by signal flow, keep individual trace segments short, and
+avoid large empty schematic regions.
+
 Build the application with PCB and schematic visual outputs, render the schematic
-SVG to PNG, re-open the cited datasheet application page, and inspect the reference,
+SVG to PNG, and inspect the locked reference,
 PCB, and schematic PNGs with the built-in \`read\` tool. Compare the generated
 schematic against the datasheet topology and values, fix visual or connectivity
 defects, and do not suppress placement DRC, autorouting, or clearance failures with
@@ -282,35 +356,8 @@ the schematic PNG.${user_context}`
 }
 
 export function buildTypicalApplicationEvidenceVerificationPrompt(): string {
-  return `Independently extract the package land pattern and primary typical-application circuit
-from datasheet.pdf. This is an evidence-verification pass: no earlier plan is present, so work
-only from the datasheet and the read-only component.circuit.tsx. Extract searchable PDF text,
-render the cited datasheet pages to PNG, and use the built-in read tool to inspect their pixels.
-
-Use the PCB top/copper land-pattern or example-board-layout drawing, never a package-bottom or
-stencil drawing. Save that exact crop as visual-reference/land-pattern.png. Carefully honor
-drawing multipliers such as 4X versus 5X and special or elongated pads. Write footprint-plan.json:
-{ "version": 1, "view": "pcb_top",
-  "source_references": [{ "page": number, "figure": string? }],
-  "pads": [{ "pin": string, "kind": "smt" | "plated_hole", "x": number,
-    "y": number, "width": number, "height": number,
-    "hole_width": number?, "hole_height": number? }] }.
-Coordinates and dimensions are millimeters relative to the package origin. Include every copper
-pad exactly once and use the component's exact numbered or named ports.
-
-Save a clear crop of the reference application circuit as
-visual-reference/typical-application.png and use read on both exact reference PNGs before finishing.
-
-Write typical-application-plan.json using schema version 2:
-{ "version": 2, "title": string, "description": string,
-  "source_references": [{ "page": number, "figure": string? }],
-  "components": [{ "reference": string, "kind": string, "value": string?,
-    "purpose": string? }],
-  "connections": [{ "net": string, "pins": [string, string, ...] }] }.
-List every component in the cited circuit, including U1. Each connection describes one
-complete electrical net and every endpoint uses exact component.port syntax such as U1.VIN
-or C1.pin1. Preserve the datasheet reference designators, values, and topology. Do not create
-or modify any circuit TSX file.`
+  return `Independently extract the evidence. You have no earlier plan and must not infer what another
+agent selected.\n\n${buildAgentPrompt()}`
 }
 
 async function findCircuitJsonFile(directory: string): Promise<string | undefined> {
@@ -341,10 +388,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface TypicalApplicationPlan {
-  version: 2
+  version: 3
+  availability: "documented" | "not_present"
   title: string
   description: string
   source_references: Array<{ page: number; figure?: string }>
+  searched_sections?: string[]
   components: Array<{ reference: string; kind: string; value?: string; purpose?: string }>
   connections: ExpectedApplicationConnection[]
 }
@@ -359,6 +408,12 @@ function requiredFiniteNumber(value: unknown, label: string): number {
     throw new Error(`${label} must be a finite number in millimeters`)
   }
   return value
+}
+
+function optionalTextArray(value: unknown, label: string): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`)
+  return value.map((item, index) => requiredText(item, `${label}[${index}]`))
 }
 
 export function parseFootprintPlan(value: unknown): FootprintPlan {
@@ -387,7 +442,7 @@ export function parseFootprintPlan(value: unknown): FootprintPlan {
       throw new Error(`footprint pads[${index}] must have kind smt or plated_hole`)
     }
     const parsed = {
-      pin: requiredText(pad.pin, `pads[${index}].pin`),
+      pin: pad.pin === null ? null : requiredText(pad.pin, `pads[${index}].pin`),
       kind: pad.kind as ExpectedFootprintPad["kind"],
       x: requiredFiniteNumber(pad.x, `pads[${index}].x`),
       y: requiredFiniteNumber(pad.y, `pads[${index}].y`),
@@ -410,7 +465,9 @@ export function parseFootprintPlan(value: unknown): FootprintPlan {
         parsed.hole_width! <= 0 ||
         parsed.hole_height! <= 0)
     ) {
-      throw new Error(`footprint plated-hole pad ${parsed.pin} must include positive hole dimensions`)
+      throw new Error(
+        `footprint plated-hole pad ${parsed.pin ?? "mechanical"} must include positive hole dimensions`,
+      )
     }
     return parsed
   })
@@ -418,8 +475,12 @@ export function parseFootprintPlan(value: unknown): FootprintPlan {
 }
 
 export function parseTypicalApplicationPlan(value: unknown): TypicalApplicationPlan {
-  if (!isRecord(value) || (value.version !== 1 && value.version !== 2)) {
-    throw new Error("typical-application-plan.json must have version 2")
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2 && value.version !== 3)) {
+    throw new Error("typical-application-plan.json must have version 3")
+  }
+  const availability = value.version === 3 ? value.availability : "documented"
+  if (availability !== "documented" && availability !== "not_present") {
+    throw new Error("typical-application-plan.json must declare documented or not_present")
   }
   if (!Array.isArray(value.source_references) || value.source_references.length === 0) {
     throw new Error("typical-application-plan.json must cite at least one datasheet page")
@@ -435,8 +496,8 @@ export function parseTypicalApplicationPlan(value: unknown): TypicalApplicationP
         : { figure: requiredText(source.figure, `source_references[${index}].figure`) }),
     }
   })
-  if (!Array.isArray(value.components) || value.components.length === 0) {
-    throw new Error("typical-application-plan.json must list the application components")
+  if (!Array.isArray(value.components) || (availability === "documented" && value.components.length === 0)) {
+    throw new Error("documented typical-application evidence must list the application components")
   }
   const seen_components = new Set<string>()
   const components = value.components.map((component, index) => {
@@ -459,8 +520,11 @@ export function parseTypicalApplicationPlan(value: unknown): TypicalApplicationP
         : { purpose: requiredText(component.purpose, `components[${index}].purpose`) }),
     }
   })
-  if (!Array.isArray(value.connections) || value.connections.length === 0) {
-    throw new Error("typical-application-plan.json must list the application connections")
+  if (
+    !Array.isArray(value.connections) ||
+    (availability === "documented" && value.connections.length === 0)
+  ) {
+    throw new Error("documented typical-application evidence must list the application connections")
   }
   const seen_nets = new Set<string>()
   const seen_endpoints = new Map<string, string>()
@@ -502,13 +566,99 @@ export function parseTypicalApplicationPlan(value: unknown): TypicalApplicationP
       }
     }
   }
+  if (availability === "not_present" && (components.length > 0 || connections.length > 0)) {
+    throw new Error("not_present typical-application evidence must have empty components and connections")
+  }
+  const searched_sections = optionalTextArray(
+    value.searched_sections,
+    "typical-application searched_sections",
+  )
+  if (availability === "not_present" && searched_sections.length === 0) {
+    throw new Error("not_present typical-application evidence must list searched_sections")
+  }
   return {
-    version: 2,
+    version: 3,
+    availability,
     title: requiredText(value.title, "typical application title"),
     description: requiredText(value.description, "typical application description"),
     source_references,
+    ...(searched_sections.length > 0 ? { searched_sections } : {}),
     components,
     connections,
+  }
+}
+
+function normalizedText(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ")
+}
+
+export function getTypicalApplicationPlanAgreementErrors(
+  primary: TypicalApplicationPlan,
+  independent: TypicalApplicationPlan,
+): string[] {
+  const errors: string[] = []
+  if (primary.availability !== independent.availability) {
+    errors.push(
+      `typical-application availability disagrees: ${primary.availability} versus ${independent.availability}`,
+    )
+    return errors
+  }
+  if (primary.availability === "not_present") {
+    const primary_sections = (primary.searched_sections ?? []).map(normalizedText).sort()
+    const independent_sections = (independent.searched_sections ?? []).map(normalizedText).sort()
+    if (JSON.stringify(primary_sections) !== JSON.stringify(independent_sections)) {
+      errors.push("typical-application searched sections disagree")
+    }
+  }
+  const primary_pages = [...new Set(primary.source_references.map((source) => source.page))].sort(
+    (left, right) => left - right,
+  )
+  const independent_pages = [...new Set(independent.source_references.map((source) => source.page))].sort(
+    (left, right) => left - right,
+  )
+  if (JSON.stringify(primary_pages) !== JSON.stringify(independent_pages)) {
+    errors.push(
+      `typical-application source pages disagree: ${primary_pages.join(", ")} versus ${independent_pages.join(", ")}`,
+    )
+  }
+  const component_signature = (plan: TypicalApplicationPlan) =>
+    plan.components
+      .map((component) => ({
+        reference: normalizedText(component.reference),
+        value: normalizedText(component.value),
+      }))
+      .sort((left, right) => left.reference.localeCompare(right.reference))
+  if (JSON.stringify(component_signature(primary)) !== JSON.stringify(component_signature(independent))) {
+    errors.push("typical-application component references or values disagree")
+  }
+  const connection_signature = (plan: TypicalApplicationPlan) =>
+    plan.connections
+      .map((connection) => ({
+        net: normalizedText(connection.net),
+        pins: connection.pins.map(normalizedText).sort(),
+      }))
+      .sort((left, right) => left.net.localeCompare(right.net))
+  if (JSON.stringify(connection_signature(primary)) !== JSON.stringify(connection_signature(independent))) {
+    errors.push("typical-application net names or endpoints disagree")
+  }
+  return errors
+}
+
+export function getForbiddenDatasheetAccesses(events: TrustedAgentEvent[]): string[] {
+  const blocked = /(?:^|["'/\\])datasheet\.(?:pdf|txt)\b|\b(?:pdftotext|pdfinfo|pdftoppm|mutool|qpdf)\b/i
+  return events.flatMap((event) => {
+    if (event.type !== "tool_start") return []
+    const args = stringifyForLog(event.args)
+    return blocked.test(args) ? [`${event.tool_name} ${args}`] : []
+  })
+}
+
+function assertNoDatasheetAccess(events: TrustedAgentEvent[], phase: string): void {
+  const accesses = getForbiddenDatasheetAccesses(events)
+  if (accesses.length > 0) {
+    throw new Error(
+      `${phase} accessed locked datasheet inputs after evidence approval: ${accesses.join("; ")}`,
+    )
   }
 }
 
@@ -635,62 +785,71 @@ async function extractIndependentComponentEvidence(input: {
   signal: AbortSignal
   append: StreamProcessInput["on_chunk"]
 }): Promise<{
+  component_evidence: ComponentEvidence
   application_plan: TypicalApplicationPlan
-  application_text: string
   footprint_plan: FootprintPlan
-  footprint_text: string
 }> {
   const verification_dir = await mkdtemp(join(tmpdir(), "datasheet-component-evidence-"))
   try {
-    await Promise.all([
-      cp(join(input.job_dir, "datasheet.pdf"), join(verification_dir, "datasheet.pdf")),
-      cp(join(input.job_dir, "index.circuit.tsx"), join(verification_dir, "component.circuit.tsx")),
-    ])
+    await cp(join(input.job_dir, "datasheet.pdf"), join(verification_dir, "datasheet.pdf"))
     const events = await runStructuredAgentPhase({
       context: input.context,
       prompt: buildTypicalApplicationEvidenceVerificationPrompt(),
       cwd: verification_dir,
       signal: input.signal,
       append: input.append,
+      event_log_file: join(input.job_dir, "agent-events.jsonl"),
+      event_phase: "independent_evidence",
     })
-    try {
-      await validateAgentImageReads({
-        job_dir: verification_dir,
-        events,
-        expected_images: ["visual-reference/land-pattern.png", "visual-reference/typical-application.png"],
-      })
-    } catch (error) {
-      if (!(error instanceof VisualInspectionInconclusiveError)) throw error
-      await input.append(
-        "system",
-        "Independent reference pixel inspection was inconclusive; continuing with structured evidence and server validation.\n",
-      )
-    }
-    const [application_raw_text, footprint_raw_text] = await Promise.all([
+    const [component_evidence_raw_text, application_raw_text, footprint_raw_text] = await Promise.all([
+      readFile(join(verification_dir, "component-evidence.json"), "utf8"),
       readFile(join(verification_dir, "typical-application-plan.json"), "utf8"),
       readFile(join(verification_dir, "footprint-plan.json"), "utf8"),
     ])
+    const component_evidence = parseComponentEvidence(JSON.parse(component_evidence_raw_text) as unknown)
     const application_plan = parseTypicalApplicationPlan(JSON.parse(application_raw_text) as unknown)
     const footprint_plan = parseFootprintPlan(JSON.parse(footprint_raw_text) as unknown)
-    if (JSON.parse(application_raw_text).version !== 2) {
-      throw new Error("Independent typical-application evidence must use plan schema version 2")
-    }
+    await validateAgentImageReads({
+      job_dir: verification_dir,
+      events,
+      expected_images: [
+        "visual-reference/land-pattern.png",
+        ...(application_plan.availability === "documented"
+          ? ["visual-reference/typical-application.png"]
+          : []),
+      ],
+    })
     await mkdir(join(input.job_dir, "visual-reference"), { recursive: true })
     await Promise.all([
-      cp(
-        join(verification_dir, "visual-reference", "typical-application.png"),
-        join(input.job_dir, "visual-reference", "typical-application.png"),
-      ),
+      ...(application_plan.availability === "documented"
+        ? [
+            cp(
+              join(verification_dir, "visual-reference", "typical-application.png"),
+              join(input.job_dir, "visual-reference", "typical-application.independent.png"),
+            ),
+          ]
+        : []),
       cp(
         join(verification_dir, "visual-reference", "land-pattern.png"),
-        join(input.job_dir, "visual-reference", "land-pattern.png"),
+        join(input.job_dir, "visual-reference", "land-pattern.independent.png"),
+      ),
+      Bun.write(
+        join(input.job_dir, "component-evidence.independent.json"),
+        `${JSON.stringify(component_evidence, null, 2)}\n`,
+      ),
+      Bun.write(
+        join(input.job_dir, "footprint-plan.independent.json"),
+        `${JSON.stringify(footprint_plan, null, 2)}\n`,
+      ),
+      Bun.write(
+        join(input.job_dir, "typical-application-plan.independent.json"),
+        `${JSON.stringify(application_plan, null, 2)}\n`,
       ),
     ])
     return {
+      component_evidence,
       application_plan,
-      application_text: `${JSON.stringify(application_plan, null, 2)}\n`,
       footprint_plan,
-      footprint_text: `${JSON.stringify(footprint_plan, null, 2)}\n`,
     }
   } finally {
     await rm(verification_dir, { recursive: true, force: true })
@@ -699,6 +858,54 @@ async function extractIndependentComponentEvidence(input: {
 
 function importsGeneratedComponent(source: string): boolean {
   return /\bfrom\s*["']\.\/index\.circuit(?:\.tsx)?["']/.test(source)
+}
+
+async function restoreProtectedBytes(path: string, expected: Buffer | undefined): Promise<boolean> {
+  const current = await readFile(path).catch(() => undefined)
+  const unchanged =
+    current === undefined ? expected === undefined : expected !== undefined && current.equals(expected)
+  if (unchanged) return false
+  if (expected === undefined) await rm(path, { force: true })
+  else await Bun.write(path, expected)
+  return true
+}
+
+function sha256(value: string | Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex")
+}
+
+async function readInstalledPackageVersion(package_name: string): Promise<string> {
+  const package_path = resolve(import.meta.dir, "../..", "node_modules", package_name, "package.json")
+  const value: unknown = JSON.parse(await readFile(package_path, "utf8"))
+  return isRecord(value) && typeof value.version === "string" ? value.version : "unknown"
+}
+
+async function collectJobProvenance(input: {
+  job_dir: string
+  additional_instructions?: string
+}): Promise<import("@/shared/job-types").JobProvenance> {
+  const [datasheet, dependency_lock, tsci_agent_version, tscircuit_version] = await Promise.all([
+    readFile(join(input.job_dir, "datasheet.pdf")),
+    readFile(resolve(import.meta.dir, "../..", "bun.lock")).catch(() => undefined),
+    readInstalledPackageVersion("tsci-agent").catch(() => "unknown"),
+    getPinnedTscircuitVersion(),
+  ])
+  return {
+    source_commit: process.env.SOURCE_COMMIT ?? process.env.GIT_COMMIT ?? "unavailable",
+    bun_version: Bun.version,
+    tscircuit_version,
+    tsci_agent_version,
+    agent_model: process.env.TSCI_AGENT_MODEL ?? "agent-default",
+    agent_settings: process.env.TSCI_AGENT_SETTINGS ?? "agent-default",
+    datasheet_sha256: sha256(datasheet),
+    ...(dependency_lock ? { dependency_lock_sha256: sha256(dependency_lock) } : {}),
+    prompt_sha256: {
+      primary_evidence: sha256(buildAgentPrompt(input.additional_instructions)),
+      independent_evidence: sha256(buildTypicalApplicationEvidenceVerificationPrompt()),
+      component_generation: sha256(buildComponentPrompt(input.additional_instructions)),
+      typical_application: sha256(buildTypicalApplicationPrompt(input.additional_instructions)),
+    },
+  }
 }
 
 export async function runJob(
@@ -713,24 +920,188 @@ export async function runJob(
   const append = async (stream: JobLogStream, message: string): Promise<void> => {
     await context.job_store.appendLog(input.job_id, stream, message)
   }
+  let validation: JobValidation = {
+    evidence: "pending",
+    component_build: "pending",
+    component_drc: "pending",
+    footprint: "pending",
+    pinout: "pending",
+    component_schematic: "pending",
+    component_visual: "pending",
+    application_build: "pending",
+    application_connectivity: "pending",
+    application_schematic: "pending",
+    application_visual: "pending",
+  }
+  const updateValidation = (update: Partial<typeof validation>): void => {
+    validation = { ...validation, ...update }
+    context.job_store.updateJob(input.job_id, { validation })
+  }
+  let active_validation_phase: "evidence" | "component_generation" | "application_generation" = "evidence"
 
   try {
     throwIfCancelled(cancellation_signal)
-    context.job_store.updateJob(input.job_id, { display_status: "agent_running" })
+    const provenance = await collectJobProvenance({
+      job_dir,
+      additional_instructions: input.additional_instructions,
+    })
+    context.job_store.updateJob(input.job_id, {
+      display_status: "agent_running",
+      validation,
+      provenance,
+    })
     await append(
       "system",
-      "Starting component and typical-application evidence phase; streaming its complete process output…\n",
+      "Starting the evidence-only extraction phase; no circuit code will be generated until the evidence agrees…\n",
     )
 
-    const component_events = await runStructuredAgentPhase({
+    const component_path = join(job_dir, "index.circuit.tsx")
+    const starter_component_code = await readFile(component_path, "utf8").catch(() => undefined)
+    const evidence_events = await runStructuredAgentPhase({
       context,
       prompt: buildAgentPrompt(input.additional_instructions),
       cwd: job_dir,
       signal: cancellation_signal,
       append,
+      event_log_file: join(job_dir, "agent-events.jsonl"),
+      event_phase: "primary_evidence",
     })
     throwIfCancelled(cancellation_signal)
+    const component_after_evidence = await readFile(component_path, "utf8").catch(() => undefined)
+    if (component_after_evidence !== starter_component_code) {
+      if (starter_component_code === undefined) await rm(component_path, { force: true })
+      else await Bun.write(component_path, starter_component_code)
+      throw new Error("The evidence phase modified index.circuit.tsx before evidence approval")
+    }
+    if (await Bun.file(join(job_dir, "typical-application.circuit.tsx")).exists()) {
+      throw new Error("The evidence phase created circuit TSX before evidence approval")
+    }
+    const component_evidence_path = join(job_dir, "component-evidence.json")
+    const component_schematic_plan_path = join(job_dir, "component-schematic-plan.json")
+    const typical_application_plan_path = join(job_dir, "typical-application-plan.json")
+    const footprint_plan_path = join(job_dir, "footprint-plan.json")
+    const component_evidence_text = await readFile(component_evidence_path, "utf8")
+    const component_evidence = parseComponentEvidence(JSON.parse(component_evidence_text) as unknown)
+    const typical_application_plan_text = await readFile(typical_application_plan_path, "utf8")
+    const typical_application_plan = parseTypicalApplicationPlan(
+      JSON.parse(typical_application_plan_text) as unknown,
+    )
+    await validateAgentImageReads({
+      job_dir,
+      events: evidence_events,
+      expected_images: [
+        "visual-reference/land-pattern.png",
+        ...(typical_application_plan.availability === "documented"
+          ? ["visual-reference/typical-application.png"]
+          : []),
+      ],
+    })
+    const land_pattern_reference_path = join(job_dir, "visual-reference/land-pattern.png")
+    const application_reference_path = join(job_dir, "visual-reference/typical-application.png")
+    const [land_pattern_reference, application_reference] = await Promise.all([
+      readFile(land_pattern_reference_path),
+      readFile(application_reference_path).catch(() => undefined),
+    ])
+    const footprint_plan_text = await readFile(footprint_plan_path, "utf8")
+    const footprint_plan = parseFootprintPlan(JSON.parse(footprint_plan_text) as unknown)
+    const primary_evidence_errors = [
+      ...getComponentEvidenceBlockingReasons(component_evidence),
+      ...getFootprintEvidenceErrors(component_evidence, footprint_plan),
+    ]
+    if (primary_evidence_errors.length > 0) {
+      updateValidation({ evidence: "human_review_required" })
+      throw new Error(`Primary datasheet evidence requires review: ${primary_evidence_errors.join("; ")}`)
+    }
 
+    throwIfCancelled(cancellation_signal)
+    await append(
+      "system",
+      "\nRunning an independent extraction pass; critical evidence must agree before code generation…\n",
+    )
+    const independently_verified = await extractIndependentComponentEvidence({
+      context,
+      job_dir,
+      signal: cancellation_signal,
+      append,
+    })
+    const agreement_errors = [
+      ...getComponentEvidenceBlockingReasons(independently_verified.component_evidence),
+      ...getFootprintEvidenceErrors(
+        independently_verified.component_evidence,
+        independently_verified.footprint_plan,
+      ),
+      ...getIndependentComponentEvidenceErrors(component_evidence, independently_verified.component_evidence),
+      ...getTypicalApplicationPlanAgreementErrors(
+        typical_application_plan,
+        independently_verified.application_plan,
+      ),
+    ]
+    if (agreement_errors.length > 0) {
+      updateValidation({ evidence: "human_review_required" })
+      throw new Error(`Independent datasheet evidence disagrees: ${agreement_errors.join("; ")}`)
+    }
+    const component_schematic_plan = createComponentSchematicPlan(component_evidence)
+    const component_schematic_plan_text = `${JSON.stringify(component_schematic_plan, null, 2)}\n`
+    await Bun.write(component_schematic_plan_path, component_schematic_plan_text)
+    updateValidation({ evidence: "passed" })
+    await append(
+      "system",
+      "Evidence approved. The primary evidence is locked; the independent artifacts are retained for audit.\n",
+    )
+
+    throwIfCancelled(cancellation_signal)
+    active_validation_phase = "component_generation"
+    await append("system", "\nGenerating the component from approved evidence only…\n")
+    let evidence_files_modified = false
+    let component_events: TrustedAgentEvent[] = []
+    try {
+      component_events = await runStructuredAgentPhase({
+        context,
+        prompt: buildComponentPrompt(input.additional_instructions),
+        cwd: job_dir,
+        signal: cancellation_signal,
+        append,
+        event_log_file: join(job_dir, "agent-events.jsonl"),
+        event_phase: "component_generation",
+      })
+    } finally {
+      const [
+        current_evidence,
+        current_schematic_plan,
+        current_footprint,
+        current_application_plan,
+        land_reference_modified,
+        application_reference_modified,
+      ] = await Promise.all([
+        readFile(component_evidence_path, "utf8").catch(() => undefined),
+        readFile(component_schematic_plan_path, "utf8").catch(() => undefined),
+        readFile(footprint_plan_path, "utf8").catch(() => undefined),
+        readFile(typical_application_plan_path, "utf8").catch(() => undefined),
+        restoreProtectedBytes(land_pattern_reference_path, land_pattern_reference),
+        restoreProtectedBytes(application_reference_path, application_reference),
+      ])
+      if (land_reference_modified || application_reference_modified) evidence_files_modified = true
+      if (current_evidence !== component_evidence_text) {
+        evidence_files_modified = true
+        await Bun.write(component_evidence_path, component_evidence_text)
+      }
+      if (current_schematic_plan !== component_schematic_plan_text) {
+        evidence_files_modified = true
+        await Bun.write(component_schematic_plan_path, component_schematic_plan_text)
+      }
+      if (current_footprint !== footprint_plan_text) {
+        evidence_files_modified = true
+        await Bun.write(footprint_plan_path, footprint_plan_text)
+      }
+      if (current_application_plan !== typical_application_plan_text) {
+        evidence_files_modified = true
+        await Bun.write(typical_application_plan_path, typical_application_plan_text)
+      }
+    }
+    if (evidence_files_modified) {
+      throw new Error("The component generation phase modified locked evidence; the server restored it")
+    }
+    assertNoDatasheetAccess(component_events, "Component generation")
     const component_visual_inspection = await validateVisualInspection({
       job_dir,
       events: component_events,
@@ -742,63 +1113,18 @@ export async function runJob(
         schematic: "dist/index/schematic.png",
       },
     })
-    if (component_visual_inspection.status === "inconclusive") {
-      await append(
-        "system",
-        "Component pixel inspection was inconclusive; continuing with the server-owned build and DRC validation.\n",
-      )
+    if (component_visual_inspection.status !== "passed") {
+      updateValidation({ component_visual: "inconclusive" })
+      throw new Error("Component visual inspection is inconclusive and requires review")
     }
-
-    const component_path = join(job_dir, "index.circuit.tsx")
+    updateValidation({ component_visual: "passed" })
     const component_code = await readFile(component_path, "utf8")
     if (!component_code.includes("export default")) {
       throw new Error("The agent did not create a default-exported TSX component")
     }
-    if (await Bun.file(join(job_dir, "typical-application.circuit.tsx")).exists()) {
-      throw new Error(
-        "The agent created typical-application.circuit.tsx before the component-ready milestone",
-      )
-    }
-    const typical_application_plan_path = join(job_dir, "typical-application-plan.json")
-    const footprint_plan_path = join(job_dir, "footprint-plan.json")
-    let typical_application_plan_text = await readFile(typical_application_plan_path, "utf8")
-    let typical_application_plan = parseTypicalApplicationPlan(
-      JSON.parse(typical_application_plan_text) as unknown,
-    )
-    let footprint_plan_text = await readFile(footprint_plan_path, "utf8")
-    let footprint_plan = parseFootprintPlan(JSON.parse(footprint_plan_text) as unknown)
 
-    throwIfCancelled(cancellation_signal)
-    await append(
-      "system",
-      "\nIndependently extracting the datasheet land pattern and typical-application netlist before component validation…\n",
-    )
-    const independently_verified = await extractIndependentComponentEvidence({
-      context,
-      job_dir,
-      signal: cancellation_signal,
-      append,
-    })
-    await Promise.all([
-      Bun.write(join(job_dir, "typical-application-plan.draft.json"), typical_application_plan_text),
-      Bun.write(join(job_dir, "footprint-plan.draft.json"), footprint_plan_text),
-    ])
-    typical_application_plan = independently_verified.application_plan
-    typical_application_plan_text = independently_verified.application_text
-    footprint_plan = independently_verified.footprint_plan
-    footprint_plan_text = independently_verified.footprint_text
-    await Promise.all([
-      Bun.write(typical_application_plan_path, typical_application_plan_text),
-      Bun.write(footprint_plan_path, footprint_plan_text),
-    ])
-    await append(
-      "system",
-      "Independent datasheet evidence is now authoritative for footprint dimensions and application connectivity.\n",
-    )
-
-    throwIfCancelled(cancellation_signal)
     context.job_store.updateJob(input.job_id, { display_status: "building" })
-    await append("system", "\nComponent phase finished. Building the generated component with tsci…\n")
+    await append("system", "\nBuilding the generated component with tsci…\n")
     const component_build = await buildCircuitArtifact({
       source_file: "index.circuit.tsx",
       output_stem: "index",
@@ -809,6 +1135,7 @@ export async function runJob(
       render_outputs: true,
     })
     if (component_build.errors.length > 0) {
+      updateValidation({ component_build: "failed" })
       context.job_store.updateJob(input.job_id, {
         component_code,
         circuit_json: component_build.circuit_json,
@@ -817,9 +1144,11 @@ export async function runJob(
         `Generated component failed clean build validation: ${component_build.errors.join("; ")}`,
       )
     }
+    updateValidation({ component_build: "passed" })
     const component_circuit_json = component_build.circuit_json
     const footprint_errors = getFootprintPlanErrors(footprint_plan, component_circuit_json)
     if (footprint_errors.length > 0) {
+      updateValidation({ footprint: "failed" })
       context.job_store.updateJob(input.job_id, {
         component_code,
         circuit_json: component_circuit_json,
@@ -828,6 +1157,34 @@ export async function runJob(
         `Generated component failed datasheet footprint validation: ${footprint_errors.join("; ")}`,
       )
     }
+    updateValidation({ footprint: "passed" })
+    const pinout_errors = getPinoutEvidenceErrors(component_evidence, component_circuit_json)
+    if (pinout_errors.length > 0) {
+      updateValidation({ pinout: "failed" })
+      context.job_store.updateJob(input.job_id, {
+        component_code,
+        circuit_json: component_circuit_json,
+      })
+      throw new Error(
+        `Generated component failed datasheet pin-table validation: ${pinout_errors.join("; ")}`,
+      )
+    }
+    updateValidation({ pinout: "passed" })
+    const component_schematic_errors = getComponentSchematicPlanErrors(
+      component_schematic_plan,
+      component_circuit_json,
+    )
+    if (component_schematic_errors.length > 0) {
+      updateValidation({ component_schematic: "failed" })
+      context.job_store.updateJob(input.job_id, {
+        component_code,
+        circuit_json: component_circuit_json,
+      })
+      throw new Error(
+        `Generated component failed deterministic schematic validation: ${component_schematic_errors.join("; ")}`,
+      )
+    }
+    updateValidation({ component_schematic: "passed" })
     await append(
       "system",
       "Validating the reusable component on a server-owned board with tsci placement DRC…\n",
@@ -839,6 +1196,7 @@ export async function runJob(
       append,
     })
     if (component_validation_build.errors.length > 0) {
+      updateValidation({ component_drc: "failed" })
       context.job_store.updateJob(input.job_id, {
         component_code,
         circuit_json: component_circuit_json,
@@ -849,6 +1207,7 @@ export async function runJob(
         )}`,
       )
     }
+    updateValidation({ component_drc: "passed" })
     const component_snapshot_path = join(job_dir, "component.circuit.tsx")
     await Bun.write(component_snapshot_path, component_code)
 
@@ -865,7 +1224,29 @@ export async function runJob(
       circuit_json: component_circuit_json,
     })
 
+    if (typical_application_plan.availability === "not_present") {
+      updateValidation({
+        application_build: "not_applicable",
+        application_connectivity: "not_applicable",
+        application_schematic: "not_applicable",
+        application_visual: "not_applicable",
+      })
+      await append(
+        "system",
+        "No datasheet typical application was found by either evidence pass. Completing with the validated component only.\n",
+      )
+      context.job_store.updateJob(input.job_id, {
+        display_status: "complete",
+        is_complete: true,
+        has_errors: false,
+        completed_at: new Date().toISOString(),
+        component_ready: true,
+      })
+      return
+    }
+
     throwIfCancelled(cancellation_signal)
+    active_validation_phase = "application_generation"
     await append("system", "\nStarting the typical-application phase after the component-ready milestone…\n")
     let protected_files_modified = false
     let application_events: TrustedAgentEvent[] = []
@@ -876,15 +1257,30 @@ export async function runJob(
         cwd: job_dir,
         signal: cancellation_signal,
         append,
+        event_log_file: join(job_dir, "agent-events.jsonl"),
+        event_phase: "typical_application_generation",
       })
     } finally {
-      const [current_component_code, current_component_snapshot, current_plan_text, current_footprint_text] =
-        await Promise.all([
-          readFile(component_path, "utf8").catch(() => undefined),
-          readFile(component_snapshot_path, "utf8").catch(() => undefined),
-          readFile(typical_application_plan_path, "utf8").catch(() => undefined),
-          readFile(footprint_plan_path, "utf8").catch(() => undefined),
-        ])
+      const [
+        current_component_code,
+        current_component_snapshot,
+        current_evidence_text,
+        current_schematic_plan_text,
+        current_plan_text,
+        current_footprint_text,
+        land_reference_modified,
+        application_reference_modified,
+      ] = await Promise.all([
+        readFile(component_path, "utf8").catch(() => undefined),
+        readFile(component_snapshot_path, "utf8").catch(() => undefined),
+        readFile(component_evidence_path, "utf8").catch(() => undefined),
+        readFile(component_schematic_plan_path, "utf8").catch(() => undefined),
+        readFile(typical_application_plan_path, "utf8").catch(() => undefined),
+        readFile(footprint_plan_path, "utf8").catch(() => undefined),
+        restoreProtectedBytes(land_pattern_reference_path, land_pattern_reference),
+        restoreProtectedBytes(application_reference_path, application_reference),
+      ])
+      if (land_reference_modified || application_reference_modified) protected_files_modified = true
       if (current_component_code !== component_code) {
         const server_published_component = context.job_store.getJob(input.job_id)?.component_code
         if (current_component_code !== server_published_component) protected_files_modified = true
@@ -893,6 +1289,14 @@ export async function runJob(
       if (current_component_snapshot !== component_code) {
         protected_files_modified = true
         await Bun.write(component_snapshot_path, component_code)
+      }
+      if (current_evidence_text !== component_evidence_text) {
+        protected_files_modified = true
+        await Bun.write(component_evidence_path, component_evidence_text)
+      }
+      if (current_schematic_plan_text !== component_schematic_plan_text) {
+        protected_files_modified = true
+        await Bun.write(component_schematic_plan_path, component_schematic_plan_text)
       }
       if (current_plan_text !== typical_application_plan_text) {
         protected_files_modified = true
@@ -909,6 +1313,26 @@ export async function runJob(
       )
     }
     throwIfCancelled(cancellation_signal)
+    assertNoDatasheetAccess(application_events, "Typical-application generation")
+
+    const typical_application_path = join(job_dir, "typical-application.circuit.tsx")
+    const typical_application_code = await readFile(typical_application_path, "utf8")
+    if (
+      !typical_application_code.includes("export default") ||
+      !importsGeneratedComponent(typical_application_code)
+    ) {
+      throw new Error(
+        "The agent did not create a default-exported typical application importing ./index.circuit",
+      )
+    }
+    const source_schematic_errors = getTypicalApplicationSourceErrors(typical_application_code)
+    if (source_schematic_errors.length > 0) {
+      updateValidation({ application_schematic: "failed" })
+      context.job_store.updateJob(input.job_id, { typical_application_code })
+      throw new Error(
+        `Typical application failed schematic source validation: ${source_schematic_errors.join("; ")}`,
+      )
+    }
 
     const application_visual_inspection = await validateVisualInspection({
       job_dir,
@@ -921,23 +1345,11 @@ export async function runJob(
         schematic: "dist/typical-application/schematic.png",
       },
     })
-    if (application_visual_inspection.status === "inconclusive") {
-      await append(
-        "system",
-        "Application pixel inspection was inconclusive; continuing with the server-owned build and connectivity validation.\n",
-      )
+    if (application_visual_inspection.status !== "passed") {
+      updateValidation({ application_visual: "inconclusive" })
+      throw new Error("Typical-application visual inspection is inconclusive and requires review")
     }
-
-    const typical_application_path = join(job_dir, "typical-application.circuit.tsx")
-    const typical_application_code = await readFile(typical_application_path, "utf8")
-    if (
-      !typical_application_code.includes("export default") ||
-      !importsGeneratedComponent(typical_application_code)
-    ) {
-      throw new Error(
-        "The agent did not create a default-exported typical application importing ./index.circuit",
-      )
-    }
+    updateValidation({ application_visual: "passed" })
 
     context.job_store.updateJob(input.job_id, { display_status: "building" })
     await append("system", "\nBuilding the typical application with tsci…\n")
@@ -951,6 +1363,7 @@ export async function runJob(
       render_outputs: true,
     })
     if (typical_application_build.errors.length > 0) {
+      updateValidation({ application_build: "failed" })
       context.job_store.updateJob(input.job_id, {
         typical_application_code,
         typical_application_circuit_json: typical_application_build.circuit_json,
@@ -959,7 +1372,20 @@ export async function runJob(
         `Typical application failed clean build validation: ${typical_application_build.errors.join("; ")}`,
       )
     }
+    updateValidation({ application_build: "passed" })
     const typical_application_circuit_json = typical_application_build.circuit_json
+    const application_schematic_errors = getApplicationSchematicErrors(typical_application_circuit_json)
+    if (application_schematic_errors.length > 0) {
+      updateValidation({ application_schematic: "failed" })
+      context.job_store.updateJob(input.job_id, {
+        typical_application_code,
+        typical_application_circuit_json,
+      })
+      throw new Error(
+        `Typical application failed schematic layout validation: ${application_schematic_errors.join("; ")}`,
+      )
+    }
+    updateValidation({ application_schematic: "passed" })
     const connectivity_errors = [
       ...getTypicalApplicationConnectivityErrors(typical_application_plan, typical_application_circuit_json),
       ...getTypicalApplicationComponentValueErrors(
@@ -968,6 +1394,7 @@ export async function runJob(
       ),
     ]
     if (connectivity_errors.length > 0) {
+      updateValidation({ application_connectivity: "failed" })
       context.job_store.updateJob(input.job_id, {
         typical_application_code,
         typical_application_circuit_json,
@@ -976,6 +1403,7 @@ export async function runJob(
         `Typical application failed datasheet netlist validation: ${connectivity_errors.join("; ")}`,
       )
     }
+    updateValidation({ application_connectivity: "passed" })
     const latest_component_job = context.job_store.getJob(input.job_id)
     const published_component_code = latest_component_job?.component_code ?? component_code
     if (published_component_code !== component_code) {
@@ -1010,6 +1438,22 @@ export async function runJob(
       return
     }
     const error_message = error instanceof Error ? error.message : String(error)
+    const failed_status = error instanceof VisualInspectionInconclusiveError ? "inconclusive" : "failed"
+    if (active_validation_phase === "evidence" && validation.evidence === "pending") {
+      updateValidation({ evidence: failed_status })
+    } else if (
+      active_validation_phase === "component_generation" &&
+      validation.component_visual === "pending" &&
+      validation.component_build === "pending"
+    ) {
+      updateValidation({ component_visual: failed_status })
+    } else if (
+      active_validation_phase === "application_generation" &&
+      validation.application_visual === "pending" &&
+      validation.application_build === "pending"
+    ) {
+      updateValidation({ application_visual: failed_status })
+    }
     await append("system", `\nConversion failed: ${error_message}\n`).catch(() => undefined)
     context.job_store.updateJob(input.job_id, {
       display_status: "failed",

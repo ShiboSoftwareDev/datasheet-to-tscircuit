@@ -13,8 +13,56 @@ export interface ApplicationConnectivityPlan {
   connections: ExpectedApplicationConnection[]
 }
 
+export function getTypicalApplicationSourceErrors(source: string): string[] {
+  const errors: string[] = []
+  if (/<\s*netlabel\b/i.test(source)) {
+    errors.push("Typical application source must not instantiate <netlabel> elements")
+  }
+  return errors
+}
+
+export function getApplicationSchematicErrors(circuit_json: AnyCircuitElement[]): string[] {
+  const records = circuit_json.map((element) => element as CircuitRecord)
+  const errors: string[] = []
+  const component_count = records.filter((record) => record.type === "schematic_component").length
+  const maximum_edge_length = Math.max(6, 2.5 * Math.sqrt(Math.max(component_count, 1)))
+  for (const [trace_index, trace] of records
+    .filter((record) => record.type === "schematic_trace")
+    .entries()) {
+    if (!Array.isArray(trace.edges)) continue
+    for (const [edge_index, edge] of trace.edges.entries()) {
+      if (typeof edge !== "object" || edge === null) continue
+      const edge_record = edge as Record<string, unknown>
+      if (
+        typeof edge_record.from !== "object" ||
+        edge_record.from === null ||
+        typeof edge_record.to !== "object" ||
+        edge_record.to === null
+      ) {
+        continue
+      }
+      const from = edge_record.from as Record<string, unknown>
+      const to = edge_record.to as Record<string, unknown>
+      const from_x = finiteNumber(from.x)
+      const from_y = finiteNumber(from.y)
+      const to_x = finiteNumber(to.x)
+      const to_y = finiteNumber(to.y)
+      if (from_x === undefined || from_y === undefined || to_x === undefined || to_y === undefined) {
+        continue
+      }
+      const length = Math.hypot(to_x - from_x, to_y - from_y)
+      if (length > maximum_edge_length) {
+        errors.push(
+          `Application schematic trace ${trace_index + 1} edge ${edge_index + 1} is ${length.toFixed(2)} units long; compact-layout limit is ${maximum_edge_length.toFixed(2)} for ${component_count} components`,
+        )
+      }
+    }
+  }
+  return errors
+}
+
 export interface ExpectedFootprintPad {
-  pin: string
+  pin: string | null
   kind: "smt" | "plated_hole"
   x: number
   y: number
@@ -70,7 +118,6 @@ function getActualFootprintPads(circuit_json: AnyCircuitElement[]): ActualFootpr
     const record = asRecord(element)
     if (record.type !== "pcb_smtpad" && record.type !== "pcb_plated_hole") return []
     const hints = asStringArray(record.port_hints)
-    if (hints.length === 0) return []
     const x = finiteNumber(record.x)
     const y = finiteNumber(record.y)
     if (x === undefined || y === undefined) return []
@@ -140,11 +187,17 @@ export function getFootprintPlanErrors(
   for (const expected of plan.pads) {
     const candidate_indices = [...unmatched].filter(
       (index) =>
-        actual_pads[index]!.pins.includes(normalizedPin(expected.pin)) &&
+        (expected.pin === null
+          ? actual_pads[index]!.pins.length === 0
+          : actual_pads[index]!.pins.includes(normalizedPin(expected.pin))) &&
         actual_pads[index]!.kind === expected.kind,
     )
     if (candidate_indices.length === 0) {
-      errors.push(`Expected ${expected.kind} pad for pin ${expected.pin} is missing`)
+      errors.push(
+        expected.pin === null
+          ? `Expected unassigned ${expected.kind} mechanical pad is missing`
+          : `Expected ${expected.kind} pad for pin ${expected.pin} is missing`,
+      )
       continue
     }
     candidate_indices.sort((left, right) => {
@@ -187,11 +240,19 @@ export function getFootprintPlanErrors(
         }
       }
     }
-    if (mismatches.length > 0) errors.push(`Pin ${expected.pin}: ${mismatches.join(", ")}`)
+    if (mismatches.length > 0) {
+      errors.push(
+        `${expected.pin === null ? "Unassigned mechanical pad" : `Pin ${expected.pin}`}: ${mismatches.join(", ")}`,
+      )
+    }
   }
   for (const index of unmatched) {
     const pad = actual_pads[index]!
-    errors.push(`Unexpected ${pad.kind} pad for pin ${pad.pins.join("/")} at (${pad.x}, ${pad.y}) mm`)
+    errors.push(
+      pad.pins.length === 0
+        ? `Unexpected unassigned ${pad.kind} mechanical pad at (${pad.x}, ${pad.y}) mm`
+        : `Unexpected ${pad.kind} pad for pin ${pad.pins.join("/")} at (${pad.x}, ${pad.y}) mm`,
+    )
   }
   return errors
 }
