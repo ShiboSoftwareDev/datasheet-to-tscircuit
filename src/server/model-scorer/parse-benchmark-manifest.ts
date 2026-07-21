@@ -17,6 +17,7 @@ export interface BenchmarkDefinition {
   source: {
     page: number
     figure?: string
+    image?: string
   }
   critical: boolean
   weight: number
@@ -85,6 +86,11 @@ export function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(entry.id as string)) {
       throw new Error(`Benchmark ${index + 1} has an invalid id`)
     }
+    const source_image = source.image
+    const expected_source_image = `evidence/figures/${String(entry.id)}.png`
+    if (source_image !== undefined && source_image !== expected_source_image) {
+      throw new Error(`Benchmark ${String(entry.id)} source.image must be ${expected_source_image}`)
+    }
     const reference_file = entry.reference_file as string
     if (
       !reference_file.startsWith("evidence/") ||
@@ -150,6 +156,7 @@ export function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
       source: {
         page: source.page,
         figure: typeof source.figure === "string" ? source.figure : undefined,
+        image: typeof source_image === "string" ? source_image : undefined,
       },
       critical: entry.critical,
       weight: entry.weight,

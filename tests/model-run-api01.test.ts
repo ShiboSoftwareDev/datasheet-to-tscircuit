@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { JobStore } from "@/server/job-store"
@@ -67,6 +67,100 @@ test("model API starts and extends the same fixed run using time-only effort", a
   expect(retried.model_run.status).toBe("queued")
   expect(retried.model_run.effort_multiplier).toBe(3)
   expect(started_run_ids).toEqual([created.model_run.model_run_id, created.model_run.model_run_id])
+
+  await rm(job_dir, { recursive: true, force: true })
+})
+
+test("model API serves the saved datasheet image for each benchmark", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-reference-api-"))
+  const model_dir = join(job_dir, "spice")
+  const figure_dir = join(model_dir, "evidence", "figures")
+  const crop_dir = join(model_dir, "evidence", "crops")
+  const page_dir = join(model_dir, "evidence", "pages")
+  await Promise.all([
+    mkdir(figure_dir, { recursive: true }),
+    mkdir(crop_dir, { recursive: true }),
+    mkdir(page_dir, { recursive: true }),
+  ])
+
+  const explicit_image = new Uint8Array([137, 80, 78, 71, 1])
+  const figure_image = new Uint8Array([137, 80, 78, 71, 2])
+  const page_image = new Uint8Array([137, 80, 78, 71, 4])
+  await Promise.all([
+    Bun.write(join(figure_dir, "explicit.png"), explicit_image),
+    Bun.write(join(crop_dir, "fig-10-3.png"), figure_image),
+    Bun.write(join(crop_dir, "page-22-r1c1.png"), new Uint8Array([137, 80, 78, 71, 5])),
+    Bun.write(join(crop_dir, "page-22-r1c2.png"), new Uint8Array([137, 80, 78, 71, 6])),
+    Bun.write(join(page_dir, "datasheet-page-22.png"), page_image),
+    Bun.write(join(job_dir, "outside.png"), new Uint8Array([137, 80, 78, 71, 3])),
+    Bun.write(
+      join(model_dir, "benchmarks.json"),
+      JSON.stringify({
+        version: 1,
+        benchmarks: [
+          {
+            id: "explicit",
+            source: {
+              page: 24,
+              figure: "Figure 10-15",
+              image: "evidence/figures/explicit.png",
+            },
+          },
+          { id: "figure-match", source: { page: 18, figure: "Figure 10-3" } },
+          { id: "page-match", source: { page: 22 } },
+          { id: "outside", source: { source_image: "../outside.png" } },
+        ],
+      }),
+    ),
+  ])
+
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  job_store.createJob({ job_id: "job_reference", job_dir, file_name: "sensor.pdf" })
+  model_run_store.createModelRun({
+    model_run_id: "model_reference",
+    job_id: "job_reference",
+    model_dir,
+    effort_multiplier: 1,
+    base_effort_ms: 1_000,
+  })
+  const handle = createModelRunApiHandler({
+    job_store,
+    model_run_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+  })
+
+  const explicit_response = await handle(
+    new Request("http://localhost/api/model-run/reference-image?job_id=job_reference&benchmark_id=explicit"),
+  )
+  expect(explicit_response?.status).toBe(200)
+  expect(explicit_response?.headers.get("Content-Type")).toBe("image/png")
+  expect(explicit_response?.headers.get("Content-Disposition")).toBe(
+    'inline; filename="explicit-datasheet-reference.png"',
+  )
+  expect(new Uint8Array(await explicit_response!.arrayBuffer())).toEqual(explicit_image)
+
+  const figure_response = await handle(
+    new Request(
+      "http://localhost/api/model-run/reference-image?job_id=job_reference&benchmark_id=figure-match",
+    ),
+  )
+  expect(figure_response?.status).toBe(200)
+  expect(new Uint8Array(await figure_response!.arrayBuffer())).toEqual(figure_image)
+
+  const page_response = await handle(
+    new Request(
+      "http://localhost/api/model-run/reference-image?job_id=job_reference&benchmark_id=page-match",
+    ),
+  )
+  expect(page_response?.status).toBe(200)
+  expect(new Uint8Array(await page_response!.arrayBuffer())).toEqual(page_image)
+
+  const outside_response = await handle(
+    new Request("http://localhost/api/model-run/reference-image?job_id=job_reference&benchmark_id=outside"),
+  )
+  expect(outside_response?.status).toBe(404)
 
   await rm(job_dir, { recursive: true, force: true })
 })

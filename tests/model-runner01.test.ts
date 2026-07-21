@@ -86,12 +86,15 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(setup_prompt).toContain("model-progress.json")
   expect(setup_prompt).toContain("time in milliseconds as x")
   expect(setup_prompt).toContain("call the built-in `read` tool on every graph PNG")
+  expect(setup_prompt).toContain("evidence/pages/datasheet-page-<page>.png")
+  expect(setup_prompt).toContain("evidence/figures/<benchmark-id>.png")
   const benchmark_prompt = buildModelBenchmarkPrompt()
   expect(benchmark_prompt).toContain("benchmark-only pass")
   expect(benchmark_prompt).toContain("dut_spice_node")
   expect(benchmark_prompt).toContain('simulation.x_axis \`"time_ms"\`')
   expect(benchmark_prompt).toContain("Do not create or modify model.lib")
   expect(benchmark_prompt).toContain("server-owned stub model")
+  expect(benchmark_prompt).toContain('source.image: "evidence/figures/<benchmark-id>.png"')
   const corrected_benchmark_prompt = buildModelBenchmarkPrompt(
     "Benchmark transfer voltage probe RESULT must connect directly to a DUT port",
   )
@@ -784,19 +787,22 @@ test("model runner validates and publishes the checkpointed champion", async () 
     Bun.write(
       agent_path,
       `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
 const args = process.argv.slice(2)
 const dir = args[args.indexOf("--dir") + 1]
 const prompt = args[args.indexOf("--prompt") + 1]
 if (prompt.includes("untimed evidence")) {
-  await Bun.write(dir + "/benchmark-draft.json", JSON.stringify({ version: 1, benchmarks: [{ id: "transfer", source: { page: 3 } }] }))
+  await mkdir(dir + "/evidence/figures", { recursive: true })
+  await Bun.write(dir + "/evidence/figures/transfer.png", Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (character) => character.charCodeAt(0)))
+  await Bun.write(dir + "/benchmark-draft.json", JSON.stringify({ version: 1, benchmarks: [{ id: "transfer", source: { page: 3, image: "evidence/figures/transfer.png" } }] }))
   await Bun.write(dir + "/model-progress.json", JSON.stringify({ sequence: 2, phase: "digitizing_graphs", message: "Digitized the transfer graph", updated_at: new Date().toISOString(), iteration: 0, evidence: { pages_reviewed: 4, graphs_found: 1, graphs_digitized: 1, benchmark_drafts: 1 } }))
-  await Bun.write(dir + "/setup-complete.json", JSON.stringify({ version: 1, completed_at: new Date().toISOString(), evidence_file_count: 1, draft_benchmark_count: 1 }))
+  await Bun.write(dir + "/setup-complete.json", JSON.stringify({ version: 1, completed_at: new Date().toISOString(), evidence_file_count: 2, draft_benchmark_count: 1 }))
   console.log("setup checkpointed")
   process.exit(0)
 }
 if (prompt.includes("benchmark-only pass")) {
   await Bun.write(dir + "/benchmarks/transfer.circuit.tsx", ${JSON.stringify(lockedBenchmarkSource)})
-  await Bun.write(dir + "/benchmarks.json", JSON.stringify({ version: 1, locked_at: new Date().toISOString(), benchmarks: [{ id: "transfer", title: "Transfer", source: { page: 3 }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/transfer.csv", result_file: "results/champion/transfer.csv", simulation: { kind: "transient_voltage", x_axis: "time_ms", probe_name: "VOUT_PROBE", dut_spice_node: "OUT" } }] }))
+  await Bun.write(dir + "/benchmarks.json", JSON.stringify({ version: 1, locked_at: new Date().toISOString(), benchmarks: [{ id: "transfer", title: "Transfer", source: { page: 3, image: "evidence/figures/transfer.png" }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/transfer.csv", result_file: "results/champion/transfer.csv", simulation: { kind: "transient_voltage", x_axis: "time_ms", probe_name: "VOUT_PROBE", dut_spice_node: "OUT" } }] }))
   await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
   await Bun.write(dir + "/model-progress.json", JSON.stringify({ sequence: 3, phase: "locking_benchmarks", message: "Finalized transfer benchmark", updated_at: new Date().toISOString(), iteration: 0, benchmark: { current: "transfer", completed: 1, total: 1 } }))
   console.log("benchmarks finalized")
@@ -932,6 +938,15 @@ console.log("simulation ok")
     { job_store, model_run_store, agent_bin: agent_path, tsci_bin: tsci_path },
   )
   expect(model_run_store.getModelRun("model_1")?.status).toBe("complete")
+  expect(
+    await Bun.file(join(job_dir, ".model-benchmark-lock", "reference-image-contract.json")).exists(),
+  ).toBe(true)
+  const benchmark_lock = JSON.parse(
+    await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).text(),
+  )
+  expect(
+    benchmark_lock.files.some(({ file }: { file: string }) => file === "evidence/figures/transfer.png"),
+  ).toBe(true)
   const restored_component = await Bun.file(join(model_dir, "component.circuit.tsx")).text()
   expect(restored_component).toContain('<chip name="U1" footprint="soic8" />')
   expect(restored_component).not.toContain('import Component from "./component.circuit"')

@@ -5,8 +5,14 @@ import { join } from "node:path"
 import {
   createOrVerifyBenchmarkLock,
   replaceBenchmarkLockAfterCircuitRepair,
+  validateBenchmarkSuiteForLock,
   verifyBenchmarkLock,
 } from "@/server/model-benchmark-lock"
+
+const referencePng = Uint8Array.from(
+  atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
+  (character) => character.charCodeAt(0),
+)
 
 const benchmarkSource = `import Component from "../component-with-model.circuit"
 
@@ -25,10 +31,12 @@ async function createLockedFixture(model_dir: string): Promise<void> {
   await Promise.all([
     mkdir(join(model_dir, "benchmarks"), { recursive: true }),
     mkdir(join(model_dir, "evidence", "curves"), { recursive: true }),
+    mkdir(join(model_dir, "evidence", "figures"), { recursive: true }),
   ])
   await Promise.all([
     Bun.write(join(model_dir, "benchmarks", "transfer.circuit.tsx"), benchmarkSource),
     Bun.write(join(model_dir, "evidence", "curves", "transfer.csv"), "x,y\n0,0\n1,1\n"),
+    Bun.write(join(model_dir, "evidence", "figures", "transfer.png"), referencePng),
     Bun.write(
       join(model_dir, "benchmarks.json"),
       JSON.stringify({
@@ -38,7 +46,7 @@ async function createLockedFixture(model_dir: string): Promise<void> {
           {
             id: "transfer",
             title: "Transfer",
-            source: { page: 3 },
+            source: { page: 3, image: "evidence/figures/transfer.png" },
             critical: true,
             weight: 1,
             tolerance: 0.05,
@@ -56,6 +64,52 @@ async function createLockedFixture(model_dir: string): Promise<void> {
     ),
   ])
 }
+
+test("new benchmark suites require and lock one exact graph crop per benchmark", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-benchmark-image-lock-"))
+  const model_dir = join(job_dir, "spice")
+  await createLockedFixture(model_dir)
+
+  const manifest = JSON.parse(await Bun.file(join(model_dir, "benchmarks.json")).text())
+  delete manifest.benchmarks[0].source.image
+  await Bun.write(join(model_dir, "benchmarks.json"), JSON.stringify(manifest))
+  await expect(validateBenchmarkSuiteForLock(model_dir, { require_source_images: true })).rejects.toThrow(
+    "must declare source.image",
+  )
+
+  manifest.benchmarks[0].source.image = "evidence/figures/transfer.png"
+  await Bun.write(join(model_dir, "benchmarks.json"), JSON.stringify(manifest))
+  await Bun.write(join(model_dir, "evidence", "figures", "transfer.png"), "not a png")
+  await expect(validateBenchmarkSuiteForLock(model_dir, { require_source_images: true })).rejects.toThrow(
+    "must be a valid PNG graph crop",
+  )
+
+  await Bun.write(join(model_dir, "evidence", "figures", "transfer.png"), referencePng)
+  const lock = await createOrVerifyBenchmarkLock(model_dir)
+  expect(lock.files.some(({ file }) => file === "evidence/figures/transfer.png")).toBe(true)
+  expect(
+    new Uint8Array(
+      await Bun.file(
+        join(
+          job_dir,
+          ".model-benchmark-lock",
+          "snapshots",
+          "generation-0001",
+          "evidence",
+          "figures",
+          "transfer.png",
+        ),
+      ).arrayBuffer(),
+    ),
+  ).toEqual(referencePng)
+
+  const changed_image = referencePng.slice()
+  changed_image[changed_image.length - 1] ^= 1
+  await Bun.write(join(model_dir, "evidence", "figures", "transfer.png"), changed_image)
+  await expect(verifyBenchmarkLock(model_dir)).rejects.toThrow("no longer matches")
+
+  await rm(job_dir, { recursive: true, force: true })
+})
 
 test("server-owned benchmark locks reject tolerance and evidence tampering", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-benchmark-lock-"))

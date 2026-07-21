@@ -5,8 +5,8 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-export function hashText(text: string): string {
-  return createHash("sha256").update(text).digest("hex")
+export function hashContent(content: string | Uint8Array): string {
+  return createHash("sha256").update(content).digest("hex")
 }
 
 export function getLockRoot(model_dir: string): string {
@@ -15,6 +15,10 @@ export function getLockRoot(model_dir: string): string {
 
 export function getLockFile(model_dir: string): string {
   return join(getLockRoot(model_dir), "lock.json")
+}
+
+export function getReferenceImageContractFile(model_dir: string): string {
+  return join(getLockRoot(model_dir), "reference-image-contract.json")
 }
 
 export function resolveWorkspaceFile(model_dir: string, file: string): string {

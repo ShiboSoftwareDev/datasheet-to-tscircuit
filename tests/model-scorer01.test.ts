@@ -166,7 +166,7 @@ test("benchmark manifests accept only complete time-domain waveform definitions"
       {
         id: "bend",
         title: "Transient waveform",
-        source: { page: 2 },
+        source: { page: 2, image: "evidence/figures/bend.png" },
         critical: true,
         weight: 1,
         tolerance: 0.01,
@@ -182,7 +182,14 @@ test("benchmark manifests accept only complete time-domain waveform definitions"
       },
     ],
   }
-  expect(parseBenchmarkManifest(base).benchmarks[0]?.simulation.x_axis).toBe("time_ms")
+  const parsed = parseBenchmarkManifest(base)
+  expect(parsed.benchmarks[0]?.simulation.x_axis).toBe("time_ms")
+  expect(parsed.benchmarks[0]?.source.image).toBe("evidence/figures/bend.png")
+  const invalid_image = structuredClone(base)
+  invalid_image.benchmarks[0]!.source.image = "evidence/figures/another-graph.png"
+  expect(() => parseBenchmarkManifest(invalid_image)).toThrow(
+    "source.image must be evidence/figures/bend.png",
+  )
   const invalid = structuredClone(base)
   invalid.benchmarks[0]!.simulation = {
     kind: "static_curve",

@@ -4,6 +4,7 @@ import {
   type BenchmarkLock,
   createOrVerifyBenchmarkLock,
   hasBenchmarkManifest,
+  hasBenchmarkReferenceImageContract,
   replaceBenchmarkLockAfterCircuitRepair,
   validateBenchmarkSuiteForLock,
 } from "../model-benchmark-lock"
@@ -61,7 +62,10 @@ export async function finalizeAndLockBenchmarks(input: {
       rejection = "The benchmark-finalization agent did not create benchmarks.json"
     } else {
       try {
-        await validateBenchmarkSuiteForLock(input.model_dir)
+        await validateBenchmarkSuiteForLock(input.model_dir, {
+          require_source_images:
+            !input.repair_lock && (await hasBenchmarkReferenceImageContract(input.model_dir)),
+        })
         await validateBenchmarkSources({
           job_dir: input.job_dir,
           model_dir: input.model_dir,

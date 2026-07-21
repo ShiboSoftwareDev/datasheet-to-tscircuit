@@ -1,5 +1,16 @@
 import type { TabId } from "@tscircuit/runframe"
-import { Activity, AlertTriangle, Check, Clipboard, Code2, FlaskConical, LoaderCircle } from "lucide-react"
+import {
+  Activity,
+  AlertTriangle,
+  ChartLine,
+  Check,
+  Clipboard,
+  Code2,
+  FileImage,
+  FlaskConical,
+  ImageOff,
+  LoaderCircle,
+} from "lucide-react"
 import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import type {
   ModelCircuitPreview as ModelCircuitPreviewData,
@@ -8,7 +19,7 @@ import type {
   ModelReferencePreview,
   ModelSelectedPreview,
 } from "@/shared/job-types"
-import { getModelSelectedPreview } from "../api"
+import { getModelReferenceImageUrl, getModelSelectedPreview } from "../api"
 
 const CircuitJsonPreview = lazy(async () => {
   const runframe_module = await import("@tscircuit/runframe")
@@ -198,13 +209,11 @@ export function getComparisonScaleDisparity(
 function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
   if (!preview) {
     return (
-      <section className="model-preview-pane model-reference-card" aria-label="Datasheet reference graph">
-        <div className="model-reference-empty">
-          <FlaskConical size={25} />
-          <strong>Waiting for digitized evidence</strong>
-          <p>The first numeric datasheet curve will appear here while setup is still running.</p>
-        </div>
-      </section>
+      <div className="model-reference-empty">
+        <FlaskConical size={25} />
+        <strong>Waiting for digitized evidence</strong>
+        <p>The first numeric datasheet curve will appear here while setup is still running.</p>
+      </div>
     )
   }
 
@@ -259,78 +268,152 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
         : "Server-verified model"
 
   return (
-    <section className="model-preview-pane model-reference-card" aria-label="Datasheet reference graph">
-      <div className="model-reference-plot">
-        {comparison_is_deprecated && preview.result_points && (
-          <div className="model-comparison-warning" role="status">
-            <AlertTriangle size={13} />
-            <span>
-              <strong>Deprecated comparison</strong>
-              This curve was built from an earlier source; the automatic run will replace it.
-            </span>
-          </div>
-        )}
-        {scale_disparity && (
-          <div className="model-scale-note" role="status">
-            <AlertTriangle size={13} />
-            <span>
-              <strong>Different vertical scales</strong>
-              The Analog Simulation tab auto-scales the model-only waveform. This comparison uses one shared
-              y-axis: reference {formatAxisValue(scale_disparity.reference_min)}–
-              {formatAxisValue(scale_disparity.reference_max)} V, model{" "}
-              {formatAxisValue(scale_disparity.result_min)}–{formatAxisValue(scale_disparity.result_max)} V.
-            </span>
-          </div>
-        )}
-        <div className="reference-graph-content">
-          <svg viewBox="0 0 650 340" role="img" aria-label={`${preview.title} reference curve`}>
-            <g className="reference-grid">
-              {[0, 1, 2, 3, 4].map((tick) => (
-                <line key={`horizontal-${tick}`} x1="38" x2="630" y1={14 + tick * 73} y2={14 + tick * 73} />
-              ))}
-              {[0, 1, 2, 3, 4].map((tick) => (
-                <line key={`vertical-${tick}`} x1={38 + tick * 148} x2={38 + tick * 148} y1="14" y2="306" />
-              ))}
-            </g>
-            <polyline className="reference-line" points={reference_path} />
-            {result_path && (
-              <polyline
-                className={`result-line${comparison_is_unverified ? " result-line-unverified" : ""}${preview.result_status === "partial" ? " result-line-partial" : ""}${comparison_is_deprecated ? " result-line-deprecated" : ""}`}
-                points={result_path}
-              />
-            )}
-            <g className="reference-axis-labels">
-              <text x="38" y="328" textAnchor="start">
-                {formatAxisValue(displayed_x_min)}
-              </text>
-              <text x="630" y="328" textAnchor="end">
-                {formatAxisValue(displayed_x_max)}
-              </text>
-              <text x="30" y="21" textAnchor="end">
-                {formatAxisValue(displayed_y_max)}
-              </text>
-              <text x="30" y="309" textAnchor="end">
-                {formatAxisValue(displayed_y_min)}
-              </text>
-            </g>
-          </svg>
-          <div className="reference-legend">
-            <span className="reference-series">
-              <i /> Datasheet reference
-            </span>
-            {preview.result_points && (
-              <span
-                className={`result-series${comparison_is_unverified ? " unverified" : ""}${comparison_is_deprecated ? " deprecated" : ""}`}
-              >
-                <i />
-                {result_label}
-              </span>
-            )}
-            {!preview.result_points && (
-              <span className="model-result-pending">Model result pending verification</span>
-            )}
-          </div>
+    <div className="model-reference-plot">
+      {comparison_is_deprecated && preview.result_points && (
+        <div className="model-comparison-warning" role="status">
+          <AlertTriangle size={13} />
+          <span>
+            <strong>Deprecated comparison</strong>
+            This curve was built from an earlier source; the automatic run will replace it.
+          </span>
         </div>
+      )}
+      {scale_disparity && (
+        <div className="model-scale-note" role="status">
+          <AlertTriangle size={13} />
+          <span>
+            <strong>Different vertical scales</strong>
+            The Analog Simulation tab auto-scales the model-only waveform. This comparison uses one shared
+            y-axis: reference {formatAxisValue(scale_disparity.reference_min)}–
+            {formatAxisValue(scale_disparity.reference_max)} V, model{" "}
+            {formatAxisValue(scale_disparity.result_min)}–{formatAxisValue(scale_disparity.result_max)} V.
+          </span>
+        </div>
+      )}
+      <div className="reference-graph-content">
+        <svg viewBox="0 0 650 340" role="img" aria-label={`${preview.title} reference curve`}>
+          <g className="reference-grid">
+            {[0, 1, 2, 3, 4].map((tick) => (
+              <line key={`horizontal-${tick}`} x1="38" x2="630" y1={14 + tick * 73} y2={14 + tick * 73} />
+            ))}
+            {[0, 1, 2, 3, 4].map((tick) => (
+              <line key={`vertical-${tick}`} x1={38 + tick * 148} x2={38 + tick * 148} y1="14" y2="306" />
+            ))}
+          </g>
+          <polyline className="reference-line" points={reference_path} />
+          {result_path && (
+            <polyline
+              className={`result-line${comparison_is_unverified ? " result-line-unverified" : ""}${preview.result_status === "partial" ? " result-line-partial" : ""}${comparison_is_deprecated ? " result-line-deprecated" : ""}`}
+              points={result_path}
+            />
+          )}
+          <g className="reference-axis-labels">
+            <text x="38" y="328" textAnchor="start">
+              {formatAxisValue(displayed_x_min)}
+            </text>
+            <text x="630" y="328" textAnchor="end">
+              {formatAxisValue(displayed_x_max)}
+            </text>
+            <text x="30" y="21" textAnchor="end">
+              {formatAxisValue(displayed_y_max)}
+            </text>
+            <text x="30" y="309" textAnchor="end">
+              {formatAxisValue(displayed_y_min)}
+            </text>
+          </g>
+        </svg>
+        <div className="reference-legend">
+          <span className="reference-series">
+            <i /> Datasheet reference
+          </span>
+          {preview.result_points && (
+            <span
+              className={`result-series${comparison_is_unverified ? " unverified" : ""}${comparison_is_deprecated ? " deprecated" : ""}`}
+            >
+              <i />
+              {result_label}
+            </span>
+          )}
+          {!preview.result_points && (
+            <span className="model-result-pending">Model result pending verification</span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+type ModelReferenceView = "reference_graph" | "datasheet_reference"
+
+function ModelReferencePane({
+  job_id,
+  benchmark_id,
+  preview,
+}: {
+  job_id: string
+  benchmark_id: string
+  preview?: ModelReferencePreview
+}) {
+  const [active_view, setActiveView] = useState<ModelReferenceView>("reference_graph")
+  const [image_failed, setImageFailed] = useState(false)
+  const resolved_benchmark_id = preview?.benchmark_id ?? benchmark_id
+  const image_url =
+    resolved_benchmark_id === "live" ? undefined : getModelReferenceImageUrl(job_id, resolved_benchmark_id)
+
+  useEffect(() => setImageFailed(false), [image_url, preview?.updated_at])
+
+  return (
+    <section className="model-preview-pane model-reference-card" aria-label="SPICE benchmark reference">
+      <header className="model-reference-toolbar">
+        <div className="reference-view-tabs" role="tablist" aria-label="SPICE reference view">
+          <button
+            className={active_view === "reference_graph" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={active_view === "reference_graph"}
+            onClick={() => setActiveView("reference_graph")}
+          >
+            <ChartLine size={14} /> Reference graph
+          </button>
+          <button
+            className={active_view === "datasheet_reference" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={active_view === "datasheet_reference"}
+            onClick={() => {
+              setImageFailed(false)
+              setActiveView("datasheet_reference")
+            }}
+          >
+            <FileImage size={14} /> Datasheet reference
+          </button>
+        </div>
+      </header>
+      <div className="model-reference-content">
+        {active_view === "reference_graph" ? (
+          <ReferenceGraph preview={preview} />
+        ) : !image_url || image_failed ? (
+          <div className="model-reference-empty">
+            <ImageOff size={25} />
+            <strong>Datasheet reference unavailable</strong>
+            <p>No retained datasheet graph image is available for this benchmark.</p>
+          </div>
+        ) : (
+          <a
+            className="model-datasheet-reference-image"
+            href={image_url}
+            target="_blank"
+            rel="noreferrer"
+            title="Open the full datasheet graph reference"
+          >
+            <img
+              key={image_url}
+              src={image_url}
+              alt={`Datasheet graph reference for ${preview?.title ?? resolved_benchmark_id}`}
+              onError={() => setImageFailed(true)}
+            />
+          </a>
+        )}
       </div>
     </section>
   )
@@ -447,7 +530,11 @@ export function ModelLivePreview({
                 key={`${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
                 preview={displayed_circuit}
               />
-              <ReferenceGraph preview={displayed_reference} />
+              <ModelReferencePane
+                job_id={job_id}
+                benchmark_id={entry.benchmark_id}
+                preview={displayed_reference}
+              />
             </div>
           </section>
         )

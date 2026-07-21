@@ -3,13 +3,14 @@ import { Boxes, CircuitBoard, LoaderCircle } from "lucide-react"
 import { lazy, Suspense, useState } from "react"
 import type { Job } from "@/shared/job-types"
 import { CodePanel } from "./code-panel"
+import type { ComponentArtifact, ComponentReferenceView } from "./component-preview-types"
+import { DatasheetReference } from "./datasheet-reference"
 
 const CircuitJsonPreview = lazy(async () => {
   const runframe_module = await import("@tscircuit/runframe")
   return { default: runframe_module.CircuitJsonPreview }
 })
 
-type ComponentArtifact = "component" | "typical_application"
 export type ComponentPreviewTab = Extract<TabId, "code" | "pcb" | "schematic">
 
 function EmptyPreview({ job, artifact }: { job: Job; artifact: ComponentArtifact }) {
@@ -116,6 +117,10 @@ export function CircuitPreview({
   on_active_tab_change: (tab: ComponentPreviewTab) => void
 }) {
   const [artifact, setArtifact] = useState<ComponentArtifact>("component")
+  const [component_reference_view, setComponentReferenceView] = useState<ComponentReferenceView>("footprint")
+  const [application_preview_tab, setApplicationPreviewTab] = useState<ComponentPreviewTab>("schematic")
+  const artifact_preview_tab = artifact === "component" ? active_tab : application_preview_tab
+  const setArtifactPreviewTab = artifact === "component" ? on_active_tab_change : setApplicationPreviewTab
 
   return (
     <section className="workspace-card preview-card" aria-label="Component and typical application preview">
@@ -144,12 +149,20 @@ export function CircuitPreview({
           </button>
         </div>
       </div>
-      <div className="viewer-shell">
-        <ArtifactRunframe
+      <div className="artifact-preview-grid">
+        <div className="viewer-shell">
+          <ArtifactRunframe
+            job={job}
+            artifact={artifact}
+            active_tab={artifact_preview_tab}
+            on_active_tab_change={setArtifactPreviewTab}
+          />
+        </div>
+        <DatasheetReference
           job={job}
           artifact={artifact}
-          active_tab={active_tab}
-          on_active_tab_change={on_active_tab_change}
+          component_view={component_reference_view}
+          on_component_view_change={setComponentReferenceView}
         />
       </div>
     </section>

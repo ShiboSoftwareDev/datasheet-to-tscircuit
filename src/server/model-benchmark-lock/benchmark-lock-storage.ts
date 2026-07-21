@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, rm } from "node:fs/promises"
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { parseBenchmarkManifest, validateBenchmarkReferenceFiles } from "../model-scorer"
 import { validateSimulationDefinitions } from "../model-simulation-validator"
@@ -7,20 +7,42 @@ import { assertBenchmarkSourceContract, parseBenchmarkRecords } from "./assert-b
 import {
   assertEvidenceFile,
   getLockRoot,
-  hashText,
+  hashContent,
   isRecord,
   resolveWorkspaceFile,
 } from "./benchmark-lock-paths"
 
-export async function readCurrentLock(model_dir: string): Promise<{
+interface ReadCurrentLockOptions {
+  require_source_images?: boolean
+}
+
+type LockedFileContent = LockedFile & { content: Buffer }
+
+function isPng(content: Uint8Array): boolean {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10]
+  return content.length >= signature.length && signature.every((byte, index) => content[index] === byte)
+}
+
+export async function readCurrentLock(
+  model_dir: string,
+  options: ReadCurrentLockOptions = {},
+): Promise<{
   benchmark_ids: string[]
-  files: Array<LockedFile & { text: string }>
+  files: LockedFileContent[]
 }> {
   const manifest_text = await readFile(join(model_dir, "benchmarks.json"), "utf8")
   const manifest_value: unknown = JSON.parse(manifest_text)
   const manifest = parseBenchmarkManifest(manifest_value)
   const records = parseBenchmarkRecords(manifest_value)
-  for (const record of records) assertEvidenceFile(model_dir, record.reference_file)
+  for (const record of records) {
+    assertEvidenceFile(model_dir, record.reference_file)
+    if (options.require_source_images && !record.source_image) {
+      throw new Error(
+        `Benchmark ${record.id} must declare source.image as evidence/figures/${record.id}.png for its exact datasheet graph crop`,
+      )
+    }
+    if (record.source_image) assertEvidenceFile(model_dir, record.source_image)
+  }
   await validateBenchmarkReferenceFiles(model_dir, manifest)
   await validateSimulationDefinitions(
     model_dir,
@@ -37,26 +59,37 @@ export async function readCurrentLock(model_dir: string): Promise<{
     "benchmarks.json",
     ...records.map((record) => join("benchmarks", `${record.id}.circuit.tsx`)),
     ...records.map((record) => record.reference_file),
+    ...records.flatMap((record) => (record.source_image ? [record.source_image] : [])),
   ]
   const unique_paths = [...new Set(paths)]
   const files = await Promise.all(
     unique_paths.map(async (file) => {
-      const text = await readFile(resolveWorkspaceFile(model_dir, file), "utf8")
-      return { file, text, sha256: hashText(text) }
+      const content = await readFile(resolveWorkspaceFile(model_dir, file))
+      return { file, content, sha256: hashContent(content) }
     }),
   )
   for (const record of records) {
-    const source = files.find((file) => file.file === join("benchmarks", `${record.id}.circuit.tsx`))?.text
-    if (!source) throw new Error(`Benchmark ${record.id} source is missing`)
-    assertBenchmarkSourceContract(source, record)
+    const source_file = files.find((file) => file.file === join("benchmarks", `${record.id}.circuit.tsx`))
+    if (!source_file) throw new Error(`Benchmark ${record.id} source is missing`)
+    assertBenchmarkSourceContract(source_file.content.toString("utf8"), record)
+    if (record.source_image) {
+      const image = files.find((file) => file.file === record.source_image)?.content
+      if (!image || !isPng(image)) {
+        throw new Error(`Benchmark ${record.id} source.image must be a valid PNG graph crop`)
+      }
+    }
   }
   return { benchmark_ids: records.map((record) => record.id).sort(), files }
 }
 
 export async function writeTextAtomically(file_path: string, text: string): Promise<void> {
+  await writeFileAtomically(file_path, text)
+}
+
+async function writeFileAtomically(file_path: string, content: string | Uint8Array): Promise<void> {
   await mkdir(dirname(file_path), { recursive: true })
   const temporary_path = `${file_path}.${crypto.randomUUID()}.tmp`
-  await Bun.write(temporary_path, text)
+  await writeFile(temporary_path, content)
   await rename(temporary_path, file_path)
 }
 
@@ -83,7 +116,7 @@ export function parseLock(value: unknown): BenchmarkLock {
 
 export async function writeLockSnapshots(input: {
   model_dir: string
-  files: Array<LockedFile & { text: string }>
+  files: LockedFileContent[]
   generation: number
 }): Promise<void> {
   const { model_dir, files, generation } = input
@@ -92,9 +125,9 @@ export async function writeLockSnapshots(input: {
   const current_root = join(lock_root, "snapshot")
   await rm(current_root, { recursive: true, force: true })
   await Promise.all(
-    files.flatMap(({ file, text }) => [
-      writeTextAtomically(join(generation_root, file), text),
-      writeTextAtomically(join(current_root, file), text),
+    files.flatMap(({ file, content }) => [
+      writeFileAtomically(join(generation_root, file), content),
+      writeFileAtomically(join(current_root, file), content),
     ]),
   )
 }

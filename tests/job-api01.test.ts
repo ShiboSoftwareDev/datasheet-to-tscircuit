@@ -173,13 +173,28 @@ test("multiple uploads start independently and appear in the jobs list", async (
 test("retained evidence and structured diagnostics are downloadable", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-evidence-files-"))
   const job_dir = join(jobs_root, "evidence_job")
-  await mkdir(join(job_dir, "visual-reference"), { recursive: true })
+  await mkdir(join(job_dir, "visual-reference", "pages"), { recursive: true })
   await Promise.all([
     Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nfixture"),
-    Bun.write(join(job_dir, "component-evidence.json"), '{"status":"unresolved"}\n'),
+    Bun.write(
+      join(job_dir, "component-evidence.json"),
+      JSON.stringify({
+        status: "unresolved",
+        pinout: {
+          pins: [
+            { sources: [{ image: "visual-reference/pages/page-004.png" }] },
+            { sources: [{ image: "visual-reference/pages/page-004.png" }] },
+            { sources: [{ image: "visual-reference/pages/page-007.png" }] },
+          ],
+        },
+      }),
+    ),
     Bun.write(join(job_dir, "footprint-plan.json"), '{"pads":[]}\n'),
     Bun.write(join(job_dir, "typical-application-plan.json"), '{"availability":"documented"}\n'),
     Bun.write(join(job_dir, "visual-reference", "land-pattern.png"), "png fixture"),
+    Bun.write(join(job_dir, "visual-reference", "typical-application.png"), "application fixture"),
+    Bun.write(join(job_dir, "visual-reference", "pages", "page-004.png"), "pinout fixture"),
+    Bun.write(join(job_dir, "visual-reference", "pages", "page-007.png"), "other fixture"),
     Bun.write(join(job_dir, "agent-events.jsonl"), '{"event":{"type":"agent_end"}}\n'),
   ])
   const job_store = new JobStore()
@@ -202,6 +217,8 @@ test("retained evidence and structured diagnostics are downloadable", async () =
     ["footprint_plan", "pads"],
     ["application_plan", "documented"],
     ["land_pattern", "png fixture"],
+    ["component_schematic_reference", "pinout fixture"],
+    ["application_reference", "application fixture"],
     ["events", "agent_end"],
   ] as const) {
     const response = await handle(

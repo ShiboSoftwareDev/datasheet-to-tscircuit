@@ -40,13 +40,19 @@ extra effort only permits more refinement iterations.
    graph PNG before digitizing it. OCR, extracted text, SVG/XML text, filenames,
    or shell metadata do not count as graph inspection. Check for an official
    vendor model when network access is available; preserve its provenance if used.
+   Retain the full rendered source page for every drafted benchmark under
+   \`evidence/pages/datasheet-page-<page>.png\`, using the same page number stored
+   in that benchmark's source.
 2. Create executable evidence only for datasheet graphs whose printed x-axis is
    time. Digitize each complete time waveform into a two-column CSV with an
    \`x,y\` header, where x is elapsed time in milliseconds. Do not digitize,
    draft, or preserve executable benchmark definitions for static curves whose
    x-axis is voltage, current, load, temperature, frequency, or another
    parameter. Write \`benchmark-draft.json\` with only the eligible time-waveform
-   sources, conditions, and proposed tolerances, then write
+   sources, conditions, and proposed tolerances. Crop the exact printed graph for
+   every draft to \`evidence/figures/<benchmark-id>.png\` and record that path as
+   \`source.image\`; the crop must contain the graph associated with that benchmark,
+   not the whole datasheet page or another graph from the same page. Then write
    \`setup-complete.json\`. Do not create or tune a model during setup.
 3. When component.circuit.tsx becomes available, the server starts a separate,
    untimed benchmark-finalization pass. During that pass, verify the pinout and
@@ -138,6 +144,9 @@ extra effort only permits more refinement iterations.
 - \`benchmarks.json\`: the locked benchmark manifest described below.
 - \`benchmarks/*.circuit.tsx\`: one reproducible tscircuit bench per benchmark.
 - \`evidence/**/*.csv\`: digitized reference curves as \`x,y\`.
+- \`evidence/pages/datasheet-page-<page>.png\`: retained full datasheet graph pages.
+- \`evidence/figures/<benchmark-id>.png\`: the exact graph crop referenced by each benchmark's
+  \`source.image\`.
 - \`results/champion/<benchmark-id>.csv\`: champion results as \`x,y\`.
 - \`results/verified/<benchmark-id>.csv\`: server-owned results extracted from
   Circuit JSON. This is a diagnostic mirror; never create or edit this directory.
@@ -223,7 +232,11 @@ workspace and every referenced CSV contains numeric \`x,y\` rows:
   "benchmarks": [{
     "id": "stable-id",
     "title": "Datasheet behavior",
-    "source": { "page": 10, "figure": "Figure 4" },
+    "source": {
+      "page": 10,
+      "figure": "Figure 4",
+      "image": "evidence/figures/stable-id.png"
+    },
     "critical": true,
     "weight": 1,
     "tolerance": 0.08,

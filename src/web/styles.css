@@ -1343,9 +1343,138 @@ a {
 }
 
 .component-page .viewer-shell {
-  flex: 1;
   height: 100%;
   min-height: 0;
+}
+
+.artifact-preview-grid {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(520px, 1.25fr) minmax(340px, 0.75fr);
+}
+
+.datasheet-reference-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-left: 1px solid #e7e8e6;
+  background:
+    linear-gradient(rgba(126, 140, 157, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(126, 140, 157, 0.06) 1px, transparent 1px), #fbfcfd;
+  background-size: 18px 18px;
+}
+
+.datasheet-reference-toolbar {
+  display: flex;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px 0;
+}
+
+.reference-view-tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #e1e1dd;
+  border-radius: 9px;
+  background: #f1f1ee;
+}
+
+.reference-view-tabs button {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  color: #74787e;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.reference-view-tabs button:hover {
+  color: #3f4954;
+}
+
+.reference-view-tabs button.active {
+  color: #2864a6;
+  background: white;
+  box-shadow: 0 1px 3px rgba(32, 33, 35, 0.09);
+}
+
+.datasheet-reference-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #59616b;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.datasheet-reference-content {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: stretch;
+  justify-content: stretch;
+  overflow: hidden;
+  padding: 8px 14px 14px;
+}
+
+.datasheet-reference-image-link,
+.model-datasheet-reference-image {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid #e3e4e2;
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 1px 2px rgba(32, 33, 35, 0.04);
+}
+
+.datasheet-reference-image-link img,
+.model-datasheet-reference-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.datasheet-reference-empty {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  color: #74808d;
+  text-align: center;
+}
+
+.datasheet-reference-empty strong {
+  margin-top: 10px;
+  color: #3d4650;
+  font-size: 12px;
+}
+
+.datasheet-reference-empty p {
+  max-width: 300px;
+  margin: 6px 0 0;
+  color: #7e8791;
+  font-size: 10px;
+  line-height: 1.55;
 }
 
 .preview-column {
@@ -2714,8 +2843,33 @@ a {
 }
 
 .model-reference-card {
+  display: flex;
+  flex-direction: column;
   border-left: 1px solid #e7e8e6;
-  background: #fff;
+  background:
+    linear-gradient(rgba(126, 140, 157, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(126, 140, 157, 0.06) 1px, transparent 1px), #fbfcfd;
+  background-size: 18px 18px;
+}
+
+.model-reference-toolbar {
+  display: flex;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 10px 0;
+}
+
+.model-reference-content {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: stretch;
+  justify-content: stretch;
+  overflow: hidden;
+  padding: 8px 14px 14px;
 }
 
 .model-runframe-shell {
@@ -2771,6 +2925,7 @@ a {
 .model-preview-placeholder,
 .model-reference-empty {
   display: flex;
+  width: 100%;
   height: 100%;
   align-items: center;
   justify-content: center;
@@ -2819,10 +2974,11 @@ a {
 
 .model-reference-plot {
   display: flex;
+  width: 100%;
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  padding: 18px 15px 14px;
+  padding: 4px 1px 0;
 }
 
 .model-comparison-warning {
@@ -2830,7 +2986,7 @@ a {
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-  margin: -6px 0 10px;
+  margin: 0 0 10px;
   padding: 7px 9px;
   border: 1px solid #ead7af;
   border-radius: 7px;
@@ -2856,7 +3012,7 @@ a {
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
-  margin: -6px 0 10px;
+  margin: 0 0 10px;
   padding: 7px 9px;
   border: 1px solid #cdddf1;
   border-radius: 7px;
@@ -3485,6 +3641,16 @@ a {
   .component-page .viewer-shell {
     height: 100%;
     min-height: 0;
+  }
+
+  .artifact-preview-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+
+  .datasheet-reference-pane {
+    border-top: 1px solid #e7e8e6;
+    border-left: 0;
   }
 }
 

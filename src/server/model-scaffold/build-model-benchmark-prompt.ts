@@ -29,7 +29,9 @@ typical-application-plan.json, and the evidence package. Create the
 complete benchmarks.json manifest and exactly one benchmarks/<id>.circuit.tsx per
 benchmark. Every benchmark must declare its server-verifiable simulation mapping,
 including probe_name and dut_spice_node, and must cite immutable evidence under
-evidence/. Update model-progress.json while working.
+evidence/. Preserve each draft's exact graph crop as
+\`source.image: "evidence/figures/<benchmark-id>.png"\`; the server rejects a
+missing, renamed, or invalid PNG crop. Update model-progress.json while working.
 
 Preserve the typical application's external component reference designators, values, and
 invariant power/feedback connectivity in every harness. Instantiate the generated component as

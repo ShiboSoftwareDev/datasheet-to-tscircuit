@@ -1,6 +1,7 @@
 import { join } from "node:path"
 import { ensureJobTscircuitRuntimeConfig } from "../job-scaffold"
 import { startModelArtifactMonitor } from "../model-artifact-monitor"
+import { enableBenchmarkReferenceImageContract } from "../model-benchmark-lock"
 import { startModelProgressMonitor } from "../model-progress"
 import { buildModelSetupPrompt, copyComponentIntoModelWorkspace, writeModelScaffold } from "../model-scaffold"
 import { ModelExecution } from "./model-execution"
@@ -26,6 +27,7 @@ export async function prepareModelWorkspace(execution: ModelExecution): Promise<
   await execution.progress_monitor.sync()
 
   if (!(await hasCompletedSetup(execution.model_dir))) {
+    await enableBenchmarkReferenceImageContract(execution.model_dir)
     execution.context.model_run_store.updateModelRun(execution.model_run_id, {
       status: "setting_up",
       is_complete: false,

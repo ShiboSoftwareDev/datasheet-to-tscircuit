@@ -14,5 +14,6 @@ export interface BenchmarkLock {
 export interface BenchmarkRecord {
   id: string
   reference_file: string
+  source_image?: string
   simulation?: unknown
 }

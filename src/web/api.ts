@@ -91,11 +91,13 @@ export type JobFileKind =
   | "footprint_plan"
   | "application_plan"
   | "land_pattern"
+  | "component_schematic_reference"
   | "application_reference"
   | "events"
 
-export function getJobFileUrl(job_id: string, file: JobFileKind): string {
-  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}`
+export function getJobFileUrl(job_id: string, file: JobFileKind, display?: "inline"): string {
+  const inline_query = display === "inline" ? "&display=inline" : ""
+  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}${inline_query}`
 }
 
 export async function getModelRun(job_id: string): Promise<ModelRun | undefined> {
@@ -150,6 +152,10 @@ export async function getModelSelectedPreview(
   )
   if (!response.ok) throw new Error(await readApiError(response))
   return (await response.json()) as ModelSelectedPreview
+}
+
+export function getModelReferenceImageUrl(job_id: string, benchmark_id: string): string {
+  return `/api/model-run/reference-image?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}`
 }
 
 export type ModelRunFileKind = "model" | "manifest" | "report" | "model_card" | "component" | "log"

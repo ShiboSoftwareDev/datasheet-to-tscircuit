@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { getLockFile, getLockRoot } from "./benchmark-lock-paths"
+import { getLockFile, getLockRoot, getReferenceImageContractFile } from "./benchmark-lock-paths"
 import { parseLock, readCurrentLock, writeLockSnapshots, writeTextAtomically } from "./benchmark-lock-storage"
 import { BenchmarkLock } from "./types"
 
@@ -12,8 +12,22 @@ export async function hasBenchmarkLock(model_dir: string): Promise<boolean> {
   return Bun.file(getLockFile(model_dir)).exists()
 }
 
-export async function validateBenchmarkSuiteForLock(model_dir: string): Promise<void> {
-  await readCurrentLock(model_dir)
+export async function enableBenchmarkReferenceImageContract(model_dir: string): Promise<void> {
+  await writeTextAtomically(
+    getReferenceImageContractFile(model_dir),
+    `${JSON.stringify({ version: 1, enabled_at: new Date().toISOString() }, null, 2)}\n`,
+  )
+}
+
+export async function hasBenchmarkReferenceImageContract(model_dir: string): Promise<boolean> {
+  return Bun.file(getReferenceImageContractFile(model_dir)).exists()
+}
+
+export async function validateBenchmarkSuiteForLock(
+  model_dir: string,
+  options: { require_source_images?: boolean } = {},
+): Promise<void> {
+  await readCurrentLock(model_dir, options)
 }
 
 export async function createOrVerifyBenchmarkLock(model_dir: string): Promise<BenchmarkLock> {

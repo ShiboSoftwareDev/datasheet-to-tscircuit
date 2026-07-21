@@ -7,6 +7,7 @@ export function parseBenchmarkRecords(value: unknown): BenchmarkRecord[] {
   return parseBenchmarkManifest(value).benchmarks.map((entry) => ({
     id: entry.id,
     reference_file: entry.reference_file,
+    source_image: entry.source.image,
     simulation: entry.simulation,
   }))
 }
