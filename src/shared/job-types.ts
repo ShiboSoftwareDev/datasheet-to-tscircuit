@@ -65,6 +65,7 @@ export interface Job {
   component_ready?: boolean
   component_code?: string
   circuit_json?: AnyCircuitElement[]
+  typical_application_title?: string
   typical_application_code?: string
   typical_application_circuit_json?: AnyCircuitElement[]
   validation?: JobValidation
@@ -235,6 +236,8 @@ export interface ModelReferenceSeriesPreview {
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]
   result_points?: ModelCurvePoint[]
+  normalized_rmse?: number
+  normalized_max_error?: number
   matches_reference?: boolean
 }
 
@@ -261,6 +264,8 @@ export interface ModelReferencePreview {
   series?: ModelReferenceSeriesPreview[]
   result_status?: "unverified" | "partial" | "verified" | "deprecated"
   result_origin?: "workspace" | "server_validation"
+  normalized_rmse?: number
+  normalized_max_error?: number
   matches_reference?: boolean
   is_stale?: boolean
   updated_at: string

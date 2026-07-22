@@ -389,7 +389,16 @@ function ModelReferencePane({
   const image_url =
     resolved_benchmark_id === "live" ? undefined : getModelReferenceImageUrl(job_id, resolved_benchmark_id)
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: retry the image when its URL or preview revision changes
   useEffect(() => setImageFailed(false), [image_url, preview?.updated_at])
+  const mismatch_metrics = [
+    preview?.normalized_rmse === undefined
+      ? undefined
+      : `NRMSE ${(preview.normalized_rmse * 100).toFixed(1)}%`,
+    preview?.normalized_max_error === undefined
+      ? undefined
+      : `max error ${(preview.normalized_max_error * 100).toFixed(1)}%`,
+  ].filter((metric): metric is string => Boolean(metric))
 
   return (
     <section className="model-preview-pane model-reference-card" aria-label="SPICE benchmark reference">
@@ -423,7 +432,8 @@ function ModelReferencePane({
           <AlertTriangle size={14} />
           <span>
             <strong>Doesn’t match the reference</strong>
-            The current graph is outside the benchmark tolerance.
+            The current graph is outside the benchmark tolerance
+            {mismatch_metrics.length > 0 ? ` · ${mismatch_metrics.join(" · ")}.` : "."}
           </span>
         </div>
       )}

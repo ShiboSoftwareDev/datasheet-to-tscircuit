@@ -15,6 +15,7 @@ interface BenchmarkPreviewSeriesRecord {
   role: "response" | "stimulus"
   quantity: string
   unit: string
+  weight: number
   reference_file: string
   y_scale: "linear" | "log"
   tolerance?: number
@@ -47,6 +48,7 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
     const x_scale = benchmark.x_scale === "log" ? "log" : "linear"
     const tolerance = positiveNumber(benchmark.tolerance)
     const max_error_tolerance = positiveNumber(benchmark.max_error_tolerance)
+    const weight = positiveNumber(benchmark.weight) ?? 1
     const parsed_series = Array.isArray(benchmark.series)
       ? benchmark.series.flatMap((series): BenchmarkPreviewSeriesRecord[] => {
           if (
@@ -63,6 +65,7 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
               role: series.role,
               quantity: typeof series.quantity === "string" ? series.quantity : "voltage",
               unit: typeof series.unit === "string" ? series.unit : "V",
+              weight: positiveNumber(series.weight) ?? weight,
               reference_file: series.reference_file,
               y_scale:
                 series.y_scale === "log" || (series.y_scale === undefined && benchmark.y_scale === "log")
@@ -88,6 +91,7 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
                 role: "response" as const,
                 quantity: "voltage",
                 unit: "V",
+                weight,
                 reference_file: legacy_reference_file,
                 y_scale: benchmark.y_scale === "log" ? ("log" as const) : ("linear" as const),
                 tolerance,
@@ -187,6 +191,7 @@ export async function readReferencePreview(input: {
           role: "response",
           quantity: "voltage",
           unit: "V",
+          weight: 1,
           reference_file,
           y_scale: "linear",
         },
@@ -262,6 +267,8 @@ export async function readReferencePreview(input: {
               y_scale: series.y_scale,
               reference_points: downsampleCurvePoints(reference_points),
               result_points: result_points?.length ? downsampleCurvePoints(result_points) : undefined,
+              normalized_rmse: comparison?.normalized_rmse,
+              normalized_max_error: comparison?.normalized_max_error,
               matches_reference: comparison?.passed,
             },
             modified_at: reference_stat?.mtimeMs ?? 0,
@@ -274,6 +281,22 @@ export async function readReferencePreview(input: {
 
   const primary =
     series_previews.find((entry) => entry.preview.role === "response")?.preview ?? series_previews[0]!.preview
+  let total_response_weight = 0
+  let weighted_response_error = 0
+  for (const entry of series_previews) {
+    if (entry.preview.role !== "response" || entry.preview.normalized_rmse === undefined) continue
+    const weight =
+      selected_benchmark.series.find((series) => series.id === entry.preview.series_id)?.weight ?? 0
+    total_response_weight += weight
+    weighted_response_error += entry.preview.normalized_rmse * weight
+  }
+  const normalized_rmse =
+    total_response_weight > 0 ? weighted_response_error / total_response_weight : undefined
+  const normalized_max_errors = series_previews.flatMap((entry) =>
+    entry.preview.normalized_max_error === undefined ? [] : [entry.preview.normalized_max_error],
+  )
+  const normalized_max_error =
+    normalized_max_errors.length > 0 ? Math.max(...normalized_max_errors) : undefined
   const has_results = series_previews.some((entry) => entry.preview.result_points?.length)
   const series_match_results = series_previews.flatMap((entry) =>
     entry.preview.matches_reference === undefined ? [] : [entry.preview.matches_reference],
@@ -308,6 +331,8 @@ export async function readReferencePreview(input: {
     series: series_previews.map((entry) => entry.preview),
     result_status,
     result_origin,
+    normalized_rmse,
+    normalized_max_error,
     matches_reference,
     is_stale,
     updated_at:

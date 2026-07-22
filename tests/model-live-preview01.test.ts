@@ -92,6 +92,8 @@ test("the reference section warns when the current graph is outside tolerance", 
           { x: 0, y: 0 },
           { x: 1, y: 2 },
         ],
+        normalized_rmse: 0.4,
+        normalized_max_error: 0.75,
         matches_reference: false,
         updated_at: "2026-07-22T00:00:00.000Z",
       },
@@ -100,4 +102,6 @@ test("the reference section warns when the current graph is outside tolerance", 
 
   expect(html).toContain("Doesn’t match the reference")
   expect(html).toContain("outside the benchmark tolerance")
+  expect(html).toContain("NRMSE 40.0%")
+  expect(html).toContain("max error 75.0%")
 })

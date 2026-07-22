@@ -1,5 +1,5 @@
-import * as Popover from "@radix-ui/react-popover"
-import { Boxes, ChevronDown, CircuitBoard, Download, FlaskConical } from "lucide-react"
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
+import { Boxes, ChevronDown, ChevronRight, CircuitBoard, Download, FlaskConical } from "lucide-react"
 import type { Job, JobDisplayStatus, ModelRun, ModelRunStatus } from "@/shared/job-types"
 import { getJobFileUrl, getModelRunFileUrl } from "../api"
 
@@ -63,9 +63,10 @@ export function WorkspaceStatusBar({
   const has_downloads = Boolean(job.component_code || job.typical_application_code || model_run?.model_source)
 
   return (
-    <div className="workspace-status-bar" aria-label="Artifact status and downloads">
+    <section className="workspace-status-bar" aria-label="Artifact status and downloads">
       <span
         className={`workspace-artifact-status status-${getStatusTone(component_status)}`}
+        role="status"
         aria-label={`Component status: ${component_status}`}
       >
         <Boxes size={12} />
@@ -76,6 +77,7 @@ export function WorkspaceStatusBar({
       </span>
       <span
         className={`workspace-artifact-status status-${getStatusTone(model_status)}`}
+        role="status"
         aria-label={`SPICE model status: ${model_status}`}
       >
         <FlaskConical size={12} />
@@ -84,8 +86,8 @@ export function WorkspaceStatusBar({
           <i /> {model_status}
         </strong>
       </span>
-      <Popover.Root>
-        <Popover.Trigger asChild>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger asChild>
           <button
             className="workspace-download-trigger"
             type="button"
@@ -94,29 +96,52 @@ export function WorkspaceStatusBar({
           >
             <Download size={13} /> <span>Download</span> <ChevronDown size={11} />
           </button>
-        </Popover.Trigger>
-        <Popover.Portal>
-          <Popover.Content className="workspace-download-popover" align="end" sideOffset={7}>
-            <strong>Download artifact</strong>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content className="workspace-download-popover" align="end" sideOffset={7}>
+            <DropdownMenu.Label className="workspace-download-label">Download artifact</DropdownMenu.Label>
             {job.component_code && (
-              <a href={getJobFileUrl(job.job_id, "component")}>
-                <Boxes size={14} /> Component TSX
-              </a>
+              <DropdownMenu.Item asChild>
+                <a className="workspace-download-item" href={getJobFileUrl(job.job_id, "component")}>
+                  <Boxes size={14} /> Component TSX
+                </a>
+              </DropdownMenu.Item>
             )}
             {job.typical_application_code && (
-              <a href={getJobFileUrl(job.job_id, "typical_application")}>
-                <CircuitBoard size={14} /> Typical application TSX
-              </a>
+              <DropdownMenu.Sub>
+                <DropdownMenu.SubTrigger className="workspace-download-item workspace-download-subtrigger">
+                  <CircuitBoard size={14} /> Typical applications <ChevronRight size={12} />
+                </DropdownMenu.SubTrigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.SubContent
+                    className="workspace-download-popover workspace-download-submenu"
+                    sideOffset={6}
+                    alignOffset={-5}
+                  >
+                    <DropdownMenu.Item asChild>
+                      <a
+                        className="workspace-download-item"
+                        href={getJobFileUrl(job.job_id, "typical_application")}
+                      >
+                        <CircuitBoard size={14} /> {job.typical_application_title ?? "Typical application"}{" "}
+                        TSX
+                      </a>
+                    </DropdownMenu.Item>
+                  </DropdownMenu.SubContent>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Sub>
             )}
             {model_run?.model_source && (
-              <a href={getModelRunFileUrl(job.job_id, "model")}>
-                <FlaskConical size={14} /> SPICE model
-              </a>
+              <DropdownMenu.Item asChild>
+                <a className="workspace-download-item" href={getModelRunFileUrl(job.job_id, "model")}>
+                  <FlaskConical size={14} /> SPICE model
+                </a>
+              </DropdownMenu.Item>
             )}
-            <Popover.Arrow className="workspace-download-arrow" />
-          </Popover.Content>
-        </Popover.Portal>
-      </Popover.Root>
-    </div>
+            <DropdownMenu.Arrow className="workspace-download-arrow" />
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>
+    </section>
   )
 }

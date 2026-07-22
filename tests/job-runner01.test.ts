@@ -639,6 +639,7 @@ await Bun.write(process.cwd() + "/dist/" + stem + "/circuit.json", JSON.stringif
   expect(job?.display_status).toBe("complete")
   expect(job?.component_ready).toBe(true)
   expect(job?.component_code).toContain("function Part")
+  expect(job?.typical_application_title).toBe("Typical sensor application")
   expect(await Bun.file(join(job_dir, "component.circuit.tsx")).text()).toBe(
     await Bun.file(join(job_dir, "index.circuit.tsx")).text(),
   )

@@ -21,13 +21,18 @@ test("JobStore streams updates and persists every log chunk", async () => {
     component_ready: true,
     component_code: "export default () => <chip />",
     circuit_json: [{ type: "source_component", source_component_id: "part" }] as Job["circuit_json"],
+    typical_application_title: "5 V regulator",
   })
 
   expect(event_types).toEqual(["log", "job_updated"])
   expect(job_store.getJob("job_1")?.logs).toHaveLength(1)
   expect(job_store.getJob("job_1")?.component_ready).toBe(true)
+  expect(job_store.getJob("job_1")?.typical_application_title).toBe("5 V regulator")
   expect(await readFile(join(job_dir, "agent.log"), "utf8")).toContain("[tool] read datasheet.pdf")
-  expect(JSON.parse(await readFile(join(job_dir, "job.json"), "utf8")).component_ready).toBe(true)
+  expect(JSON.parse(await readFile(join(job_dir, "job.json"), "utf8"))).toMatchObject({
+    component_ready: true,
+    typical_application_title: "5 V regulator",
+  })
 
   unsubscribe?.()
   await rm(job_dir, { recursive: true, force: true })

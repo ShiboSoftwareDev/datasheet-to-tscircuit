@@ -260,6 +260,12 @@ export async function runEvidencePhase(execution: JobExecution): Promise<Approve
     "\nRunning an independent extraction pass; critical evidence must agree before code generation…\n",
   )
   const approved_evidence = await verifyEvidenceIndependently(primary_evidence, execution)
+  execution.context.job_store.updateJob(execution.job_id, {
+    typical_application_title:
+      approved_evidence.typical_application_plan.availability === "documented"
+        ? approved_evidence.typical_application_plan.title
+        : undefined,
+  })
 
   const component_schematic_plan = createComponentSchematicPlan(approved_evidence.component_evidence)
   const component_schematic_plan_text = `${JSON.stringify(component_schematic_plan, null, 2)}\n`

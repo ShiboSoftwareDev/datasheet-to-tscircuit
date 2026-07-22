@@ -92,16 +92,20 @@ function formatProgressTime(value: string): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
 }
 
-function getModelError(model_run: ModelRun): string {
-  const reported_error =
-    model_run.progress?.champion?.score ?? model_run.progress?.champion?.worst_normalized_error
-  if (reported_error !== undefined) return `${(reported_error * 100).toFixed(1)}%`
+export function getModelMatchMetrics(model_run: ModelRun): {
+  match_score?: number
+  normalized_rmse?: number
+} {
+  const normalized_rmse = model_run.validation?.score ?? model_run.progress?.champion?.score
+  return {
+    normalized_rmse,
+    match_score: normalized_rmse === undefined ? undefined : Math.max(0, Math.min(1, 1 - normalized_rmse)),
+  }
+}
 
-  const validation_errors = model_run.validation?.benchmarks
-    .map((benchmark) => benchmark.normalized_rmse)
-    .filter((error): error is number => error !== undefined)
-  if (validation_errors?.length) return `${(Math.max(...validation_errors) * 100).toFixed(1)}%`
-  return model_run.has_errors ? "Failed" : "Pending"
+function formatModelMetric(value: number | undefined, model_run: ModelRun): string {
+  if (value !== undefined) return `${(value * 100).toFixed(1)}%`
+  return model_run.has_errors ? "Unavailable" : "Pending"
 }
 
 function PreviousTasks({ model_run, current_task }: { model_run: ModelRun; current_task: string }) {
@@ -352,6 +356,7 @@ export function ModelPanel({
     model_run.status === "setting_up" ||
     model_run.status === "waiting_for_component"
   const current_task = model_run.error_message ?? model_run.progress?.message ?? getStatusCopy(model_run)
+  const match_metrics = getModelMatchMetrics(model_run)
 
   return (
     <div className="model-workspace">
@@ -373,9 +378,16 @@ export function ModelPanel({
         </div>
 
         <section className="model-header-stats" aria-label="Current model statistics">
+          <div
+            className="model-header-stat model-match-stat"
+            title="Derived as 100% minus the weighted normalized RMSE"
+          >
+            <span>Match</span>
+            <strong>{formatModelMetric(match_metrics.match_score, model_run)}</strong>
+          </div>
           <div className="model-header-stat model-error-stat">
-            <span>Error</span>
-            <strong>{getModelError(model_run)}</strong>
+            <span>NRMSE</span>
+            <strong>{formatModelMetric(match_metrics.normalized_rmse, model_run)}</strong>
           </div>
           <PreviousTasks model_run={model_run} current_task={current_task} />
         </section>

@@ -1,13 +1,13 @@
 import { readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job, JobDisplayStatus } from "@/shared/job-types"
-import type { JobStore } from "../job-store"
 import {
   getTypicalApplicationComponentValueErrors,
   getTypicalApplicationConnectivityErrors,
   getTypicalApplicationSourceErrors,
 } from "../job-artifact-validator"
 import { parseTypicalApplicationPlan } from "../job-runner"
+import type { JobStore } from "../job-store"
 import { isRecord, readJson, readPersistedLogs } from "./read-persisted-logs"
 import { inferFileName, readRestoredCircuitJson } from "./read-restored-circuit-json"
 import {
@@ -42,6 +42,20 @@ export async function restoreJobDirectory(input: {
     stat(input.job_dir),
   ])
   const saved = isRecord(snapshot) ? snapshot : undefined
+  const saved_typical_application_title =
+    typeof saved?.typical_application_title === "string" && saved.typical_application_title.trim()
+      ? saved.typical_application_title.trim()
+      : undefined
+  const restored_application_plan = saved_typical_application_title
+    ? undefined
+    : await readJson(join(input.job_dir, "typical-application-plan.json"))
+  const typical_application_title =
+    saved_typical_application_title ??
+    (isRecord(restored_application_plan) &&
+    typeof restored_application_plan.title === "string" &&
+    restored_application_plan.title.trim()
+      ? restored_application_plan.title.trim()
+      : undefined)
   const saved_status =
     typeof saved?.display_status === "string" && JOB_STATUSES.has(saved.display_status as JobDisplayStatus)
       ? (saved.display_status as JobDisplayStatus)
@@ -156,6 +170,7 @@ export async function restoreJobDirectory(input: {
     component_ready,
     component_code,
     circuit_json,
+    typical_application_title,
     typical_application_code,
     typical_application_circuit_json,
     validation: restored_validation,

@@ -227,6 +227,8 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   expect(selected_workspace_preview?.reference_preview?.result_points?.[1]).toEqual({ x: 1, y: 2.1 })
   expect(selected_workspace_preview?.reference_preview?.result_status).toBe("unverified")
   expect(selected_workspace_preview?.reference_preview?.result_origin).toBe("workspace")
+  expect(selected_workspace_preview?.reference_preview?.normalized_rmse).toBeCloseTo(0.1)
+  expect(selected_workspace_preview?.reference_preview?.normalized_max_error).toBeCloseTo(0.1)
   expect(selected_workspace_preview?.reference_preview?.matches_reference).toBe(false)
   expect(selected_workspace_preview?.reference_preview?.updated_at).toBe(
     selected_workspace_preview?.circuit_preview?.updated_at,

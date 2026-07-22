@@ -51,6 +51,10 @@ test("persisted component and model jobs survive a server restart and deletion r
       'import Component from "./index.circuit"\nexport default () => <board><Component /></board>\n',
     ),
     Bun.write(
+      join(job_dir, "typical-application-plan.json"),
+      JSON.stringify({ title: "Restored sensor application" }),
+    ),
+    Bun.write(
       join(job_dir, "dist", "index", "circuit.json"),
       JSON.stringify([{ type: "source_component", source_component_id: "restored" }]),
     ),
@@ -100,6 +104,7 @@ test("persisted component and model jobs survive a server restart and deletion r
   expect(restored_jobs.getJob("job_restore")?.file_name).toBe("original-sensor.pdf")
   expect(restored_jobs.getJob("job_restore")?.display_status).toBe("complete")
   expect(restored_jobs.getJob("job_restore")?.component_ready).toBe(true)
+  expect(restored_jobs.getJob("job_restore")?.typical_application_title).toBe("Restored sensor application")
   expect(restored_jobs.getJob("job_restore")?.logs[0]?.message).toBe("Original component log\n")
   expect(restored_jobs.getJob("job_restore")?.circuit_json?.[0]?.type).toBe("source_component")
   expect(restored_jobs.getJob("job_restore")?.typical_application_circuit_json?.[0]?.type).toBe(

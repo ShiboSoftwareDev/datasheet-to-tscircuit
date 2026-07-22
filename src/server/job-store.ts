@@ -1,5 +1,5 @@
-import { appendFile } from "node:fs/promises"
 import { mkdirSync, writeFileSync } from "node:fs"
+import { appendFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job, JobEvent, JobListEvent, JobLog, JobLogStream, JobSummary } from "@/shared/job-types"
 
@@ -42,6 +42,7 @@ export interface RestoreJobInput extends CreateJobInput {
   component_ready?: boolean
   component_code?: string
   circuit_json?: Job["circuit_json"]
+  typical_application_title?: string
   typical_application_code?: string
   typical_application_circuit_json?: Job["typical_application_circuit_json"]
   validation?: Job["validation"]
@@ -60,6 +61,7 @@ export type JobUpdate = Partial<
     | "component_ready"
     | "component_code"
     | "circuit_json"
+    | "typical_application_title"
     | "typical_application_code"
     | "typical_application_circuit_json"
     | "validation"
@@ -82,6 +84,7 @@ function getPublicJob(job_record: JobRecord): Job {
     component_ready: job_record.component_ready,
     component_code: job_record.component_code,
     circuit_json: job_record.circuit_json,
+    typical_application_title: job_record.typical_application_title,
     typical_application_code: job_record.typical_application_code,
     typical_application_circuit_json: job_record.typical_application_circuit_json,
     validation: job_record.validation,
@@ -272,6 +275,7 @@ export class JobStore {
           additional_instructions: job_record.additional_instructions,
           retry_source_job_id: job_record.retry_source_job_id,
           component_ready: job_record.component_ready,
+          typical_application_title: job_record.typical_application_title,
           validation: job_record.validation,
           provenance: job_record.provenance,
           evidence_available: job_record.evidence_available,
