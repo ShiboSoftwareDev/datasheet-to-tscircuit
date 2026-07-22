@@ -3,7 +3,7 @@ import { dirname, join, relative } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 import { SimulationBenchmarkVerification } from "./types"
 import { assertSafeBenchmarkId } from "./parse-simulation-definition"
-import { readSimulationDefinition } from "./simulation-definitions"
+import { readSimulationDefinitions } from "./simulation-definitions"
 import { isCircuitJson } from "./get-circuit-build-diagnostics"
 import {
   getModelSimulationSourceSignature,
@@ -14,10 +14,12 @@ import {
   writeArtifactCopies,
   writeTextAtomically,
 } from "./simulation-validation-storage"
-import { extractSimulationResultPoints, parseSimulationOutput } from "./extract-simulation-result-points"
+import { extractSimulationResultSeries, parseSimulationOutput } from "./extract-simulation-result-points"
 import {
   assertCanonicalDutSimulation,
   assertNoSyntheticBenchmarkChannel,
+  assertSenseResistorMeasurement,
+  assertSimulationProbeExists,
 } from "./assert-canonical-dut-simulation"
 
 export async function verifySimulationBenchmark(input: {
@@ -33,7 +35,7 @@ export async function verifySimulationBenchmark(input: {
     const job_dir = dirname(input.model_dir)
     const source_path = join(input.model_dir, "benchmarks", `${input.benchmark_id}.circuit.tsx`)
     const circuit_json_path = join(job_dir, "dist", "spice", "benchmarks", input.benchmark_id, "circuit.json")
-    const definition = await readSimulationDefinition(input.model_dir, input.benchmark_id)
+    const definitions = await readSimulationDefinitions(input.model_dir, input.benchmark_id)
     const supplied_paths: Array<{ path: string }> = input.circuit_json_paths?.length
       ? input.circuit_json_paths
       : [{ path: circuit_json_path }]
@@ -68,44 +70,90 @@ export async function verifySimulationBenchmark(input: {
     if (errors.length > 0) throw new Error(errors.join("; "))
     assertNoSyntheticBenchmarkChannel(model_source)
     for (const circuit of circuit_jsons) {
-      assertCanonicalDutSimulation({
-        circuit_json: circuit as AnyCircuitElement[],
-        model_source,
-        probe_name: definition.probe_name,
-        dut_spice_node: definition.dut_spice_node,
-      })
+      for (const definition of definitions) {
+        if (definition.role === "response") {
+          assertCanonicalDutSimulation({
+            circuit_json: circuit as AnyCircuitElement[],
+            model_source,
+            probe_name: definition.probe_name,
+            dut_spice_node: definition.dut_spice_node!,
+            sense_resistor: definition.sense_resistor,
+            scale: definition.scale,
+            unit: definition.unit,
+          })
+        } else if (definition.sense_resistor) {
+          assertSenseResistorMeasurement({
+            circuit_json: circuit as AnyCircuitElement[],
+            probe_name: definition.probe_name,
+            sense_resistor: definition.sense_resistor,
+            scale: definition.scale,
+            unit: definition.unit,
+          })
+        } else {
+          assertSimulationProbeExists({
+            circuit_json: circuit as AnyCircuitElement[],
+            probe_name: definition.probe_name,
+          })
+        }
+      }
     }
 
-    const points = extractSimulationResultPoints(circuit_json, definition)
-    const text = toCsv(points)
-    const trusted_result_file = join(
-      getVerifiedResultsDirectory(input.model_dir),
-      `${input.benchmark_id}.csv`,
+    const result_series = extractSimulationResultSeries(circuit_json, definitions)
+    const legacy = definitions.length === 1 && definitions[0]?.series_id === "result"
+    const files = definitions.map((definition) => {
+      const text = toCsv(result_series[definition.series_id]!)
+      const trusted_result_file = legacy
+        ? join(getVerifiedResultsDirectory(input.model_dir), `${input.benchmark_id}.csv`)
+        : join(
+            getVerifiedResultsDirectory(input.model_dir),
+            input.benchmark_id,
+            `${definition.series_id}.csv`,
+          )
+      const diagnostic_result_file = legacy
+        ? join(input.model_dir, "results", "verified", `${input.benchmark_id}.csv`)
+        : join(input.model_dir, "results", "verified", input.benchmark_id, `${definition.series_id}.csv`)
+      const diagnostic_artifact_file = legacy
+        ? join(input.model_dir, "validation-artifacts", input.benchmark_id, "result.csv")
+        : join(
+            input.model_dir,
+            "validation-artifacts",
+            input.benchmark_id,
+            "results",
+            `${definition.series_id}.csv`,
+          )
+      return { definition, text, trusted_result_file, diagnostic_result_file, diagnostic_artifact_file }
+    })
+    await Promise.all(
+      files.flatMap((file) => [
+        mkdir(dirname(file.trusted_result_file), { recursive: true }),
+        mkdir(dirname(file.diagnostic_result_file), { recursive: true }),
+      ]),
     )
-    const diagnostic_result_file = join(input.model_dir, "results", "verified", `${input.benchmark_id}.csv`)
-    const diagnostic_artifact_file = join(
-      input.model_dir,
-      "validation-artifacts",
-      input.benchmark_id,
-      "result.csv",
+    await Promise.all(
+      files.flatMap((file) => [
+        writeTextAtomically(file.trusted_result_file, file.text),
+        writeTextAtomically(file.diagnostic_result_file, file.text),
+        writeTextAtomically(file.diagnostic_artifact_file, file.text),
+      ]),
     )
-    await Promise.all([
-      mkdir(dirname(trusted_result_file), { recursive: true }),
-      mkdir(dirname(diagnostic_result_file), { recursive: true }),
-    ])
-    await Promise.all([
-      writeTextAtomically(trusted_result_file, text),
-      writeTextAtomically(diagnostic_result_file, text),
-      writeTextAtomically(diagnostic_artifact_file, text),
-    ])
+    const primary = files.find((file) => file.definition.role === "response")!
     return {
       benchmark_id: input.benchmark_id,
       passed: true,
       status: "passed",
       generated_at,
       ...artifact,
-      verified_result_file: relative(getValidationRoot(input.model_dir), trusted_result_file),
-      sha256: hashText(text),
+      verified_result_file: relative(getValidationRoot(input.model_dir), primary.trusted_result_file),
+      sha256: hashText(primary.text),
+      ...(legacy
+        ? {}
+        : {
+            verified_result_files: files.map((file) => ({
+              series_id: file.definition.series_id,
+              file: relative(getValidationRoot(input.model_dir), file.trusted_result_file),
+              sha256: hashText(file.text),
+            })),
+          }),
     }
   } catch (error) {
     return {

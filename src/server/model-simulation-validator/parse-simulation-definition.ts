@@ -22,7 +22,10 @@ function optionalFiniteNumber(input: { value: unknown; fallback: number; label: 
   return value
 }
 
-export function parseSimulationDefinition(value: unknown): SimulationExtractionDefinition {
+export function parseSimulationDefinition(
+  value: unknown,
+  options: { role?: "response" | "stimulus"; quantity?: string } = {},
+): SimulationExtractionDefinition {
   if (!isRecord(value)) {
     throw new Error(
       "benchmark has no server-verifiable simulation extraction; add simulation.kind and probe mapping",
@@ -32,13 +35,38 @@ export function parseSimulationDefinition(value: unknown): SimulationExtractionD
     if (value.x_axis !== "time_ms") {
       throw new Error('simulation.x_axis must be "time_ms" for transient waveform benchmarks')
     }
+    const role = options.role ?? "response"
+    const dut_spice_node =
+      value.dut_spice_node === undefined
+        ? undefined
+        : requiredString(value.dut_spice_node, "simulation.dut_spice_node")
+    if (role === "response" && !dut_spice_node) {
+      throw new Error("simulation.dut_spice_node is required for a DUT response series")
+    }
+    const is_current = options.quantity?.trim().toLowerCase() === "current"
+    const sense_resistor =
+      value.sense_resistor === undefined
+        ? undefined
+        : requiredString(value.sense_resistor, "simulation.sense_resistor")
+    if (is_current && !sense_resistor) {
+      throw new Error("simulation.sense_resistor is required for a current series")
+    }
+    const scale = optionalFiniteNumber({ value: value.scale, fallback: 1, label: "simulation.scale" })
+    if (is_current && scale === 0) {
+      throw new Error("simulation.scale must be non-zero for a current series")
+    }
+    const offset = optionalFiniteNumber({ value: value.offset, fallback: 0, label: "simulation.offset" })
+    if (is_current && offset !== 0) {
+      throw new Error("simulation.offset must be zero for a physical current measurement")
+    }
     return {
       kind: "transient_voltage",
       x_axis: "time_ms",
       probe_name: requiredString(value.probe_name, "simulation.probe_name"),
-      dut_spice_node: requiredString(value.dut_spice_node, "simulation.dut_spice_node"),
-      scale: optionalFiniteNumber({ value: value.scale, fallback: 1, label: "simulation.scale" }),
-      offset: optionalFiniteNumber({ value: value.offset, fallback: 0, label: "simulation.offset" }),
+      dut_spice_node,
+      sense_resistor,
+      scale,
+      offset,
     }
   }
   throw new Error(

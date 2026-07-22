@@ -1,15 +1,30 @@
 import { readdir, readFile, stat } from "node:fs/promises"
 import { basename, join, relative } from "node:path"
-import type { ModelCircuitPreview, ModelCurvePoint, ModelReferencePreview } from "@/shared/job-types"
+import type {
+  ModelCircuitPreview,
+  ModelCurvePoint,
+  ModelReferencePreview,
+  ModelReferenceSeriesPreview,
+} from "@/shared/job-types"
 import { extractSimulationResultPoints, parseSimulationDefinition } from "../model-simulation-validator"
+
+interface BenchmarkPreviewSeriesRecord {
+  id: string
+  title: string
+  role: "response" | "stimulus"
+  quantity: string
+  unit: string
+  reference_file: string
+  y_scale: "linear" | "log"
+  simulation?: unknown
+}
 
 interface BenchmarkPreviewRecord {
   id?: string
   title?: string
+  x_scale?: "linear" | "log"
+  series: BenchmarkPreviewSeriesRecord[]
   reference_file?: string
-  x_scale?: string
-  y_scale?: string
-  simulation?: unknown
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -20,16 +35,54 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
   if (!isRecord(value) || !Array.isArray(value.benchmarks)) return []
   return value.benchmarks.flatMap((benchmark) => {
     if (!isRecord(benchmark)) return []
-    return [
-      {
-        id: typeof benchmark.id === "string" ? benchmark.id : undefined,
-        title: typeof benchmark.title === "string" ? benchmark.title : undefined,
-        reference_file: typeof benchmark.reference_file === "string" ? benchmark.reference_file : undefined,
-        x_scale: benchmark.x_scale === "log" ? "log" : "linear",
-        y_scale: benchmark.y_scale === "log" ? "log" : "linear",
-        simulation: benchmark.simulation,
-      },
-    ]
+    const id = typeof benchmark.id === "string" ? benchmark.id : undefined
+    const title = typeof benchmark.title === "string" ? benchmark.title : id
+    const x_scale = benchmark.x_scale === "log" ? "log" : "linear"
+    const parsed_series = Array.isArray(benchmark.series)
+      ? benchmark.series.flatMap((series): BenchmarkPreviewSeriesRecord[] => {
+          if (
+            !isRecord(series) ||
+            typeof series.id !== "string" ||
+            typeof series.reference_file !== "string" ||
+            (series.role !== "response" && series.role !== "stimulus")
+          )
+            return []
+          return [
+            {
+              id: series.id,
+              title: typeof series.title === "string" ? series.title : series.id,
+              role: series.role,
+              quantity: typeof series.quantity === "string" ? series.quantity : "voltage",
+              unit: typeof series.unit === "string" ? series.unit : "V",
+              reference_file: series.reference_file,
+              y_scale: series.y_scale === "log" ? "log" : "linear",
+              simulation: series.simulation,
+            },
+          ]
+        })
+      : []
+    const legacy_reference_file =
+      typeof benchmark.reference_file === "string" ? benchmark.reference_file : undefined
+    const series =
+      parsed_series.length > 0
+        ? parsed_series
+        : legacy_reference_file
+          ? [
+              {
+                id: "result",
+                title: title ?? "Result",
+                role: "response" as const,
+                quantity: "voltage",
+                unit: "V",
+                reference_file: legacy_reference_file,
+                y_scale: benchmark.y_scale === "log" ? ("log" as const) : ("linear" as const),
+                simulation: benchmark.simulation,
+              },
+            ]
+          : []
+    return series.length > 0
+      ? [{ id, title, x_scale, series, reference_file: series[0]?.reference_file }]
+      : []
   })
 }
 
@@ -97,46 +150,103 @@ export async function readReferencePreview(input: {
   let selected = benchmarks.find(
     (benchmark) =>
       benchmark.id === normalized_current ||
-      benchmark.reference_file?.includes(normalized_current ?? "\u0000"),
+      benchmark.series.some((series) => series.reference_file.includes(normalized_current ?? "\u0000")),
   )
   if (input.require_exact && !selected) return undefined
-  selected ??= benchmarks.find((benchmark) => Boolean(benchmark.reference_file))
+  selected ??= benchmarks.find((benchmark) => benchmark.series.length > 0)
 
-  let reference_file = selected?.reference_file
-  if (!reference_file) {
+  if (!selected) {
     const newest_curve = await newestFile(
       await listFiles(join(input.model_dir, "evidence", "curves"), ".csv"),
     )
     if (!newest_curve) return undefined
-    reference_file = relative(input.model_dir, newest_curve)
-    selected = { id: basename(reference_file, ".csv"), title: basename(reference_file, ".csv") }
+    const reference_file = relative(input.model_dir, newest_curve)
+    selected = {
+      id: basename(reference_file, ".csv"),
+      title: basename(reference_file, ".csv"),
+      x_scale: "linear",
+      reference_file,
+      series: [
+        {
+          id: "result",
+          title: basename(reference_file, ".csv"),
+          role: "response",
+          quantity: "voltage",
+          unit: "V",
+          reference_file,
+          y_scale: "linear",
+        },
+      ],
+    }
   }
 
-  const reference_path = join(input.model_dir, reference_file)
-  const [reference_text, reference_stat] = await Promise.all([
-    readFile(reference_path, "utf8").catch(() => undefined),
-    stat(reference_path).catch(() => undefined),
-  ])
-  if (!reference_text) return undefined
-  const reference_points = parseCurveCsv(reference_text)
-  if (reference_points.length === 0) return undefined
+  const series_previews = (
+    await Promise.all(
+      selected.series.map(
+        async (
+          series,
+        ): Promise<
+          | {
+              preview: ModelReferenceSeriesPreview
+              modified_at: number
+            }
+          | undefined
+        > => {
+          const reference_path = join(input.model_dir, series.reference_file)
+          const [reference_text, reference_stat] = await Promise.all([
+            readFile(reference_path, "utf8").catch(() => undefined),
+            stat(reference_path).catch(() => undefined),
+          ])
+          if (!reference_text) return undefined
+          const reference_points = parseCurveCsv(reference_text)
+          if (reference_points.length === 0) return undefined
+          const result_points = (() => {
+            if (!input.circuit_preview?.circuit_json || !series.simulation) return undefined
+            try {
+              return downsampleCurvePoints(
+                extractSimulationResultPoints(
+                  input.circuit_preview.circuit_json,
+                  parseSimulationDefinition(series.simulation, {
+                    role: series.role,
+                    quantity: series.quantity,
+                  }),
+                ),
+              )
+            } catch {
+              return undefined
+            }
+          })()
+          const legacy = selected!.series.length === 1 && series.id === "result"
+          const verified_result_file = legacy
+            ? `results/verified/${selected!.id}.csv`
+            : `results/verified/${selected!.id}/${series.id}.csv`
+          return {
+            preview: {
+              series_id: series.id,
+              title: series.title,
+              role: series.role,
+              quantity: series.quantity,
+              unit: series.unit,
+              source_file: series.reference_file,
+              result_file: result_points?.length ? verified_result_file : undefined,
+              y_scale: series.y_scale,
+              reference_points,
+              result_points: result_points?.length ? result_points : undefined,
+            },
+            modified_at: reference_stat?.mtimeMs ?? 0,
+          }
+        },
+      ),
+    )
+  ).filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+  if (series_previews.length === 0) return undefined
 
-  const result_points = (() => {
-    if (!input.circuit_preview?.circuit_json || !selected?.simulation) return undefined
-    try {
-      return downsampleCurvePoints(
-        extractSimulationResultPoints(
-          input.circuit_preview.circuit_json,
-          parseSimulationDefinition(selected.simulation),
-        ),
-      )
-    } catch {
-      return undefined
-    }
-  })()
+  const primary =
+    series_previews.find((entry) => entry.preview.role === "response")?.preview ?? series_previews[0]!.preview
+  const has_results = series_previews.some((entry) => entry.preview.result_points?.length)
   const is_stale = Boolean(input.circuit_preview?.is_stale)
-  const result_origin = result_points?.length ? input.circuit_preview?.snapshot_origin : undefined
-  const result_status = result_points?.length
+  const result_origin = has_results ? input.circuit_preview?.snapshot_origin : undefined
+  const result_status = has_results
     ? is_stale
       ? "deprecated"
       : result_origin === "workspace"
@@ -148,21 +258,20 @@ export async function readReferencePreview(input: {
             : "unverified"
     : undefined
   return {
-    benchmark_id: selected?.id,
-    title: selected?.title ?? selected?.id ?? basename(reference_file, ".csv"),
-    source_file: reference_file,
-    result_file:
-      result_status === "verified" && selected?.id ? `results/verified/${selected.id}.csv` : undefined,
-    x_scale: selected?.x_scale === "log" ? "log" : "linear",
-    y_scale: selected?.y_scale === "log" ? "log" : "linear",
-    reference_points,
-    result_points: result_points && result_points.length > 0 ? result_points : undefined,
+    benchmark_id: selected.id,
+    title: selected.title ?? selected.id ?? basename(primary.source_file, ".csv"),
+    source_file: primary.source_file,
+    result_file: result_status === "verified" ? primary.result_file : undefined,
+    x_scale: selected.x_scale ?? "linear",
+    y_scale: primary.y_scale,
+    reference_points: primary.reference_points,
+    result_points: primary.result_points,
+    series: series_previews.map((entry) => entry.preview),
     result_status,
     result_origin,
     is_stale,
     updated_at:
-      (result_points?.length ? input.circuit_preview?.updated_at : undefined) ??
-      reference_stat?.mtime.toISOString() ??
-      new Date().toISOString(),
+      (has_results ? input.circuit_preview?.updated_at : undefined) ??
+      new Date(Math.max(...series_previews.map((entry) => entry.modified_at))).toISOString(),
   }
 }

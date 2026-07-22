@@ -29,7 +29,7 @@ import { dirname, join, resolve } from "node:path"
 import { parseBenchmarkManifest, renderModelBenchmarkComparisonSvg, scoreSingleModelBenchmark } from ${JSON.stringify(
         pathToFileURL(join(serverDirectory, "model-scorer", "index.ts")).href,
       )}
-import { extractSimulationResultPoints, parseSimulationDefinition } from ${JSON.stringify(
+import { extractSimulationResultSeries, parseSimulationDefinition } from ${JSON.stringify(
         pathToFileURL(join(serverDirectory, "model-simulation-validator", "index.ts")).href,
       )}
 
@@ -43,13 +43,27 @@ const circuitJsonPath = process.argv[3]
   ? resolve(process.argv[3])
   : join(dirname(modelDir), "dist", "spice", "benchmarks", benchmarkId, "circuit.json")
 const circuitJson = JSON.parse(await readFile(circuitJsonPath, "utf8"))
-const points = extractSimulationResultPoints(circuitJson, parseSimulationDefinition(benchmark.simulation))
+const definitions = benchmark.series.map((series) => ({
+  series_id: series.id,
+  role: series.role,
+  quantity: series.quantity,
+  unit: series.unit,
+  ...parseSimulationDefinition(series.simulation, { role: series.role, quantity: series.quantity }),
+}))
+const extracted = extractSimulationResultSeries(circuitJson, definitions)
 const diagnosticDir = join(modelDir, "diagnostics", benchmarkId)
-const resultFile = join(diagnosticDir, "result.csv")
 await mkdir(diagnosticDir, { recursive: true })
-await Bun.write(resultFile, \`x,y\\n\${points.map((point) => \`\${point.x},\${point.y}\`).join("\\n")}\\n\`)
-const score = await scoreSingleModelBenchmark({ model_dir: modelDir, benchmark_id: benchmarkId, result_file_override: resultFile })
-const svg = await renderModelBenchmarkComparisonSvg({ model_dir: modelDir, benchmark_id: benchmarkId, result_file_override: resultFile })
+const resultFiles = Object.fromEntries(await Promise.all(benchmark.series.map(async (series) => {
+  const resultFile = benchmark.series.length === 1 && series.id === "result"
+    ? join(diagnosticDir, "result.csv")
+    : join(diagnosticDir, "results", \`\${series.id}.csv\`)
+  await mkdir(dirname(resultFile), { recursive: true })
+  const points = extracted[series.id]
+  await Bun.write(resultFile, \`x,y\\n\${points.map((point) => \`\${point.x},\${point.y}\`).join("\\n")}\\n\`)
+  return [series.id, resultFile]
+})))
+const score = await scoreSingleModelBenchmark({ model_dir: modelDir, benchmark_id: benchmarkId, result_files_override: resultFiles })
+const svg = await renderModelBenchmarkComparisonSvg({ model_dir: modelDir, benchmark_id: benchmarkId, result_files_override: resultFiles })
 await Promise.all([
   Bun.write(join(diagnosticDir, "comparison.json"), \`\${JSON.stringify(score, null, 2)}\\n\`),
   Bun.write(join(diagnosticDir, "comparison.svg"), svg),

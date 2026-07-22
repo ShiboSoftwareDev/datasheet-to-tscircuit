@@ -13,7 +13,14 @@ export interface BenchmarkLock {
 
 export interface BenchmarkRecord {
   id: string
-  reference_file: string
   source_image?: string
-  simulation?: unknown
+  series: Array<{
+    id: string
+    role: "response" | "stimulus"
+    quantity: string
+    unit: string
+    reference_file: string
+    source_image?: string
+    simulation?: unknown
+  }>
 }

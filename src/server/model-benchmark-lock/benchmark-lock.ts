@@ -15,8 +15,15 @@ export async function hasBenchmarkLock(model_dir: string): Promise<boolean> {
 export async function enableBenchmarkReferenceImageContract(model_dir: string): Promise<void> {
   await writeTextAtomically(
     getReferenceImageContractFile(model_dir),
-    `${JSON.stringify({ version: 1, enabled_at: new Date().toISOString() }, null, 2)}\n`,
+    `${JSON.stringify({ version: 2, enabled_at: new Date().toISOString() }, null, 2)}\n`,
   )
+}
+
+export async function requiresCompleteTimeGraphInventory(model_dir: string): Promise<boolean> {
+  const value = await readFile(getReferenceImageContractFile(model_dir), "utf8")
+    .then((text) => JSON.parse(text) as { version?: unknown })
+    .catch(() => undefined)
+  return value !== undefined
 }
 
 export async function hasBenchmarkReferenceImageContract(model_dir: string): Promise<boolean> {

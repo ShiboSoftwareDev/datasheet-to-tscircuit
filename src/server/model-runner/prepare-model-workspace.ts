@@ -1,12 +1,15 @@
 import { join } from "node:path"
 import { ensureJobTscircuitRuntimeConfig } from "../job-scaffold"
 import { startModelArtifactMonitor } from "../model-artifact-monitor"
-import { enableBenchmarkReferenceImageContract } from "../model-benchmark-lock"
+import {
+  enableBenchmarkReferenceImageContract,
+  requiresCompleteTimeGraphInventory,
+} from "../model-benchmark-lock"
 import { startModelProgressMonitor } from "../model-progress"
 import { buildModelSetupPrompt, copyComponentIntoModelWorkspace, writeModelScaffold } from "../model-scaffold"
 import { ModelExecution } from "./model-execution"
 import { updateServerProgress, waitForComponent } from "./model-run-state"
-import { hasCompletedSetup } from "./model-setup-state"
+import { hasCompletedSetup, validateCompletedSetup } from "./model-setup-state"
 import { streamModelProcess } from "./stream-model-process"
 
 export async function prepareModelWorkspace(execution: ModelExecution): Promise<boolean> {
@@ -56,6 +59,8 @@ export async function prepareModelWorkspace(execution: ModelExecution): Promise<
       ],
       cwd: execution.model_dir,
       signal: execution.process_controller.signal,
+      activity_paths: [join(execution.model_dir, "model-progress.json")],
+      workspace_root: execution.model_dir,
       on_chunk: execution.append.bind(execution),
     })
     if (execution.cancellation_signal.aborted) {
@@ -71,7 +76,14 @@ export async function prepareModelWorkspace(execution: ModelExecution): Promise<
     if (!(await hasCompletedSetup(execution.model_dir))) {
       throw new Error("The setup agent did not create setup-complete.json")
     }
+    if (await requiresCompleteTimeGraphInventory(execution.model_dir)) {
+      await validateCompletedSetup(execution.model_dir)
+    }
     await execution.append("system", "Untimed evidence setup is complete.\n")
+  }
+
+  if (await requiresCompleteTimeGraphInventory(execution.model_dir)) {
+    await validateCompletedSetup(execution.model_dir)
   }
 
   const component_job = execution.context.job_store.getJob(execution.model_run.job_id)

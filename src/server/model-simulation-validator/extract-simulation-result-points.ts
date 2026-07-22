@@ -1,4 +1,4 @@
-import { SimulationExtractionDefinition, SimulationGraph } from "./types"
+import { SimulationExtractionDefinition, SimulationGraph, SimulationSeriesDefinition } from "./types"
 import { getCircuitBuildDiagnostics, isCircuitJson } from "./get-circuit-build-diagnostics"
 import { isRecord } from "./parse-simulation-definition"
 
@@ -49,4 +49,23 @@ export function extractSimulationResultPoints(
     x,
     y: graph.voltage_levels[index]! * definition.scale + definition.offset,
   }))
+}
+
+export function extractSimulationResultSeries(
+  circuit_json: unknown,
+  definitions: SimulationSeriesDefinition[],
+): Record<string, Array<{ x: number; y: number }>> {
+  const graphs = parseSimulationOutput(circuit_json).graphs
+  return Object.fromEntries(
+    definitions.map((definition) => {
+      const graph = requireGraph(graphs, definition.probe_name)
+      return [
+        definition.series_id,
+        graph.timestamps_ms.map((x, index) => ({
+          x,
+          y: graph.voltage_levels[index]! * definition.scale + definition.offset,
+        })),
+      ]
+    }),
+  )
 }

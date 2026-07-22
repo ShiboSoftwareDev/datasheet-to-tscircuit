@@ -1,3 +1,4 @@
+import { join } from "node:path"
 import { hasBenchmarkManifest, verifyBenchmarkLock } from "../model-benchmark-lock"
 import { buildModelAgentPrompt } from "../model-scaffold"
 import { publishAvailableModelCheckpoint, restoreBestReportedModelCheckpoint } from "./model-checkpoint"
@@ -77,6 +78,8 @@ export async function runRefinementAgentPass(
         ],
         cwd: execution.model_dir,
         signal: agent_controller.signal,
+        activity_paths: [join(execution.model_dir, "model-progress.json")],
+        workspace_root: execution.model_dir,
         on_chunk: async (stream, message) => {
           agent_process_output = captureProcessOutput(agent_process_output, message)
           await execution.append(stream, message)

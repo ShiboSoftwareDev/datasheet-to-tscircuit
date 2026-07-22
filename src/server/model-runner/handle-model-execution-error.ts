@@ -1,7 +1,11 @@
-import { publishAvailableModelCheckpoint } from "./model-checkpoint"
+import { publishAvailableModelCheckpoint, restoreBestReportedModelCheckpoint } from "./model-checkpoint"
 import type { ModelExecution } from "./model-execution"
 import { updateServerProgress } from "./model-run-state"
-import { ModelInfrastructureError, ModelProcessStaleError } from "./stream-model-process"
+import {
+  ModelInfrastructureError,
+  ModelProcessStaleError,
+  ModelWorkspaceIsolationError,
+} from "./stream-model-process"
 
 export async function handleModelExecutionError(error: unknown, execution: ModelExecution): Promise<void> {
   execution.stopBudgetMonitor()
@@ -17,6 +21,19 @@ export async function handleModelExecutionError(error: unknown, execution: Model
     : error instanceof Error
       ? error.message
       : String(error)
+  if (is_stale_error || error instanceof ModelWorkspaceIsolationError) {
+    const restored_revision = await restoreBestReportedModelCheckpoint(execution.model_dir).catch(
+      () => undefined,
+    )
+    if (restored_revision) {
+      await execution
+        .append(
+          "system",
+          `Restored reported champion ${restored_revision} after terminating the agent process tree.\n`,
+        )
+        .catch(() => undefined)
+    }
+  }
   await publishAvailableModelCheckpoint(
     { model_run_id: execution.model_run_id, model_dir: execution.model_dir },
     execution.context.model_run_store,

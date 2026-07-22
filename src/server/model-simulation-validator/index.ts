@@ -1,5 +1,6 @@
 export type {
   SimulationExtractionDefinition,
+  SimulationSeriesDefinition,
   CircuitBuildDiagnostics,
   SimulationBenchmarkVerification,
   VerifiedSimulationArtifact,
@@ -8,10 +9,14 @@ export { parseSimulationDefinition } from "./parse-simulation-definition"
 export {
   getSimulationRunCount,
   readSimulationDefinition,
+  readSimulationDefinitions,
   validateSimulationDefinitions,
 } from "./simulation-definitions"
 export { getAllCircuitErrors, getCircuitBuildDiagnostics } from "./get-circuit-build-diagnostics"
-export { extractSimulationResultPoints } from "./extract-simulation-result-points"
+export {
+  extractSimulationResultPoints,
+  extractSimulationResultSeries,
+} from "./extract-simulation-result-points"
 export {
   getModelSimulationSourceSignature,
   getVerifiedResultsDirectory,
@@ -21,8 +26,13 @@ export {
 export { verifyPartialSimulationBenchmark } from "./verify-partial-simulation-benchmark"
 export { verifySimulationBenchmark } from "./verify-simulation-benchmark"
 export {
+  assertCanonicalDutSimulation,
+  assertSenseResistorMeasurement,
+} from "./assert-canonical-dut-simulation"
+export {
   writeSimulationValidationReport,
   getVerifiedSimulationArtifact,
   getVerifiedResultFile,
+  getVerifiedResultFiles,
   hasCompleteVerifiedSimulationReport,
 } from "./simulation-validation-artifacts"

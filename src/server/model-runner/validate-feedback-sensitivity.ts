@@ -6,7 +6,7 @@ import { parseTypicalApplicationPlan, type TypicalApplicationPlan } from "../job
 import {
   extractSimulationResultPoints,
   getVerifiedResultsDirectory,
-  readSimulationDefinition,
+  readSimulationDefinitions,
 } from "../model-simulation-validator"
 import { inferApplicationDutReference } from "./get-benchmark-application-plan"
 import { TimeShiftPoint, parseResultCsv } from "./validate-absolute-time-shift"
@@ -158,7 +158,15 @@ export async function validateFeedbackSensitivity(input: {
   }
   const resistance_ratio = input.resistance_ratio ?? 1.05
   const benchmark_files = await listModelBenchFiles(input.model_dir)
-  let selected: { benchmark_id: string; benchmark_file: string; shifted_source: string } | undefined
+  let selected:
+    | {
+        benchmark_id: string
+        benchmark_file: string
+        shifted_source: string
+        series_id: string
+        legacy_result: boolean
+      }
+    | undefined
   for (const benchmark_file of benchmark_files) {
     const source = await readFile(join(input.model_dir, "benchmarks", benchmark_file), "utf8")
     const shifted = shiftNamedResistorResistance({
@@ -168,12 +176,23 @@ export async function validateFeedbackSensitivity(input: {
     })
     if (!shifted) continue
     const benchmark_id = benchmark_file.replace(/\.circuit\.tsx$/i, "")
-    if (
-      !(await Bun.file(join(getVerifiedResultsDirectory(input.model_dir), `${benchmark_id}.csv`)).exists())
-    ) {
+    const definitions = await readSimulationDefinitions(input.model_dir, benchmark_id)
+    const primary = definitions.find((definition) => definition.role === "response")
+    if (!primary) continue
+    const legacy_result = definitions.length === 1 && primary.series_id === "result"
+    const verified_result = legacy_result
+      ? join(getVerifiedResultsDirectory(input.model_dir), `${benchmark_id}.csv`)
+      : join(getVerifiedResultsDirectory(input.model_dir), benchmark_id, `${primary.series_id}.csv`)
+    if (!(await Bun.file(verified_result).exists())) {
       continue
     }
-    selected = { benchmark_id, benchmark_file, shifted_source: shifted.source }
+    selected = {
+      benchmark_id,
+      benchmark_file,
+      shifted_source: shifted.source,
+      series_id: primary.series_id,
+      legacy_result,
+    }
     break
   }
   if (!selected) {
@@ -227,14 +246,21 @@ export async function validateFeedbackSensitivity(input: {
         error_message: build.error_message ?? "feedback-shifted benchmark produced no simulator output",
       }
     }
-    const definition = await readSimulationDefinition(input.model_dir, selected.benchmark_id)
+    const definitions = await readSimulationDefinitions(input.model_dir, selected.benchmark_id)
+    const definition = definitions.find((candidate) => candidate.series_id === selected.series_id)!
     const shifted_points = extractSimulationResultPoints(
       JSON.parse(await readFile(build.path, "utf8")),
       definition,
     )
     const original_points = parseResultCsv(
       await readFile(
-        join(getVerifiedResultsDirectory(input.model_dir), `${selected.benchmark_id}.csv`),
+        selected.legacy_result
+          ? join(getVerifiedResultsDirectory(input.model_dir), `${selected.benchmark_id}.csv`)
+          : join(
+              getVerifiedResultsDirectory(input.model_dir),
+              selected.benchmark_id,
+              `${selected.series_id}.csv`,
+            ),
         "utf8",
       ),
     )

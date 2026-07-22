@@ -17,6 +17,8 @@ import {
   getUnpoweredRequiredPinErrors,
   isTransientAgentTransportFailure,
   modelUsesAbsoluteTime,
+  ModelProcessStaleError,
+  ModelWorkspaceIsolationError,
   parseModelManifest,
   preflightNgspice,
   restoreBestReportedModelCheckpoint,
@@ -25,7 +27,10 @@ import {
   shiftLiteralPulseDelays,
   shiftNamedResistorResistance,
   stripAnalogSimulationForStructuralCheck,
+  streamModelProcess,
   validateAbsoluteTimeShift,
+  validateCompletedSetup,
+  validateFinalizedBenchmarksMatchDraft,
   validateManifestAgainstModel,
 } from "@/server/model-runner"
 import {
@@ -79,6 +84,181 @@ test("benchmark preflight requires and validates a power probe for every require
       [probe_name],
     ),
   ).toEqual([])
+})
+
+test("strict setup inventory rejects omitted time-domain figures", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-setup-inventory-"))
+  try {
+    await Bun.write(
+      join(model_dir, "benchmark-draft.json"),
+      JSON.stringify({
+        version: 2,
+        figure_inventory: [
+          {
+            page: 24,
+            figure: "Figure 10-15",
+            x_axis: "time",
+            status: "excluded",
+            reason: "one-probe contract",
+          },
+        ],
+        benchmarks: [],
+      }),
+    )
+    await Bun.write(
+      join(model_dir, "setup-complete.json"),
+      JSON.stringify({ version: 2, draft_benchmark_count: 0 }),
+    )
+    await expect(validateCompletedSetup(model_dir)).rejects.toThrow(
+      "Every reviewed time-domain graph must be drafted",
+    )
+
+    await Bun.write(
+      join(model_dir, "benchmark-draft.json"),
+      JSON.stringify({
+        version: 2,
+        figure_inventory: [
+          {
+            page: 24,
+            figure: "Figure 10-15",
+            x_axis: "time",
+            status: "drafted",
+            benchmark_id: "switching-pfm",
+          },
+        ],
+        benchmarks: [{ id: "switching-pfm" }],
+      }),
+    )
+    await Bun.write(
+      join(model_dir, "setup-complete.json"),
+      JSON.stringify({ version: 2, draft_benchmark_count: 1 }),
+    )
+    await expect(validateCompletedSetup(model_dir)).resolves.toBeUndefined()
+    await Bun.write(join(model_dir, "benchmarks.json"), JSON.stringify({ version: 2, benchmarks: [] }))
+    await expect(validateFinalizedBenchmarksMatchDraft(model_dir)).rejects.toThrow(
+      "must exactly match the complete time-graph draft",
+    )
+    await Bun.write(
+      join(model_dir, "benchmarks.json"),
+      JSON.stringify({ version: 2, benchmarks: [{ id: "switching-pfm" }] }),
+    )
+    await expect(validateFinalizedBenchmarksMatchDraft(model_dir)).resolves.toBeUndefined()
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("model progress file updates keep a silent agent process alive", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "datasheet-model-progress-heartbeat-"))
+  const agent_path = join(workspace, "silent-agent")
+  const progress_path = join(workspace, "model-progress.json")
+  const previous_timeout = process.env.MODEL_STALE_TIMEOUT_MS
+  try {
+    await Bun.write(
+      agent_path,
+      `#!/usr/bin/env bun
+const progress = ${JSON.stringify(progress_path)}
+for (let sequence = 1; sequence <= 3; sequence += 1) {
+  await Bun.sleep(400)
+  await Bun.write(progress, JSON.stringify({ sequence }))
+}
+`,
+    )
+    await chmod(agent_path, 0o755)
+    process.env.MODEL_STALE_TIMEOUT_MS = "1000"
+    await expect(
+      streamModelProcess({
+        command: [agent_path],
+        cwd: workspace,
+        signal: new AbortController().signal,
+        activity_paths: [progress_path],
+        on_chunk: async () => undefined,
+      }),
+    ).resolves.toBe(0)
+  } finally {
+    if (previous_timeout === undefined) delete process.env.MODEL_STALE_TIMEOUT_MS
+    else process.env.MODEL_STALE_TIMEOUT_MS = previous_timeout
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("agent tool calls cannot read sibling job workspaces", async () => {
+  const root = await mkdtemp(join(tmpdir(), "datasheet-model-isolation-"))
+  const workspace = join(root, ".runtime", "jobs", "current", "spice")
+  const agent_path = join(root, "isolation-agent")
+  try {
+    await mkdir(workspace, { recursive: true })
+    await Bun.write(
+      agent_path,
+      `#!/usr/bin/env bun
+console.error('[tool] read {"path":"${root}/.runtime/jobs/sibling/spice/benchmarks.json"}')
+await Bun.sleep(30_000)
+`,
+    )
+    await chmod(agent_path, 0o755)
+    await expect(
+      streamModelProcess({
+        command: [agent_path],
+        cwd: workspace,
+        workspace_root: workspace,
+        signal: new AbortController().signal,
+        on_chunk: async () => undefined,
+      }),
+    ).rejects.toBeInstanceOf(ModelWorkspaceIsolationError)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("stale termination kills detached descendants before they can write late artifacts", async () => {
+  if (process.platform !== "linux") {
+    try {
+      if (
+        Bun.spawnSync(["ps", "-axo", "pid=,ppid="], { stdout: "ignore", stderr: "ignore" }).exitCode !== 0
+      ) {
+        return
+      }
+    } catch {
+      return
+    }
+  }
+  const workspace = await mkdtemp(join(tmpdir(), "datasheet-model-process-tree-"))
+  const agent_path = join(workspace, "parent-agent")
+  const child_path = join(workspace, "detached-child")
+  const late_artifact = join(workspace, "late-artifact.txt")
+  const previous_timeout = process.env.MODEL_STALE_TIMEOUT_MS
+  try {
+    await Bun.write(
+      child_path,
+      `#!/usr/bin/env bun
+await Bun.sleep(1600)
+await Bun.write(${JSON.stringify(late_artifact)}, "late write")
+`,
+    )
+    await Bun.write(
+      agent_path,
+      `#!/usr/bin/env bun
+Bun.spawn([${JSON.stringify(child_path)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+await Bun.sleep(30_000)
+`,
+    )
+    await Promise.all([chmod(agent_path, 0o755), chmod(child_path, 0o755)])
+    process.env.MODEL_STALE_TIMEOUT_MS = "1000"
+    await expect(
+      streamModelProcess({
+        command: [agent_path],
+        cwd: workspace,
+        signal: new AbortController().signal,
+        on_chunk: async () => undefined,
+      }),
+    ).rejects.toBeInstanceOf(ModelProcessStaleError)
+    await Bun.sleep(1800)
+    expect(await Bun.file(late_artifact).exists()).toBe(false)
+  } finally {
+    if (previous_timeout === undefined) delete process.env.MODEL_STALE_TIMEOUT_MS
+    else process.env.MODEL_STALE_TIMEOUT_MS = previous_timeout
+    await rm(workspace, { recursive: true, force: true })
+  }
 })
 
 const lockedBenchmarkSource = `import Component from "../component-with-model.circuit"
@@ -144,8 +324,14 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(setup_prompt).toContain("call the built-in `read` tool on every graph PNG")
   expect(setup_prompt).toContain("evidence/pages/datasheet-page-<page>.png")
   expect(setup_prompt).toContain("evidence/figures/<benchmark-id>.png")
+  expect(setup_prompt).toContain("source.channel_count")
+  expect(setup_prompt).toContain("silently omitted")
+  expect(setup_prompt).toContain("Commas and spaces are not valid ids")
   const benchmark_prompt = buildModelBenchmarkPrompt()
   expect(benchmark_prompt).toContain("benchmark-only pass")
+  expect(benchmark_prompt).toContain("version-2 benchmarks.json")
+  expect(benchmark_prompt).toContain("Preserve every draft series")
+  expect(benchmark_prompt).toContain("one shared analog transient run")
   expect(benchmark_prompt).toContain("dut_spice_node")
   expect(benchmark_prompt).toContain('simulation.x_axis `"time_ms"`')
   expect(benchmark_prompt).toContain("Do not create or modify model.lib")
@@ -153,6 +339,10 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(benchmark_prompt).toContain("one timePerStep beyond the final reference")
   expect(benchmark_prompt).toContain("probes every DUT pin marked requiresPower")
   expect(benchmark_prompt).toContain('source.image: "evidence/figures/<benchmark-id>.png"')
+  expect(benchmark_prompt).toContain("A square `voltagesource` is always")
+  expect(benchmark_prompt).toContain("`peakToPeakVoltage` does not create a DC offset")
+  expect(benchmark_prompt).toContain("never at the source component's pin")
+  expect(benchmark_prompt).toContain("must not contain commas or spaces")
   const corrected_benchmark_prompt = buildModelBenchmarkPrompt(
     "Benchmark transfer voltage probe RESULT must connect directly to a DUT port",
   )
@@ -798,6 +988,77 @@ process.exit(8)
   await rm(job_dir, { recursive: true, force: true })
 })
 
+test("a stalled benchmark correction pass restarts without losing its validation workspace", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-benchmark-stall-"))
+  const model_dir = join(job_dir, "spice")
+  const agent_path = join(job_dir, "stalled-benchmark-agent")
+  const tsci_path = join(job_dir, "unused-tsci")
+  const previous_stale_timeout = process.env.MODEL_STALE_TIMEOUT_MS
+  const previous_finalization_attempts = process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS
+  try {
+    await Promise.all([
+      Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nfixture"),
+      Bun.write(join(job_dir, "index.circuit.tsx"), 'export default () => <chip name="U1" />\n'),
+      Bun.write(
+        agent_path,
+        `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const args = process.argv.slice(2)
+const dir = args[args.indexOf("--dir") + 1]
+const prompt = args[args.indexOf("--prompt") + 1]
+if (!prompt.includes("benchmark-only pass")) process.exit(9)
+if (!prompt.includes("previous correction agent stalled")) {
+  await Bun.write(dir + "/../benchmark-first-pass-started.txt", "yes")
+  await Bun.sleep(10_000)
+  process.exit(8)
+}
+await Bun.write(dir + "/../benchmark-retry-started.txt", "yes")
+await mkdir(dir + "/benchmarks", { recursive: true })
+await mkdir(dir + "/evidence/curves", { recursive: true })
+await Bun.write(dir + "/benchmarks/transfer.circuit.tsx", ${JSON.stringify(lockedBenchmarkSource)})
+await Bun.write(dir + "/benchmarks.json", JSON.stringify({ version: 1, locked_at: new Date().toISOString(), benchmarks: [{ id: "transfer", title: "Transfer", source: { page: 3 }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/transfer.csv", result_file: "results/champion/transfer.csv", simulation: { kind: "transient_voltage", x_axis: "time_ms", probe_name: "VOUT_PROBE", dut_spice_node: "OUT" } }] }))
+await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
+`,
+      ),
+      Bun.write(tsci_path, provisionalBenchmarkBuildSource),
+    ])
+    await Promise.all([chmod(agent_path, 0o755), chmod(tsci_path, 0o755)])
+    const job_store = new JobStore()
+    const model_run_store = new ModelRunStore()
+    job_store.createJob({ job_id: "job_benchmark_stall", job_dir, file_name: "part.pdf" })
+    job_store.updateJob("job_benchmark_stall", { display_status: "complete", is_complete: true })
+    model_run_store.createModelRun({
+      model_run_id: "model_benchmark_stall",
+      job_id: "job_benchmark_stall",
+      model_dir,
+      effort_multiplier: 1,
+      base_effort_ms: 2_000,
+    })
+    await Bun.write(join(model_dir, "setup-complete.json"), JSON.stringify({ version: 1 }))
+    process.env.MODEL_STALE_TIMEOUT_MS = "2000"
+    process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS = "2"
+
+    await runModel(
+      { model_run_id: "model_benchmark_stall" },
+      { job_store, model_run_store, agent_bin: agent_path, tsci_bin: tsci_path },
+    )
+
+    const run = model_run_store.getModelRun("model_benchmark_stall")
+    expect(run?.logs.map((log) => log.message).join("\n")).toContain("Restarting the untimed correction pass")
+    expect(await Bun.file(join(job_dir, "benchmark-retry-started.txt")).text()).toBe("yes")
+    expect(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).exists()).toBe(true)
+  } finally {
+    if (previous_stale_timeout === undefined) delete process.env.MODEL_STALE_TIMEOUT_MS
+    else process.env.MODEL_STALE_TIMEOUT_MS = previous_stale_timeout
+    if (previous_finalization_attempts === undefined) {
+      delete process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS
+    } else {
+      process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS = previous_finalization_attempts
+    }
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})
+
 test("benchmark contract rejections are returned to the untimed finalization agent", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-benchmark-correction-"))
   const model_dir = join(job_dir, "spice")
@@ -919,9 +1180,9 @@ const prompt = args[args.indexOf("--prompt") + 1]
 if (prompt.includes("untimed evidence")) {
   await mkdir(dir + "/evidence/figures", { recursive: true })
   await Bun.write(dir + "/evidence/figures/transfer.png", Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (character) => character.charCodeAt(0)))
-  await Bun.write(dir + "/benchmark-draft.json", JSON.stringify({ version: 1, benchmarks: [{ id: "transfer", source: { page: 3, image: "evidence/figures/transfer.png" } }] }))
+  await Bun.write(dir + "/benchmark-draft.json", JSON.stringify({ version: 2, figure_inventory: [{ page: 3, figure: "Transfer", x_axis: "time", status: "drafted", benchmark_id: "transfer" }], benchmarks: [{ id: "transfer", source: { page: 3, image: "evidence/figures/transfer.png" } }] }))
   await Bun.write(dir + "/model-progress.json", JSON.stringify({ sequence: 2, phase: "digitizing_graphs", message: "Digitized the transfer graph", updated_at: new Date().toISOString(), iteration: 0, evidence: { pages_reviewed: 4, graphs_found: 1, graphs_digitized: 1, benchmark_drafts: 1 } }))
-  await Bun.write(dir + "/setup-complete.json", JSON.stringify({ version: 1, completed_at: new Date().toISOString(), evidence_file_count: 2, draft_benchmark_count: 1 }))
+  await Bun.write(dir + "/setup-complete.json", JSON.stringify({ version: 2, completed_at: new Date().toISOString(), evidence_file_count: 2, draft_benchmark_count: 1 }))
   console.log("setup checkpointed")
   process.exit(0)
 }
@@ -1481,7 +1742,7 @@ if (prompt.includes("benchmark-only pass")) {
     { id: "waveform-b", title: "Waveform B", source: { page: 2 }, critical: true, weight: 1, tolerance: 0.01, reference_file: "evidence/curves/waveform-b.csv", result_file: "results/champion/waveform-b.csv", simulation },
   ] }))
   await Bun.write(dir + "/evidence/curves/waveform-a.csv", "x,y\\n0,0\\n1,2\\n2,4\\n")
-  await Bun.write(dir + "/evidence/curves/waveform-b.csv", "x,y\\n0,0\\n1,2\\n2,4\\n")
+  await Bun.write(dir + "/evidence/curves/waveform-b.csv", "x,y\\n0,0\\n0.5,1\\n1,2\\n2,4\\n")
   process.exit(0)
 }
 await Bun.write(dir + "/model.lib", ".subckt WAVEFORM IN OUT\\nR1 IN OUT 1k\\n.ends WAVEFORM\\n")

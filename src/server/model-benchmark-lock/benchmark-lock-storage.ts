@@ -35,7 +35,10 @@ export async function readCurrentLock(
   const manifest = parseBenchmarkManifest(manifest_value)
   const records = parseBenchmarkRecords(manifest_value)
   for (const record of records) {
-    assertEvidenceFile(model_dir, record.reference_file)
+    for (const series of record.series) {
+      assertEvidenceFile(model_dir, series.reference_file)
+      if (series.source_image) assertEvidenceFile(model_dir, series.source_image)
+    }
     if (options.require_source_images && !record.source_image) {
       throw new Error(
         `Benchmark ${record.id} must declare source.image as evidence/figures/${record.id}.png for its exact datasheet graph crop`,
@@ -58,8 +61,11 @@ export async function readCurrentLock(
   const paths = [
     "benchmarks.json",
     ...records.map((record) => join("benchmarks", `${record.id}.circuit.tsx`)),
-    ...records.map((record) => record.reference_file),
+    ...records.flatMap((record) => record.series.map((series) => series.reference_file)),
     ...records.flatMap((record) => (record.source_image ? [record.source_image] : [])),
+    ...records.flatMap((record) =>
+      record.series.flatMap((series) => (series.source_image ? [series.source_image] : [])),
+    ),
   ]
   const unique_paths = [...new Set(paths)]
   const files = await Promise.all(
@@ -76,6 +82,15 @@ export async function readCurrentLock(
       const image = files.find((file) => file.file === record.source_image)?.content
       if (!image || !isPng(image)) {
         throw new Error(`Benchmark ${record.id} source.image must be a valid PNG graph crop`)
+      }
+    }
+    for (const series of record.series) {
+      if (!series.source_image) continue
+      const image = files.find((file) => file.file === series.source_image)?.content
+      if (!image || !isPng(image)) {
+        throw new Error(
+          `Benchmark ${record.id} series ${series.id} source_image must be a valid PNG channel crop`,
+        )
       }
     }
   }

@@ -343,3 +343,123 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   monitor.stop()
   await rm(job_dir, { recursive: true, force: true })
 })
+
+test("model previews expose every channel from a multi-channel benchmark figure", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-multi-channel-preview-"))
+  const model_dir = join(job_dir, "spice")
+  const output_dir = join(job_dir, "dist", "spice", "benchmarks", "startup-sequence")
+  try {
+    await Promise.all([
+      mkdir(join(model_dir, "benchmarks"), { recursive: true }),
+      mkdir(join(model_dir, "evidence", "curves", "startup-sequence"), { recursive: true }),
+      mkdir(output_dir, { recursive: true }),
+    ])
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmarks", "startup-sequence.circuit.tsx"),
+        "export default () => <board />\n",
+      ),
+      Bun.write(
+        join(model_dir, "benchmarks.json"),
+        JSON.stringify({
+          version: 2,
+          benchmarks: [
+            {
+              id: "startup-sequence",
+              title: "Startup sequence",
+              x_scale: "linear",
+              series: [
+                {
+                  id: "vout",
+                  title: "Output voltage",
+                  role: "response",
+                  quantity: "voltage",
+                  unit: "V",
+                  reference_file: "evidence/curves/startup-sequence/vout.csv",
+                  simulation: {
+                    kind: "transient_voltage",
+                    x_axis: "time_ms",
+                    probe_name: "RESULT_VOUT",
+                    dut_spice_node: "OUT",
+                  },
+                },
+                {
+                  id: "pg",
+                  title: "Power-good response",
+                  role: "response",
+                  quantity: "voltage",
+                  unit: "V",
+                  reference_file: "evidence/curves/startup-sequence/pg.csv",
+                  simulation: {
+                    kind: "transient_voltage",
+                    x_axis: "time_ms",
+                    probe_name: "RESULT_PG",
+                    dut_spice_node: "PG",
+                  },
+                },
+                {
+                  id: "vin",
+                  title: "Input-voltage stimulus",
+                  role: "stimulus",
+                  quantity: "voltage",
+                  unit: "V",
+                  reference_file: "evidence/curves/startup-sequence/vin.csv",
+                  simulation: {
+                    kind: "transient_voltage",
+                    x_axis: "time_ms",
+                    probe_name: "STIMULUS_VIN",
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+      Bun.write(
+        join(model_dir, "evidence", "curves", "startup-sequence", "vout.csv"),
+        "x,y\n0,0\n1,1\n2,2\n",
+      ),
+      Bun.write(join(model_dir, "evidence", "curves", "startup-sequence", "pg.csv"), "x,y\n0,0\n1,0\n2,5\n"),
+      Bun.write(join(model_dir, "evidence", "curves", "startup-sequence", "vin.csv"), "x,y\n0,0\n1,5\n2,5\n"),
+      Bun.write(
+        join(output_dir, "circuit.json"),
+        JSON.stringify([
+          {
+            type: "simulation_transient_voltage_graph",
+            name: "RESULT_VOUT",
+            timestamps_ms: [0, 1, 2],
+            voltage_levels: [0, 1, 2],
+          },
+          {
+            type: "simulation_transient_voltage_graph",
+            name: "RESULT_PG",
+            timestamps_ms: [0, 1, 2],
+            voltage_levels: [0, 0, 5],
+          },
+          {
+            type: "simulation_transient_voltage_graph",
+            name: "STIMULUS_VIN",
+            timestamps_ms: [0, 1, 2],
+            voltage_levels: [0, 5, 5],
+          },
+        ]),
+      ),
+    ])
+
+    const selected = await loadModelSelectedPreview({
+      model_dir,
+      benchmark_id: "startup-sequence",
+    })
+    expect(selected?.reference_preview?.series?.map((series) => series.series_id)).toEqual([
+      "vout",
+      "pg",
+      "vin",
+    ])
+    expect(selected?.reference_preview?.series?.map((series) => series.result_points?.[2]?.y)).toEqual([
+      2, 5, 5,
+    ])
+    expect(selected?.reference_preview?.reference_points[2]).toEqual({ x: 2, y: 2 })
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})

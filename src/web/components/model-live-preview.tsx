@@ -217,6 +217,35 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
     )
   }
 
+  if (preview.series && preview.series.length > 1) {
+    return (
+      <div className="model-reference-series-stack">
+        {preview.series.map((series) => (
+          <section className="model-reference-series-panel" key={series.series_id}>
+            <header>
+              <strong>{series.title}</strong>
+              <span>
+                {series.role === "response" ? "DUT response" : "Harness stimulus"} · {series.unit}
+              </span>
+            </header>
+            <ReferenceGraph
+              preview={{
+                ...preview,
+                title: `${preview.title}: ${series.title}`,
+                source_file: series.source_file,
+                result_file: series.result_file,
+                y_scale: series.y_scale,
+                reference_points: series.reference_points,
+                result_points: series.result_points,
+                series: undefined,
+              }}
+            />
+          </section>
+        ))}
+      </div>
+    )
+  }
+
   const all_points = [...preview.reference_points, ...(preview.result_points ?? [])]
   const scaled_x = all_points.flatMap((point) => {
     const value = scaledValue(point.x, preview.x_scale)
@@ -354,7 +383,7 @@ function ModelReferencePane({
   benchmark_id: string
   preview?: ModelReferencePreview
 }) {
-  const [active_view, setActiveView] = useState<ModelReferenceView>("reference_graph")
+  const [active_view, setActiveView] = useState<ModelReferenceView>("datasheet_reference")
   const [image_failed, setImageFailed] = useState(false)
   const resolved_benchmark_id = preview?.benchmark_id ?? benchmark_id
   const image_url =
@@ -373,7 +402,7 @@ function ModelReferencePane({
             aria-selected={active_view === "reference_graph"}
             onClick={() => setActiveView("reference_graph")}
           >
-            <ChartLine size={14} /> Reference graph
+            <ChartLine size={14} /> Reference graphs
           </button>
           <button
             className={active_view === "datasheet_reference" ? "active" : ""}

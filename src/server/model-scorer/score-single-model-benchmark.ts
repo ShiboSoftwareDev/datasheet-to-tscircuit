@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import type { ModelValidationBenchmark } from "@/shared/job-types"
+import type { ModelValidationBenchmark, ModelValidationSeries } from "@/shared/job-types"
 import {
   type BenchmarkDefinition,
   type BenchmarkManifest,
+  type BenchmarkSeriesDefinition,
   type Point,
   parseBenchmarkManifest,
   resolveWorkspaceFile,
@@ -100,7 +101,6 @@ function interpolate(input: { points: Point[]; x: number; x_scale: "linear" | "l
     throw new Error(`Reference x=${x} is outside the simulated result range`)
   }
   const bounded_x = Math.max(first_x, Math.min(last_x, transformed_x))
-
   for (let index = 1; index < points.length; index += 1) {
     const right = points[index]!
     const right_x = transform({ value: right.x, scale: x_scale, label: "result x" })
@@ -114,28 +114,17 @@ function interpolate(input: { points: Point[]; x: number; x_scale: "linear" | "l
   return points.at(-1)!.y
 }
 
-export async function scoreBenchmark(input: {
-  model_dir: string
-  benchmark: BenchmarkDefinition
-  options?: ScoreBenchmarkOptions
-}): Promise<ModelValidationBenchmark> {
-  const { model_dir, benchmark } = input
-  const options = input.options ?? {}
+export function scoreSeriesPoints(input: {
+  series: BenchmarkSeriesDefinition
+  reference_points: Point[]
+  result_points: Point[]
+  x_scale?: "linear" | "log"
+}): ModelValidationSeries {
+  const { series, reference_points, result_points } = input
   try {
-    const reference_points = await readCsvPoints(resolveWorkspaceFile(model_dir, benchmark.reference_file))
-    const result_file =
-      options.result_file_override ??
-      (options.results_directory_override
-        ? join(options.results_directory_override, `${benchmark.id}.csv`)
-        : resolveWorkspaceFile(model_dir, benchmark.result_file))
-    const result_points = await readCsvPoints(result_file)
-    const x_scale = benchmark.x_scale ?? "linear"
-    const y_scale = benchmark.y_scale ?? "linear"
-    const range_coverage_error = getBenchmarkRangeCoverageError({
-      reference_points,
-      result_points,
-      x_scale,
-    })
+    const x_scale = input.x_scale ?? "linear"
+    const y_scale = series.y_scale ?? "linear"
+    const range_coverage_error = getBenchmarkRangeCoverageError({ reference_points, result_points, x_scale })
     if (range_coverage_error) throw new Error(range_coverage_error)
     const target_values = reference_points.map((point) =>
       transform({ value: point.y, scale: y_scale, label: "reference y" }),
@@ -146,11 +135,7 @@ export async function scoreBenchmark(input: {
     const normalization_span = Math.max(target_max - target_min, target_abs_max * 0.05, 1e-12)
     const normalized_errors = reference_points.map((reference_point) => {
       const simulated_y = interpolate({ points: result_points, x: reference_point.x, x_scale })
-      const transformed_simulated_y = transform({
-        value: simulated_y,
-        scale: y_scale,
-        label: "simulated y",
-      })
+      const transformed_simulated_y = transform({ value: simulated_y, scale: y_scale, label: "simulated y" })
       const transformed_reference_y = transform({
         value: reference_point.y,
         scale: y_scale,
@@ -162,25 +147,107 @@ export async function scoreBenchmark(input: {
       normalized_errors.reduce((total, error) => total + error * error, 0) / normalized_errors.length,
     )
     const normalized_max_error = Math.max(...normalized_errors)
-    const max_error_tolerance = benchmark.max_error_tolerance ?? benchmark.tolerance * 2
+    const max_error_tolerance = series.max_error_tolerance ?? series.tolerance * 2
     return {
-      benchmark_id: benchmark.id,
-      title: benchmark.title,
-      critical: benchmark.critical,
-      tolerance: benchmark.tolerance,
+      series_id: series.id,
+      title: series.title,
+      role: series.role,
+      unit: series.unit,
+      tolerance: series.tolerance,
       normalized_rmse,
       normalized_max_error,
-      passed: normalized_rmse <= benchmark.tolerance && normalized_max_error <= max_error_tolerance,
+      passed: normalized_rmse <= series.tolerance && normalized_max_error <= max_error_tolerance,
     }
   } catch (error) {
     return {
-      benchmark_id: benchmark.id,
-      title: benchmark.title,
-      critical: benchmark.critical,
-      tolerance: benchmark.tolerance,
+      series_id: series.id,
+      title: series.title,
+      role: series.role,
+      unit: series.unit,
+      tolerance: series.tolerance,
       passed: false,
       error_message: error instanceof Error ? error.message : String(error),
     }
+  }
+}
+
+export function resolveSeriesResultFile(input: {
+  model_dir: string
+  benchmark: BenchmarkDefinition
+  series: BenchmarkSeriesDefinition
+  options?: ScoreBenchmarkOptions
+}): string {
+  const { model_dir, benchmark, series } = input
+  const options = input.options ?? {}
+  const explicit = options.result_files_override?.[series.id]
+  if (explicit) return explicit
+  const primary = benchmark.series.find((candidate) => candidate.role === "response")
+  if (options.result_file_override && primary?.id === series.id) return options.result_file_override
+  if (options.results_directory_override) {
+    const is_legacy = benchmark.series.length === 1 && series.id === "result"
+    return is_legacy
+      ? join(options.results_directory_override, `${benchmark.id}.csv`)
+      : join(options.results_directory_override, benchmark.id, `${series.id}.csv`)
+  }
+  return resolveWorkspaceFile(model_dir, series.result_file)
+}
+
+export async function scoreBenchmark(input: {
+  model_dir: string
+  benchmark: BenchmarkDefinition
+  options?: ScoreBenchmarkOptions
+}): Promise<ModelValidationBenchmark> {
+  const { model_dir, benchmark } = input
+  const series_results = await Promise.all(
+    benchmark.series.map(async (series) => {
+      try {
+        const [reference_points, result_points] = await Promise.all([
+          readCsvPoints(resolveWorkspaceFile(model_dir, series.reference_file)),
+          readCsvPoints(resolveSeriesResultFile({ model_dir, benchmark, series, options: input.options })),
+        ])
+        return scoreSeriesPoints({ series, reference_points, result_points, x_scale: benchmark.x_scale })
+      } catch (error) {
+        return {
+          series_id: series.id,
+          title: series.title,
+          role: series.role,
+          unit: series.unit,
+          tolerance: series.tolerance,
+          passed: false,
+          error_message: error instanceof Error ? error.message : String(error),
+        } satisfies ModelValidationSeries
+      }
+    }),
+  )
+  const response_results = series_results.filter((series) => series.role === "response")
+  let total_weight = 0
+  let weighted_error = 0
+  for (const result of response_results) {
+    const definition = benchmark.series.find((series) => series.id === result.series_id)!
+    if (result.normalized_rmse === undefined) continue
+    total_weight += definition.weight
+    weighted_error += result.normalized_rmse * definition.weight
+  }
+  const normalized_values = series_results.flatMap((series) =>
+    series.normalized_max_error === undefined ? [] : [series.normalized_max_error],
+  )
+  const failures = series_results.filter((series) => !series.passed)
+  return {
+    benchmark_id: benchmark.id,
+    title: benchmark.title,
+    critical: benchmark.critical,
+    tolerance: benchmark.tolerance,
+    normalized_rmse: total_weight > 0 ? weighted_error / total_weight : undefined,
+    normalized_max_error: normalized_values.length > 0 ? Math.max(...normalized_values) : undefined,
+    passed: failures.length === 0,
+    ...(failures.some((series) => series.error_message)
+      ? {
+          error_message: failures
+            .map((series) => `${series.title}: ${series.error_message ?? "outside tolerance"}`)
+            .join("; "),
+        }
+      : {}),
+    series: series_results,
   }
 }
 
@@ -199,12 +266,13 @@ export async function scoreSingleModelBenchmark(input: {
   model_dir: string
   benchmark_id: string
   result_file_override?: string
+  result_files_override?: Record<string, string>
 }): Promise<ModelValidationBenchmark> {
-  const { model_dir, benchmark_id, result_file_override } = input
+  const { model_dir, benchmark_id, result_file_override, result_files_override } = input
   const manifest = await readBenchmarkManifest(model_dir)
   return scoreBenchmark({
     model_dir,
     benchmark: requireBenchmark(manifest, benchmark_id),
-    options: { result_file_override },
+    options: { result_file_override, result_files_override },
   })
 }

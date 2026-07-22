@@ -4,6 +4,7 @@ export {
   hasBenchmarkLock,
   enableBenchmarkReferenceImageContract,
   hasBenchmarkReferenceImageContract,
+  requiresCompleteTimeGraphInventory,
   validateBenchmarkSuiteForLock,
   createOrVerifyBenchmarkLock,
   replaceBenchmarkLockAfterCircuitRepair,

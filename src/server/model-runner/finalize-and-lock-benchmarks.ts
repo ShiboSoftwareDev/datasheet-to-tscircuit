@@ -5,12 +5,13 @@ import {
   createOrVerifyBenchmarkLock,
   hasBenchmarkManifest,
   hasBenchmarkReferenceImageContract,
+  requiresCompleteTimeGraphInventory,
   replaceBenchmarkLockAfterCircuitRepair,
   validateBenchmarkSuiteForLock,
 } from "../model-benchmark-lock"
 import { buildModelBenchmarkPrompt } from "../model-scaffold"
-import { ModelRunnerContext, streamModelProcess } from "./stream-model-process"
-import { findPrematureRefinementArtifacts } from "./model-setup-state"
+import { ModelProcessStaleError, type ModelRunnerContext, streamModelProcess } from "./stream-model-process"
+import { findPrematureRefinementArtifacts, validateFinalizedBenchmarksMatchDraft } from "./model-setup-state"
 import { validateBenchmarkSources } from "./strip-analog-simulation-for-structural-check"
 import { preflightBenchmarkHarnesses } from "./preflight-benchmark-harnesses"
 import { updateServerProgress } from "./model-run-state"
@@ -26,27 +27,48 @@ export async function finalizeAndLockBenchmarks(input: {
   initial_feedback?: string
   repair_lock?: BenchmarkLock
 }): Promise<{ benchmark_lock: BenchmarkLock }> {
-  const configured_attempts = Number(process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS ?? 4)
+  const configured_attempts = Number(process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS ?? 6)
   const max_attempts = Number.isInteger(configured_attempts)
     ? Math.max(1, Math.min(8, configured_attempts))
-    : 4
+    : 6
   let benchmark_validation_feedback = input.initial_feedback
   for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
-    const benchmark_exit_code = await streamModelProcess({
-      command: [
-        input.context.agent_bin,
-        "do",
-        "--prompt",
-        buildModelBenchmarkPrompt(benchmark_validation_feedback, {
-          locked_circuit_repair: Boolean(input.repair_lock),
-        }),
-        "--dir",
-        input.model_dir,
-      ],
-      cwd: input.model_dir,
-      signal: input.signal,
-      on_chunk: input.append,
-    })
+    let benchmark_exit_code: number
+    try {
+      benchmark_exit_code = await streamModelProcess({
+        command: [
+          input.context.agent_bin,
+          "do",
+          "--prompt",
+          buildModelBenchmarkPrompt(benchmark_validation_feedback, {
+            locked_circuit_repair: Boolean(input.repair_lock),
+          }),
+          "--dir",
+          input.model_dir,
+        ],
+        cwd: input.model_dir,
+        signal: input.signal,
+        activity_paths: [join(input.model_dir, "model-progress.json")],
+        workspace_root: input.model_dir,
+        on_chunk: input.append,
+      })
+    } catch (error) {
+      if (!(error instanceof ModelProcessStaleError) || input.signal.aborted) throw error
+      if (attempt >= max_attempts) {
+        throw error
+      }
+      benchmark_validation_feedback = [
+        benchmark_validation_feedback,
+        "The previous correction agent stalled without completing the requested repair. Continue from the existing workspace and resolve the same server validation errors.",
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+      await input.append(
+        "system",
+        `Benchmark-finalization attempt ${attempt} stopped after producing no output. Restarting the untimed correction pass without discarding its workspace or consuming refinement effort.\n`,
+      )
+      continue
+    }
     if (benchmark_exit_code !== 0) {
       throw new Error(`Benchmark-finalization agent exited with code ${benchmark_exit_code}`)
     }
@@ -62,6 +84,9 @@ export async function finalizeAndLockBenchmarks(input: {
       rejection = "The benchmark-finalization agent did not create benchmarks.json"
     } else {
       try {
+        if (await requiresCompleteTimeGraphInventory(input.model_dir)) {
+          await validateFinalizedBenchmarksMatchDraft(input.model_dir)
+        }
         await validateBenchmarkSuiteForLock(input.model_dir, {
           require_source_images:
             !input.repair_lock && (await hasBenchmarkReferenceImageContract(input.model_dir)),

@@ -67,6 +67,8 @@ export async function getVerifiedSimulationArtifact(
 
   let result_text: string | undefined
   let result_file: string | undefined
+  let result_texts: Record<string, string> | undefined
+  let result_files: Record<string, string> | undefined
   if (result.passed) {
     if (typeof result.verified_result_file !== "string" || typeof result.sha256 !== "string") {
       return undefined
@@ -76,6 +78,35 @@ export async function getVerifiedSimulationArtifact(
     result_text = await readFile(result_path, "utf8")
     if (hashText(result_text) !== result.sha256) return undefined
     result_file = `results/verified/${benchmark_id}.csv`
+    if (Array.isArray(result.verified_result_files) && result.verified_result_files.length > 0) {
+      const entries = await Promise.all(
+        result.verified_result_files.map(async (series) => {
+          if (
+            !isRecord(series) ||
+            typeof series.series_id !== "string" ||
+            typeof series.file !== "string" ||
+            typeof series.sha256 !== "string"
+          )
+            return undefined
+          const series_path = resolveInside(trusted_root, series.file)
+          if (!series_path) return undefined
+          const text = await readFile(series_path, "utf8")
+          if (hashText(text) !== series.sha256) return undefined
+          return {
+            series_id: series.series_id,
+            text,
+            file: `results/verified/${benchmark_id}/${series.series_id}.csv`,
+          }
+        }),
+      )
+      if (entries.some((entry) => !entry)) return undefined
+      result_texts = Object.fromEntries(entries.map((entry) => [entry!.series_id, entry!.text]))
+      result_files = Object.fromEntries(entries.map((entry) => [entry!.series_id, entry!.file]))
+      const primary = result.verified_result_files.find(
+        (series) => series.file === result.verified_result_file,
+      )
+      if (primary) result_file = result_files[primary.series_id]
+    }
   } else if (
     result.status === "building" &&
     typeof result.partial_result_file === "string" &&
@@ -86,6 +117,33 @@ export async function getVerifiedSimulationArtifact(
     result_text = await readFile(result_path, "utf8")
     if (hashText(result_text) !== result.partial_sha256) return undefined
     result_file = `results/partial/${benchmark_id}.csv`
+    if (Array.isArray(result.partial_result_files) && result.partial_result_files.length > 0) {
+      const entries = await Promise.all(
+        result.partial_result_files.map(async (series) => {
+          if (
+            !isRecord(series) ||
+            typeof series.series_id !== "string" ||
+            typeof series.file !== "string" ||
+            typeof series.sha256 !== "string"
+          )
+            return undefined
+          const series_path = resolveInside(trusted_root, series.file)
+          if (!series_path) return undefined
+          const text = await readFile(series_path, "utf8")
+          if (hashText(text) !== series.sha256) return undefined
+          return {
+            series_id: series.series_id,
+            text,
+            file: `results/partial/${benchmark_id}/${series.series_id}.csv`,
+          }
+        }),
+      )
+      if (entries.some((entry) => !entry)) return undefined
+      result_texts = Object.fromEntries(entries.map((entry) => [entry!.series_id, entry!.text]))
+      result_files = Object.fromEntries(entries.map((entry) => [entry!.series_id, entry!.file]))
+      const primary = result.partial_result_files.find((series) => series.file === result.partial_result_file)
+      if (primary) result_file = result_files[primary.series_id]
+    }
   }
   return {
     benchmark_id,
@@ -97,6 +155,8 @@ export async function getVerifiedSimulationArtifact(
     circuit_json,
     result_file,
     result_text,
+    result_files,
+    result_texts,
     error_message: result.error_message,
     status: result.status ?? (result.passed ? "passed" : "failed"),
   }
@@ -108,6 +168,14 @@ export async function getVerifiedResultFile(
 ): Promise<string | undefined> {
   const artifact = await getVerifiedSimulationArtifact(model_dir, benchmark_id)
   return artifact?.passed ? artifact.result_file : undefined
+}
+
+export async function getVerifiedResultFiles(
+  model_dir: string,
+  benchmark_id: string,
+): Promise<Record<string, string> | undefined> {
+  const artifact = await getVerifiedSimulationArtifact(model_dir, benchmark_id)
+  return artifact?.passed ? artifact.result_files : undefined
 }
 
 export async function hasCompleteVerifiedSimulationReport(model_dir: string): Promise<boolean> {
@@ -147,5 +215,10 @@ export async function hasCompleteVerifiedSimulationReport(model_dir: string): Pr
         : undefined
     }),
   )
-  return artifacts.every((artifact) => artifact?.passed === true && Boolean(artifact.result_text))
+  return artifacts.every(
+    (artifact) =>
+      artifact?.passed === true &&
+      (Boolean(artifact.result_text) ||
+        Boolean(artifact.result_texts && Object.keys(artifact.result_texts).length)),
+  )
 }

@@ -121,6 +121,19 @@ export interface ModelValidationBenchmark {
   normalized_max_error?: number
   passed: boolean
   error_message?: string
+  series?: ModelValidationSeries[]
+}
+
+export interface ModelValidationSeries {
+  series_id: string
+  title: string
+  role: "response" | "stimulus"
+  unit: string
+  tolerance: number
+  normalized_rmse?: number
+  normalized_max_error?: number
+  passed: boolean
+  error_message?: string
 }
 
 export interface ModelValidationSummary {
@@ -178,6 +191,10 @@ export interface ModelProgress {
     pages_reviewed?: number
     graphs_found?: number
     graphs_digitized?: number
+    figures_found?: number
+    figures_digitized?: number
+    channels_found?: number
+    channels_digitized?: number
     benchmark_drafts?: number
   }
   benchmark?: {
@@ -207,6 +224,19 @@ export interface ModelCurvePoint {
   y: number
 }
 
+export interface ModelReferenceSeriesPreview {
+  series_id: string
+  title: string
+  role: "response" | "stimulus"
+  quantity: string
+  unit: string
+  source_file: string
+  result_file?: string
+  y_scale: "linear" | "log"
+  reference_points: ModelCurvePoint[]
+  result_points?: ModelCurvePoint[]
+}
+
 export interface ModelCircuitPreview {
   source_file: string
   code: string
@@ -227,6 +257,7 @@ export interface ModelReferencePreview {
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]
   result_points?: ModelCurvePoint[]
+  series?: ModelReferenceSeriesPreview[]
   result_status?: "unverified" | "partial" | "verified" | "deprecated"
   result_origin?: "workspace" | "server_validation"
   is_stale?: boolean

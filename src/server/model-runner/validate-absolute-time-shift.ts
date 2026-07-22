@@ -5,7 +5,7 @@ import type { JobLogStream } from "@/shared/job-types"
 import {
   extractSimulationResultPoints,
   getVerifiedResultsDirectory,
-  readSimulationDefinition,
+  readSimulationDefinitions,
 } from "../model-simulation-validator"
 import { listModelBenchFiles } from "./list-model-bench-files"
 import { executeValidationBuild } from "./validate-champion"
@@ -365,12 +365,19 @@ export async function validateAbsoluteTimeShift(input: {
       }
     }
 
-    const definition = await readSimulationDefinition(input.model_dir, candidate.benchmark_id)
+    const definitions = await readSimulationDefinitions(input.model_dir, candidate.benchmark_id)
+    const definition = definitions.find((entry) => entry.role === "response")!
     const shifted_circuit: unknown = JSON.parse(await readFile(build.path, "utf8"))
     const shifted_points = extractSimulationResultPoints(shifted_circuit, definition)
     const original_points = parseResultCsv(
       await readFile(
-        join(getVerifiedResultsDirectory(input.model_dir), `${candidate.benchmark_id}.csv`),
+        definitions.length === 1 && definition.series_id === "result"
+          ? join(getVerifiedResultsDirectory(input.model_dir), `${candidate.benchmark_id}.csv`)
+          : join(
+              getVerifiedResultsDirectory(input.model_dir),
+              candidate.benchmark_id,
+              `${definition.series_id}.csv`,
+            ),
         "utf8",
       ),
     )

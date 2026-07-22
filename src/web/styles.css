@@ -2981,6 +2981,62 @@ a {
   padding: 4px 1px 0;
 }
 
+.model-reference-series-stack {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: 14px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow: auto;
+}
+
+.model-reference-series-panel {
+  width: 100%;
+  min-width: 0;
+  min-height: 260px;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid #e3e5e8;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.model-reference-series-panel > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: #35404d;
+  font-size: 10px;
+}
+
+.model-reference-series-panel .model-reference-plot {
+  width: 100%;
+  height: auto;
+  min-width: 0;
+}
+
+.model-reference-series-panel .reference-graph-content {
+  width: 100%;
+  min-width: 0;
+}
+
+.model-reference-series-panel .reference-graph-content svg {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: none;
+}
+
+.model-reference-series-panel > header span {
+  color: #75808c;
+  font-size: 8.5px;
+}
+
 .model-comparison-warning {
   display: flex;
   flex: 0 0 auto;

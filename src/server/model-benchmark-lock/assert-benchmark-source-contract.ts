@@ -6,9 +6,16 @@ import { isRecord } from "./benchmark-lock-paths"
 export function parseBenchmarkRecords(value: unknown): BenchmarkRecord[] {
   return parseBenchmarkManifest(value).benchmarks.map((entry) => ({
     id: entry.id,
-    reference_file: entry.reference_file,
     source_image: entry.source.image,
-    simulation: entry.simulation,
+    series: entry.series.map((series) => ({
+      id: series.id,
+      role: series.role,
+      quantity: series.quantity,
+      unit: series.unit,
+      reference_file: series.reference_file,
+      source_image: series.source_image,
+      simulation: series.simulation,
+    })),
   }))
 }
 
@@ -45,8 +52,8 @@ function readLiteralJsxAttribute(
 function findVoltageProbe(
   source_file: ts.SourceFile,
   probe_name: string,
-): { found: boolean; target?: string } {
-  let result: { found: boolean; target?: string } = { found: false }
+): { found: boolean; target?: string; reference?: string } {
+  let result: { found: boolean; target?: string; reference?: string } = { found: false }
   const visit = (node: ts.Node): void => {
     if (result.found) return
     if (
@@ -54,13 +61,41 @@ function findVoltageProbe(
       node.tagName.getText() === "voltageprobe" &&
       readLiteralJsxAttribute(node, "name") === probe_name
     ) {
-      result = { found: true, target: readLiteralJsxAttribute(node, "connectsTo") }
+      result = {
+        found: true,
+        target: readLiteralJsxAttribute(node, "connectsTo"),
+        reference: readLiteralJsxAttribute(node, "referenceTo"),
+      }
       return
     }
     ts.forEachChild(node, visit)
   }
   visit(source_file)
   return result
+}
+
+function countNamedResistors(source_file: ts.SourceFile, resistor_name: string): number {
+  let count = 0
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) &&
+      node.tagName.getText() === "resistor" &&
+      readLiteralJsxAttribute(node, "name") === resistor_name
+    ) {
+      count += 1
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source_file)
+  return count
+}
+
+function isDirectComponentPin(target: string, component_name: string): boolean {
+  const escaped_name = component_name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return new RegExp(
+    `^(?:${escaped_name}\\.(?:pin)?[12]|\\.${escaped_name}\\s*>\\s*\\.(?:pin)?[12])$`,
+    "i",
+  ).test(target)
 }
 
 function assertAnalogSimulationProps(source_file: ts.SourceFile, benchmark_id: string): void {
@@ -97,17 +132,6 @@ function assertAnalogSimulationProps(source_file: ts.SourceFile, benchmark_id: s
 
 export function assertBenchmarkSourceContract(source: string, benchmark: BenchmarkRecord): void {
   const source_file = parseBenchmarkSource(source, benchmark.id)
-  if (
-    !isRecord(benchmark.simulation) ||
-    typeof benchmark.simulation.probe_name !== "string" ||
-    !benchmark.simulation.probe_name.trim() ||
-    typeof benchmark.simulation.dut_spice_node !== "string" ||
-    !benchmark.simulation.dut_spice_node.trim()
-  ) {
-    throw new Error(
-      `Benchmark ${benchmark.id} must declare simulation.probe_name and simulation.dut_spice_node`,
-    )
-  }
   if (!/component-with-model(?:\.circuit)?["']/.test(source)) {
     throw new Error(`Benchmark ${benchmark.id} must import component-with-model.circuit`)
   }
@@ -121,16 +145,82 @@ export function assertBenchmarkSourceContract(source: string, benchmark: Benchma
     throw new Error(`Benchmark ${benchmark.id} must run an ngspice analogsimulation`)
   }
   assertAnalogSimulationProps(source_file, benchmark.id)
-  const probe_name = isRecord(benchmark.simulation) ? benchmark.simulation.probe_name : undefined
-  if (typeof probe_name === "string") {
+  for (const series of benchmark.series) {
+    if (
+      !isRecord(series.simulation) ||
+      typeof series.simulation.probe_name !== "string" ||
+      !series.simulation.probe_name.trim() ||
+      (series.role === "response" &&
+        (typeof series.simulation.dut_spice_node !== "string" || !series.simulation.dut_spice_node.trim()))
+    ) {
+      throw new Error(
+        `Benchmark ${benchmark.id} series ${series.id} must declare simulation.probe_name${
+          series.role === "response" ? " and simulation.dut_spice_node" : ""
+        }`,
+      )
+    }
+    const probe_name = series.simulation.probe_name
+    const quantity = series.quantity.trim().toLowerCase()
+    const sense_resistor =
+      typeof series.simulation.sense_resistor === "string"
+        ? series.simulation.sense_resistor.trim()
+        : undefined
+    if (quantity === "current") {
+      if (!sense_resistor) {
+        throw new Error(
+          `Benchmark ${benchmark.id} current series ${series.id} must declare simulation.sense_resistor`,
+        )
+      }
+      if (countNamedResistors(source_file, sense_resistor) !== 1) {
+        throw new Error(
+          `Benchmark ${benchmark.id} current series ${series.id} must define exactly one resistor named ${sense_resistor}`,
+        )
+      }
+      if (
+        typeof series.simulation.scale !== "number" ||
+        !Number.isFinite(series.simulation.scale) ||
+        series.simulation.scale === 0
+      ) {
+        throw new Error(
+          `Benchmark ${benchmark.id} current series ${series.id} must declare a non-zero simulation.scale`,
+        )
+      }
+    }
     const probe = findVoltageProbe(source_file, probe_name)
     if (!probe.found) {
-      throw new Error(`Benchmark ${benchmark.id} must define voltage probe ${probe_name}`)
+      throw new Error(`Benchmark ${benchmark.id} series ${series.id} must define voltage probe ${probe_name}`)
     }
     const probe_target = probe.target
-    if (!probe_target || !/^(?:DUT\.[A-Za-z_$][\w$-]*|\.DUT\s*>\s*\.[A-Za-z_$][\w$-]*)$/.test(probe_target)) {
+    if (!probe_target) {
+      throw new Error(`Benchmark ${benchmark.id} voltage probe ${probe_name} must declare connectsTo`)
+    }
+    if (quantity === "current") {
+      if (
+        !probe.reference ||
+        !sense_resistor ||
+        !isDirectComponentPin(probe_target, sense_resistor) ||
+        !isDirectComponentPin(probe.reference, sense_resistor) ||
+        probe_target.toLowerCase() === probe.reference.toLowerCase()
+      ) {
+        throw new Error(
+          `Benchmark ${benchmark.id} current probe ${probe_name} must measure differentially across both pins of sense resistor ${sense_resistor}`,
+        )
+      }
+    } else if (
+      series.role === "response" &&
+      !/^(?:DUT\.[A-Za-z_$][\w$-]*|\.DUT\s*>\s*\.[A-Za-z_$][\w$-]*)$/.test(probe_target)
+    ) {
       throw new Error(
-        `Benchmark ${benchmark.id} voltage probe ${probe_name} must connect directly to a DUT port, for example .DUT > .VOUT; net-only targets cannot be resolved by tscircuit simulation`,
+        `Benchmark ${benchmark.id} response probe ${probe_name} must connect directly to a DUT port, for example .DUT > .VOUT`,
+      )
+    }
+    if (
+      series.role === "stimulus" &&
+      series.quantity.trim().toLowerCase() === "voltage" &&
+      !/^(?:DUT\.[A-Za-z_$][\w$-]*|\.DUT\s*>\s*\.[A-Za-z_$][\w$-]*)$/.test(probe_target)
+    ) {
+      throw new Error(
+        `Benchmark ${benchmark.id} voltage-stimulus probe ${probe_name} must measure the applied waveform directly at its DUT port, for example .DUT > .VIN`,
       )
     }
   }

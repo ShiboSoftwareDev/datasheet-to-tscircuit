@@ -3,8 +3,16 @@ import { join } from "node:path"
 import type { JobLogStream } from "@/shared/job-types"
 import { parseTypicalApplicationPlan } from "../job-runner"
 import { parseBenchmarkManifest, resolveWorkspaceFile } from "../model-scorer/parse-benchmark-manifest"
-import { getBenchmarkRangeCoverageError, readCsvPoints } from "../model-scorer/score-single-model-benchmark"
-import { extractSimulationResultPoints } from "../model-simulation-validator"
+import {
+  getBenchmarkRangeCoverageError,
+  readCsvPoints,
+  scoreSeriesPoints,
+} from "../model-scorer/score-single-model-benchmark"
+import {
+  assertCanonicalDutSimulation,
+  assertSenseResistorMeasurement,
+  extractSimulationResultPoints,
+} from "../model-simulation-validator"
 import { parseSimulationOutput } from "../model-simulation-validator/extract-simulation-result-points"
 import { parseSimulationDefinition } from "../model-simulation-validator/parse-simulation-definition"
 import { writeServerIntegratedComponent } from "./attach-model-to-generated-component"
@@ -171,20 +179,63 @@ export async function preflightBenchmarkHarnesses(input: {
           try {
             const benchmark = benchmarks_by_id.get(benchmark_id)
             if (!benchmark) throw new Error(`benchmarks.json has no ${benchmark_id} benchmark`)
-            const reference_points = await readCsvPoints(
-              resolveWorkspaceFile(input.model_dir, benchmark.reference_file),
-            )
             const circuit_json: unknown = JSON.parse(await readFile(result.path, "utf8"))
-            const result_points = extractSimulationResultPoints(
-              circuit_json,
-              parseSimulationDefinition(benchmark.simulation),
-            )
-            const coverage_error = getBenchmarkRangeCoverageError({
-              reference_points,
-              result_points,
-              x_scale: benchmark.x_scale,
-            })
-            if (coverage_error) throw new Error(coverage_error)
+            for (const series of benchmark.series) {
+              const definition = parseSimulationDefinition(series.simulation, {
+                role: series.role,
+                quantity: series.quantity,
+              })
+              if (series.role === "response" && definition.sense_resistor) {
+                assertCanonicalDutSimulation({
+                  circuit_json: circuit_json as import("circuit-json").AnyCircuitElement[],
+                  model_source,
+                  probe_name: definition.probe_name,
+                  dut_spice_node: definition.dut_spice_node!,
+                  sense_resistor: definition.sense_resistor,
+                  scale: definition.scale,
+                  unit: series.unit,
+                })
+              } else if (definition.sense_resistor) {
+                assertSenseResistorMeasurement({
+                  circuit_json: circuit_json as import("circuit-json").AnyCircuitElement[],
+                  probe_name: definition.probe_name,
+                  sense_resistor: definition.sense_resistor,
+                  scale: definition.scale,
+                  unit: series.unit,
+                })
+              }
+              const reference_points = await readCsvPoints(
+                resolveWorkspaceFile(input.model_dir, series.reference_file),
+              )
+              const result_points = extractSimulationResultPoints(circuit_json, definition)
+              const coverage_error = getBenchmarkRangeCoverageError({
+                reference_points,
+                result_points,
+                x_scale: benchmark.x_scale,
+              })
+              if (coverage_error) throw new Error(`${series.id}: ${coverage_error}`)
+              if (series.role === "stimulus") {
+                const stimulus_score = scoreSeriesPoints({
+                  series,
+                  reference_points,
+                  result_points,
+                  x_scale: benchmark.x_scale,
+                })
+                if (!stimulus_score.passed) {
+                  const reference_values = reference_points.map((point) => point.y)
+                  const result_values = result_points.map((point) => point.y)
+                  const reference_range = `${Math.min(...reference_values)}..${Math.max(...reference_values)}`
+                  const simulated_range = `${Math.min(...result_values)}..${Math.max(...result_values)}`
+                  throw new Error(
+                    `${series.id} harness stimulus does not match its digitized channel${
+                      stimulus_score.error_message
+                        ? `: ${stimulus_score.error_message}`
+                        : ` (NRMSE ${stimulus_score.normalized_rmse}, max ${stimulus_score.normalized_max_error})`
+                    }; reference range ${reference_range} ${series.unit}, simulated range ${simulated_range} ${series.unit}`,
+                  )
+                }
+              }
+            }
             const power_errors = getUnpoweredRequiredPinErrors(circuit_json, power_probe_names)
             if (power_errors.length > 0) throw new Error(power_errors.join("; "))
           } catch (error) {

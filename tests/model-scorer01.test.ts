@@ -225,3 +225,126 @@ test("benchmark manifests accept only complete time-domain waveform definitions"
   } as (typeof invalid.benchmarks)[0]["simulation"]
   expect(() => parseBenchmarkManifest(invalid)).toThrow('transient_voltage simulation with x_axis "time_ms"')
 })
+
+test("multi-channel figures keep and score every response and stimulus series independently", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-multi-channel-scorer-"))
+  const benchmark = {
+    id: "startup-sequence",
+    title: "Startup sequence",
+    source: {
+      page: 7,
+      figure: "Figure 12",
+      image: "evidence/figures/startup-sequence.png",
+      channel_count: 3,
+    },
+    critical: true,
+    weight: 1,
+    tolerance: 0.05,
+    x_scale: "linear",
+    series: [
+      {
+        id: "vout",
+        title: "Output voltage",
+        role: "response",
+        quantity: "voltage",
+        unit: "V",
+        weight: 2,
+        source_image: "evidence/figures/startup-sequence/vout.png",
+        reference_file: "evidence/curves/startup-sequence/vout.csv",
+        result_file: "results/champion/startup-sequence/vout.csv",
+        simulation: {
+          kind: "transient_voltage",
+          x_axis: "time_ms",
+          probe_name: "RESULT_VOUT",
+          dut_spice_node: "OUT",
+        },
+      },
+      {
+        id: "pg",
+        title: "Power-good response",
+        role: "response",
+        quantity: "voltage",
+        unit: "V",
+        weight: 1,
+        source_image: "evidence/figures/startup-sequence/pg.png",
+        reference_file: "evidence/curves/startup-sequence/pg.csv",
+        result_file: "results/champion/startup-sequence/pg.csv",
+        simulation: {
+          kind: "transient_voltage",
+          x_axis: "time_ms",
+          probe_name: "RESULT_PG",
+          dut_spice_node: "PG",
+        },
+      },
+      {
+        id: "vin",
+        title: "Input-voltage stimulus",
+        role: "stimulus",
+        quantity: "voltage",
+        unit: "V",
+        source_image: "evidence/figures/startup-sequence/vin.png",
+        reference_file: "evidence/curves/startup-sequence/vin.csv",
+        result_file: "results/champion/startup-sequence/vin.csv",
+        simulation: {
+          kind: "transient_voltage",
+          x_axis: "time_ms",
+          probe_name: "STIMULUS_VIN",
+        },
+      },
+    ],
+  }
+  try {
+    await Promise.all([
+      mkdir(join(model_dir, "evidence", "curves", benchmark.id), { recursive: true }),
+      mkdir(join(model_dir, "results", "champion", benchmark.id), { recursive: true }),
+    ])
+    await Bun.write(
+      join(model_dir, "benchmarks.json"),
+      JSON.stringify({ version: 2, locked_at: new Date().toISOString(), benchmarks: [benchmark] }),
+    )
+    await Promise.all([
+      Bun.write(join(model_dir, benchmark.series[0]!.reference_file), "x,y\n0,0\n1,1\n2,2\n"),
+      Bun.write(join(model_dir, benchmark.series[1]!.reference_file), "x,y\n0,0\n1,0\n2,5\n"),
+      Bun.write(join(model_dir, benchmark.series[2]!.reference_file), "x,y\n0,0\n1,5\n2,5\n"),
+      Bun.write(join(model_dir, benchmark.series[0]!.result_file), "x,y\n0,0\n1,1\n2,2\n"),
+      Bun.write(join(model_dir, benchmark.series[1]!.result_file), "x,y\n0,0\n1,0\n2,5\n"),
+      Bun.write(join(model_dir, benchmark.series[2]!.result_file), "x,y\n0,0\n1,0\n2,0\n"),
+    ])
+
+    const failed_stimulus = await scoreSingleModelBenchmark({
+      model_dir,
+      benchmark_id: benchmark.id,
+    })
+    expect(failed_stimulus.passed).toBe(false)
+    expect(failed_stimulus.normalized_rmse).toBe(0)
+    expect(failed_stimulus.series?.map((series) => [series.series_id, series.role, series.passed])).toEqual([
+      ["vout", "response", true],
+      ["pg", "response", true],
+      ["vin", "stimulus", false],
+    ])
+
+    await Bun.write(join(model_dir, benchmark.series[2]!.result_file), "x,y\n0,0\n1,5\n2,5\n")
+    const passed = await scoreSingleModelBenchmark({ model_dir, benchmark_id: benchmark.id })
+    const comparison_svg = await renderModelBenchmarkComparisonSvg({
+      model_dir,
+      benchmark_id: benchmark.id,
+    })
+    expect(passed.passed).toBe(true)
+    expect(passed.series).toHaveLength(3)
+    expect(comparison_svg).toContain("Output voltage · response · V")
+    expect(comparison_svg).toContain("Power-good response · response · V")
+    expect(comparison_svg).toContain("Input-voltage stimulus · stimulus · V")
+
+    const missing_channel = structuredClone({
+      version: 2,
+      locked_at: new Date().toISOString(),
+      benchmarks: [benchmark],
+    })
+    missing_channel.benchmarks[0]!.series.pop()
+    expect(() => parseBenchmarkManifest(missing_channel)).toThrow(
+      "source.channel_count=3 but series[] contains 2 channels",
+    )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})

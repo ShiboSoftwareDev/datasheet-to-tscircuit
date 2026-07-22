@@ -54,6 +54,10 @@ export function parseModelProgress(value: unknown): ModelProgress {
         pages_reviewed: optionalCount(value.evidence.pages_reviewed),
         graphs_found: optionalCount(value.evidence.graphs_found),
         graphs_digitized: optionalCount(value.evidence.graphs_digitized),
+        figures_found: optionalCount(value.evidence.figures_found),
+        figures_digitized: optionalCount(value.evidence.figures_digitized),
+        channels_found: optionalCount(value.evidence.channels_found),
+        channels_digitized: optionalCount(value.evidence.channels_digitized),
         benchmark_drafts: optionalCount(value.evidence.benchmark_drafts),
       }
     : undefined

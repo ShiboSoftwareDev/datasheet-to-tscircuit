@@ -60,9 +60,7 @@ export function WorkspaceStatusBar({
       ? "Ready"
       : COMPONENT_STATUS_COPY[job.display_status]
   const model_status = getModelStatus(model_run, is_model_loading)
-  const has_downloads = Boolean(
-    job.component_code || job.typical_application_code || model_run?.model_source || job.evidence_available,
-  )
+  const has_downloads = Boolean(job.component_code || job.typical_application_code || model_run?.model_source)
 
   return (
     <div className="workspace-status-bar" aria-label="Artifact status and downloads">
@@ -102,26 +100,18 @@ export function WorkspaceStatusBar({
             <strong>Download artifact</strong>
             {job.component_code && (
               <a href={getJobFileUrl(job.job_id, "component")}>
-                <Boxes size={14} /> Component
+                <Boxes size={14} /> Component TSX
               </a>
             )}
             {job.typical_application_code && (
               <a href={getJobFileUrl(job.job_id, "typical_application")}>
-                <CircuitBoard size={14} /> Typical application
+                <CircuitBoard size={14} /> Typical application TSX
               </a>
             )}
             {model_run?.model_source && (
               <a href={getModelRunFileUrl(job.job_id, "model")}>
                 <FlaskConical size={14} /> SPICE model
               </a>
-            )}
-            {job.evidence_available && (
-              <>
-                <a href={getJobFileUrl(job.job_id, "component_evidence")}>Evidence JSON</a>
-                <a href={getJobFileUrl(job.job_id, "footprint_plan")}>Footprint plan</a>
-                <a href={getJobFileUrl(job.job_id, "land_pattern")}>Land-pattern reference</a>
-                <a href={getJobFileUrl(job.job_id, "events")}>Structured diagnostics</a>
-              </>
             )}
             <Popover.Arrow className="workspace-download-arrow" />
           </Popover.Content>

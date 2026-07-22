@@ -37,3 +37,12 @@ export {
 } from "./validate-feedback-sensitivity"
 export { runModel } from "./run-model"
 export { listModelBenchFiles } from "./list-model-bench-files"
+export {
+  validateCompletedSetup,
+  validateFinalizedBenchmarksMatchDraft,
+} from "./model-setup-state"
+export {
+  ModelProcessStaleError,
+  ModelWorkspaceIsolationError,
+  streamModelProcess,
+} from "./stream-model-process"

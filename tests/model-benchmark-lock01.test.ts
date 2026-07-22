@@ -8,6 +8,8 @@ import {
   validateBenchmarkSuiteForLock,
   verifyBenchmarkLock,
 } from "@/server/model-benchmark-lock"
+import { assertBenchmarkSourceContract } from "@/server/model-benchmark-lock/assert-benchmark-source-contract"
+import type { BenchmarkRecord } from "@/server/model-benchmark-lock/types"
 
 const referencePng = Uint8Array.from(
   atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
@@ -191,6 +193,62 @@ test("benchmark locks accept direct DUT selectors containing a greater-than sepa
   await rm(job_dir, { recursive: true, force: true })
 })
 
+test("multi-channel voltage stimuli must be probed at the driven DUT port", () => {
+  const benchmark: BenchmarkRecord = {
+    id: "line-transient",
+    source_image: "evidence/figures/line-transient.png",
+    series: [
+      {
+        id: "vout",
+        role: "response",
+        quantity: "voltage",
+        unit: "V",
+        reference_file: "evidence/curves/line-transient/vout.csv",
+        simulation: {
+          kind: "transient_voltage",
+          x_axis: "time_ms",
+          probe_name: "VOUT",
+          dut_spice_node: "VOUT",
+        },
+      },
+      {
+        id: "vin",
+        role: "stimulus",
+        quantity: "voltage",
+        unit: "V",
+        reference_file: "evidence/curves/line-transient/vin.csv",
+        simulation: {
+          kind: "transient_voltage",
+          x_axis: "time_ms",
+          probe_name: "VIN",
+        },
+      },
+    ],
+  }
+  const direct_probe_source = `import Component from "../component-with-model.circuit"
+
+export default () => <board>
+  <Component name="DUT" />
+  <voltageprobe name="VOUT" connectsTo=".DUT > .VOUT" />
+  <voltageprobe name="VIN" connectsTo=".DUT > .VIN" />
+  <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" />
+</board>`
+
+  expect(() => assertBenchmarkSourceContract(direct_probe_source, benchmark)).not.toThrow()
+  expect(() =>
+    assertBenchmarkSourceContract(
+      direct_probe_source.replace('connectsTo=".DUT > .VIN"', 'connectsTo=".VIN_SOURCE > .pin1"'),
+      benchmark,
+    ),
+  ).toThrow("must measure the applied waveform directly at its DUT port")
+  expect(() =>
+    assertBenchmarkSourceContract(
+      direct_probe_source.replace("<board>", '<board><spicemodel name="VIN_SOURCE" />'),
+      benchmark,
+    ),
+  ).not.toThrow()
+})
+
 test("benchmark locks reject invalid analogsimulation props before refinement", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-benchmark-simulation-props-"))
   const model_dir = join(job_dir, "spice")
@@ -279,5 +337,87 @@ test("benchmark locks reject incomplete manifests, malformed references, and inv
   )
   await expect(createOrVerifyBenchmarkLock(model_dir)).rejects.toThrow("invalid TSX")
 
+  await rm(job_dir, { recursive: true, force: true })
+})
+
+test("current channels require a differential probe across their declared sense resistor", () => {
+  const benchmark: BenchmarkRecord = {
+    id: "switching",
+    series: [
+      {
+        id: "il",
+        role: "response",
+        quantity: "current",
+        unit: "A",
+        reference_file: "evidence/curves/switching/il.csv",
+        simulation: {
+          kind: "transient_voltage",
+          x_axis: "time_ms",
+          probe_name: "RESULT_IL",
+          dut_spice_node: "L1",
+          sense_resistor: "R_IL_SENSE",
+          scale: 100,
+        },
+      },
+    ],
+  }
+  const direct_pin_probe = `import Component from "../component-with-model.circuit"
+export default () => <board>
+  <Component name="DUT" />
+  <resistor name="R_IL_SENSE" resistance="10m" />
+  <voltageprobe name="RESULT_IL" connectsTo=".DUT > .L1" referenceTo="net.GND" />
+  <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" />
+</board>`
+  expect(() => assertBenchmarkSourceContract(direct_pin_probe, benchmark)).toThrow(
+    "must measure differentially across both pins",
+  )
+
+  const sensed_probe = direct_pin_probe.replace(
+    'connectsTo=".DUT > .L1" referenceTo="net.GND"',
+    'connectsTo=".R_IL_SENSE > .pin1" referenceTo=".R_IL_SENSE > .pin2"',
+  )
+  expect(() => assertBenchmarkSourceContract(sensed_probe, benchmark)).not.toThrow()
+})
+
+test("benchmark locks reject copied response digitization across different figures", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-benchmark-duplicate-response-"))
+  const model_dir = join(job_dir, "spice")
+  await Promise.all([
+    mkdir(join(model_dir, "benchmarks"), { recursive: true }),
+    mkdir(join(model_dir, "evidence", "curves"), { recursive: true }),
+  ])
+  await Promise.all([
+    Bun.write(join(model_dir, "benchmarks", "pfm.circuit.tsx"), benchmarkSource),
+    Bun.write(join(model_dir, "benchmarks", "pwm.circuit.tsx"), benchmarkSource),
+    Bun.write(join(model_dir, "evidence", "curves", "pfm.csv"), "x,y\n0,0\n1,1\n2,0\n"),
+    Bun.write(join(model_dir, "evidence", "curves", "pwm.csv"), "x,y\n0,0\n1,1\n2,0\n"),
+    Bun.write(
+      join(model_dir, "benchmarks.json"),
+      JSON.stringify({
+        version: 1,
+        locked_at: new Date().toISOString(),
+        benchmarks: ["pfm", "pwm"].map((id, index) => ({
+          id,
+          title: id.toUpperCase(),
+          source: { page: 10 + index },
+          critical: true,
+          weight: 1,
+          tolerance: 0.1,
+          reference_file: `evidence/curves/${id}.csv`,
+          result_file: `results/champion/${id}.csv`,
+          simulation: {
+            kind: "transient_voltage",
+            x_axis: "time_ms",
+            probe_name: "VOUT",
+            dut_spice_node: "OUT",
+          },
+        })),
+      }),
+    ),
+  ])
+
+  await expect(validateBenchmarkSuiteForLock(model_dir)).rejects.toThrow(
+    "independently digitize each datasheet figure",
+  )
   await rm(job_dir, { recursive: true, force: true })
 })
