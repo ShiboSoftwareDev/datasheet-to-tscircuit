@@ -235,6 +235,7 @@ export interface ModelReferenceSeriesPreview {
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]
   result_points?: ModelCurvePoint[]
+  matches_reference?: boolean
 }
 
 export interface ModelCircuitPreview {
@@ -260,6 +261,7 @@ export interface ModelReferencePreview {
   series?: ModelReferenceSeriesPreview[]
   result_status?: "unverified" | "partial" | "verified" | "deprecated"
   result_origin?: "workspace" | "server_validation"
+  matches_reference?: boolean
   is_stale?: boolean
   updated_at: string
 }

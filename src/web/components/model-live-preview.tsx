@@ -418,6 +418,15 @@ function ModelReferencePane({
           </button>
         </div>
       </header>
+      {preview?.matches_reference === false && (
+        <div className="model-reference-mismatch-warning" role="status">
+          <AlertTriangle size={14} />
+          <span>
+            <strong>Doesn’t match the reference</strong>
+            The current graph is outside the benchmark tolerance.
+          </span>
+        </div>
+      )}
       <div className="model-reference-content">
         {active_view === "reference_graph" ? (
           <ReferenceGraph preview={preview} />

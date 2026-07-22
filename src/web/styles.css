@@ -2865,6 +2865,32 @@ a {
   padding: 8px 14px 14px;
 }
 
+.model-reference-mismatch-warning {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 14px 0;
+  padding: 7px 9px;
+  border: 1px solid #edc5bf;
+  border-radius: 7px;
+  color: #97483d;
+  background: #fff6f4;
+  font-size: 8.5px;
+  line-height: 1.35;
+}
+
+.model-reference-mismatch-warning span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.model-reference-mismatch-warning strong {
+  color: #7f342b;
+  font-size: 9px;
+}
+
 .model-runframe-shell {
   position: relative;
   height: 100%;

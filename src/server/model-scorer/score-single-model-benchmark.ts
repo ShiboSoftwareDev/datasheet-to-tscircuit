@@ -115,7 +115,10 @@ function interpolate(input: { points: Point[]; x: number; x_scale: "linear" | "l
 }
 
 export function scoreSeriesPoints(input: {
-  series: BenchmarkSeriesDefinition
+  series: Pick<
+    BenchmarkSeriesDefinition,
+    "id" | "title" | "role" | "unit" | "tolerance" | "max_error_tolerance" | "y_scale"
+  >
   reference_points: Point[]
   result_points: Point[]
   x_scale?: "linear" | "log"

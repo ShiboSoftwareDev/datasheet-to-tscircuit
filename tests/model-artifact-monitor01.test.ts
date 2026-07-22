@@ -214,6 +214,7 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   expect(model_run?.circuit_preview?.snapshot_origin).toBe("server_validation")
   expect(model_run?.reference_preview?.title).toBe("Transfer curve")
   expect(model_run?.reference_preview?.result_points?.[1]).toEqual({ x: 1, y: 0.9 })
+  expect(model_run?.reference_preview?.matches_reference).toBe(true)
   expect(model_run?.preview_options.map((option) => option.benchmark_id)).toEqual(["output", "transfer"])
 
   const output_mtime_before = (await stat(output_output)).mtimeMs
@@ -226,6 +227,7 @@ test("model previews read persisted Circuit JSON and never rerun TSX on selectio
   expect(selected_workspace_preview?.reference_preview?.result_points?.[1]).toEqual({ x: 1, y: 2.1 })
   expect(selected_workspace_preview?.reference_preview?.result_status).toBe("unverified")
   expect(selected_workspace_preview?.reference_preview?.result_origin).toBe("workspace")
+  expect(selected_workspace_preview?.reference_preview?.matches_reference).toBe(false)
   expect(selected_workspace_preview?.reference_preview?.updated_at).toBe(
     selected_workspace_preview?.circuit_preview?.updated_at,
   )

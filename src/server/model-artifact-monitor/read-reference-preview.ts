@@ -6,6 +6,7 @@ import type {
   ModelReferencePreview,
   ModelReferenceSeriesPreview,
 } from "@/shared/job-types"
+import { scoreSeriesPoints } from "../model-scorer/score-single-model-benchmark"
 import { extractSimulationResultPoints, parseSimulationDefinition } from "../model-simulation-validator"
 
 interface BenchmarkPreviewSeriesRecord {
@@ -16,6 +17,8 @@ interface BenchmarkPreviewSeriesRecord {
   unit: string
   reference_file: string
   y_scale: "linear" | "log"
+  tolerance?: number
+  max_error_tolerance?: number
   simulation?: unknown
 }
 
@@ -31,6 +34,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
 function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
   if (!isRecord(value) || !Array.isArray(value.benchmarks)) return []
   return value.benchmarks.flatMap((benchmark) => {
@@ -38,6 +45,8 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
     const id = typeof benchmark.id === "string" ? benchmark.id : undefined
     const title = typeof benchmark.title === "string" ? benchmark.title : id
     const x_scale = benchmark.x_scale === "log" ? "log" : "linear"
+    const tolerance = positiveNumber(benchmark.tolerance)
+    const max_error_tolerance = positiveNumber(benchmark.max_error_tolerance)
     const parsed_series = Array.isArray(benchmark.series)
       ? benchmark.series.flatMap((series): BenchmarkPreviewSeriesRecord[] => {
           if (
@@ -55,7 +64,12 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
               quantity: typeof series.quantity === "string" ? series.quantity : "voltage",
               unit: typeof series.unit === "string" ? series.unit : "V",
               reference_file: series.reference_file,
-              y_scale: series.y_scale === "log" ? "log" : "linear",
+              y_scale:
+                series.y_scale === "log" || (series.y_scale === undefined && benchmark.y_scale === "log")
+                  ? "log"
+                  : "linear",
+              tolerance: positiveNumber(series.tolerance) ?? tolerance,
+              max_error_tolerance: positiveNumber(series.max_error_tolerance) ?? max_error_tolerance,
               simulation: series.simulation,
             },
           ]
@@ -76,6 +90,8 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
                 unit: "V",
                 reference_file: legacy_reference_file,
                 y_scale: benchmark.y_scale === "log" ? ("log" as const) : ("linear" as const),
+                tolerance,
+                max_error_tolerance,
                 simulation: benchmark.simulation,
               },
             ]
@@ -104,17 +120,15 @@ function downsampleCurvePoints(points: ModelCurvePoint[]): ModelCurvePoint[] {
 }
 
 function parseCurveCsv(text: string): ModelCurvePoint[] {
-  return downsampleCurvePoints(
-    text
-      .split(/\r?\n/)
-      .slice(1)
-      .flatMap((line) => {
-        const [raw_x, raw_y] = line.split(",")
-        const x = Number(raw_x?.trim())
-        const y = Number(raw_y?.trim())
-        return Number.isFinite(x) && Number.isFinite(y) ? [{ x, y }] : []
-      }),
-  )
+  return text
+    .split(/\r?\n/)
+    .slice(1)
+    .flatMap((line) => {
+      const [raw_x, raw_y] = line.split(",")
+      const x = Number(raw_x?.trim())
+      const y = Number(raw_y?.trim())
+      return Number.isFinite(x) && Number.isFinite(y) ? [{ x, y }] : []
+    })
 }
 
 export async function listFiles(directory: string, suffix: string): Promise<string[]> {
@@ -179,10 +193,11 @@ export async function readReferencePreview(input: {
       ],
     }
   }
+  const selected_benchmark = selected
 
   const series_previews = (
     await Promise.all(
-      selected.series.map(
+      selected_benchmark.series.map(
         async (
           series,
         ): Promise<
@@ -203,23 +218,38 @@ export async function readReferencePreview(input: {
           const result_points = (() => {
             if (!input.circuit_preview?.circuit_json || !series.simulation) return undefined
             try {
-              return downsampleCurvePoints(
-                extractSimulationResultPoints(
-                  input.circuit_preview.circuit_json,
-                  parseSimulationDefinition(series.simulation, {
-                    role: series.role,
-                    quantity: series.quantity,
-                  }),
-                ),
+              return extractSimulationResultPoints(
+                input.circuit_preview.circuit_json,
+                parseSimulationDefinition(series.simulation, {
+                  role: series.role,
+                  quantity: series.quantity,
+                }),
               )
             } catch {
               return undefined
             }
           })()
-          const legacy = selected!.series.length === 1 && series.id === "result"
+          const legacy = selected_benchmark.series.length === 1 && series.id === "result"
           const verified_result_file = legacy
-            ? `results/verified/${selected!.id}.csv`
-            : `results/verified/${selected!.id}/${series.id}.csv`
+            ? `results/verified/${selected_benchmark.id}.csv`
+            : `results/verified/${selected_benchmark.id}/${series.id}.csv`
+          const comparison =
+            result_points?.length && series.tolerance
+              ? scoreSeriesPoints({
+                  series: {
+                    id: series.id,
+                    title: series.title,
+                    role: series.role,
+                    unit: series.unit,
+                    tolerance: series.tolerance,
+                    max_error_tolerance: series.max_error_tolerance,
+                    y_scale: series.y_scale,
+                  },
+                  reference_points,
+                  result_points,
+                  x_scale: selected_benchmark.x_scale,
+                })
+              : undefined
           return {
             preview: {
               series_id: series.id,
@@ -230,8 +260,9 @@ export async function readReferencePreview(input: {
               source_file: series.reference_file,
               result_file: result_points?.length ? verified_result_file : undefined,
               y_scale: series.y_scale,
-              reference_points,
-              result_points: result_points?.length ? result_points : undefined,
+              reference_points: downsampleCurvePoints(reference_points),
+              result_points: result_points?.length ? downsampleCurvePoints(result_points) : undefined,
+              matches_reference: comparison?.passed,
             },
             modified_at: reference_stat?.mtimeMs ?? 0,
           }
@@ -244,6 +275,14 @@ export async function readReferencePreview(input: {
   const primary =
     series_previews.find((entry) => entry.preview.role === "response")?.preview ?? series_previews[0]!.preview
   const has_results = series_previews.some((entry) => entry.preview.result_points?.length)
+  const series_match_results = series_previews.flatMap((entry) =>
+    entry.preview.matches_reference === undefined ? [] : [entry.preview.matches_reference],
+  )
+  const matches_reference = series_match_results.some((matches) => !matches)
+    ? false
+    : series_match_results.length === series_previews.length
+      ? true
+      : undefined
   const is_stale = Boolean(input.circuit_preview?.is_stale)
   const result_origin = has_results ? input.circuit_preview?.snapshot_origin : undefined
   const result_status = has_results
@@ -258,17 +297,18 @@ export async function readReferencePreview(input: {
             : "unverified"
     : undefined
   return {
-    benchmark_id: selected.id,
-    title: selected.title ?? selected.id ?? basename(primary.source_file, ".csv"),
+    benchmark_id: selected_benchmark.id,
+    title: selected_benchmark.title ?? selected_benchmark.id ?? basename(primary.source_file, ".csv"),
     source_file: primary.source_file,
     result_file: result_status === "verified" ? primary.result_file : undefined,
-    x_scale: selected.x_scale ?? "linear",
+    x_scale: selected_benchmark.x_scale ?? "linear",
     y_scale: primary.y_scale,
     reference_points: primary.reference_points,
     result_points: primary.result_points,
     series: series_previews.map((entry) => entry.preview),
     result_status,
     result_origin,
+    matches_reference,
     is_stale,
     updated_at:
       (has_results ? input.circuit_preview?.updated_at : undefined) ??

@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import type { ModelCircuitPreview } from "@/shared/job-types"
-import { getComparisonScaleDisparity, getRunframeCircuitJson } from "@/web/components/model-live-preview"
+import {
+  getComparisonScaleDisparity,
+  getRunframeCircuitJson,
+  ModelLivePreview,
+} from "@/web/components/model-live-preview"
 
 const previous_circuit_json: NonNullable<ModelCircuitPreview["circuit_json"]> = []
 const live_circuit_json: NonNullable<ModelCircuitPreview["circuit_json"]> = []
@@ -64,4 +70,34 @@ test("comparison graphs identify independently auto-scaled waveforms", () => {
       ],
     ),
   ).toBeUndefined()
+})
+
+test("the reference section warns when the current graph is outside tolerance", () => {
+  const html = renderToStaticMarkup(
+    createElement(ModelLivePreview, {
+      job_id: "job_1",
+      is_complete: true,
+      preview_options: [],
+      reference_preview: {
+        benchmark_id: "transfer",
+        title: "Transfer curve",
+        source_file: "evidence/curves/transfer.csv",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 1 },
+        ],
+        result_points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 2 },
+        ],
+        matches_reference: false,
+        updated_at: "2026-07-22T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html).toContain("Doesn’t match the reference")
+  expect(html).toContain("outside the benchmark tolerance")
 })
