@@ -206,13 +206,6 @@ a {
   text-decoration: none;
 }
 
-.brand img {
-  width: 30px;
-  height: 30px;
-  display: block;
-  filter: drop-shadow(0 2px 5px rgba(37, 99, 235, 0.14));
-}
-
 .brand-name {
   display: flex;
   align-items: center;
