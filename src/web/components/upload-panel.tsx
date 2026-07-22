@@ -1,4 +1,4 @@
-import { ArrowRight, FileText, FlaskConical, Sparkles, UploadCloud, X } from "lucide-react"
+import { ArrowRight, Bot, Cloud, FileText, FlaskConical, Sparkles, UploadCloud, X } from "lucide-react"
 import { useRef, useState } from "react"
 import { createJob } from "../api"
 import type { Job } from "@/shared/job-types"
@@ -38,10 +38,12 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
   const [file, setFile] = useState<File>()
   const [is_dragging, setIsDragging] = useState(false)
   const [additional_instructions, setAdditionalInstructions] = useState("")
+  const [use_openai, setUseOpenai] = useState(false)
   const [create_pspice_model, setCreatePspiceModel] = useState(getInitialModelEnabled)
   const [model_effort, setModelEffort] = useState(getInitialModelEffort)
   const [is_uploading, setIsUploading] = useState(false)
   const [error_message, setErrorMessage] = useState<string>()
+  const [error_summary, error_command] = error_message?.split("\n", 2) ?? []
 
   const updateCreatePspiceModel = (is_enabled: boolean) => {
     setCreatePspiceModel(is_enabled)
@@ -80,6 +82,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
         await createJob({
           file,
           additional_instructions,
+          use_openai,
           model_options: {
             create_pspice_model,
             model_effort_multiplier: model_effort,
@@ -167,6 +170,44 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
         />
       </label>
 
+      <fieldset className="agent-provider">
+        <legend>AI provider</legend>
+        <div className="agent-provider-options">
+          <label className={`agent-provider-card ${use_openai ? "" : "selected"}`}>
+            <span className="model-option-icon">
+              <Cloud size={17} />
+            </span>
+            <span className="model-option-copy">
+              <strong>
+                tscircuit AI Gateway <em>Default</em>
+              </strong>
+              <small>Managed access</small>
+            </span>
+            <input
+              type="radio"
+              name="agent-provider"
+              checked={!use_openai}
+              onChange={() => setUseOpenai(false)}
+            />
+          </label>
+          <label className={`agent-provider-card ${use_openai ? "selected" : ""}`}>
+            <span className="model-option-icon">
+              <Bot size={17} />
+            </span>
+            <span className="model-option-copy">
+              <strong>OpenAI</strong>
+              <small>Your subscription</small>
+            </span>
+            <input
+              type="radio"
+              name="agent-provider"
+              checked={use_openai}
+              onChange={() => setUseOpenai(true)}
+            />
+          </label>
+        </div>
+      </fieldset>
+
       <section className={`upload-model-option ${create_pspice_model ? "enabled" : ""}`}>
         <button
           className="model-option-toggle"
@@ -212,9 +253,10 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
       </section>
 
       {error_message && (
-        <p className="form-error" role="alert">
-          {error_message}
-        </p>
+        <div className="form-error" role="alert">
+          <span>{error_summary}</span>
+          {error_command && <code>{error_command}</code>}
+        </div>
       )}
 
       <button className="primary-button" type="button" disabled={!file || is_uploading} onClick={submit}>

@@ -39,6 +39,7 @@ export async function finalizeAndLockBenchmarks(input: {
         command: [
           input.context.agent_bin,
           "do",
+          ...(input.context.use_openai ? ["--use-openai"] : []),
           "--prompt",
           buildModelBenchmarkPrompt(benchmark_validation_feedback, {
             locked_circuit_repair: Boolean(input.repair_lock),

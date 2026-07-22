@@ -68,7 +68,15 @@ export async function runStructuredAgentPhase(input: {
   const restore_image_runtime = await prepareAgentImageRuntime(input.cwd)
   try {
     const exit_code = await streamProcess({
-      command: [...command_prefix, "do", "--prompt", input.prompt, "--dir", input.cwd],
+      command: [
+        ...command_prefix,
+        "do",
+        ...(input.context.use_openai ? ["--use-openai"] : []),
+        "--prompt",
+        input.prompt,
+        "--dir",
+        input.cwd,
+      ],
       cwd: input.cwd,
       signal: input.signal,
       on_chunk: async (stream, message) => {

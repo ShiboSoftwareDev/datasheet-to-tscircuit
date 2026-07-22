@@ -9,6 +9,7 @@ services:
       - .env
     environment:
       HOST: 0.0.0.0
+      PI_CODING_AGENT_DIR: /app/.runtime/pi-agent
       PORT: 3000
     ports:
       - "127.0.0.1:3000:3000"

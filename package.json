@@ -8,6 +8,7 @@
     "dev": "concurrently -k -n api,web -c blue,green \"bun --watch src/server/index.ts\" \"vite\"",
     "dev:server": "bun --watch src/server/index.ts",
     "dev:web": "vite",
+    "auth:openai": "docker compose run --rm --no-deps -e PI_OAUTH_CALLBACK_HOST=0.0.0.0 -p 127.0.0.1:1455:1455 app ./node_modules/.bin/tsci-agent auth login --openai",
     "build": "docker compose build",
     "build:web": "vite build",
     "start": "docker compose up --no-build",
@@ -60,7 +61,7 @@
     "react-hot-toast": "^2.5.2",
     "react-query": "^3.39.3",
     "tailwind-merge": "^2.6.0",
-    "tsci-agent": "0.1.10",
+    "tsci-agent": "0.1.11",
     "tscircuit": "0.0.2110",
     "zustand": "^4.5.7"
   },

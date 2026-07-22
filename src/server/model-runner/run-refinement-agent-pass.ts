@@ -71,6 +71,7 @@ export async function runRefinementAgentPass(
         command: [
           execution.context.agent_bin,
           "do",
+          ...(execution.context.use_openai ? ["--use-openai"] : []),
           "--prompt",
           buildModelAgentPrompt(),
           "--dir",

@@ -10,6 +10,7 @@ export interface ModelRunnerContext {
   model_run_store: ModelRunStore
   agent_bin: string
   tsci_bin: string
+  use_openai?: boolean
 }
 
 export interface StreamModelProcessInput {

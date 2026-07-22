@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createJobApiHandler } from "@/server/job-api"
 import { runJob } from "@/server/job-runner"
+import { runStructuredAgentPhase } from "@/server/job-runner/run-structured-agent-phase"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 
@@ -11,13 +12,15 @@ test("job create accepts a PDF and starts the injected background runner", async
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-"))
   const job_store = new JobStore()
   let started_job_id: string | undefined
+  let started_use_openai: boolean | undefined
   const handle = createJobApiHandler({
     jobs_root,
     job_store,
     agent_bin: "unused-agent",
     tsci_bin: "unused-tsci",
-    run_job: async (input) => {
+    run_job: async (input, context) => {
       started_job_id = input.job_id
+      started_use_openai = context.use_openai
     },
   })
   const form = new FormData()
@@ -31,12 +34,78 @@ test("job create accepts a PDF and starts the injected background runner", async
   expect(response?.status).toBe(202)
   expect(body.job.file_name).toBe("sensor.pdf")
   expect(started_job_id).toBe(body.job.job_id)
+  expect(started_use_openai).toBe(false)
   expect(await Bun.file(join(jobs_root, body.job.job_id, "datasheet.pdf")).exists()).toBe(true)
   expect(await Bun.file(join(jobs_root, body.job.job_id, "AGENTS.md")).text()).toContain(
     "typical-application-plan.json",
   )
 
   await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("an unauthenticated OpenAI request returns the login instruction without creating a job", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-openai-auth-"))
+  const job_store = new JobStore()
+  let started = false
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: join(jobs_root, "missing-agent"),
+    tsci_bin: "unused-tsci",
+    run_job: async () => {
+      started = true
+    },
+  })
+  const form = new FormData()
+  form.set("datasheet", new File(["%PDF-1.7\nfixture"], "sensor.pdf", { type: "application/pdf" }))
+  form.set("use_openai", "true")
+
+  const response = await handle(
+    new Request("http://localhost/api/job/create", { method: "POST", body: form }),
+  )
+  const body = (await response?.json()) as { error: { error_code: string; message: string } }
+
+  expect(response?.status).toBe(409)
+  expect(body.error.error_code).toBe("openai_auth_required")
+  expect(body.error.message).toContain("bun run auth:openai")
+  expect(job_store.listJobs()).toHaveLength(0)
+  expect(started).toBe(false)
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("structured agent commands add --use-openai only when selected", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-agent-command-"))
+  const agent_bin = join(job_dir, "capture-agent")
+  await Bun.write(
+    agent_bin,
+    `#!/usr/bin/env bun
+const args = process.argv.slice(2)
+const dir = args[args.indexOf("--dir") + 1]
+await Bun.write(dir + "/args-" + (args.includes("--use-openai") ? "openai" : "default") + ".json", JSON.stringify(args))
+console.log(JSON.stringify({ protocol: "tsci-agent-event-v1", sequence: 1, type: "agent_end", failed: false }))
+`,
+  )
+  await chmod(agent_bin, 0o755)
+  const job_store = new JobStore()
+  const run = (use_openai: boolean) =>
+    runStructuredAgentPhase({
+      context: { job_store, agent_bin, tsci_bin: "unused-tsci", use_openai },
+      prompt: "fixture",
+      cwd: job_dir,
+      signal: new AbortController().signal,
+      append: async () => undefined,
+    })
+
+  await run(false)
+  await run(true)
+
+  const default_args = await Bun.file(join(job_dir, "args-default.json")).json()
+  const openai_args = await Bun.file(join(job_dir, "args-openai.json")).json()
+  expect(default_args).not.toContain("--use-openai")
+  expect(openai_args).toContain("--use-openai")
+
+  await rm(job_dir, { recursive: true, force: true })
 })
 
 test("an unexpected background runner rejection is contained as a failed job", async () => {

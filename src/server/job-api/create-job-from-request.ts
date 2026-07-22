@@ -7,6 +7,20 @@ import { errorResponse, jsonResponse } from "./job-api-responses"
 import { validatePdf } from "./validate-pdf"
 import { launchJobRunner } from "./launch-job-runner"
 
+async function isOpenAiAuthenticated(agent_bin: string): Promise<boolean> {
+  try {
+    const child = Bun.spawn([agent_bin, "auth", "status", "--openai"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    })
+    const [exit_code, output] = await Promise.all([child.exited, new Response(child.stdout).text()])
+    return exit_code === 0 && output.includes("OpenAI credentials are stored.")
+  } catch {
+    return false
+  }
+}
+
 export async function createJobFromRequest(request: Request, context: JobApiContext): Promise<Response> {
   let form: FormData
   try {
@@ -53,6 +67,16 @@ export async function createJobFromRequest(request: Request, context: JobApiCont
     })
   }
 
+  const use_openai = form.get("use_openai") === "true"
+  if (use_openai && !(await isOpenAiAuthenticated(context.agent_bin))) {
+    return errorResponse({
+      error_code: "openai_auth_required",
+      message:
+        "OpenAI authentication is missing or invalid. Run this command, then try again:\nbun run auth:openai",
+      status: 409,
+    })
+  }
+
   const job_id = crypto.randomUUID()
   const job_dir = join(context.jobs_root, job_id)
   await mkdir(job_dir, { recursive: true })
@@ -74,16 +98,15 @@ export async function createJobFromRequest(request: Request, context: JobApiCont
     stream: "system",
     message: `Uploaded ${datasheet.name} (${datasheet.size} bytes).\n`,
   })
-
   let model_run
   if (create_pspice_model) {
     model_run = await launchModelRun(
       { job_id, job_dir, effort_multiplier: model_effort_multiplier! },
-      { ...context, model_run_store: context.model_run_store! },
+      { ...context, model_run_store: context.model_run_store!, use_openai },
     )
   }
 
-  launchJobRunner({ job_id, additional_instructions }, context)
+  launchJobRunner({ job_id, additional_instructions }, { ...context, use_openai })
 
   return jsonResponse({ job, model_run }, 202)
 }

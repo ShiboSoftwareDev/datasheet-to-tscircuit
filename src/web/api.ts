@@ -31,11 +31,13 @@ async function readApiError(response: Response): Promise<string> {
 export async function createJob(input: {
   file: File
   additional_instructions: string
+  use_openai: boolean
   model_options?: { create_pspice_model: boolean; model_effort_multiplier: number }
 }): Promise<Job> {
-  const { file, additional_instructions, model_options } = input
+  const { file, additional_instructions, use_openai, model_options } = input
   const form = new FormData()
   form.set("datasheet", file)
+  form.set("use_openai", String(use_openai))
   if (additional_instructions.trim()) form.set("additional_instructions", additional_instructions.trim())
   if (model_options?.create_pspice_model) {
     form.set("create_pspice_model", "true")

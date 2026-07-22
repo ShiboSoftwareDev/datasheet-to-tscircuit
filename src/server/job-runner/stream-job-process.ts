@@ -7,6 +7,7 @@ export interface JobRunnerContext {
   agent_bin: string
   agent_event_runner?: string
   tsci_bin: string
+  use_openai?: boolean
 }
 
 export interface StreamProcessInput {

@@ -8,12 +8,14 @@ import { readCliOption } from "./read-cli-option"
 
 export async function runStructuredAgentCommand(args: string[]): Promise<void> {
   if (args[0] !== "do") throw new Error("structured-agent-runner only supports the do command")
+  const use_openai = args.includes("--use-openai")
   const prompt = readCliOption(args, "--prompt")
   const directory = resolve(readCliOption(args, "--dir"))
   const emitter: TrustedAgentEventEmitter = { sequence: 0 }
 
   await using result = await runPromptInSandbox(prompt, {
     dir: directory,
+    piArgs: use_openai ? ["--model", "openai-codex/gpt-5.6-terra"] : undefined,
     onEvent(event) {
       if (event.type === "message_update") {
         const update = event.assistantMessageEvent

@@ -52,6 +52,7 @@ export async function prepareModelWorkspace(execution: ModelExecution): Promise<
       command: [
         execution.context.agent_bin,
         "do",
+        ...(execution.context.use_openai ? ["--use-openai"] : []),
         "--prompt",
         buildModelSetupPrompt(),
         "--dir",

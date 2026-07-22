@@ -45,6 +45,19 @@ Open `http://localhost:3000`. Compose publishes the port on host loopback only,
 so it is not reachable from other machines. Generated PDFs, TSX, Circuit JSON,
 and `agent.log` files persist under `.runtime/jobs` after the container stops.
 
+To use OpenAI, authenticate once from the repository directory:
+
+```bash
+bun run auth:openai
+```
+
+The command starts a temporary authentication container and publishes its OAuth
+callback on host loopback. OpenAI credentials are stored in
+`/app/.runtime/pi-agent`, inside the existing `.runtime` bind mount. They persist
+across application restarts, container recreation, and image rebuilds, so login
+is normally required only once. Run the command again if the credentials expire
+or become invalid. The tscircuit AI Gateway remains the default.
+
 Stop the application with:
 
 ```bash
