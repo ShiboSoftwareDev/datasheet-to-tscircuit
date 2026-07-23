@@ -8,6 +8,8 @@ export interface JobRunnerContext {
   agent_event_runner?: string
   tsci_bin: string
   use_openai?: boolean
+  agent_transport_retry_limit?: number
+  agent_transport_retry_base_delay_ms?: number
 }
 
 export interface StreamProcessInput {
@@ -28,6 +30,13 @@ export class AutomatedConversionUnavailableError extends Error {
   constructor(message: string) {
     super(message)
     this.name = "AutomatedConversionUnavailableError"
+  }
+}
+
+export class AgentTransportUnavailableError extends AutomatedConversionUnavailableError {
+  constructor(message: string) {
+    super(message)
+    this.name = "AgentTransportUnavailableError"
   }
 }
 
@@ -74,7 +83,10 @@ export async function streamProcess(input: StreamProcessInput): Promise<number> 
   const child_process = Bun.spawn(input.command, {
     cwd: input.cwd,
     detached: true,
-    env: { ...process.env, PATH: command_path },
+    // The production server environment selects React's production JSX runtime, while tsci's
+    // source evaluator emits jsxDEV calls. Keep job toolchains on the matching development
+    // runtime without changing the server's own production mode.
+    env: { ...process.env, NODE_ENV: "development", PATH: command_path },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

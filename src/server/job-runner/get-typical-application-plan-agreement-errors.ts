@@ -87,6 +87,18 @@ function componentValuesAgree(input: {
 }): boolean {
   const { primary_value, independent_value, kind, target_part_number } = input
   if (primary_value === undefined && independent_value === undefined) return true
+  const target_identifier = normalizedIdentifier(target_part_number)
+  if (
+    kind === "integrated_circuit" &&
+    target_identifier.length >= 4 &&
+    [primary_value, independent_value].every(
+      (value) => value === undefined || normalizedIdentifier(value).startsWith(target_identifier),
+    )
+  ) {
+    // Component evidence owns U1 identity. Application agents may repeat either the base or
+    // orderable part number, or omit the redundant value, without creating an electrical split.
+    return true
+  }
   if (primary_value === undefined || independent_value === undefined) return false
   const primary_engineering_value = engineeringValue(primary_value)
   const independent_engineering_value = engineeringValue(independent_value)
@@ -101,7 +113,6 @@ function componentValuesAgree(input: {
   const primary_identifier = normalizedIdentifier(primary_value)
   const independent_identifier = normalizedIdentifier(independent_value)
   if (primary_identifier === independent_identifier) return true
-  const target_identifier = normalizedIdentifier(target_part_number)
   return (
     kind === "integrated_circuit" &&
     target_identifier.length >= 4 &&

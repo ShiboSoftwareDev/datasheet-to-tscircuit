@@ -47,8 +47,13 @@ The server controls three strictly separated phases:
   justify mapping to a generic footprint.
 - List only referenced electrical parts as application components. Unlabeled open-circle terminals,
   rail arrows, and wire endpoints are interfaces, not \`power_port\` or terminal components.
+- Treat depicted supply, battery, load, charger, MCU, and other system-context blocks as external
+  interfaces unless the diagram assigns the block an actual part reference and electrical value
+  needed by the reference circuit.
 - Always include the target IC as component \`U1\`, use \`U1.port\` for its endpoints, and omit bare
   external rail labels such as VIN, VOUT, or GND from connection pin arrays.
+- Record every visibly wired target configuration or address pin; do not omit it merely because it
+  carries no runtime signal.
 - Trace every application wire end-to-end in the inspected pixels. At crossings, a junction dot
   connects conductors and a bridge/jump arc does not. Inspect crossings at high zoom and follow
   pull-up resistors to their labeled rail instead of assigning the nearest horizontal wire.
@@ -71,6 +76,12 @@ The server controls three strictly separated phases:
   \`canUseOpenDrain\` and \`isUsingOpenDrain\`; do not set them for other pins.
 - Use built-in tscircuit elements. A generic footprinter is allowed only when its emitted geometry
   exactly matches approved evidence; do not add third-party package imports.
+- Preserve every documented selector-safe pin label. tscircuit pin labels may contain only letters,
+  digits, and underscores. If punctuation makes a documented label unsafe, put only an unambiguous
+  selector-safe alias in \`pinLabels\` and preserve the exact datasheet spelling in a nearby source
+  comment; do not add a rejected punctuation alias that makes the build report errors. Use IN_NEG
+  for IN− or IN-, and IN_POS for IN+. The server validates this polarity mapping against the
+  approved evidence; do not treat the safe Circuit JSON spelling as a visual failure.
 - Treat the server-created component-schematic-plan.json as read-only and implement its
   schPinArrangement exactly. The server derives this stable layout from independently agreed roles.
 - Do not use \`placementDrcChecksDisabled\`, \`routingDisabled\`,
@@ -92,6 +103,9 @@ The server controls three strictly separated phases:
   \`footprint-plan.json\`, and \`typical-application-plan.json\` as read-only.
 - Create a default-exported \`typical-application.circuit.tsx\` importing
   \`./index.circuit\`. Implement every planned component, value, and structured net.
+- When a planned endpoint contains selector-unsafe punctuation, use the generated component's
+  explicit selector-safe polarity alias (for example IN_NEG for IN− or IN-, and IN_POS for IN+)
+  without changing its physical pin, polarity, or planned net.
 - For every external component with a recorded manufacturer part number, set the exact literal
   \`manufacturerPartNumber\` JSX prop in both verified and schematic-only modes. For
   \`pcb_implementation: "verified"\`, also set each external component's literal \`footprint\` JSX

@@ -104,23 +104,57 @@ async function verifyEvidenceIndependently(
   type ValidDisagreement = {
     attempt: number
     evidence: IndependentEvidence
+    primary_component_errors: string[]
+    primary_application_errors: string[]
     primary_errors: string[]
   }
 
   const max_extraction_attempts = 4
-  const max_valid_disagreements = 3
+  const max_valid_disagreements = max_extraction_attempts
   let independent_retry_feedback: string | undefined
   let last_retryable_error: string | undefined
   const valid_disagreements: ValidDisagreement[] = []
 
-  const getPairwiseErrors = (left: IndependentEvidence, right: IndependentEvidence): string[] => [
-    ...getIndependentComponentEvidenceErrors(left.component_evidence, right.component_evidence),
-    ...getTypicalApplicationPlanAgreementErrors({
+  const getComponentErrors = (left: IndependentEvidence, right: IndependentEvidence): string[] =>
+    getIndependentComponentEvidenceErrors(left.component_evidence, right.component_evidence)
+
+  const getApplicationErrors = (left: IndependentEvidence, right: IndependentEvidence): string[] =>
+    getTypicalApplicationPlanAgreementErrors({
       primary: left.application_plan,
       independent: right.application_plan,
       target_part_number: right.component_evidence.part_number.value,
-    }),
+    })
+
+  const getPairwiseErrors = (left: IndependentEvidence, right: IndependentEvidence): string[] => [
+    ...getComponentErrors(left, right),
+    ...getApplicationErrors(left, right),
   ]
+
+  const getDomainConsensusCandidate = (): ValidDisagreement | undefined => {
+    const candidates = valid_disagreements.filter((candidate) => {
+      const component_supported =
+        candidate.primary_component_errors.length === 0 ||
+        valid_disagreements.some(
+          (other) =>
+            other.attempt !== candidate.attempt &&
+            getComponentErrors(candidate.evidence, other.evidence).length === 0,
+        )
+      const application_supported =
+        candidate.primary_application_errors.length === 0 ||
+        valid_disagreements.some(
+          (other) =>
+            other.attempt !== candidate.attempt &&
+            getApplicationErrors(candidate.evidence, other.evidence).length === 0,
+        )
+      return component_supported && application_supported
+    })
+    const first = candidates[0]
+    if (!first) return undefined
+    if (candidates.some((candidate) => getPairwiseErrors(first.evidence, candidate.evidence).length > 0)) {
+      return undefined
+    }
+    return first
+  }
 
   const noConsensusError = (): AutomatedConversionUnavailableError => {
     const comparisons = valid_disagreements.map(
@@ -142,6 +176,22 @@ async function verifyEvidenceIndependently(
     return new AutomatedConversionUnavailableError(
       `Evidence extracts did not reach consensus after ${valid_disagreements.length} valid independent verification(s): ${comparisons.join("; ")}`,
     )
+  }
+
+  const getTargetedConsensusFeedback = (): string => {
+    const differences = new Set<string>()
+    for (const disagreement of valid_disagreements) {
+      for (const error of disagreement.primary_errors) differences.add(error)
+    }
+    for (let left_index = 0; left_index < valid_disagreements.length; left_index += 1) {
+      for (let right_index = left_index + 1; right_index < valid_disagreements.length; right_index += 1) {
+        const left = valid_disagreements.at(left_index)
+        const right = valid_disagreements.at(right_index)
+        if (!left || !right) continue
+        for (const error of getPairwiseErrors(left.evidence, right.evidence)) differences.add(error)
+      }
+    }
+    return [...differences].join("; ").slice(0, 6_000)
   }
 
   for (let attempt = 1; attempt <= max_extraction_attempts; attempt += 1) {
@@ -198,17 +248,16 @@ async function verifyEvidenceIndependently(
       break
     }
 
-    const comparison_errors = [
-      ...getIndependentComponentEvidenceErrors(
-        primary_evidence.component_evidence,
-        independently_verified.component_evidence,
-      ),
-      ...getTypicalApplicationPlanAgreementErrors({
-        primary: primary_evidence.typical_application_plan,
-        independent: independently_verified.application_plan,
-        target_part_number: primary_evidence.component_evidence.part_number.value,
-      }),
-    ]
+    const primary_component_errors = getIndependentComponentEvidenceErrors(
+      primary_evidence.component_evidence,
+      independently_verified.component_evidence,
+    )
+    const primary_application_errors = getTypicalApplicationPlanAgreementErrors({
+      primary: primary_evidence.typical_application_plan,
+      independent: independently_verified.application_plan,
+      target_part_number: primary_evidence.component_evidence.part_number.value,
+    })
+    const comparison_errors = [...primary_component_errors, ...primary_application_errors]
     if (comparison_errors.length === 0) {
       const accepted_differences = getIndependentComponentEvidenceAcceptedDifferences(
         primary_evidence.component_evidence,
@@ -222,6 +271,11 @@ async function verifyEvidenceIndependently(
           "system",
           `Evidence consensus recovered on independent attempt ${attempt}; the primary extraction is retained.\n`,
         )
+      } else if (last_retryable_error) {
+        await execution.append(
+          "system",
+          `Evidence verification recovered on independent attempt ${attempt} after an earlier incomplete attempt; the primary extraction is retained.\n`,
+        )
       }
       return primary_evidence
     }
@@ -231,6 +285,7 @@ async function verifyEvidenceIndependently(
         const promoted = await promoteIndependentConsensus({
           execution,
           independently_verified,
+          attempt,
         })
         await execution.append(
           "system",
@@ -243,19 +298,40 @@ async function verifyEvidenceIndependently(
     valid_disagreements.push({
       attempt,
       evidence: independently_verified,
+      primary_component_errors,
+      primary_application_errors,
       primary_errors: comparison_errors,
     })
+    const domain_consensus = getDomainConsensusCandidate()
+    if (domain_consensus) {
+      const promoted = await promoteIndependentConsensus({
+        execution,
+        independently_verified: domain_consensus.evidence,
+        attempt: domain_consensus.attempt,
+      })
+      await execution.append(
+        "system",
+        `Domain-level evidence consensus recovered on independent attempt ${attempt}. Independent attempt ${domain_consensus.attempt} is retained because its component evidence and typical-application plan are each supported by a separate extraction.\n`,
+      )
+      return promoted
+    }
     if (valid_disagreements.length >= max_valid_disagreements) throw noConsensusError()
 
     independent_retry_feedback =
       valid_disagreements.length === 1
         ? "A prior independent extraction disagreed with the primary evidence. Perform a fresh extraction without assuming either result."
-        : "Multiple valid independent extractions disagree on critical evidence. This is a recovery tie-breaker. Re-inspect the original datasheet pixels from scratch, concentrate on dimension-leader endpoints and calculated pad centers, and do not average prior values."
+        : `Multiple valid independent extractions disagree on critical evidence. This is a recovery tie-breaker${
+            valid_disagreements.length >= 3 ? " and final targeted adjudication" : ""
+          }. Re-inspect the original datasheet pixels from scratch and resolve each exact difference below from its cited table or diagram. Concentrate on dimension-leader endpoints, calculated pad centers, every visibly wired configuration pin, and whether depicted system blocks are parts or external interfaces. Do not average prior values.\n\nExact unresolved differences:\n${getTargetedConsensusFeedback()}`
     await execution.append(
       "system",
       valid_disagreements.length === 1
         ? `Independent evidence attempt ${attempt} disagreed with the primary extraction (${comparison_errors.join("; ")}). Retrying with another independent verification…\n`
-        : `Independent evidence remains split after attempt ${attempt} (${comparison_errors.join("; ")}). Running a recovery tie-breaker verification…\n`,
+        : `Independent evidence remains split after attempt ${attempt} (${comparison_errors.join("; ")}). ${
+            valid_disagreements.length >= 3
+              ? "Running one final targeted adjudication of the exact disputed facts"
+              : "Running a recovery tie-breaker verification"
+          }…\n`,
     )
   }
 
@@ -268,22 +344,29 @@ async function verifyEvidenceIndependently(
 async function promoteIndependentConsensus(input: {
   execution: JobExecution
   independently_verified: Awaited<ReturnType<typeof extractIndependentComponentEvidence>>
+  attempt: number
 }): Promise<PrimaryEvidenceExtraction> {
-  const { execution, independently_verified } = input
+  const { execution, independently_verified, attempt } = input
   const component_evidence_text = `${JSON.stringify(independently_verified.component_evidence, null, 2)}\n`
   const footprint_plan_text = `${JSON.stringify(independently_verified.footprint_plan, null, 2)}\n`
   const typical_application_plan_text = `${JSON.stringify(independently_verified.application_plan, null, 2)}\n`
+  const retained_visual_reference_dir = join(
+    execution.job_dir,
+    "evidence-attempts",
+    `independent-${attempt}`,
+    "visual-reference",
+  )
   await Promise.all([
     Bun.write(join(execution.job_dir, "component-evidence.json"), component_evidence_text),
     Bun.write(join(execution.job_dir, "footprint-plan.json"), footprint_plan_text),
     Bun.write(join(execution.job_dir, "typical-application-plan.json"), typical_application_plan_text),
     cp(
-      join(execution.job_dir, "visual-reference", "land-pattern.independent.png"),
+      join(retained_visual_reference_dir, "land-pattern.png"),
       join(execution.job_dir, "visual-reference", "land-pattern.png"),
     ),
     independently_verified.application_plan.availability === "documented"
       ? cp(
-          join(execution.job_dir, "visual-reference", "typical-application.independent.png"),
+          join(retained_visual_reference_dir, "typical-application.png"),
           join(execution.job_dir, "visual-reference", "typical-application.png"),
         )
       : rm(join(execution.job_dir, "visual-reference", "typical-application.png"), { force: true }),

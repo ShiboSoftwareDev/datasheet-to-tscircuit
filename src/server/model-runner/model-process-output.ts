@@ -1,15 +1,9 @@
 import { join } from "node:path"
+export {
+  captureAgentProcessOutput as captureProcessOutput,
+  isTransientAgentTransportFailure,
+} from "../agent-tools/agent-transport-failure"
 import { SimulationFailureKind } from "./validate-champion"
-
-export function captureProcessOutput(current: string, message: string): string {
-  return `${current}${message}`.slice(-16_000)
-}
-
-export function isTransientAgentTransportFailure(output: string): boolean {
-  return /connection (?:error|closed|failed|lost|reset)|failed to connect|econn(?:reset|refused|aborted)|network error|socket hang up|fetch failed|temporarily unavailable|service unavailable|gateway timeout|http (?:502|503|504)\b/i.test(
-    output,
-  )
-}
 
 export function summarizeProcessFailure(output: string): string | undefined {
   const lines = output

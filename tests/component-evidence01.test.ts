@@ -239,6 +239,47 @@ test("pin-table validation preserves every documented alias", () => {
   )
 })
 
+test("pin-table validation accepts unambiguous selector-safe polarity aliases", () => {
+  const polarized = evidence()
+  polarized.pinout.pins[0]!.labels = ["IN−"]
+  polarized.pinout.pins[1]!.labels = ["IN+"]
+  const circuit = [
+    {
+      type: "source_component",
+      source_component_id: "u1",
+      manufacturer_part_number: "GENERIC-2-A",
+    },
+    {
+      type: "source_port",
+      source_port_id: "p1",
+      source_component_id: "u1",
+      pin_number: 1,
+      name: "IN_NEG",
+      port_hints: ["1", "IN_NEG"],
+    },
+    {
+      type: "source_port",
+      source_port_id: "p2",
+      source_component_id: "u1",
+      pin_number: 2,
+      name: "IN_POS",
+      port_hints: ["2", "IN_POS"],
+      requires_ground: true,
+    },
+  ]
+
+  expect(getPinoutEvidenceErrors(polarized, circuit as unknown as AnyCircuitElement[])).toEqual([])
+
+  circuit[1]!.name = "IN_POS"
+  circuit[1]!.port_hints = ["1", "IN_POS"]
+  circuit[2]!.name = "IN_NEG"
+  circuit[2]!.port_hints = ["2", "IN_NEG"]
+  expect(getPinoutEvidenceErrors(polarized, circuit as unknown as AnyCircuitElement[])).toEqual([
+    "pin 1 labels IN− are absent from its Circuit JSON port",
+    "pin 2 labels IN+ are absent from its Circuit JSON port",
+  ])
+})
+
 test("pin-table validation enforces exact ordering code and electrical role attributes", () => {
   const circuit = [
     {

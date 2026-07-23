@@ -57,11 +57,14 @@ Use tscircuit's source semantics exactly. A square \`voltagesource\` is always
 A square \`currentsource\` is always 0 A to \`peakToPeakCurrent\`; its
 \`current\` value is not an offset while \`waveShape\` is present. For a 0 V-to-high
 enable edge, use one square voltage source with \`voltage\` equal to the high level
-and the required \`pulseDelay\`. For a nonzero-low input step, use one DC bias
-voltage source in series with one 0 V-to-delta square source as a single
-ground-referenced chain. If you instead use a harness-local \`<spicemodel>\`
-PULSE driver, map its SPICE nodes to the chip pins in the correct direction and
-still probe the stimulus at the DUT port, never at the helper source. For a
+and the required \`pulseDelay\`. The installed SPICE converter ground-references
+every \`<voltagesource>\` negative terminal, so never put voltage-source components
+in series to create a DC offset: that collapses the middle node and produces a
+shorted VSRC. For a nonzero-low input step, use one harness-local helper \`<chip>\`
+whose \`<spicemodel>\` contains a single
+\`PULSE(low high delay rise fall width period)\` source between mapped OUT and GND
+pins. Map its SPICE nodes to the helper chip pins in the correct direction and
+probe the stimulus at the DUT port, never at the helper source. For a
 nonzero-low current step, combine a separate DC current source with pulse sources
 and verify the actual current through an explicit sense resistor. Measure every
 voltage stimulus at the driven DUT port (for example \`.DUT > .VIN\` or

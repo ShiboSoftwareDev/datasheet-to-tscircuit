@@ -135,6 +135,10 @@ function commandText(args: unknown): string {
 function isExpectedBuildCommand(args: unknown, expected_command: string): boolean {
   const command = commandText(args).trim()
   if (/[;&|`$<>]/.test(command)) return false
+  const normalized_command = command.replace(
+    /^(?:env\s+)?NODE_ENV=(?:development|"development"|'development')\s+/,
+    "",
+  )
   const local_command = expected_command.replace(/^tsci(?=\s|$)/, "./node_modules/.bin/tsci")
   const unprefixed_local_command = expected_command.replace(/^tsci(?=\s|$)/, "node_modules/.bin/tsci")
   return [
@@ -143,7 +147,7 @@ function isExpectedBuildCommand(args: unknown, expected_command: string): boolea
     `bunx ${expected_command}`,
     local_command,
     unprefixed_local_command,
-  ].some((candidate) => command === candidate || command.startsWith(`${candidate} `))
+  ].some((candidate) => normalized_command === candidate || normalized_command.startsWith(`${candidate} `))
 }
 
 function isAllowedSchematicRender(input: {

@@ -202,7 +202,10 @@ export async function streamModelProcess(input: StreamModelProcessInput): Promis
   const child_process = Bun.spawn(input.command, {
     cwd: input.cwd,
     detached: true,
-    env: { ...process.env, PATH: command_path },
+    // Docker runs the server in production mode, but tscircuit's source evaluator emits
+    // development-runtime jsxDEV calls. Every model subprocess, including benchmark structural
+    // builds, must use the same matching JSX runtime as component/application subprocesses.
+    env: { ...process.env, NODE_ENV: "development", PATH: command_path },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

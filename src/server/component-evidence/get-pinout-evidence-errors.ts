@@ -1,4 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
+import { normalizeElectricalPinLabel } from "../pin-label-normalization"
 import { normalizePin, normalizeText } from "./get-pad-agreement-errors"
 import type { CircuitRecord } from "./parse-component-evidence"
 import type { ComponentEvidence } from "./types"
@@ -54,8 +55,8 @@ export function getPinoutEvidenceErrors(
     const actual_labels = [
       typeof port.name === "string" ? port.name : "",
       ...asStringArray(port.port_hints),
-    ].map(normalizeText)
-    if (!pin.labels.map(normalizeText).every((label) => actual_labels.includes(label))) {
+    ].map(normalizeElectricalPinLabel)
+    if (!pin.labels.map(normalizeElectricalPinLabel).every((label) => actual_labels.includes(label))) {
       errors.push(`pin ${pin.number} labels ${pin.labels.join("/")} are absent from its Circuit JSON port`)
     }
     const expected_attributes = {

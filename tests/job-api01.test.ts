@@ -108,6 +108,50 @@ console.log(JSON.stringify({ protocol: "tsci-agent-event-v1", sequence: 1, type:
   await rm(job_dir, { recursive: true, force: true })
 })
 
+test("structured agent phases recover transient transport failures without consuming the phase", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-agent-transport-recovery-"))
+  const agent_bin = join(job_dir, "flaky-transport-agent")
+  await Bun.write(
+    agent_bin,
+    `#!/usr/bin/env bun
+const args = process.argv.slice(2)
+const dir = args[args.indexOf("--dir") + 1]
+const attemptPath = dir + "/transport-attempts"
+const attempt = Number(await Bun.file(attemptPath).text().catch(() => "0")) + 1
+await Bun.write(attemptPath, String(attempt))
+if (attempt < 3) {
+  console.error("error: Was there a typo in the url or port?")
+  process.exit(1)
+}
+console.log(JSON.stringify({ protocol: "tsci-agent-event-v1", sequence: 1, type: "agent_end", failed: false }))
+`,
+  )
+  await chmod(agent_bin, 0o755)
+  const messages: string[] = []
+  const events = await runStructuredAgentPhase({
+    context: {
+      job_store: new JobStore(),
+      agent_bin,
+      tsci_bin: "unused-tsci",
+      agent_transport_retry_limit: 3,
+      agent_transport_retry_base_delay_ms: 1,
+    },
+    prompt: "fixture",
+    cwd: job_dir,
+    signal: new AbortController().signal,
+    append: async (_stream, message) => {
+      messages.push(message)
+    },
+  })
+
+  expect(events.at(-1)).toMatchObject({ type: "agent_end", failed: false })
+  expect(await Bun.file(join(job_dir, "transport-attempts")).text()).toBe("3")
+  expect(messages.filter((message) => message.includes("Agent transport was unavailable"))).toHaveLength(2)
+  expect(messages.join("\n")).toContain("retrying the same phase")
+
+  await rm(job_dir, { recursive: true, force: true })
+})
+
 test("an unexpected background runner rejection is contained as a failed job", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-runner-rejection-"))
   const job_store = new JobStore()

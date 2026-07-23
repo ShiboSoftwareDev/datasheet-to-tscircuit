@@ -1,9 +1,4 @@
-function sanitizeRetryFeedback(value: string): string {
-  return value
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    .trim()
-    .slice(0, 2_000)
-}
+import { sanitizeRetryFeedback } from "./generation-recovery"
 
 export function buildAgentPrompt(additional_instructions?: string, retry_feedback?: string): string {
   const user_context = additional_instructions?.trim()
@@ -60,7 +55,9 @@ datasheet discrepancies in the relevant source note instead.
 Classify each pin role from its cited electrical function. The role describes the pin, not a desired
 schematic side; use other only when none of the explicit electrical roles applies. Set
 electrical_attributes.open_drain only when the cited pin documentation explicitly identifies an
-open-drain output; never infer it from the generic output role.
+open-drain output; never infer it from the generic output role. An explicit statement in the pin
+description such as "open-drain bidirectional data" is authoritative even when the separate type
+column only says digital input/output.
 
 Do not write footprint-plan.json. The server derives it deterministically from the sourced
 component-evidence footprint pads and drawing orientation. Write typical-application-plan.json:
@@ -94,9 +91,13 @@ publish only the schematic implementation.
 
 List only actual referenced electrical parts in components. Unlabeled rail arrows, open-circle
 input/output terminals, and schematic wire endpoints are interfaces, not components; do not invent
-power_port or terminal pseudo-components for them. Always include the target IC as component U1 and
-use U1.port for its endpoints. Every pins entry must use component.port syntax; omit bare VIN, VOUT,
-GND, or other external rail labels. Before finalizing every connection, trace each
+power_port or terminal pseudo-components for them. Treat depicted supply, battery, load, charger,
+MCU, and other system-context blocks as external interfaces unless the diagram assigns the block an
+actual part reference and electrical value needed by the reference circuit. Always include the target IC as component U1
+and use U1.port for its endpoints. Every pins entry must use
+component.port syntax; omit bare VIN, VOUT, GND, or other external rail labels. Record every visibly
+wired target configuration or address pin; do not omit such pins merely because they carry no
+runtime signal. Before finalizing every connection, trace each
 wire end-to-end in the inspected pixels at high zoom. A junction dot connects conductors; a bridge
 or jump arc at a crossing explicitly does not connect them. In particular, follow pull-up resistors
 past crossings to the labeled rail instead of assigning the nearest horizontal wire.${retry_context}${user_context}`

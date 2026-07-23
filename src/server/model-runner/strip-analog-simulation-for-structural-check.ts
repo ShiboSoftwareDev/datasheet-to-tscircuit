@@ -4,7 +4,7 @@ import type { JobLogStream } from "@/shared/job-types"
 import ts from "typescript"
 import { getCircuitBuildDiagnostics } from "../model-simulation-validator"
 import { listModelBenchFiles } from "./list-model-bench-files"
-import { streamModelProcess } from "./stream-model-process"
+import { ModelInfrastructureError, streamModelProcess } from "./stream-model-process"
 import { captureProcessOutput, summarizeProcessFailure } from "./model-process-output"
 import { getValidationConcurrency } from "./validate-champion"
 
@@ -105,7 +105,13 @@ export async function validateBenchmarkSources(input: {
             },
           })
           if (exit_code !== 0) {
-            failures.push(`${benchmark_file}: ${summarizeProcessFailure(process_output)}`)
+            const failure = summarizeProcessFailure(process_output)
+            if (/jsxDEV\d*\s+is not a function/i.test(process_output)) {
+              throw new ModelInfrastructureError(
+                `Benchmark structural-render JSX runtime failed: ${benchmark_file}: ${failure}`,
+              )
+            }
+            failures.push(`${benchmark_file}: ${failure}`)
             continue
           }
           try {

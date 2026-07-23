@@ -10,7 +10,12 @@ import {
   validateBenchmarkSuiteForLock,
 } from "../model-benchmark-lock"
 import { buildModelBenchmarkPrompt } from "../model-scaffold"
-import { ModelProcessStaleError, type ModelRunnerContext, streamModelProcess } from "./stream-model-process"
+import {
+  ModelInfrastructureError,
+  ModelProcessStaleError,
+  type ModelRunnerContext,
+  streamModelProcess,
+} from "./stream-model-process"
 import { findPrematureRefinementArtifacts, validateFinalizedBenchmarksMatchDraft } from "./model-setup-state"
 import { validateBenchmarkSources } from "./strip-analog-simulation-for-structural-check"
 import { preflightBenchmarkHarnesses } from "./preflight-benchmark-harnesses"
@@ -113,6 +118,7 @@ export async function finalizeAndLockBenchmarks(input: {
           : await createOrVerifyBenchmarkLock(input.model_dir)
         return { benchmark_lock }
       } catch (error) {
+        if (error instanceof ModelInfrastructureError) throw error
         rejection = error instanceof Error ? error.message : String(error)
       }
     }

@@ -89,7 +89,12 @@ export async function prepareGenerationWorkspace(
     "footprint-plan.json",
     "typical-application-plan.json",
   ]
-  const application_files = ["component.circuit.tsx", "dist/index", "build-targets.log"]
+  const application_files = [
+    "component.circuit.tsx",
+    "typical-application.circuit.tsx",
+    "dist/index",
+    "build-targets.log",
+  ]
   const visual_reference =
     phase === "component"
       ? join("visual-reference", "land-pattern.png")

@@ -20,6 +20,14 @@ import {
   publishGenerationWorkspace,
   restoreProtectedTree,
 } from "./generation-workspace"
+import {
+  canRetryGenerationFailure,
+  generationFailureMessage,
+  MAX_GENERATION_ATTEMPTS,
+  retainFailedGenerationAttempt,
+  sanitizeRetryFeedback,
+  shouldDiscardGenerationCheckpoint,
+} from "./generation-recovery"
 import { assertNoDatasheetAccess } from "./get-forbidden-datasheet-accesses"
 import type { JobExecution } from "./job-execution"
 import type { GeneratedComponent } from "./run-component-generation-phase"
@@ -88,18 +96,15 @@ async function restoreApplicationInputs(input: {
   return protected_files_modified
 }
 
-export async function runApplicationGenerationPhase(input: {
+async function runApplicationGenerationAttempt(input: {
   evidence: ApprovedJobEvidence
   component: GeneratedComponent
   execution: JobExecution
+  attempt: number
+  retry_feedback?: string
 }): Promise<void> {
-  const { evidence, component, execution } = input
+  const { evidence, component, execution, attempt, retry_feedback } = input
   throwIfCancelled(execution.cancellation_signal)
-  execution.active_validation_phase = "application_generation"
-  await execution.append(
-    "system",
-    "\nStarting the typical-application phase after the component-ready milestone…\n",
-  )
   const pcb_implementation = evidence.typical_application_plan.pcb_implementation ?? "verified"
   const application_workspace = await prepareGenerationWorkspace(execution.job_dir, "application")
   let protected_files_modified = false
@@ -107,13 +112,17 @@ export async function runApplicationGenerationPhase(input: {
   try {
     application_events = await runStructuredAgentPhase({
       context: execution.context,
-      prompt: buildTypicalApplicationPrompt(execution.additional_instructions, pcb_implementation),
+      prompt: buildTypicalApplicationPrompt(
+        execution.additional_instructions,
+        pcb_implementation,
+        retry_feedback,
+      ),
       cwd: application_workspace.directory,
       signal: execution.cancellation_signal,
       append: execution.append.bind(execution),
       event_log_file: execution.protected_event_log_file,
       event_publish_file: execution.published_event_log_file,
-      event_phase: "typical_application_generation",
+      event_phase: `typical_application_generation_attempt_${attempt}`,
     })
   } finally {
     try {
@@ -274,4 +283,73 @@ export async function runApplicationGenerationPhase(input: {
     typical_application_code,
     typical_application_circuit_json,
   })
+}
+
+export async function runApplicationGenerationPhase(input: {
+  evidence: ApprovedJobEvidence
+  component: GeneratedComponent
+  execution: JobExecution
+}): Promise<void> {
+  const { execution } = input
+  throwIfCancelled(execution.cancellation_signal)
+  execution.active_validation_phase = "application_generation"
+  await execution.append(
+    "system",
+    "\nStarting the typical-application phase after the component-ready milestone…\n",
+  )
+
+  let retry_feedback: string | undefined
+  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
+    const source_path = join(execution.job_dir, "typical-application.circuit.tsx")
+    const source_checkpoint = await readFile(source_path).catch(() => undefined)
+    try {
+      await runApplicationGenerationAttempt({
+        ...input,
+        attempt,
+        retry_feedback,
+      })
+      return
+    } catch (error) {
+      await retainFailedGenerationAttempt({
+        job_dir: execution.job_dir,
+        phase: "application",
+        attempt,
+        error,
+      }).catch(() => undefined)
+      const discard_checkpoint = shouldDiscardGenerationCheckpoint(error)
+      if (discard_checkpoint) {
+        if (source_checkpoint) await Bun.write(source_path, source_checkpoint)
+        else await rm(source_path, { force: true })
+      }
+      if (
+        attempt >= MAX_GENERATION_ATTEMPTS ||
+        !canRetryGenerationFailure(error, execution.cancellation_signal)
+      ) {
+        throw error
+      }
+
+      retry_feedback = sanitizeRetryFeedback(generationFailureMessage(error))
+      execution.updateValidation({
+        application_build: "pending",
+        application_connectivity: "pending",
+        application_schematic: "pending",
+        application_visual: "pending",
+      })
+      execution.context.job_store.updateJob(execution.job_id, {
+        display_status: "agent_running",
+        is_complete: false,
+        has_errors: false,
+      })
+      await execution.append(
+        "system",
+        `Typical-application generation attempt ${attempt} did not pass server validation (${retry_feedback}). ${
+          discard_checkpoint
+            ? "The candidate was discarded because it touched protected inputs."
+            : "The generated source was checkpointed for correction."
+        } Retrying automatically (${attempt + 1}/${MAX_GENERATION_ATTEMPTS})…\n`,
+      )
+    }
+  }
+
+  throw new Error("Typical-application generation exhausted its recovery attempts")
 }

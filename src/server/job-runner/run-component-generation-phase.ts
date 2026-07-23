@@ -18,6 +18,14 @@ import {
   publishGenerationWorkspace,
   restoreProtectedTree,
 } from "./generation-workspace"
+import {
+  canRetryGenerationFailure,
+  generationFailureMessage,
+  MAX_GENERATION_ATTEMPTS,
+  retainFailedGenerationAttempt,
+  sanitizeRetryFeedback,
+  shouldDiscardGenerationCheckpoint,
+} from "./generation-recovery"
 import { assertNoDatasheetAccess } from "./get-forbidden-datasheet-accesses"
 import type { JobExecution } from "./job-execution"
 import type { ApprovedJobEvidence } from "./run-evidence-phase"
@@ -71,26 +79,26 @@ async function restoreComponentEvidence(
   return evidence_files_modified
 }
 
-export async function runComponentGenerationPhase(
+async function runComponentGenerationAttempt(
   evidence: ApprovedJobEvidence,
   execution: JobExecution,
+  attempt: number,
+  retry_feedback?: string,
 ): Promise<GeneratedComponent> {
   throwIfCancelled(execution.cancellation_signal)
-  execution.active_validation_phase = "component_generation"
-  await execution.append("system", "\nGenerating the component from approved evidence only…\n")
   const component_workspace = await prepareGenerationWorkspace(execution.job_dir, "component")
   let evidence_files_modified = false
   let component_events = []
   try {
     component_events = await runStructuredAgentPhase({
       context: execution.context,
-      prompt: buildComponentPrompt(execution.additional_instructions),
+      prompt: buildComponentPrompt(execution.additional_instructions, retry_feedback),
       cwd: component_workspace.directory,
       signal: execution.cancellation_signal,
       append: execution.append.bind(execution),
       event_log_file: execution.protected_event_log_file,
       event_publish_file: execution.published_event_log_file,
-      event_phase: "component_generation",
+      event_phase: `component_generation_attempt_${attempt}`,
     })
   } finally {
     try {
@@ -253,4 +261,65 @@ export async function runComponentGenerationPhase(
     circuit_json: component_circuit_json,
   })
   return { component_code, component_circuit_json, component_snapshot_path }
+}
+
+export async function runComponentGenerationPhase(
+  evidence: ApprovedJobEvidence,
+  execution: JobExecution,
+): Promise<GeneratedComponent> {
+  throwIfCancelled(execution.cancellation_signal)
+  execution.active_validation_phase = "component_generation"
+  await execution.append("system", "\nGenerating the component from approved evidence only…\n")
+
+  let retry_feedback: string | undefined
+  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
+    const source_path = join(execution.job_dir, "index.circuit.tsx")
+    const source_checkpoint = await readFile(source_path).catch(() => undefined)
+    try {
+      return await runComponentGenerationAttempt(evidence, execution, attempt, retry_feedback)
+    } catch (error) {
+      await retainFailedGenerationAttempt({
+        job_dir: execution.job_dir,
+        phase: "component",
+        attempt,
+        error,
+      }).catch(() => undefined)
+      const discard_checkpoint = shouldDiscardGenerationCheckpoint(error)
+      if (discard_checkpoint) {
+        if (source_checkpoint) await Bun.write(source_path, source_checkpoint)
+        else await rm(source_path, { force: true })
+      }
+      if (
+        attempt >= MAX_GENERATION_ATTEMPTS ||
+        !canRetryGenerationFailure(error, execution.cancellation_signal)
+      ) {
+        throw error
+      }
+
+      retry_feedback = sanitizeRetryFeedback(generationFailureMessage(error))
+      execution.updateValidation({
+        component_build: "pending",
+        component_drc: "pending",
+        footprint: "pending",
+        pinout: "pending",
+        component_schematic: "pending",
+        component_visual: "pending",
+      })
+      execution.context.job_store.updateJob(execution.job_id, {
+        display_status: "agent_running",
+        is_complete: false,
+        has_errors: false,
+      })
+      await execution.append(
+        "system",
+        `Component generation attempt ${attempt} did not pass server validation (${retry_feedback}). ${
+          discard_checkpoint
+            ? "The candidate was discarded because it touched protected inputs."
+            : "The generated source was checkpointed for correction."
+        } Retrying automatically (${attempt + 1}/${MAX_GENERATION_ATTEMPTS})…\n`,
+      )
+    }
+  }
+
+  throw new Error("Component generation exhausted its recovery attempts")
 }

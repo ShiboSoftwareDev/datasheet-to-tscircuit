@@ -12,6 +12,7 @@ import { buildAgentPrompt } from "./build-agent-prompt"
 import { parseTypicalApplicationPlan, type TypicalApplicationPlan } from "./parse-typical-application-plan"
 import { runStructuredAgentPhase } from "./run-structured-agent-phase"
 import {
+  AgentTransportUnavailableError,
   AutomatedConversionUnavailableError,
   JobCancelledError,
   type JobRunnerContext,
@@ -40,7 +41,7 @@ async function clearPrimaryEvidenceArtifacts(job_dir: string): Promise<void> {
 }
 
 export function canRetryEvidenceFailure(error: unknown): boolean {
-  if (error instanceof JobCancelledError) return false
+  if (error instanceof JobCancelledError || error instanceof AgentTransportUnavailableError) return false
   const message = error instanceof Error ? error.message : String(error)
   return !/modified index\.circuit\.tsx|created circuit TSX/i.test(message)
 }

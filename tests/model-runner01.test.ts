@@ -341,6 +341,9 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(benchmark_prompt).toContain('source.image: "evidence/figures/<benchmark-id>.png"')
   expect(benchmark_prompt).toContain("A square `voltagesource` is always")
   expect(benchmark_prompt).toContain("`peakToPeakVoltage` does not create a DC offset")
+  expect(benchmark_prompt).toContain("never put voltage-source components")
+  expect(benchmark_prompt).toContain("shorted VSRC")
+  expect(benchmark_prompt).toContain("`PULSE(low high delay rise fall width period)`")
   expect(benchmark_prompt).toContain("never at the source component's pin")
   expect(benchmark_prompt).toContain("must not contain commas or spaces")
   const corrected_benchmark_prompt = buildModelBenchmarkPrompt(
@@ -638,6 +641,7 @@ test("fatal ngspice output is recognized even when tsci exits zero", () => {
 test("temporary agent transport failures are retryable but model errors are not", () => {
   expect(isTransientAgentTransportFailure("Connection error: socket hang up")).toBe(true)
   expect(isTransientAgentTransportFailure("HTTP 503 Service Unavailable")).toBe(true)
+  expect(isTransientAgentTransportFailure("Was there a typo in the url or port?")).toBe(true)
   expect(isTransientAgentTransportFailure("Error: model.lib has invalid syntax")).toBe(false)
 })
 

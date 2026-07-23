@@ -320,11 +320,14 @@ Source semantics are literal: a square \`voltagesource\` produces 0 V to its
 \`voltage\` value, and a square \`currentsource\` produces 0 A to its
 \`peakToPeakCurrent\` value. Neither \`peakToPeakVoltage\` nor \`current\` acts as
 a DC offset when \`waveShape\` is present. Use a DC source plus a separate pulse
-source when a stimulus has a nonzero low level. A series DC-voltage bias plus one
-0 V-to-delta pulse source is allowed when it forms one ground-referenced source
-chain without a loop. A harness-local \`<spicemodel>\` PULSE driver is also allowed,
-but its SPICE nodes must map to chip pins in the correct direction and its stimulus
-probe must still target the driven DUT port. Probe voltage stimuli directly at the
+source only for separate, independently ground-referenced nodes. The installed
+SPICE converter ground-references every \`<voltagesource>\` negative terminal, so
+never put voltage-source components in series to create a DC offset: that collapses
+the middle node and produces a shorted VSRC. For a nonzero-low voltage step, use
+one harness-local helper \`<chip>\` whose \`<spicemodel>\` contains a single
+\`PULSE(low high delay rise fall width period)\` source between mapped OUT and GND
+pins. Its SPICE nodes must map to the helper chip pins in the correct direction and
+its stimulus probe must still target the driven DUT port. Probe voltage stimuli directly at the
 driven DUT port, such as \`.DUT > .VIN\` or \`.DUT > .EN\`; probing a custom
 source pin may not emit a simulator graph.
 Measure current stimuli across an explicit sense resistor and use scale to convert

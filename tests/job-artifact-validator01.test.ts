@@ -188,6 +188,63 @@ test("datasheet connectivity gate catches a cleanly-built pull-up on the wrong n
   ])
 })
 
+test("datasheet connectivity resolves punctuation-bearing endpoints through polarity aliases", () => {
+  const plan = {
+    components: [{ reference: "U1" }, { reference: "R1" }],
+    connections: [
+      { net: "SENSE_POS", pins: ["U1.IN+", "R1.1"] },
+      { net: "SENSE_NEG", pins: ["U1.IN−", "R1.2"] },
+    ],
+  }
+  const circuit = [
+    { type: "source_component", source_component_id: "u1", name: "U1" },
+    { type: "source_component", source_component_id: "r1", name: "R1" },
+    {
+      type: "source_port",
+      source_port_id: "u1_pos",
+      source_component_id: "u1",
+      name: "IN_POS",
+      port_hints: ["IN_POS", "pin10", "10"],
+      subcircuit_connectivity_map_key: "sense-pos",
+    },
+    {
+      type: "source_port",
+      source_port_id: "u1_neg",
+      source_component_id: "u1",
+      name: "IN_NEG",
+      port_hints: ["IN_NEG", "pin9", "9"],
+      subcircuit_connectivity_map_key: "sense-neg",
+    },
+    {
+      type: "source_port",
+      source_port_id: "r1_1",
+      source_component_id: "r1",
+      name: "pin1",
+      pin_number: 1,
+      subcircuit_connectivity_map_key: "sense-pos",
+    },
+    {
+      type: "source_port",
+      source_port_id: "r1_2",
+      source_component_id: "r1",
+      name: "pin2",
+      pin_number: 2,
+      subcircuit_connectivity_map_key: "sense-neg",
+    },
+  ]
+
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit as unknown as AnyCircuitElement[])).toEqual([])
+
+  circuit[2]!.name = "IN_NEG"
+  circuit[2]!.port_hints = ["IN_NEG", "pin10", "10"]
+  circuit[3]!.name = "IN_POS"
+  circuit[3]!.port_hints = ["IN_POS", "pin9", "9"]
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit as unknown as AnyCircuitElement[])).toEqual([
+    "SENSE_POS: expected pins are not electrically connected: U1.IN+, R1.1",
+    "SENSE_NEG: expected pins are not electrically connected: U1.IN−, R1.2",
+  ])
+})
+
 test("datasheet connectivity accepts swapped pins only for interchangeable passives", () => {
   const plan = {
     components: [{ reference: "U1" }, { reference: "L1" }],
@@ -461,6 +518,38 @@ test("visual gate accepts honest inconclusive reports but rejects unsupported pa
       status: "passed",
     })
   }
+  for (const environment_prefix of [
+    "NODE_ENV=development",
+    'NODE_ENV="development"',
+    "env NODE_ENV='development'",
+  ]) {
+    const environment_prefixed_events: TrustedAgentEvent[] = events.map((event) =>
+      event.type === "tool_start" && event.tool_call_id === "build"
+        ? {
+            ...event,
+            args: {
+              command: `${environment_prefix} tsci build index.circuit.tsx --ignore-warnings --pcb-png --schematic-svgs`,
+            },
+          }
+        : event,
+    )
+    await expect(
+      validateVisualInspection({ ...input, events: environment_prefixed_events }),
+    ).resolves.toEqual({ status: "passed" })
+  }
+  await expect(
+    validateVisualInspection({
+      ...input,
+      events: events.map((event) =>
+        event.type === "tool_start" && event.tool_call_id === "build"
+          ? {
+              ...event,
+              args: { command: "NODE_ENV=production tsci build index.circuit.tsx" },
+            }
+          : event,
+      ),
+    }),
+  ).rejects.toThrow("missing final build command")
   await expect(
     validateVisualInspection({
       ...input,

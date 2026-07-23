@@ -1,4 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
+import { normalizeElectricalPinLabel } from "../pin-label-normalization"
 import { CircuitRecord, asRecord, asStringArray } from "./footprint-plan-validation"
 import { ApplicationConnectivityPlan } from "./application-source-validation"
 
@@ -18,10 +19,8 @@ function resolveExpectedPort(input: {
     return `Expected pin ${JSON.stringify(endpoint)} must use component.port syntax`
   }
   const component_name = endpoint.slice(0, separator).trim().toLowerCase()
-  const port_name = endpoint
-    .slice(separator + 1)
-    .trim()
-    .toLowerCase()
+  const port_name = endpoint.slice(separator + 1).trim()
+  const normalized_port_name = normalizeElectricalPinLabel(port_name)
   const component = components_by_name.get(component_name)
   if (!component || typeof component.source_component_id !== "string") {
     return `Expected pin ${JSON.stringify(endpoint)} references missing component ${JSON.stringify(
@@ -30,13 +29,13 @@ function resolveExpectedPort(input: {
   }
   const matches = (ports_by_component_id.get(component.source_component_id) ?? []).filter((port) => {
     const aliases = new Set<string>()
-    if (typeof port.name === "string") aliases.add(port.name.toLowerCase())
+    if (typeof port.name === "string") aliases.add(port.name)
     if (typeof port.pin_number === "number") {
       aliases.add(String(port.pin_number))
       aliases.add(`pin${port.pin_number}`)
     }
-    for (const hint of asStringArray(port.port_hints)) aliases.add(hint.toLowerCase())
-    return aliases.has(port_name)
+    for (const hint of asStringArray(port.port_hints)) aliases.add(hint)
+    return [...aliases].some((alias) => normalizeElectricalPinLabel(alias) === normalized_port_name)
   })
   if (matches.length !== 1 || typeof matches[0]?.source_port_id !== "string") {
     return `Expected pin ${JSON.stringify(endpoint)} resolved to ${matches.length} source ports`
