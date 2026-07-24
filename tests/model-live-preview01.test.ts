@@ -126,7 +126,7 @@ test("the model datasheet reference renders as a non-interactive image", () => {
   expect(html).not.toContain("Open the full datasheet graph reference")
 })
 
-test("benchmark previews render one selectable graph instead of every graph at once", () => {
+test("benchmark previews render every graph without a selector", () => {
   const html = renderToStaticMarkup(
     createElement(ModelLivePreview, {
       job_id: "job_1",
@@ -151,8 +151,7 @@ test("benchmark previews render one selectable graph instead of every graph at o
     }),
   )
 
-  expect(html).toContain('aria-label="Select benchmark graph"')
-  expect(html).toContain("Showing one of 3 benchmarks")
-  expect(html).toContain("Line transient · line-wide")
-  expect(html.match(/model-preview-workspace/g)).toHaveLength(1)
+  expect(html).not.toContain('aria-label="Select benchmark graph"')
+  expect(html).not.toContain("Showing one of")
+  expect(html.match(/model-preview-workspace/g)).toHaveLength(3)
 })
