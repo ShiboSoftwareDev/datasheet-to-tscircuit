@@ -72,7 +72,7 @@ test("comparison graphs identify independently auto-scaled waveforms", () => {
   ).toBeUndefined()
 })
 
-test("the reference section warns when the current graph is outside tolerance", () => {
+test("the comparison header shows metrics and tolerance status", () => {
   const html = renderToStaticMarkup(
     createElement(ModelLivePreview, {
       job_id: "job_1",
@@ -100,10 +100,47 @@ test("the reference section warns when the current graph is outside tolerance", 
     }),
   )
 
-  expect(html).toContain("Doesn’t match the reference")
-  expect(html).toContain("outside the benchmark tolerance")
-  expect(html).toContain("NRMSE 40.0%")
-  expect(html).toContain("max error 75.0%")
+  expect(html).toContain('class="model-comparison-summary"')
+  expect(html).toContain("<span>NRMSE</span><strong>40.0%</strong>")
+  expect(html).toContain("<span>Peak error</span><strong>75.0%</strong>")
+  expect(html).toContain("Outside tolerance")
+  expect(html).not.toContain("model-reference-mismatch-warning")
+})
+
+test("the comparison header warns when its Circuit JSON graph is deprecated", () => {
+  const html = renderToStaticMarkup(
+    createElement(ModelLivePreview, {
+      job_id: "job_1",
+      is_complete: true,
+      preview_options: [],
+      reference_preview: {
+        benchmark_id: "transfer",
+        title: "Transfer curve",
+        source_file: "evidence/curves/transfer.csv",
+        result_file: "results/transfer.csv",
+        result_status: "deprecated",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 1 },
+        ],
+        result_points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 0.8 },
+        ],
+        normalized_rmse: 0.2,
+        matches_reference: false,
+        updated_at: "2026-07-22T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html).toContain("Circuit JSON graph deprecated")
+  expect(html).toContain(
+    'title="The plotted Circuit JSON result comes from an earlier source than the reference comparison."',
+  )
+  expect(html).not.toContain("model-comparison-warning")
 })
 
 test("the model datasheet reference renders as a non-interactive image", () => {

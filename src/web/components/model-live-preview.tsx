@@ -298,15 +298,6 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
 
   return (
     <div className="model-reference-plot">
-      {comparison_is_deprecated && preview.result_points && (
-        <div className="model-comparison-warning" role="status">
-          <AlertTriangle size={13} />
-          <span>
-            <strong>Deprecated comparison</strong>
-            This curve was built from an earlier source; the automatic run will replace it.
-          </span>
-        </div>
-      )}
       {scale_disparity && (
         <div className="model-scale-note" role="status">
           <AlertTriangle size={13} />
@@ -374,6 +365,55 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
 
 type ModelReferenceView = "reference_graph" | "datasheet_reference"
 
+function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
+  if (!preview) return null
+
+  const comparison_is_deprecated = preview.result_status === "deprecated" || preview.is_stale
+  const has_summary =
+    preview.normalized_rmse !== undefined ||
+    preview.normalized_max_error !== undefined ||
+    comparison_is_deprecated ||
+    preview.matches_reference !== undefined
+  if (!has_summary) return null
+
+  return (
+    <div className="model-comparison-summary" aria-label="Comparison statistics">
+      {preview.normalized_rmse !== undefined && (
+        <span className="model-comparison-metric">
+          <span>NRMSE</span>
+          <strong>{(preview.normalized_rmse * 100).toFixed(1)}%</strong>
+        </span>
+      )}
+      {preview.normalized_max_error !== undefined && (
+        <span className="model-comparison-metric">
+          <span>Peak error</span>
+          <strong>{(preview.normalized_max_error * 100).toFixed(1)}%</strong>
+        </span>
+      )}
+      {comparison_is_deprecated ? (
+        <span
+          className="model-comparison-state is-deprecated"
+          role="status"
+          title="The plotted Circuit JSON result comes from an earlier source than the reference comparison."
+        >
+          <AlertTriangle size={12} />
+          Circuit JSON graph deprecated
+        </span>
+      ) : preview.matches_reference === false ? (
+        <span className="model-comparison-state is-mismatch" role="status">
+          <AlertTriangle size={12} />
+          Outside tolerance
+        </span>
+      ) : preview.matches_reference === true ? (
+        <span className="model-comparison-state is-match" role="status">
+          <Check size={12} />
+          Matches reference
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 function ModelReferencePane({
   job_id,
   benchmark_id,
@@ -391,14 +431,6 @@ function ModelReferencePane({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: retry the image when its URL or preview revision changes
   useEffect(() => setImageFailed(false), [image_url, preview?.updated_at])
-  const mismatch_metrics = [
-    preview?.normalized_rmse === undefined
-      ? undefined
-      : `NRMSE ${(preview.normalized_rmse * 100).toFixed(1)}%`,
-    preview?.normalized_max_error === undefined
-      ? undefined
-      : `max error ${(preview.normalized_max_error * 100).toFixed(1)}%`,
-  ].filter((metric): metric is string => Boolean(metric))
 
   return (
     <section className="model-preview-pane model-reference-card" aria-label="SPICE benchmark reference">
@@ -427,16 +459,6 @@ function ModelReferencePane({
           </button>
         </div>
       </header>
-      {preview?.matches_reference === false && (
-        <div className="model-reference-mismatch-warning" role="status">
-          <AlertTriangle size={14} />
-          <span>
-            <strong>Doesn’t match the reference</strong>
-            The current graph is outside the benchmark tolerance
-            {mismatch_metrics.length > 0 ? ` · ${mismatch_metrics.join(" · ")}.` : "."}
-          </span>
-        </div>
-      )}
       <div className="model-reference-content">
         {active_view === "reference_graph" ? (
           <ReferenceGraph preview={preview} />
@@ -561,6 +583,7 @@ export function ModelLivePreview({
                 <Activity size={16} />
                 <span title={entry.title}>{entry.title}</span>
               </div>
+              <ComparisonSummary preview={displayed_reference} />
             </header>
             {load_errors[entry.benchmark_id] && !loaded && (
               <p className="model-preview-load-error" role="alert">
