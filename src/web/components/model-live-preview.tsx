@@ -26,6 +26,9 @@ const CircuitJsonPreview = lazy(async () => {
   return { default: runframe_module.CircuitJsonPreview }
 })
 
+export const MODEL_SCHEMATIC_CODE_TABS: TabId[] = ["code", "schematic"]
+export const MODEL_ANALOG_ONLY_TABS: TabId[] = ["analog_simulation"]
+
 function ModelCode({ preview }: { preview: ModelCircuitPreviewData }) {
   const [is_copied, setIsCopied] = useState(false)
   const copyCode = async () => {
@@ -100,7 +103,7 @@ export function getRunframeCircuitJson(input: {
 }
 
 function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData }) {
-  const [active_tab, setActiveTab] = useState<TabId>("analog_simulation")
+  const [active_tab, setActiveTab] = useState<TabId>("schematic")
   // Runframe leaves Code whenever the Circuit JSON prop changes. Keep the snapshot
   // that was visible on entry, then reveal the newest live data on a visual tab.
   const [code_tab_circuit_json, setCodeTabCircuitJson] = useState(preview?.circuit_json)
@@ -114,39 +117,57 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
     if (tab === "code") setCodeTabCircuitJson(preview?.circuit_json)
     setActiveTab(tab)
   }
+  const project_name = preview?.source_file.replace(/\.circuit\.tsx$/i, "")
 
   return (
     <section className="model-preview-pane model-circuit-preview" aria-label="Live model circuit preview">
-      <div className="model-runframe-shell">
-        {preview?.circuit_json && preview.error_message && (
-          <p className="model-preview-build-error" role="alert">
-            {preview.error_message}
-          </p>
-        )}
-        {!preview || !runframe_circuit_json ? (
-          <CircuitPlaceholder preview={preview} />
-        ) : (
-          <Suspense fallback={<CircuitPlaceholder preview={preview} />}>
-            <CircuitJsonPreview
-              circuitJson={runframe_circuit_json}
-              code={preview.code}
-              showCodeTab
-              codeTabContent={<ModelCode preview={preview} />}
-              onActiveTabChange={handleActiveTabChange}
-              availableTabs={["code", "schematic", "analog_simulation"]}
-              defaultActiveTab="analog_simulation"
-              defaultTab="analog_simulation"
-              showJsonTab={false}
-              hideSchematicInAnalogSimulation
-              showRenderLogTab={false}
-              showFileMenu={false}
-              allowSelectingVersion={false}
-              isWebEmbedded
-              projectName={preview.source_file.replace(/\.circuit\.tsx$/i, "")}
-            />
-          </Suspense>
-        )}
-      </div>
+      {preview?.circuit_json && preview.error_message && (
+        <p className="model-preview-build-error" role="alert">
+          {preview.error_message}
+        </p>
+      )}
+      {!preview || !runframe_circuit_json ? (
+        <CircuitPlaceholder preview={preview} />
+      ) : (
+        <Suspense fallback={<CircuitPlaceholder preview={preview} />}>
+          <div className="model-circuit-split">
+            <div className="model-runframe-shell model-schematic-code-runframe">
+              <CircuitJsonPreview
+                circuitJson={runframe_circuit_json}
+                code={preview.code}
+                showCodeTab
+                codeTabContent={<ModelCode preview={preview} />}
+                onActiveTabChange={handleActiveTabChange}
+                availableTabs={MODEL_SCHEMATIC_CODE_TABS}
+                defaultActiveTab="schematic"
+                defaultTab="schematic"
+                showJsonTab={false}
+                showRenderLogTab={false}
+                showFileMenu={false}
+                allowSelectingVersion={false}
+                isWebEmbedded
+                projectName={project_name}
+              />
+            </div>
+            <div className="model-runframe-shell model-analog-only-runframe">
+              <CircuitJsonPreview
+                circuitJson={preview.circuit_json ?? runframe_circuit_json}
+                code={preview.code}
+                availableTabs={MODEL_ANALOG_ONLY_TABS}
+                defaultActiveTab="analog_simulation"
+                defaultTab="analog_simulation"
+                showJsonTab={false}
+                hideSchematicInAnalogSimulation
+                showRenderLogTab={false}
+                showFileMenu={false}
+                allowSelectingVersion={false}
+                isWebEmbedded
+                projectName={project_name}
+              />
+            </div>
+          </div>
+        </Suspense>
+      )}
     </section>
   )
 }
@@ -505,8 +526,6 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
   )
 }
 
-type ModelReferenceView = "reference_graph" | "datasheet_reference"
-
 function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
   if (!preview) return null
 
@@ -556,7 +575,7 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
   )
 }
 
-function ModelReferencePane({
+function ModelDatasheetReferencePane({
   job_id,
   benchmark_id,
   preview,
@@ -565,7 +584,6 @@ function ModelReferencePane({
   benchmark_id: string
   preview?: ModelReferencePreview
 }) {
-  const [active_view, setActiveView] = useState<ModelReferenceView>("datasheet_reference")
   const [image_failed, setImageFailed] = useState(false)
   const resolved_benchmark_id = preview?.benchmark_id ?? benchmark_id
   const image_url =
@@ -577,34 +595,13 @@ function ModelReferencePane({
   return (
     <section className="model-preview-pane model-reference-card" aria-label="SPICE benchmark reference">
       <header className="model-reference-toolbar">
-        <div className="reference-view-tabs" role="tablist" aria-label="SPICE reference view">
-          <button
-            className={active_view === "reference_graph" ? "active" : ""}
-            type="button"
-            role="tab"
-            aria-selected={active_view === "reference_graph"}
-            onClick={() => setActiveView("reference_graph")}
-          >
-            <ChartLine size={14} /> Reference graphs
-          </button>
-          <button
-            className={active_view === "datasheet_reference" ? "active" : ""}
-            type="button"
-            role="tab"
-            aria-selected={active_view === "datasheet_reference"}
-            onClick={() => {
-              setImageFailed(false)
-              setActiveView("datasheet_reference")
-            }}
-          >
-            <FileImage size={14} /> Datasheet reference
-          </button>
+        <div className="model-reference-title">
+          <FileImage size={14} />
+          <strong>Datasheet reference</strong>
         </div>
       </header>
       <div className="model-reference-content">
-        {active_view === "reference_graph" ? (
-          <ReferenceGraph preview={preview} />
-        ) : !image_url || image_failed ? (
+        {!image_url || image_failed ? (
           <div className="model-reference-empty">
             <ImageOff size={25} />
             <strong>Datasheet reference unavailable</strong>
@@ -620,6 +617,20 @@ function ModelReferencePane({
             onError={() => setImageFailed(true)}
           />
         )}
+      </div>
+    </section>
+  )
+}
+
+function ModelReferenceGraphsPane({ preview }: { preview?: ModelReferencePreview }) {
+  return (
+    <section className="model-reference-graphs-card" aria-label="Reference graph comparisons">
+      <header className="model-reference-graphs-toolbar">
+        <ChartLine size={14} />
+        <strong>Reference graphs</strong>
+      </header>
+      <div className="model-reference-graphs-content">
+        <ReferenceGraph preview={preview} />
       </div>
     </section>
   )
@@ -737,11 +748,12 @@ export function ModelLivePreview({
                 key={`${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
                 preview={displayed_circuit}
               />
-              <ModelReferencePane
+              <ModelDatasheetReferencePane
                 job_id={job_id}
                 benchmark_id={entry.benchmark_id}
                 preview={displayed_reference}
               />
+              <ModelReferenceGraphsPane preview={displayed_reference} />
             </div>
           </section>
         )

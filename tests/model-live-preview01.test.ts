@@ -6,6 +6,8 @@ import {
   getComparisonScaleDisparity,
   getGraphAxisLayout,
   getRunframeCircuitJson,
+  MODEL_ANALOG_ONLY_TABS,
+  MODEL_SCHEMATIC_CODE_TABS,
   ModelLivePreview,
   ReferenceGraph,
 } from "@/web/components/model-live-preview"
@@ -45,6 +47,12 @@ test("the code tab uses live Circuit JSON until it has captured a snapshot", () 
       code_tab_circuit_json: undefined,
     }),
   ).toBe(live_circuit_json)
+})
+
+test("the TSX area separates schematic/code from graph-only analog simulation", () => {
+  expect(MODEL_SCHEMATIC_CODE_TABS).toEqual(["code", "schematic"])
+  expect(MODEL_ANALOG_ONLY_TABS).toEqual(["analog_simulation"])
+  expect(MODEL_ANALOG_ONLY_TABS).not.toContain("schematic")
 })
 
 test("comparison graphs identify independently auto-scaled waveforms", () => {
@@ -235,11 +243,23 @@ test("the comparison header warns when its Circuit JSON graph is deprecated", ()
   expect(html).not.toContain("model-comparison-warning")
 })
 
-test("the model datasheet reference renders as a non-interactive image", () => {
+test("the datasheet image stays visible above a separate reference graph strip", () => {
   const html = renderToStaticMarkup(
     createElement(ModelLivePreview, {
       job_id: "job_1",
       is_complete: true,
+      reference_preview: {
+        benchmark_id: "transfer",
+        title: "Transfer curve",
+        source_file: "evidence/curves/transfer.csv",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 1 },
+        ],
+        updated_at: "2026-07-22T00:00:00.000Z",
+      },
       preview_options: [
         {
           benchmark_id: "transfer",
@@ -253,6 +273,14 @@ test("the model datasheet reference renders as a non-interactive image", () => {
   expect(html).toContain('<img class="model-datasheet-reference-image"')
   expect(html).not.toContain('<a class="model-datasheet-reference-image"')
   expect(html).not.toContain("Open the full datasheet graph reference")
+  expect(html).not.toContain('class="reference-view-tabs"')
+  expect(html).toContain('class="model-reference-graphs-card"')
+  expect(html.indexOf('class="model-circuit-preview')).toBeLessThan(
+    html.indexOf('class="model-reference-graphs-card"'),
+  )
+  expect(html.indexOf('class="model-reference-card')).toBeLessThan(
+    html.indexOf('class="model-reference-graphs-card"'),
+  )
 })
 
 test("benchmark previews render every graph without a selector", () => {
