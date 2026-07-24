@@ -39,6 +39,13 @@ function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
 }
 
+function formatQuantityLabel(quantity: string): string {
+  return quantity
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase())
+}
+
 function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
   if (!isRecord(value) || !Array.isArray(value.benchmarks)) return []
   return value.benchmarks.flatMap((benchmark) => {
@@ -324,6 +331,10 @@ export async function readReferencePreview(input: {
     title: selected_benchmark.title ?? selected_benchmark.id ?? basename(primary.source_file, ".csv"),
     source_file: primary.source_file,
     result_file: result_status === "verified" ? primary.result_file : undefined,
+    x_axis_label: "Time",
+    x_axis_unit: "ms",
+    y_axis_label: formatQuantityLabel(primary.quantity),
+    y_axis_unit: primary.unit,
     x_scale: selected_benchmark.x_scale ?? "linear",
     y_scale: primary.y_scale,
     reference_points: primary.reference_points,

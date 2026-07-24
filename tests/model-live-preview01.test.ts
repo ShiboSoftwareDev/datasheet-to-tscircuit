@@ -4,8 +4,10 @@ import { renderToStaticMarkup } from "react-dom/server"
 import type { ModelCircuitPreview } from "@/shared/job-types"
 import {
   getComparisonScaleDisparity,
+  getGraphAxisLayout,
   getRunframeCircuitJson,
   ModelLivePreview,
+  ReferenceGraph,
 } from "@/web/components/model-live-preview"
 
 const previous_circuit_json: NonNullable<ModelCircuitPreview["circuit_json"]> = []
@@ -70,6 +72,96 @@ test("comparison graphs identify independently auto-scaled waveforms", () => {
       ],
     ),
   ).toBeUndefined()
+})
+
+test("graph axes use useful linear and logarithmic ticks", () => {
+  const linear_axis = getGraphAxisLayout([-0.8, 3.2], "linear")
+  expect(linear_axis.ticks.map((tick) => tick.value)).toContain(0)
+  expect(linear_axis.ticks.length).toBeGreaterThanOrEqual(4)
+  expect(linear_axis.min).toBeLessThanOrEqual(-0.8)
+  expect(linear_axis.max).toBeGreaterThanOrEqual(3.2)
+
+  const log_axis = getGraphAxisLayout([0.1, 100], "log")
+  expect(log_axis.ticks.map((tick) => tick.label)).toEqual(["0.1", "1", "10", "100"])
+})
+
+test("reference graphs label both axes with units and intermediate ticks", () => {
+  const html = renderToStaticMarkup(
+    createElement(ReferenceGraph, {
+      preview: {
+        title: "Transfer curve",
+        source_file: "evidence/curves/transfer.csv",
+        x_axis_label: "Time",
+        x_axis_unit: "ms",
+        y_axis_label: "Voltage",
+        y_axis_unit: "V",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [
+          { x: 0, y: -1 },
+          { x: 1, y: 1 },
+          { x: 2, y: 3 },
+        ],
+        updated_at: "2026-07-22T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html).toContain("Time (ms)")
+  expect(html).toContain("Voltage (V)")
+  expect(html).toContain('class="reference-axis-ticks"')
+  expect(html.match(/reference-axis-tick-x/g)?.length).toBeGreaterThanOrEqual(4)
+  expect(html.match(/reference-axis-tick-y/g)?.length).toBeGreaterThanOrEqual(4)
+})
+
+test("multi-series reference graphs keep a complete plot and legend in each panel", () => {
+  const html = renderToStaticMarkup(
+    createElement(ReferenceGraph, {
+      preview: {
+        title: "Transient response",
+        source_file: "evidence/curves/transient.csv",
+        x_axis_label: "Time",
+        x_axis_unit: "ms",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [],
+        series: [
+          {
+            series_id: "bus",
+            title: "BUS Voltage",
+            role: "stimulus",
+            quantity: "voltage",
+            unit: "V",
+            source_file: "evidence/curves/transient-bus.csv",
+            y_scale: "linear",
+            reference_points: [
+              { x: 0, y: 0 },
+              { x: 0.1, y: 1 },
+            ],
+          },
+          {
+            series_id: "alert",
+            title: "ALERT",
+            role: "response",
+            quantity: "voltage",
+            unit: "V",
+            source_file: "evidence/curves/transient-alert.csv",
+            y_scale: "linear",
+            reference_points: [
+              { x: 0, y: 3.3 },
+              { x: 0.1, y: 0 },
+            ],
+          },
+        ],
+        updated_at: "2026-07-22T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html.match(/class="model-reference-series-panel"/g)).toHaveLength(2)
+  expect(html.match(/Time \(ms\)/g)).toHaveLength(4)
+  expect(html.match(/Voltage \(V\)/g)).toHaveLength(4)
+  expect(html.match(/class="reference-legend"/g)).toHaveLength(2)
 })
 
 test("the comparison header shows metrics and tolerance status", () => {

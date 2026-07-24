@@ -3218,20 +3218,27 @@ a {
 .model-reference-series-stack {
   display: grid;
   width: 100%;
+  height: 100%;
   min-width: 0;
+  flex: 1 1 0;
   grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: max-content;
   align-content: start;
   gap: 14px;
   min-height: 0;
+  overflow-y: auto;
   overflow-x: hidden;
-  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .model-reference-series-panel {
+  display: block;
   width: 100%;
   min-width: 0;
-  min-height: 260px;
+  min-height: 0;
   box-sizing: border-box;
+  overflow: visible;
   padding: 10px;
   border: 1px solid #e3e5e8;
   border-radius: 9px;
@@ -3248,14 +3255,19 @@ a {
 }
 
 .model-reference-series-panel .model-reference-plot {
+  display: block;
   width: 100%;
   height: auto;
   min-width: 0;
+  flex: 0 0 auto;
 }
 
 .model-reference-series-panel .reference-graph-content {
+  display: block;
   width: 100%;
   min-width: 0;
+  min-height: auto;
+  flex: 0 0 auto;
 }
 
 .model-reference-series-panel .reference-graph-content svg {
@@ -3264,6 +3276,11 @@ a {
   max-width: 100%;
   height: auto;
   max-height: none;
+  overflow: visible;
+}
+
+.model-reference-series-panel .reference-legend {
+  margin-top: 6px;
 }
 
 .model-reference-series-panel > header span {
@@ -3352,10 +3369,21 @@ a {
   stroke-dasharray: 3 8;
 }
 
-.reference-axis-labels {
+.reference-axes line {
+  stroke: #b8c0c9;
+  stroke-width: 1.2;
+}
+
+.reference-axis-ticks {
   fill: #7d858f;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 9px;
+}
+
+.reference-axis-titles {
+  fill: #4f5965;
   font-size: 10px;
+  font-weight: 650;
 }
 
 .reference-legend {

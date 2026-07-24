@@ -156,6 +156,91 @@ function scaledValue(value: number, scale: "linear" | "log"): number | undefined
   return value
 }
 
+const GRAPH_LEFT = 64
+const GRAPH_RIGHT = 636
+const GRAPH_TOP = 16
+const GRAPH_BOTTOM = 310
+
+function formatAxisValue(value: number): string {
+  if (Math.abs(value) < 1e-12) return "0"
+  const exponent = Math.floor(Math.log10(Math.abs(value)))
+  if (exponent >= 4 || exponent <= -3) {
+    const engineering_exponent = Math.floor(exponent / 3) * 3
+    const mantissa = value / 10 ** engineering_exponent
+    return `${Number(mantissa.toPrecision(3))}e${engineering_exponent}`
+  }
+  return Number(value.toPrecision(4)).toString()
+}
+
+function niceLinearStep(raw_step: number): number {
+  if (!Number.isFinite(raw_step) || raw_step <= 0) return 1
+  const magnitude = 10 ** Math.floor(Math.log10(raw_step))
+  const fraction = raw_step / magnitude
+  const nice_fraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 2.5 ? 2.5 : fraction <= 5 ? 5 : 10
+  return nice_fraction * magnitude
+}
+
+export interface GraphAxisLayout {
+  min: number
+  max: number
+  ticks: Array<{ scaled_value: number; value: number; label: string }>
+}
+
+export function getGraphAxisLayout(
+  values: number[],
+  scale: "linear" | "log",
+  target_tick_count = 5,
+): GraphAxisLayout {
+  const scaled_values = values.flatMap((value) => {
+    const scaled = scaledValue(value, scale)
+    return scaled === undefined || !Number.isFinite(scaled) ? [] : [scaled]
+  })
+  let data_min = scaled_values.length > 0 ? Math.min(...scaled_values) : 0
+  let data_max = scaled_values.length > 0 ? Math.max(...scaled_values) : 1
+
+  if (data_min === data_max) {
+    const padding = scale === "log" ? 0.5 : Math.max(Math.abs(data_min) * 0.1, 1)
+    data_min -= padding
+    data_max += padding
+  }
+
+  if (scale === "log") {
+    const span = data_max - data_min
+    if (span >= 1) {
+      const raw_step = span / Math.max(1, target_tick_count - 1)
+      const step = Math.max(1, Math.ceil(raw_step))
+      const min = Math.floor(data_min / step) * step
+      const max = Math.ceil(data_max / step) * step
+      const ticks = Array.from({ length: Math.round((max - min) / step) + 1 }, (_, index) => {
+        const scaled_value = min + index * step
+        const value = 10 ** scaled_value
+        return { scaled_value, value, label: formatAxisValue(value) }
+      })
+      return { min, max, ticks }
+    }
+
+    const min = data_min
+    const max = data_max
+    const ticks = Array.from({ length: target_tick_count }, (_, index) => {
+      const scaled_value = min + (index / Math.max(1, target_tick_count - 1)) * (max - min)
+      const value = 10 ** scaled_value
+      return { scaled_value, value, label: formatAxisValue(value) }
+    })
+    return { min, max, ticks }
+  }
+
+  const step = niceLinearStep((data_max - data_min) / Math.max(1, target_tick_count - 1))
+  const min = Math.floor(data_min / step) * step
+  const max = Math.ceil(data_max / step) * step
+  const tick_count = Math.round((max - min) / step) + 1
+  const ticks = Array.from({ length: tick_count }, (_, index) => {
+    const scaled_value = min + index * step
+    const value = Math.abs(scaled_value) < step * 1e-9 ? 0 : scaled_value
+    return { scaled_value: value, value, label: formatAxisValue(value) }
+  })
+  return { min, max, ticks }
+}
+
 function curvePath(input: {
   points: ModelCurvePoint[]
   x_scale: "linear" | "log"
@@ -165,24 +250,35 @@ function curvePath(input: {
   y_min: number
   y_max: number
 }): string {
-  const width = 592
-  const height = 292
+  const width = GRAPH_RIGHT - GRAPH_LEFT
+  const height = GRAPH_BOTTOM - GRAPH_TOP
   return input.points
     .flatMap((point) => {
       const scaled_x = scaledValue(point.x, input.x_scale)
       const scaled_y = scaledValue(point.y, input.y_scale)
       if (scaled_x === undefined || scaled_y === undefined) return []
-      const x = 38 + ((scaled_x - input.x_min) / Math.max(1e-12, input.x_max - input.x_min)) * width
-      const y = 14 + (1 - (scaled_y - input.y_min) / Math.max(1e-12, input.y_max - input.y_min)) * height
+      const x = GRAPH_LEFT + ((scaled_x - input.x_min) / Math.max(1e-12, input.x_max - input.x_min)) * width
+      const y =
+        GRAPH_TOP + (1 - (scaled_y - input.y_min) / Math.max(1e-12, input.y_max - input.y_min)) * height
       return [`${x.toFixed(2)},${y.toFixed(2)}`]
     })
     .join(" ")
 }
 
-function formatAxisValue(value: number): string {
-  const magnitude = Math.abs(value)
-  if ((magnitude > 0 && magnitude < 0.001) || magnitude >= 10_000) return value.toExponential(1)
-  return Number(value.toPrecision(4)).toString()
+function graphCoordinate(value: number, min: number, max: number, start: number, end: number): number {
+  return start + ((value - min) / Math.max(1e-12, max - min)) * (end - start)
+}
+
+function formatAxisTitle(label: string | undefined, unit: string | undefined, fallback: string): string {
+  const resolved_label = label?.trim() || fallback
+  return unit?.trim() ? `${resolved_label} (${unit.trim()})` : resolved_label
+}
+
+function formatQuantityLabel(quantity: string): string {
+  return quantity
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase())
 }
 
 export function getComparisonScaleDisparity(
@@ -206,7 +302,7 @@ export function getComparisonScaleDisparity(
   return { reference_min, reference_max, result_min, result_max }
 }
 
-function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
+export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
   if (!preview) {
     return (
       <div className="model-reference-empty">
@@ -234,6 +330,8 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
                 title: `${preview.title}: ${series.title}`,
                 source_file: series.source_file,
                 result_file: series.result_file,
+                y_axis_label: formatQuantityLabel(series.quantity),
+                y_axis_unit: series.unit,
                 y_scale: series.y_scale,
                 reference_points: series.reference_points,
                 result_points: series.result_points,
@@ -247,45 +345,44 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
   }
 
   const all_points = [...preview.reference_points, ...(preview.result_points ?? [])]
-  const scaled_x = all_points.flatMap((point) => {
-    const value = scaledValue(point.x, preview.x_scale)
-    return value === undefined ? [] : [value]
-  })
-  const scaled_y = all_points.flatMap((point) => {
-    const value = scaledValue(point.y, preview.y_scale)
-    return value === undefined ? [] : [value]
-  })
-  const x_min = scaled_x.length > 0 ? Math.min(...scaled_x) : 0
-  const x_max = scaled_x.length > 0 ? Math.max(...scaled_x) : 1
-  const y_min = scaled_y.length > 0 ? Math.min(...scaled_y) : 0
-  const y_max = scaled_y.length > 0 ? Math.max(...scaled_y) : 1
+  const x_axis = getGraphAxisLayout(
+    all_points.map((point) => point.x),
+    preview.x_scale,
+  )
+  const y_axis = getGraphAxisLayout(
+    all_points.map((point) => point.y),
+    preview.y_scale,
+  )
   const reference_path = curvePath({
     points: preview.reference_points,
     x_scale: preview.x_scale,
     y_scale: preview.y_scale,
-    x_min,
-    x_max,
-    y_min,
-    y_max,
+    x_min: x_axis.min,
+    x_max: x_axis.max,
+    y_min: y_axis.min,
+    y_max: y_axis.max,
   })
   const result_path = preview.result_points
     ? curvePath({
         points: preview.result_points,
         x_scale: preview.x_scale,
         y_scale: preview.y_scale,
-        x_min,
-        x_max,
-        y_min,
-        y_max,
+        x_min: x_axis.min,
+        x_max: x_axis.max,
+        y_min: y_axis.min,
+        y_max: y_axis.max,
       })
     : undefined
-  const displayed_x_min = preview.x_scale === "log" ? 10 ** x_min : x_min
-  const displayed_x_max = preview.x_scale === "log" ? 10 ** x_max : x_max
-  const displayed_y_min = preview.y_scale === "log" ? 10 ** y_min : y_min
-  const displayed_y_max = preview.y_scale === "log" ? 10 ** y_max : y_max
   const comparison_is_deprecated = preview.result_status === "deprecated" || preview.is_stale
   const comparison_is_unverified = preview.result_status === "unverified"
   const scale_disparity = getComparisonScaleDisparity(preview.reference_points, preview.result_points)
+  const primary_series = preview.series?.find((series) => series.role === "response") ?? preview.series?.[0]
+  const resolved_y_axis_label =
+    preview.y_axis_label ?? (primary_series ? formatQuantityLabel(primary_series.quantity) : undefined)
+  const resolved_y_axis_unit = preview.y_axis_unit ?? primary_series?.unit
+  const x_axis_title = formatAxisTitle(preview.x_axis_label ?? "Time", preview.x_axis_unit ?? "ms", "Time")
+  const y_axis_title = formatAxisTitle(resolved_y_axis_label, resolved_y_axis_unit, "Value")
+  const y_axis_unit = resolved_y_axis_unit?.trim() ? ` ${resolved_y_axis_unit.trim()}` : ""
   const result_label = comparison_is_deprecated
     ? "Previous model result · deprecated"
     : comparison_is_unverified
@@ -305,20 +402,42 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
             <strong>Different vertical scales</strong>
             The Analog Simulation tab auto-scales the model-only waveform. This comparison uses one shared
             y-axis: reference {formatAxisValue(scale_disparity.reference_min)}–
-            {formatAxisValue(scale_disparity.reference_max)} V, model{" "}
-            {formatAxisValue(scale_disparity.result_min)}–{formatAxisValue(scale_disparity.result_max)} V.
+            {formatAxisValue(scale_disparity.reference_max)}
+            {y_axis_unit}, model {formatAxisValue(scale_disparity.result_min)}–
+            {formatAxisValue(scale_disparity.result_max)}
+            {y_axis_unit}.
           </span>
         </div>
       )}
       <div className="reference-graph-content">
-        <svg viewBox="0 0 650 340" role="img" aria-label={`${preview.title} reference curve`}>
+        <svg
+          viewBox="0 0 650 366"
+          role="img"
+          aria-label={`${preview.title} comparison graph; ${x_axis_title}; ${y_axis_title}`}
+        >
           <g className="reference-grid">
-            {[0, 1, 2, 3, 4].map((tick) => (
-              <line key={`horizontal-${tick}`} x1="38" x2="630" y1={14 + tick * 73} y2={14 + tick * 73} />
-            ))}
-            {[0, 1, 2, 3, 4].map((tick) => (
-              <line key={`vertical-${tick}`} x1={38 + tick * 148} x2={38 + tick * 148} y1="14" y2="306" />
-            ))}
+            {y_axis.ticks.map((tick) => {
+              const y = graphCoordinate(tick.scaled_value, y_axis.min, y_axis.max, GRAPH_BOTTOM, GRAPH_TOP)
+              return (
+                <line
+                  key={`horizontal-${tick.scaled_value}`}
+                  x1={GRAPH_LEFT}
+                  x2={GRAPH_RIGHT}
+                  y1={y}
+                  y2={y}
+                />
+              )
+            })}
+            {x_axis.ticks.map((tick) => {
+              const x = graphCoordinate(tick.scaled_value, x_axis.min, x_axis.max, GRAPH_LEFT, GRAPH_RIGHT)
+              return (
+                <line key={`vertical-${tick.scaled_value}`} x1={x} x2={x} y1={GRAPH_TOP} y2={GRAPH_BOTTOM} />
+              )
+            })}
+          </g>
+          <g className="reference-axes">
+            <line x1={GRAPH_LEFT} x2={GRAPH_LEFT} y1={GRAPH_TOP} y2={GRAPH_BOTTOM} />
+            <line x1={GRAPH_LEFT} x2={GRAPH_RIGHT} y1={GRAPH_BOTTOM} y2={GRAPH_BOTTOM} />
           </g>
           <polyline className="reference-line" points={reference_path} />
           {result_path && (
@@ -327,18 +446,41 @@ function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
               points={result_path}
             />
           )}
-          <g className="reference-axis-labels">
-            <text x="38" y="328" textAnchor="start">
-              {formatAxisValue(displayed_x_min)}
+          <g className="reference-axis-ticks">
+            {y_axis.ticks.map((tick) => (
+              <text
+                className="reference-axis-tick reference-axis-tick-y"
+                key={`y-label-${tick.scaled_value}`}
+                x={GRAPH_LEFT - 8}
+                y={graphCoordinate(tick.scaled_value, y_axis.min, y_axis.max, GRAPH_BOTTOM, GRAPH_TOP) + 3}
+                textAnchor="end"
+              >
+                {tick.label}
+              </text>
+            ))}
+            {x_axis.ticks.map((tick, index) => (
+              <text
+                className="reference-axis-tick reference-axis-tick-x"
+                key={`x-label-${tick.scaled_value}`}
+                x={graphCoordinate(tick.scaled_value, x_axis.min, x_axis.max, GRAPH_LEFT, GRAPH_RIGHT)}
+                y={GRAPH_BOTTOM + 18}
+                textAnchor={index === 0 ? "start" : index === x_axis.ticks.length - 1 ? "end" : "middle"}
+              >
+                {tick.label}
+              </text>
+            ))}
+          </g>
+          <g className="reference-axis-titles">
+            <text x={(GRAPH_LEFT + GRAPH_RIGHT) / 2} y="357" textAnchor="middle">
+              {x_axis_title}
             </text>
-            <text x="630" y="328" textAnchor="end">
-              {formatAxisValue(displayed_x_max)}
-            </text>
-            <text x="30" y="21" textAnchor="end">
-              {formatAxisValue(displayed_y_max)}
-            </text>
-            <text x="30" y="309" textAnchor="end">
-              {formatAxisValue(displayed_y_min)}
+            <text
+              x="14"
+              y={(GRAPH_TOP + GRAPH_BOTTOM) / 2}
+              textAnchor="middle"
+              transform={`rotate(-90 14 ${(GRAPH_TOP + GRAPH_BOTTOM) / 2})`}
+            >
+              {y_axis_title}
             </text>
           </g>
         </svg>
