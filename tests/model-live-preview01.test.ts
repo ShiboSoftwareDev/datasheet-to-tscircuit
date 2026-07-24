@@ -106,6 +106,26 @@ test("the reference section warns when the current graph is outside tolerance", 
   expect(html).toContain("max error 75.0%")
 })
 
+test("the model datasheet reference renders as a non-interactive image", () => {
+  const html = renderToStaticMarkup(
+    createElement(ModelLivePreview, {
+      job_id: "job_1",
+      is_complete: true,
+      preview_options: [
+        {
+          benchmark_id: "transfer",
+          title: "Transfer curve",
+          circuit_file: "benchmarks/transfer.circuit.tsx",
+        },
+      ],
+    }),
+  )
+
+  expect(html).toContain('<img class="model-datasheet-reference-image"')
+  expect(html).not.toContain('<a class="model-datasheet-reference-image"')
+  expect(html).not.toContain("Open the full datasheet graph reference")
+})
+
 test("benchmark previews render one selectable graph instead of every graph at once", () => {
   const html = renderToStaticMarkup(
     createElement(ModelLivePreview, {

@@ -447,20 +447,14 @@ function ModelReferencePane({
             <p>No retained datasheet graph image is available for this benchmark.</p>
           </div>
         ) : (
-          <a
+          <img
             className="model-datasheet-reference-image"
-            href={image_url}
-            target="_blank"
-            rel="noreferrer"
-            title="Open the full datasheet graph reference"
-          >
-            <img
-              key={image_url}
-              src={image_url}
-              alt={`Datasheet graph reference for ${preview?.title ?? resolved_benchmark_id}`}
-              onError={() => setImageFailed(true)}
-            />
-          </a>
+            key={image_url}
+            src={image_url}
+            alt={`Datasheet graph reference for ${preview?.title ?? resolved_benchmark_id}`}
+            draggable={false}
+            onError={() => setImageFailed(true)}
+          />
         )}
       </div>
     </section>
