@@ -17,6 +17,13 @@ Crop every individual channel with its label and scale legend to
 \`evidence/curves/<benchmark-id>/<series-id>.csv\`. The number of series must equal
 source.channel_count. The full crop must show that benchmark's figure, not the
 whole page or another graph from the same page.
+Do not copy the full multi-channel figure into the per-channel image paths. Do not
+generate one generic family waveform and reuse it across figures or operating
+conditions. Digitize each response independently from its own visible trace and
+preserve the figure-specific timing, amplitude, overshoot, ripple, and settling.
+If two stimulus channels are genuinely identical, retain them with their separate
+source crops; exact duplicate response CSVs from different figures are reported as
+evidence-quality warnings and cannot support an accuracy claim.
 Use stable benchmark and series ids matching \`^[A-Za-z0-9][A-Za-z0-9._-]*$\`
 from the draft onward. Commas and spaces are not valid ids.
 Ignore static curves whose x-axis is a swept voltage, current, load,

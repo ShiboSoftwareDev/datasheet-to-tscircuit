@@ -29,13 +29,17 @@ test("job create accepts a PDF and starts the injected background runner", async
   const response = await handle(
     new Request("http://localhost/api/job/create", { method: "POST", body: form }),
   )
-  const body = (await response?.json()) as { job: { job_id: string; file_name: string } }
+  const body = (await response?.json()) as {
+    job: { job_id: string; file_name: string; use_openai?: boolean }
+  }
 
   expect(response?.status).toBe(202)
   expect(body.job.file_name).toBe("sensor.pdf")
+  expect(body.job.use_openai).toBe(false)
   expect(started_job_id).toBe(body.job.job_id)
   expect(started_use_openai).toBe(false)
   expect(await Bun.file(join(jobs_root, body.job.job_id, "datasheet.pdf")).exists()).toBe(true)
+  expect((await Bun.file(join(jobs_root, body.job.job_id, "job.json")).json()).use_openai).toBe(false)
   expect(await Bun.file(join(jobs_root, body.job.job_id, "AGENTS.md")).text()).toContain(
     "typical-application-plan.json",
   )
@@ -422,6 +426,7 @@ test("a failed task can be retried just like a stopped task", async () => {
     job_id: "failed_job",
     job_dir: source_dir,
     file_name: "failed-sensor.pdf",
+    use_openai: true,
     additional_instructions: "Preserve the exposed pad",
   })
   job_store.updateJob("failed_job", {
@@ -429,25 +434,88 @@ test("a failed task can be retried just like a stopped task", async () => {
     is_complete: true,
     has_errors: true,
   })
-  const started_jobs: string[] = []
+  const started_jobs: Array<{ job_id: string; use_openai?: boolean }> = []
   const handle = createJobApiHandler({
     jobs_root,
     job_store,
     agent_bin: "unused-agent",
     tsci_bin: "unused-tsci",
-    run_job: async ({ job_id }) => {
-      started_jobs.push(job_id)
+    run_job: async ({ job_id }, context) => {
+      started_jobs.push({ job_id, use_openai: context.use_openai })
     },
   })
 
   const response = await handle(
-    new Request("http://localhost/api/job/retry?job_id=failed_job", { method: "POST" }),
+    new Request("http://localhost/api/job/retry?job_id=failed_job&use_openai=false", {
+      method: "POST",
+    }),
   )
-  const body = (await response?.json()) as { job: { job_id: string } }
+  const body = (await response?.json()) as { job: { job_id: string; use_openai?: boolean } }
   expect(response?.status).toBe(202)
   expect(body.job.job_id).not.toBe("failed_job")
-  expect(started_jobs).toEqual([body.job.job_id])
+  expect(body.job.use_openai).toBe(true)
+  expect(started_jobs).toEqual([{ job_id: body.job.job_id, use_openai: true }])
+  expect((await Bun.file(join(jobs_root, body.job.job_id, "job.json")).json()).use_openai).toBe(true)
   expect(await Bun.file(join(jobs_root, body.job.job_id, "datasheet.pdf")).text()).toContain("failed fixture")
+
+  job_store.updateJob(body.job.job_id, {
+    display_status: "failed",
+    is_complete: true,
+    has_errors: true,
+  })
+  const nested_response = await handle(
+    new Request(`http://localhost/api/job/retry?job_id=${body.job.job_id}&use_openai=false`, {
+      method: "POST",
+    }),
+  )
+  const nested_body = (await nested_response?.json()) as {
+    job: { job_id: string; use_openai?: boolean }
+  }
+  expect(nested_body.job.use_openai).toBe(true)
+  expect(started_jobs.at(-1)).toEqual({ job_id: nested_body.job.job_id, use_openai: true })
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("a legacy failed task adopts the saved UI provider for its retry lineage", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-retry-legacy-provider-"))
+  const source_dir = join(jobs_root, "legacy_failed_job")
+  await mkdir(source_dir, { recursive: true })
+  await Bun.write(join(source_dir, "datasheet.pdf"), "%PDF-1.7\nlegacy failed fixture")
+  const job_store = new JobStore()
+  job_store.createJob({
+    job_id: "legacy_failed_job",
+    job_dir: source_dir,
+    file_name: "legacy-sensor.pdf",
+  })
+  job_store.updateJob("legacy_failed_job", {
+    display_status: "failed",
+    is_complete: true,
+    has_errors: true,
+  })
+  const providers: Array<boolean | undefined> = []
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_job: async (_input, context) => {
+      providers.push(context.use_openai)
+    },
+  })
+
+  const response = await handle(
+    new Request("http://localhost/api/job/retry?job_id=legacy_failed_job&use_openai=true", {
+      method: "POST",
+    }),
+  )
+  const body = (await response?.json()) as { job: { use_openai?: boolean } }
+
+  expect(response?.status).toBe(202)
+  expect(body.job.use_openai).toBe(true)
+  expect(providers).toEqual([true])
+  expect(job_store.getJob("legacy_failed_job")?.use_openai).toBe(true)
+  expect((await Bun.file(join(source_dir, "job.json")).json()).use_openai).toBe(true)
 
   await rm(jobs_root, { recursive: true, force: true })
 })

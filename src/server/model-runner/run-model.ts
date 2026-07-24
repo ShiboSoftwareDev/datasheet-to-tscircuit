@@ -16,13 +16,17 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
     throw new Error("Model run workspace was not found")
   }
 
+  const execution_context = {
+    ...context,
+    use_openai: model_run.use_openai ?? context.use_openai ?? false,
+  }
   const execution = new ModelExecution({
     model_run_id: input.model_run_id,
     model_run,
     job_dir,
     model_dir,
     cancellation_signal,
-    context,
+    context: execution_context,
   })
   if (cancellation_signal.aborted) {
     await execution.preserveCancellation()

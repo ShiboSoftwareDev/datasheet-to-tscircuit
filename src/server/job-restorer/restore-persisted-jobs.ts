@@ -24,7 +24,16 @@ export async function restorePersistedJobs(input: {
       model_dir: join(job_dir, "spice"),
       model_run_store: input.model_run_store,
     })
-    if (model_run) model_runs_restored += 1
+    if (model_run) {
+      model_runs_restored += 1
+      if (job.use_openai === undefined && model_run.use_openai !== undefined) {
+        input.job_store.updateJob(job.job_id, { use_openai: model_run.use_openai })
+      } else if (job.use_openai !== undefined && model_run.use_openai !== job.use_openai) {
+        input.model_run_store.updateModelRun(model_run.model_run_id, {
+          use_openai: job.use_openai,
+        })
+      }
+    }
   }
   return { jobs_restored, model_runs_restored }
 }

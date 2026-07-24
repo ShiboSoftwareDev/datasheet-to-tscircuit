@@ -486,56 +486,6 @@ export function ModelLivePreview({
     return source_name?.replace(/\.circuit\.tsx$/i, "")
   }, [circuit_preview?.source_file, reference_preview?.benchmark_id])
   const preview_option_key = preview_options.map((option) => option.benchmark_id).join("\u0000")
-  const [loaded_previews, setLoadedPreviews] = useState<Record<string, ModelSelectedPreview>>({})
-  const [load_errors, setLoadErrors] = useState<Record<string, string>>({})
-
-  useEffect(() => {
-    const benchmark_ids = preview_option_key ? preview_option_key.split("\u0000") : []
-    if (benchmark_ids.length === 0) {
-      setLoadedPreviews({})
-      setLoadErrors({})
-      return
-    }
-    let cancelled = false
-    let interval: number | undefined
-    const load = async () => {
-      const results = await Promise.all(
-        benchmark_ids.map(async (benchmark_id) => {
-          try {
-            return { benchmark_id, preview: await getModelSelectedPreview(job_id, benchmark_id) }
-          } catch (error) {
-            return {
-              benchmark_id,
-              error: error instanceof Error ? error.message : "Could not load this benchmark preview.",
-            }
-          }
-        }),
-      )
-      if (cancelled) return
-      setLoadedPreviews((current) => {
-        const next: Record<string, ModelSelectedPreview> = {}
-        for (const result of results) {
-          const preview = result.preview
-          const current_preview = current[result.benchmark_id]
-          if (preview) next[result.benchmark_id] = preview
-          else if (current_preview) next[result.benchmark_id] = current_preview
-        }
-        return next
-      })
-      const next_errors: Record<string, string> = {}
-      for (const result of results) {
-        if (result.error) next_errors[result.benchmark_id] = result.error
-      }
-      setLoadErrors(next_errors)
-    }
-    void load()
-    if (!is_complete) interval = window.setInterval(() => void load(), 2_000)
-    return () => {
-      cancelled = true
-      if (interval !== undefined) window.clearInterval(interval)
-    }
-  }, [is_complete, job_id, preview_option_key])
-
   const preview_entries: Array<{ benchmark_id: string; title: string }> =
     preview_options.length > 0
       ? preview_options
@@ -545,48 +495,133 @@ export function ModelLivePreview({
             title: reference_preview?.title ?? "Simulation comparison",
           },
         ]
+  const default_benchmark_id =
+    preview_entries.find((entry) => entry.benchmark_id === live_benchmark_id)?.benchmark_id ??
+    preview_entries[0]?.benchmark_id ??
+    "live"
+  const [selected_benchmark_id, setSelectedBenchmarkId] = useState(default_benchmark_id)
+  const [loaded_previews, setLoadedPreviews] = useState<Record<string, ModelSelectedPreview>>({})
+  const [load_errors, setLoadErrors] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    setSelectedBenchmarkId((current) =>
+      preview_entries.some((entry) => entry.benchmark_id === current) ? current : default_benchmark_id,
+    )
+  }, [default_benchmark_id, preview_option_key])
+
+  useEffect(() => {
+    if (!preview_options.some((option) => option.benchmark_id === selected_benchmark_id)) {
+      setLoadedPreviews({})
+      setLoadErrors({})
+      return
+    }
+    let cancelled = false
+    let interval: number | undefined
+    const load = async () => {
+      let preview: ModelSelectedPreview | undefined
+      let error: string | undefined
+      try {
+        preview = await getModelSelectedPreview(job_id, selected_benchmark_id)
+      } catch (cause) {
+        error = cause instanceof Error ? cause.message : "Could not load this benchmark preview."
+      }
+      if (cancelled) return
+      setLoadedPreviews((current) => {
+        if (!preview) return current
+        return { ...current, [selected_benchmark_id]: preview }
+      })
+      setLoadErrors((current) => {
+        const next = { ...current }
+        if (error) next[selected_benchmark_id] = error
+        else delete next[selected_benchmark_id]
+        return next
+      })
+    }
+    void load()
+    if (!is_complete) interval = window.setInterval(() => void load(), 2_000)
+    return () => {
+      cancelled = true
+      if (interval !== undefined) window.clearInterval(interval)
+    }
+  }, [is_complete, job_id, preview_option_key, selected_benchmark_id])
+
+  const selected_entry =
+    preview_entries.find((entry) => entry.benchmark_id === selected_benchmark_id) ?? preview_entries[0]
+  const duplicate_title_count = selected_entry
+    ? preview_entries.filter((entry) => entry.title === selected_entry.title).length
+    : 0
+  const selected_title =
+    selected_entry && duplicate_title_count > 1
+      ? `${selected_entry.title} · ${selected_entry.benchmark_id}`
+      : selected_entry?.title
 
   return (
     <section className="model-preview-list" aria-label="SPICE benchmark comparisons">
-      {preview_entries.map((entry) => {
-        const loaded = loaded_previews[entry.benchmark_id]
-        const can_use_live_preview = entry.benchmark_id === live_benchmark_id || entry.benchmark_id === "live"
-        const displayed_circuit =
-          loaded?.circuit_preview ?? (can_use_live_preview ? circuit_preview : undefined)
-        const displayed_reference =
-          loaded?.reference_preview ?? (can_use_live_preview ? reference_preview : undefined)
+      {preview_entries.length > 1 && (
+        <div className="model-preview-selector">
+          <label>
+            <span>Benchmark graph</span>
+            <select
+              aria-label="Select benchmark graph"
+              value={selected_entry?.benchmark_id}
+              onChange={(event) => setSelectedBenchmarkId(event.currentTarget.value)}
+            >
+              {preview_entries.map((entry) => {
+                const duplicate_count = preview_entries.filter(
+                  (candidate) => candidate.title === entry.title,
+                ).length
+                return (
+                  <option key={entry.benchmark_id} value={entry.benchmark_id}>
+                    {duplicate_count > 1 ? `${entry.title} · ${entry.benchmark_id}` : entry.title}
+                  </option>
+                )
+              })}
+            </select>
+          </label>
+          <small>Showing one of {preview_entries.length} benchmarks; choose another graph to load it.</small>
+        </div>
+      )}
+      {selected_entry &&
+        [selected_entry].map((entry) => {
+          const loaded = loaded_previews[entry.benchmark_id]
+          const can_use_live_preview =
+            entry.benchmark_id === live_benchmark_id || entry.benchmark_id === "live"
+          const displayed_circuit =
+            loaded?.circuit_preview ?? (can_use_live_preview ? circuit_preview : undefined)
+          const displayed_reference =
+            loaded?.reference_preview ?? (can_use_live_preview ? reference_preview : undefined)
 
-        return (
-          <section
-            className="workspace-card model-preview-workspace"
-            aria-label={`${entry.title} simulation comparison`}
-            key={entry.benchmark_id}
-          >
-            <header className="card-toolbar model-preview-toolbar">
-              <div className="toolbar-title">
-                <Activity size={16} />
-                <span title={entry.title}>{entry.title}</span>
+          return (
+            <section
+              className="workspace-card model-preview-workspace"
+              aria-label={`${selected_title} simulation comparison`}
+              key={entry.benchmark_id}
+            >
+              <header className="card-toolbar model-preview-toolbar">
+                <div className="toolbar-title">
+                  <Activity size={16} />
+                  <span title={selected_title}>{selected_title}</span>
+                </div>
+              </header>
+              {load_errors[entry.benchmark_id] && !loaded && (
+                <p className="model-preview-load-error" role="alert">
+                  {load_errors[entry.benchmark_id]}
+                </p>
+              )}
+              <div className="model-preview-grid">
+                <ModelCircuitPreview
+                  key={`${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
+                  preview={displayed_circuit}
+                />
+                <ModelReferencePane
+                  job_id={job_id}
+                  benchmark_id={entry.benchmark_id}
+                  preview={displayed_reference}
+                />
               </div>
-            </header>
-            {load_errors[entry.benchmark_id] && !loaded && (
-              <p className="model-preview-load-error" role="alert">
-                {load_errors[entry.benchmark_id]}
-              </p>
-            )}
-            <div className="model-preview-grid">
-              <ModelCircuitPreview
-                key={`${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
-                preview={displayed_circuit}
-              />
-              <ModelReferencePane
-                job_id={job_id}
-                benchmark_id={entry.benchmark_id}
-                preview={displayed_reference}
-              />
-            </div>
-          </section>
-        )
-      })}
+            </section>
+          )
+        })}
     </section>
   )
 }

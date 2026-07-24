@@ -3,7 +3,11 @@ import { getSimulationRunCount } from "../model-simulation-validator"
 import { finalizeAndLockBenchmarks } from "./finalize-and-lock-benchmarks"
 import { ModelExecution } from "./model-execution"
 import { updateServerProgress } from "./model-run-state"
-import { clearIncompleteBenchmarkFinalization, findPrematureRefinementArtifacts } from "./model-setup-state"
+import {
+  clearIncompleteBenchmarkFinalization,
+  clearRefinementArtifacts,
+  findPrematureRefinementArtifacts,
+} from "./model-setup-state"
 import { preflightNgspice } from "./preflight-ngspice"
 
 async function establishBenchmarkLock(execution: ModelExecution): Promise<BenchmarkLock> {
@@ -13,6 +17,9 @@ async function establishBenchmarkLock(execution: ModelExecution): Promise<Benchm
     benchmark_lock = await verifyBenchmarkLock(execution.model_dir, benchmark_lock)
     execution.context.model_run_store.rememberBenchmarkLock(execution.model_run_id, benchmark_lock)
     return benchmark_lock
+  }
+  if (execution.model_run.manifest?.revision.endsWith("-unverified")) {
+    await clearRefinementArtifacts(execution.model_dir)
   }
 
   const premature_artifacts = await findPrematureRefinementArtifacts(execution.model_dir)

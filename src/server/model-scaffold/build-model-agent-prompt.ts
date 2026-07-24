@@ -45,6 +45,11 @@ behavior from electrical inputs and internal state. Do not create narrow voltage
 current, load, MODE, or enable windows around the exact benchmark conditions, and
 do not enumerate benchmark stimulus values in conditional expressions. Use
 datasheet-supported operating thresholds and continuous causal behavior instead.
+For every DUT-current response, produce current through a finite physical branch.
+Never force the measured DUT current pin to ground with an ideal B, V, or E voltage
+source merely to reproduce its plotted voltage waveform; the server rejects that
+as synthetic current. Use a causal switch/current path with finite impedance so
+the benchmark's external sense resistor measures actual branch current.
 After the normal suite passes, the server perturbs one verified external feedback
 divider and requires the output setpoint to follow it. A fixed benchmark output
 that ignores FB fails this hidden check. The server also scans for TIME; only when

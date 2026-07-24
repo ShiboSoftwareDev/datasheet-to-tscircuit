@@ -1,6 +1,6 @@
-import { createNgspiceSpiceEngine } from "@tscircuit/ngspice-spice-engine"
+import { createLocalNgspiceSpiceEngine } from "./src/server/job-scaffold/local-ngspice-engine"
 
-const ngspiceSpiceEngine = await createNgspiceSpiceEngine()
+const ngspiceSpiceEngine = await createLocalNgspiceSpiceEngine()
 
 export default {
   platformConfig: {

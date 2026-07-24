@@ -21,6 +21,7 @@ export interface JobLog {
 export type JobValidationStatus =
   | "pending"
   | "passed"
+  | "warning"
   | "failed"
   | "inconclusive"
   | "unresolved"
@@ -55,12 +56,15 @@ export interface JobProvenance {
 export interface Job {
   job_id: string
   file_name: string
+  /** Missing only on tasks persisted before provider selection became durable. */
+  use_openai?: boolean
   created_at: string
   completed_at?: string
   display_status: JobDisplayStatus
   is_complete: boolean
   has_errors: boolean
   error_message?: string
+  warnings?: string[]
   logs: JobLog[]
   component_ready?: boolean
   component_code?: string
@@ -83,6 +87,7 @@ export type JobSummary = Pick<
   | "is_complete"
   | "has_errors"
   | "error_message"
+  | "warnings"
 >
 
 export type JobEvent =
@@ -287,6 +292,8 @@ export interface ModelSelectedPreview {
 export interface ModelRun {
   model_run_id: string
   job_id: string
+  /** Missing only on runs persisted before provider selection became durable. */
+  use_openai?: boolean
   created_at: string
   updated_at: string
   completed_at?: string
@@ -294,6 +301,7 @@ export interface ModelRun {
   is_complete: boolean
   has_errors: boolean
   error_message?: string
+  warnings?: string[]
   effort_multiplier: number
   base_effort_ms: number
   allocated_time_ms: number

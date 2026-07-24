@@ -29,11 +29,53 @@ export async function readCurrentLock(
 ): Promise<{
   benchmark_ids: string[]
   files: LockedFileContent[]
+  warnings: string[]
 }> {
   const manifest_text = await readFile(join(model_dir, "benchmarks.json"), "utf8")
   const manifest_value: unknown = JSON.parse(manifest_text)
   const manifest = parseBenchmarkManifest(manifest_value)
   const records = parseBenchmarkRecords(manifest_value)
+  const exclusions_path = join(model_dir, "benchmark-exclusions.json")
+  const exclusions_text = await readFile(exclusions_path, "utf8").catch(() => undefined)
+  if (exclusions_text !== undefined) {
+    const exclusions: unknown = JSON.parse(exclusions_text)
+    if (!isRecord(exclusions) || exclusions.version !== 1 || !Array.isArray(exclusions.excluded)) {
+      throw new Error("benchmark-exclusions.json must be a server-owned version 1 exclusion record")
+    }
+    const excluded_ids = exclusions.excluded.map((entry, index) => {
+      if (
+        !isRecord(entry) ||
+        typeof entry.benchmark_id !== "string" ||
+        !entry.benchmark_id.trim() ||
+        !Array.isArray(entry.reasons) ||
+        entry.reasons.length === 0 ||
+        entry.reasons.some((reason) => typeof reason !== "string" || !reason.trim())
+      ) {
+        throw new Error(`benchmark-exclusions.json entry ${index + 1} is malformed`)
+      }
+      return entry.benchmark_id.trim()
+    })
+    if (new Set(excluded_ids).size !== excluded_ids.length) {
+      throw new Error("benchmark-exclusions.json benchmark ids must be unique")
+    }
+    const draft: unknown = JSON.parse(await readFile(join(model_dir, "benchmark-draft.json"), "utf8"))
+    if (!isRecord(draft) || !Array.isArray(draft.benchmarks)) {
+      throw new Error("benchmark-exclusions.json requires the complete benchmark-draft.json inventory")
+    }
+    const draft_ids = draft.benchmarks.map((entry, index) => {
+      if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim()) {
+        throw new Error(`benchmark-draft.json benchmark ${index + 1} has no stable id`)
+      }
+      return entry.id.trim()
+    })
+    const executable_ids = new Set(records.map((record) => record.id))
+    const expected_excluded_ids = draft_ids.filter((id) => !executable_ids.has(id)).sort()
+    if (JSON.stringify(excluded_ids.sort()) !== JSON.stringify(expected_excluded_ids)) {
+      throw new Error(
+        "benchmark-exclusions.json must exactly explain every drafted benchmark omitted from the executable suite",
+      )
+    }
+  }
   for (const record of records) {
     for (const series of record.series) {
       assertEvidenceFile(model_dir, series.reference_file)
@@ -46,7 +88,7 @@ export async function readCurrentLock(
     }
     if (record.source_image) assertEvidenceFile(model_dir, record.source_image)
   }
-  await validateBenchmarkReferenceFiles(model_dir, manifest)
+  const warnings = await validateBenchmarkReferenceFiles(model_dir, manifest)
   await validateSimulationDefinitions(
     model_dir,
     records.map((record) => record.id),
@@ -60,6 +102,7 @@ export async function readCurrentLock(
 
   const paths = [
     "benchmarks.json",
+    ...(exclusions_text === undefined ? [] : ["benchmark-exclusions.json"]),
     ...records.map((record) => join("benchmarks", `${record.id}.circuit.tsx`)),
     ...records.flatMap((record) => record.series.map((series) => series.reference_file)),
     ...records.flatMap((record) => (record.source_image ? [record.source_image] : [])),
@@ -84,6 +127,10 @@ export async function readCurrentLock(
         throw new Error(`Benchmark ${record.id} source.image must be a valid PNG graph crop`)
       }
     }
+    const full_image = record.source_image
+      ? files.find((file) => file.file === record.source_image)?.content
+      : undefined
+    const channel_image_labels = new Map<string, string>()
     for (const series of record.series) {
       if (!series.source_image) continue
       const image = files.find((file) => file.file === series.source_image)?.content
@@ -92,9 +139,27 @@ export async function readCurrentLock(
           `Benchmark ${record.id} series ${series.id} source_image must be a valid PNG channel crop`,
         )
       }
+      const image_hash = hashContent(image)
+      if (record.series.length > 1 && full_image && image_hash === hashContent(full_image)) {
+        warnings.push(
+          `Evidence quality: ${record.id}/${series.id} reuses the complete figure as its channel crop. The output remains available, but inspect the full figure because this channel image was not independently cropped.`,
+        )
+      }
+      const previous_channel = channel_image_labels.get(image_hash)
+      if (previous_channel) {
+        warnings.push(
+          `Evidence quality: ${record.id}/${series.id} and ${previous_channel} use the same channel image. The output remains available, but the individual channel evidence is duplicated.`,
+        )
+      } else {
+        channel_image_labels.set(image_hash, `${record.id}/${series.id}`)
+      }
     }
   }
-  return { benchmark_ids: records.map((record) => record.id).sort(), files }
+  return {
+    benchmark_ids: records.map((record) => record.id).sort(),
+    files,
+    warnings: [...new Set(warnings)],
+  }
 }
 
 export async function writeTextAtomically(file_path: string, text: string): Promise<void> {

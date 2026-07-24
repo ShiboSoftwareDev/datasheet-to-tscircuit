@@ -2,6 +2,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
 import { Boxes, ChevronDown, ChevronRight, CircuitBoard, Download, FlaskConical } from "lucide-react"
 import type { Job, JobDisplayStatus, ModelRun, ModelRunStatus } from "@/shared/job-types"
 import { getJobFileUrl, getModelRunFileUrl } from "../api"
+import { ArtifactWarningsDialog } from "./artifact-warnings"
 
 const COMPONENT_STATUS_COPY: Record<JobDisplayStatus, string> = {
   queued: "Queued",
@@ -30,7 +31,7 @@ const MODEL_STATUS_COPY: Record<ModelRunStatus, string> = {
 type StatusTone = "idle" | "working" | "ready" | "unsupported" | "failed"
 
 function getStatusTone(status: string): StatusTone {
-  if (status === "Ready") return "ready"
+  if (["Ready", "Ready with warnings", "Output with warnings"].includes(status)) return "ready"
   if (status === "Not convertible") return "unsupported"
   if (["Failed", "Cancelled", "Timed out"].includes(status)) return "failed"
   if (status === "Not started") return "idle"
@@ -40,6 +41,9 @@ function getStatusTone(status: string): StatusTone {
 function getModelStatus(model_run: ModelRun | undefined, is_loading: boolean): string {
   if (is_loading) return "Loading"
   if (!model_run) return "Not started"
+  if (model_run.status === "complete" && (model_run.warnings?.length ?? 0) > 0) {
+    return "Ready with warnings"
+  }
   if (model_run.status === "timed_out" && !model_run.error_message?.toLowerCase().includes("no output")) {
     return "Failed"
   }
@@ -50,14 +54,21 @@ export function WorkspaceStatusBar({
   job,
   model_run,
   is_model_loading,
+  warnings,
+  warning_artifact_label,
 }: {
   job: Job
   model_run?: ModelRun
   is_model_loading: boolean
+  warnings: string[]
+  warning_artifact_label: string
 }) {
-  const component_status =
-    job.component_ready || job.display_status === "complete"
-      ? "Ready"
+  const component_status = job.component_ready
+    ? (job.warnings?.length ?? 0) > 0
+      ? "Ready with warnings"
+      : "Ready"
+    : job.display_status === "complete" && (job.warnings?.length ?? 0) > 0
+      ? "Output with warnings"
       : COMPONENT_STATUS_COPY[job.display_status]
   const model_status = getModelStatus(model_run, is_model_loading)
   const has_downloads = Boolean(job.component_code || job.typical_application_code || model_run?.model_source)
@@ -86,6 +97,7 @@ export function WorkspaceStatusBar({
           <i /> {model_status}
         </strong>
       </span>
+      <ArtifactWarningsDialog warnings={warnings} artifact_label={warning_artifact_label} />
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
           <button

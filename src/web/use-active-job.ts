@@ -22,6 +22,7 @@ function summarizeJob(job: Job): JobSummary {
     is_complete: job.is_complete,
     has_errors: job.has_errors,
     error_message: job.error_message,
+    warnings: job.warnings,
   }
 }
 

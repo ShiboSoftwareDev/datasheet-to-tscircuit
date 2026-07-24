@@ -100,6 +100,7 @@ export async function validateFinalizedBenchmarksMatchDraft(model_dir: string): 
 
 export async function findPrematureRefinementArtifacts(model_dir: string): Promise<string[]> {
   const canonical_files = [
+    "benchmark-exclusions.json",
     "model.lib",
     "model-manifest.json",
     "component-with-model.circuit.tsx",
@@ -119,6 +120,7 @@ export async function findPrematureRefinementArtifacts(model_dir: string): Promi
 export async function clearIncompleteBenchmarkFinalization(model_dir: string): Promise<void> {
   await Promise.all([
     rm(join(model_dir, "benchmarks.json"), { force: true }),
+    rm(join(model_dir, "benchmark-exclusions.json"), { force: true }),
     rm(join(model_dir, "benchmarks"), { recursive: true, force: true }),
   ])
   await mkdir(join(model_dir, "benchmarks"), { recursive: true })

@@ -17,7 +17,7 @@ ARG SOURCE_COMMIT=unavailable
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu poppler-utils \
+    && apt-get install -y --no-install-recommends gosu ngspice poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 ENV HOST=0.0.0.0 \

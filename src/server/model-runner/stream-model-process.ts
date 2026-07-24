@@ -195,6 +195,7 @@ export async function streamModelProcess(input: StreamModelProcessInput): Promis
   if (input.signal.aborted) return 143
   const activity_paths = input.activity_paths ?? []
   let activity_signatures = await getActivitySignatures(activity_paths)
+  let has_observed_activity = activity_signatures.some((signature) => signature !== "missing")
   const inherited_path = process.env.PATH ?? ""
   const command_path = input.command[0]?.includes("/")
     ? `${dirname(input.command[0])}${delimiter}${inherited_path}`
@@ -237,6 +238,15 @@ export async function streamModelProcess(input: StreamModelProcessInput): Promis
         if (completed) return
         if (JSON.stringify(signatures) !== JSON.stringify(activity_signatures)) {
           activity_signatures = signatures
+          has_observed_activity = true
+          arm_stale_timer()
+          return
+        }
+        if (activity_paths.length > 0 && !has_observed_activity) {
+          // A newly spawned agent can take most of one timeout interval to load
+          // under CPU pressure. Give its declared heartbeat file one full startup
+          // grace interval before calling a completely silent process stale.
+          has_observed_activity = true
           arm_stale_timer()
           return
         }

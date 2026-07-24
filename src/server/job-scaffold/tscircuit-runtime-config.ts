@@ -1,6 +1,10 @@
-export const TSCIRCUIT_RUNTIME_CONFIG = `import { createNgspiceSpiceEngine } from "@tscircuit/ngspice-spice-engine"
+const local_engine_url = new URL("./local-ngspice-engine.ts", import.meta.url).href
 
-const ngspiceSpiceEngine = await createNgspiceSpiceEngine()
+export const TSCIRCUIT_RUNTIME_CONFIG = `import { createLocalNgspiceSpiceEngine } from ${JSON.stringify(
+  local_engine_url,
+)}
+
+const ngspiceSpiceEngine = await createLocalNgspiceSpiceEngine()
 
 export default {
   platformConfig: {

@@ -25,7 +25,7 @@ export async function runModelRefinement(
     const remaining_after_validation =
       execution.context.model_run_store.getRemainingTimeMs(execution.model_run_id) ?? 0
     if (remaining_after_validation <= 0 || execution.budget_exhausted) {
-      state.final_error_message = "Ran out of iterations before every benchmark could be verified."
+      state.final_error_message ??= "Ran out of iterations before every benchmark could be verified."
       break
     }
     if (execution.stale_timeout) break

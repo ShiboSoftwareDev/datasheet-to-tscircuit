@@ -10,12 +10,27 @@ export {
   restoreBestReportedModelCheckpoint,
   restoreLastPromotedModelCheckpoint,
 } from "./model-checkpoint"
-export { getBenchmarkApplicationPlan, getRequiredPowerPinLabels } from "./get-benchmark-application-plan"
 export {
+  getBenchmarkApplicationErrors,
+  getBenchmarkApplicationPlan,
+  getRequiredPowerPinLabels,
+  getStubComponentPins,
+} from "./get-benchmark-application-plan"
+export {
+  formatGroupedBenchmarkFailures,
   getRequiredPowerPreflightProbeName,
   getRequiredPowerProbeContractErrors,
   getUnpoweredRequiredPinErrors,
+  removeAmbiguousStimulusEdgePoints,
+  summarizeStimulusTransitions,
 } from "./preflight-benchmark-harnesses"
+export { executeValidationBuild, runValidationTaskPool } from "./validate-champion"
+export { excludeFailedBenchmarkHarnesses } from "./finalize-and-lock-benchmarks"
+export { selectPublishedComponentCircuitJson } from "./attach-model-to-generated-component"
+export {
+  getModelExecutionRecoveryWarning,
+  normalizeModelExecutionErrorMessage,
+} from "./handle-model-execution-error"
 export { stripAnalogSimulationForStructuralCheck } from "./strip-analog-simulation-for-structural-check"
 export { preflightNgspice } from "./preflight-ngspice"
 export type {

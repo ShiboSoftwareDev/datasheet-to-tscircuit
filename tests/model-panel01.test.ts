@@ -42,3 +42,26 @@ test("model header clamps derived match percentage at zero", () => {
   expect(metrics.normalized_rmse).toBe(1.25)
   expect(metrics.match_score).toBe(0)
 })
+
+test("model header withholds match claims from completed output with warnings", () => {
+  const metrics = getModelMatchMetrics({
+    is_complete: true,
+    warnings: [
+      "Evidence quality: response references are duplicated, so the result is available but unverified.",
+    ],
+    validation: {
+      benchmark_count: 2,
+      passing_count: 2,
+      critical_count: 1,
+      critical_passing_count: 1,
+      score: 0.01,
+      worst_normalized_error: 0.02,
+      all_critical_passed: true,
+      all_passed: true,
+      benchmarks: [],
+    },
+  } as unknown as ModelRun)
+
+  expect(metrics.normalized_rmse).toBeUndefined()
+  expect(metrics.match_score).toBeUndefined()
+})

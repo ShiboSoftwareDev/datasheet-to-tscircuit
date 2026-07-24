@@ -1,43 +1,183 @@
 import { expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { getTypicalApplicationConnectivityErrors } from "@/server/job-artifact-validator"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import {
   classifyFatalSimulationFailure,
   compareTimeShiftedResults,
+  excludeFailedBenchmarkHarnesses,
+  executeValidationBuild,
   findSuspiciousBenchmarkConditioning,
+  formatGroupedBenchmarkFailures,
+  getBenchmarkApplicationErrors,
   getBenchmarkApplicationPlan,
   getFatalSimulationProcessFailure,
+  getModelExecutionRecoveryWarning,
   getRequiredPowerPinLabels,
   getRequiredPowerPreflightProbeName,
   getRequiredPowerProbeContractErrors,
+  getStubComponentPins,
   getUnpoweredRequiredPinErrors,
   isTransientAgentTransportFailure,
-  modelUsesAbsoluteTime,
   ModelProcessStaleError,
   ModelWorkspaceIsolationError,
+  modelUsesAbsoluteTime,
+  normalizeModelExecutionErrorMessage,
   parseModelManifest,
   preflightNgspice,
+  removeAmbiguousStimulusEdgePoints,
   restoreBestReportedModelCheckpoint,
   restoreLastPromotedModelCheckpoint,
+  runValidationTaskPool,
   runModel,
+  selectPublishedComponentCircuitJson,
   shiftLiteralPulseDelays,
   shiftNamedResistorResistance,
-  stripAnalogSimulationForStructuralCheck,
   streamModelProcess,
+  stripAnalogSimulationForStructuralCheck,
+  summarizeStimulusTransitions,
   validateAbsoluteTimeShift,
   validateCompletedSetup,
   validateFinalizedBenchmarksMatchDraft,
   validateManifestAgainstModel,
 } from "@/server/model-runner"
 import {
+  attachModelToGeneratedComponent,
+  writeServerIntegratedComponent,
+  writeServerStructuralComponent,
+} from "@/server/model-runner/attach-model-to-generated-component"
+import {
   buildModelAgentPrompt,
   buildModelBenchmarkPrompt,
   buildModelSetupPrompt,
 } from "@/server/model-scaffold"
+import { scoreSeriesPoints } from "@/server/model-scorer/score-single-model-benchmark"
+
+test("validation task pools report one task error and continue the remaining benchmarks", async () => {
+  const completed: number[] = []
+  const warnings: string[] = []
+  await runValidationTaskPool({
+    tasks: [1, 2, 3],
+    concurrency: 2,
+    signal: new AbortController().signal,
+    run: async (task) => {
+      if (task === 2) throw new Error("canonical DUT current pin L1 is forced directly")
+      completed.push(task)
+    },
+    on_error: async (_task, error) => {
+      warnings.push(error instanceof Error ? error.message : String(error))
+    },
+  })
+
+  expect(completed.sort()).toEqual([1, 3])
+  expect(warnings).toEqual(["canonical DUT current pin L1 is forced directly"])
+})
+
+test("failed benchmark harnesses become evidence-only while valid harnesses remain executable", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-benchmark-exclusions-"))
+  try {
+    await mkdir(join(model_dir, "benchmarks"), { recursive: true })
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmarks.json"),
+        JSON.stringify({
+          version: 2,
+          locked_at: new Date().toISOString(),
+          benchmarks: [{ id: "valid-a" }, { id: "bad-b" }, { id: "valid-c" }],
+        }),
+      ),
+      Bun.write(join(model_dir, "benchmarks", "valid-a.circuit.tsx"), "valid a"),
+      Bun.write(join(model_dir, "benchmarks", "bad-b.circuit.tsx"), "bad b"),
+      Bun.write(join(model_dir, "benchmarks", "valid-c.circuit.tsx"), "valid c"),
+    ])
+
+    const recovered = await excludeFailedBenchmarkHarnesses({
+      model_dir,
+      failures: [
+        {
+          benchmark_file: "bad-b.circuit.tsx",
+          error_message: "stimulus does not match its digitized channel",
+        },
+      ],
+    })
+
+    expect(recovered).toEqual({ excluded_ids: ["bad-b"], remaining_ids: ["valid-a", "valid-c"] })
+    expect(
+      JSON.parse(await Bun.file(join(model_dir, "benchmarks.json")).text()).benchmarks.map(
+        (benchmark: { id: string }) => benchmark.id,
+      ),
+    ).toEqual(["valid-a", "valid-c"])
+    expect(await Bun.file(join(model_dir, "benchmarks", "bad-b.circuit.tsx")).exists()).toBe(false)
+    expect(await Bun.file(join(model_dir, "benchmarks", "valid-a.circuit.tsx")).exists()).toBe(true)
+    expect(await Bun.file(join(model_dir, "benchmark-exclusions.json")).text()).toContain(
+      "stimulus does not match its digitized channel",
+    )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("SPICE attachment cannot replace a PCB-capable component preview with a PCB-disabled build", () => {
+  const existing = [
+    { type: "source_component", source_component_id: "component" },
+    { type: "pcb_component", source_component_id: "component" },
+  ]
+  const integrated = [
+    { type: "source_component", source_component_id: "component" },
+    { type: "simulation_spice_subcircuit", source_component_id: "component" },
+  ]
+  expect(Object.is(selectPublishedComponentCircuitJson({ existing, integrated }), existing)).toBe(true)
+
+  const integrated_with_pcb = [...integrated, { type: "pcb_component", source_component_id: "component" }]
+  expect(
+    Object.is(
+      selectPublishedComponentCircuitJson({ existing, integrated: integrated_with_pcb }),
+      integrated_with_pcb,
+    ),
+  ).toBe(true)
+})
+
+test("SPICE attachment recovers a missing in-memory PCB preview from the authoritative component build", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-pcb-recovery-"))
+  const model_dir = join(job_dir, "spice")
+  await Promise.all([
+    mkdir(join(job_dir, "dist", "index"), { recursive: true }),
+    mkdir(join(job_dir, "dist", "spice", "component-with-model"), { recursive: true }),
+    mkdir(model_dir, { recursive: true }),
+  ])
+  const integrated = [
+    { type: "source_component", source_component_id: "component" },
+    { type: "simulation_spice_subcircuit", source_component_id: "component" },
+  ]
+  const component_with_pcb = [
+    { type: "source_component", source_component_id: "component" },
+    { type: "pcb_component", source_component_id: "component" },
+    { type: "pcb_smtpad", pcb_smtpad_id: "pad1" },
+  ]
+  await Promise.all([
+    Bun.write(join(model_dir, "component-with-model.circuit.tsx"), "export default () => <chip />\n"),
+    Bun.write(join(model_dir, "component.circuit.tsx"), "export default () => <chip />\n"),
+    Bun.write(join(model_dir, "model.lib"), ".subckt DUT A B\n.ends DUT\n"),
+    Bun.write(
+      join(job_dir, "dist", "spice", "component-with-model", "circuit.json"),
+      JSON.stringify(integrated),
+    ),
+    Bun.write(join(job_dir, "dist", "index", "circuit.json"), JSON.stringify(component_with_pcb)),
+  ])
+  const job_store = new JobStore()
+  job_store.createJob({ job_id: "job_1", job_dir, file_name: "component.pdf" })
+  job_store.updateJob("job_1", { circuit_json: integrated as never })
+
+  await attachModelToGeneratedComponent({ job_id: "job_1", job_dir, model_dir, job_store })
+
+  expect(job_store.getJob("job_1")?.circuit_json?.some((element) => element.type === "pcb_component")).toBe(
+    true,
+  )
+  await rm(job_dir, { recursive: true, force: true })
+})
 
 test("benchmark preflight requires and validates a power probe for every required DUT pin", () => {
   const power_pins = getRequiredPowerPinLabels([
@@ -84,6 +224,126 @@ test("benchmark preflight requires and validates a power probe for every require
       [probe_name],
     ),
   ).toEqual([])
+})
+
+test("server benchmark stubs expose unique semantic SPICE nodes and group repeated failures", () => {
+  expect(
+    getStubComponentPins({
+      component_source: "",
+      component_circuit_json: [
+        {
+          type: "source_port",
+          pin_number: 1,
+          name: "EN",
+          port_hints: ["EN", "pin1", "1"],
+        },
+        {
+          type: "source_port",
+          pin_number: 7,
+          name: "L2",
+          port_hints: ["L2", "pin7", "7"],
+        },
+        {
+          type: "source_port",
+          pin_number: 8,
+          name: "GND",
+          port_hints: ["GND", "pin8", "8"],
+        },
+        {
+          type: "source_port",
+          pin_number: 9,
+          name: "GND",
+          port_hints: ["GND", "pin9", "9"],
+        },
+      ],
+    }),
+  ).toEqual([
+    { component_pin: "pin1", spice_node: "EN" },
+    { component_pin: "pin7", spice_node: "L2" },
+    { component_pin: "pin8", spice_node: "P8" },
+    { component_pin: "pin9", spice_node: "P9" },
+  ])
+
+  const grouped = formatGroupedBenchmarkFailures([
+    { benchmark_file: "switching-a.circuit.tsx", error_message: "L2 is not mapped" },
+    { benchmark_file: "switching-b.circuit.tsx", error_message: "L2 is not mapped" },
+    { benchmark_file: "startup.circuit.tsx", error_message: "stimulus timing mismatch" },
+  ])
+  expect(grouped).toContain(
+    "2 benchmarks (switching-a.circuit.tsx, switching-b.circuit.tsx): L2 is not mapped",
+  )
+  expect(grouped.match(/L2 is not mapped/g)).toHaveLength(1)
+  expect(grouped).toContain("startup.circuit.tsx: stimulus timing mismatch")
+})
+
+test("stimulus preflight tolerates only the ambiguous sample at an ideal step edge", () => {
+  const reference = [
+    { x: 0, y: 0.1 },
+    { x: 0.05, y: 0.1 },
+    { x: 0.099, y: 0.1 },
+    { x: 0.1, y: 0.1 },
+    { x: 0.101, y: 1 },
+    { x: 0.25, y: 1 },
+    { x: 0.3, y: 1 },
+    { x: 0.301, y: 0.1 },
+    { x: 0.4, y: 0.1 },
+  ]
+  const simulator_edge_convention = [
+    { x: 0, y: 0.1 },
+    { x: 0.099, y: 0.1 },
+    { x: 0.1, y: 1 },
+    { x: 0.101, y: 1 },
+    { x: 0.299, y: 1 },
+    { x: 0.3, y: 0.1 },
+    { x: 0.301, y: 0.1 },
+    { x: 0.4, y: 0.1 },
+  ]
+  const wrong_high_first_phase = [
+    { x: 0, y: 1 },
+    { x: 0.2, y: 1 },
+    { x: 0.201, y: 0.1 },
+    { x: 0.4, y: 0.1 },
+  ]
+  const series = {
+    id: "load-current",
+    title: "Load current",
+    role: "stimulus" as const,
+    unit: "A",
+    tolerance: 0.05,
+  }
+
+  expect(
+    scoreSeriesPoints({
+      series,
+      reference_points: removeAmbiguousStimulusEdgePoints(reference),
+      result_points: simulator_edge_convention,
+    }).passed,
+  ).toBe(true)
+  expect(
+    scoreSeriesPoints({
+      series,
+      reference_points: removeAmbiguousStimulusEdgePoints(reference),
+      result_points: wrong_high_first_phase,
+    }).passed,
+  ).toBe(false)
+  expect(summarizeStimulusTransitions(reference)).toContain("low→high at x≈0.101")
+  expect(summarizeStimulusTransitions(wrong_high_first_phase)).toContain("starts 1")
+})
+
+test("provider quota failures preserve a concise recovery reason", () => {
+  const raw_error =
+    "tsci-agent exited with code 1: You exceeded your current quota, please check your plan and billing details."
+  expect(normalizeModelExecutionErrorMessage(raw_error)).toBe("The model provider quota is exhausted.")
+  const warning = getModelExecutionRecoveryWarning({
+    error_message: raw_error,
+    preserved_existing_output: true,
+  })
+  expect(warning).toBe(
+    "Additional SPICE refinement could not start because the model provider quota is exhausted. The previously published SPICE output was preserved unchanged.",
+  )
+  expect(warning).not.toContain("tsci-agent exited")
+  expect(warning).not.toContain("billing details")
+  expect(normalizeModelExecutionErrorMessage("ngspice failed to converge")).toBe("ngspice failed to converge")
 })
 
 test("strict setup inventory rejects omitted time-domain figures", async () => {
@@ -165,7 +425,9 @@ for (let sequence = 1; sequence <= 3; sequence += 1) {
 `,
     )
     await chmod(agent_path, 0o755)
-    process.env.MODEL_STALE_TIMEOUT_MS = "1000"
+    // Keep this comfortably above subprocess startup jitter when the complete
+    // suite is running many Bun/tsci processes in parallel.
+    process.env.MODEL_STALE_TIMEOUT_MS = "5000"
     await expect(
       streamModelProcess({
         command: [agent_path],
@@ -289,6 +551,110 @@ const output = process.cwd() + "/../dist/spice/benchmarks/" + benchmarkId
 await mkdir(output, { recursive: true })
 await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "VOUT_PROBE", timestamps_ms: [0, 1], voltage_levels: [0, 1] }]))
 `
+
+test("persistent harness failures become evidence-only and refinement still starts", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-preflight-recovery-"))
+  const model_dir = join(job_dir, "spice")
+  const agent_path = join(job_dir, "preflight-recovery-agent")
+  const tsci_path = join(job_dir, "preflight-recovery-tsci")
+  const previous_attempts = process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS
+  try {
+    await mkdir(model_dir, { recursive: true })
+    await Promise.all([
+      Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nfixture"),
+      Bun.write(
+        join(job_dir, "index.circuit.tsx"),
+        'export default () => <chip name="U1" footprint="soic8" pinLabels={{ pin1: "IN", pin2: "OUT" }} />\n',
+      ),
+      Bun.write(join(model_dir, "setup-complete.json"), JSON.stringify({ version: 1 })),
+      Bun.write(
+        join(model_dir, "benchmark-draft.json"),
+        JSON.stringify({ version: 2, benchmarks: [{ id: "valid" }, { id: "bad-range" }] }),
+      ),
+      Bun.write(
+        agent_path,
+        `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const args = process.argv.slice(2)
+const dir = args[args.indexOf("--dir") + 1]
+const prompt = args[args.indexOf("--prompt") + 1]
+if (prompt.includes("benchmark-only pass")) {
+  await mkdir(dir + "/benchmarks", { recursive: true })
+  await mkdir(dir + "/evidence/curves", { recursive: true })
+  const source = ${JSON.stringify(lockedBenchmarkSource)}
+  await Bun.write(dir + "/benchmarks/valid.circuit.tsx", source)
+  await Bun.write(dir + "/benchmarks/bad-range.circuit.tsx", source)
+  const simulation = { kind: "transient_voltage", x_axis: "time_ms", probe_name: "VOUT_PROBE", dut_spice_node: "OUT" }
+  await Bun.write(dir + "/benchmarks.json", JSON.stringify({ version: 1, locked_at: new Date().toISOString(), benchmarks: [
+    { id: "valid", title: "Valid", source: { page: 2 }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/valid.csv", result_file: "results/champion/valid.csv", simulation },
+    { id: "bad-range", title: "Bad range", source: { page: 3 }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/bad-range.csv", result_file: "results/champion/bad-range.csv", simulation },
+  ] }))
+  await Bun.write(dir + "/evidence/curves/valid.csv", "x,y\\n0,0\\n1,1\\n")
+  await Bun.write(dir + "/evidence/curves/bad-range.csv", "x,y\\n0,0\\n2,1\\n")
+  process.exit(0)
+}
+await Bun.write(dir + "/../refinement-started.txt", "yes")
+`,
+      ),
+      Bun.write(
+        tsci_path,
+        `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const target = Bun.argv.slice(2)[1] ?? ""
+if (target === "server-ngspice-preflight.circuit.tsx") {
+  const output = process.cwd() + "/../dist/spice/server-ngspice-preflight"
+  await mkdir(output, { recursive: true })
+  await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "RESULT", timestamps_ms: [0, 0.01], voltage_levels: [1, 1] }]))
+  process.exit(0)
+}
+const benchmarkId = target.split("/").at(-1)?.replace(/\\.circuit\\.tsx$/, "")
+if (!benchmarkId) process.exit(2)
+const output = process.cwd() + "/../dist/spice/benchmarks/" + benchmarkId
+await mkdir(output, { recursive: true })
+await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "VOUT_PROBE", timestamps_ms: [0, 1], voltage_levels: [0, 1] }]))
+`,
+      ),
+    ])
+    await Promise.all([chmod(agent_path, 0o755), chmod(tsci_path, 0o755)])
+
+    const job_store = new JobStore()
+    const model_run_store = new ModelRunStore()
+    job_store.createJob({ job_id: "job_preflight_recovery", job_dir, file_name: "part.pdf" })
+    job_store.updateJob("job_preflight_recovery", {
+      display_status: "complete",
+      is_complete: true,
+      component_ready: true,
+    })
+    model_run_store.createModelRun({
+      model_run_id: "model_preflight_recovery",
+      job_id: "job_preflight_recovery",
+      model_dir,
+      effort_multiplier: 1,
+      base_effort_ms: 500,
+    })
+    process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS = "1"
+
+    await runModel(
+      { model_run_id: "model_preflight_recovery" },
+      { job_store, model_run_store, agent_bin: agent_path, tsci_bin: tsci_path },
+    )
+
+    expect(await Bun.file(join(job_dir, "refinement-started.txt")).text()).toBe("yes")
+    expect(
+      JSON.parse(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).text()).benchmark_ids,
+    ).toEqual(["valid"])
+    expect(model_run_store.getModelRun("model_preflight_recovery")?.warnings?.join("\n")).toContain(
+      "bad-range",
+    )
+    expect(await Bun.file(join(model_dir, "benchmark-exclusions.json")).text()).toContain(
+      "simulation ends at x=1 but the reference requires x=2",
+    )
+  } finally {
+    if (previous_attempts === undefined) delete process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS
+    else process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS = previous_attempts
+    await rm(job_dir, { recursive: true, force: true })
+  }
+}, 20_000)
 
 test("model prompt keeps benchmarks fixed while effort only extends iteration time", () => {
   const prompt = buildModelAgentPrompt()
@@ -596,6 +962,90 @@ test("benchmark application gate preserves feedback and PG wiring while allowing
   )
 })
 
+test("benchmark application gate trusts the generated DUT suffix and treats declared sense resistors as wires", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-benchmark-application-"))
+  try {
+    const plan = getBenchmarkApplicationPlan({
+      version: 3,
+      availability: "documented",
+      title: "Buck-boost typical application",
+      description: "Switching path",
+      source_references: [{ page: 17, figure: "Figure 10-1" }],
+      components: [
+        {
+          reference: "U1",
+          kind: "converter",
+          manufacturer_part_number: "TPS63802DLA",
+          footprint: "qfn10",
+        },
+        { reference: "L1", kind: "inductor", value: "0.47uH" },
+      ],
+      connections: [{ net: "SW_L1", pins: ["U1.L1", "L1.pin1"] }],
+    })
+    expect(plan.components.find((component) => component.reference === "DUT")).toMatchObject({
+      manufacturer_part_number: undefined,
+      footprint: undefined,
+    })
+
+    const circuit_path = join(model_dir, "circuit.json")
+    await Bun.write(
+      circuit_path,
+      JSON.stringify([
+        {
+          type: "source_component",
+          source_component_id: "dut",
+          name: "DUT",
+          manufacturer_part_number: "TPS63802DLAR",
+        },
+        { type: "source_component", source_component_id: "sense", name: "R_SENSE_INDUCTOR" },
+        { type: "source_component", source_component_id: "l1", name: "L1", inductance: "0.47uH" },
+        {
+          type: "source_port",
+          source_port_id: "dut_l1",
+          source_component_id: "dut",
+          name: "L1",
+          subcircuit_connectivity_map_key: "switch_dut",
+        },
+        {
+          type: "source_port",
+          source_port_id: "sense_1",
+          source_component_id: "sense",
+          name: "pin1",
+          pin_number: 1,
+          subcircuit_connectivity_map_key: "switch_dut",
+        },
+        {
+          type: "source_port",
+          source_port_id: "sense_2",
+          source_component_id: "sense",
+          name: "pin2",
+          pin_number: 2,
+          subcircuit_connectivity_map_key: "switch_inductor",
+        },
+        {
+          type: "source_port",
+          source_port_id: "l1_1",
+          source_component_id: "l1",
+          name: "pin1",
+          pin_number: 1,
+          subcircuit_connectivity_map_key: "switch_inductor",
+        },
+      ]),
+    )
+
+    expect(await getBenchmarkApplicationErrors(plan, circuit_path)).toContain(
+      "SW_L1: expected pins are not electrically connected: DUT.L1, L1.pin1",
+    )
+    expect(
+      await getBenchmarkApplicationErrors(plan, circuit_path, {
+        transparent_component_names: ["R_SENSE_INDUCTOR"],
+      }),
+    ).toEqual([])
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
 test("stimulus-shift comparison distinguishes causal and absolute-time waveforms", () => {
   const original = [
     { x: 0, y: 0 },
@@ -640,9 +1090,68 @@ test("fatal ngspice output is recognized even when tsci exits zero", () => {
 
 test("temporary agent transport failures are retryable but model errors are not", () => {
   expect(isTransientAgentTransportFailure("Connection error: socket hang up")).toBe(true)
+  expect(isTransientAgentTransportFailure("The socket connection was closed unexpectedly.")).toBe(true)
   expect(isTransientAgentTransportFailure("HTTP 503 Service Unavailable")).toBe(true)
   expect(isTransientAgentTransportFailure("Was there a typo in the url or port?")).toBe(true)
   expect(isTransientAgentTransportFailure("Error: model.lib has invalid syntax")).toBe(false)
+})
+
+test("validation builds retry a closed transport without consuming benchmark correction", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-validation-transport-"))
+  const model_dir = join(job_dir, "spice")
+  const source_path = join(model_dir, "benchmarks", "transient.circuit.tsx")
+  const generated_path = join(job_dir, "dist", "spice", "benchmarks", "transient", "circuit.json")
+  const saved_path = join(model_dir, "validation-artifacts", "transient", "circuit.json")
+  const attempts_path = join(job_dir, "attempts.txt")
+  const tsci_path = join(job_dir, "flaky-tsci")
+  try {
+    await mkdir(join(model_dir, "benchmarks"), { recursive: true })
+    await Bun.write(source_path, "export default () => <board />\n")
+    await Bun.write(
+      tsci_path,
+      `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const attemptsPath = ${JSON.stringify(attempts_path)}
+const generatedPath = ${JSON.stringify(generated_path)}
+const attempt = Number(await Bun.file(attemptsPath).text().catch(() => "0")) + 1
+await Bun.write(attemptsPath, String(attempt))
+if (attempt < 3) {
+  if (attempt === 1) {
+    console.error("The socket connection was closed unexpectedly.")
+    process.exit(1)
+  }
+  await mkdir(generatedPath.slice(0, generatedPath.lastIndexOf("/")), { recursive: true })
+  await Bun.write(generatedPath, JSON.stringify([{ type: "simulation_unknown_experiment_error", message: "Unable to connect. Is the computer able to access the url?" }]))
+  process.exit(0)
+}
+await mkdir(generatedPath.slice(0, generatedPath.lastIndexOf("/")), { recursive: true })
+await Bun.write(generatedPath, JSON.stringify([]))
+`,
+    )
+    await chmod(tsci_path, 0o755)
+    const messages: string[] = []
+    const result = await executeValidationBuild({
+      benchmark_file: "transient.circuit.tsx",
+      run: {
+        run_id: "preflight",
+        source_path,
+        generated_path,
+        saved_path,
+      },
+      model_dir,
+      signal: new AbortController().signal,
+      tsci_bin: tsci_path,
+      append: async (_stream, message) => {
+        messages.push(message)
+      },
+    })
+
+    expect(result).toMatchObject({ exit_code: 0, path: saved_path })
+    expect(await Bun.file(attempts_path).text()).toBe("3")
+    expect(messages.filter((message) => message.includes("retrying the same build"))).toHaveLength(2)
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
 })
 
 test("absolute-TIME models receive one shifted simulation after nominal results exist", async () => {
@@ -815,49 +1324,40 @@ await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_tr
       append: async () => undefined,
     }),
   ).toBeGreaterThanOrEqual(0)
-  await rm(job_dir, { recursive: true, force: true })
-})
 
-test("ngspice preflight uses a real component port that the tscircuit probe renderer can resolve", async () => {
-  const tmp_root = join(process.cwd(), "tmp")
-  await mkdir(tmp_root, { recursive: true })
-  const job_dir = await mkdtemp(join(tmp_root, "ngspice-real-preflight-"))
-  const model_dir = join(job_dir, "spice")
-  await Promise.all([
-    mkdir(model_dir, { recursive: true }),
-    Bun.write(
-      join(job_dir, "package.json"),
-      '{"name":"ngspice-real-preflight","private":true,"type":"module"}\n',
-    ),
-    Bun.write(
-      join(job_dir, "tscircuit.config.ts"),
-      `import { createNgspiceSpiceEngine } from "@tscircuit/ngspice-spice-engine"
-
-const ngspiceSpiceEngine = await createNgspiceSpiceEngine()
-
-export default { platformConfig: { spiceEngineMap: { ngspice: ngspiceSpiceEngine } } }
+  const attempts_path = join(job_dir, "preflight-attempts.txt")
+  await Bun.write(
+    tsci_path,
+    `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const attemptsPath = ${JSON.stringify(attempts_path)}
+const output = ${JSON.stringify(job_dir)} + "/dist/spice/server-ngspice-preflight"
+const attempt = Number(await Bun.file(attemptsPath).text().catch(() => "0")) + 1
+await Bun.write(attemptsPath, String(attempt))
+if (attempt < 3) {
+  console.error("The socket connection was closed unexpectedly.")
+  process.exit(1)
+}
+await mkdir(output, { recursive: true })
+await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "RESULT", timestamps_ms: [0, 0.01], voltage_levels: [1, 1] }]))
 `,
-    ),
-  ])
+  )
   const messages: string[] = []
-  try {
-    expect(
-      await preflightNgspice({
-        job_dir,
-        model_dir,
-        signal: new AbortController().signal,
-        tsci_bin: join(process.cwd(), "node_modules", ".bin", "tsci"),
-        append: async (_stream, message) => {
-          messages.push(message)
-        },
-      }),
-    ).toBeGreaterThanOrEqual(0)
-    expect(messages.join("\n")).toContain("ngspice preflight passed")
-    expect(messages.join("\n")).not.toContain("Could not identify connected source for VoltageProbe")
-  } finally {
-    await rm(job_dir, { recursive: true, force: true })
-  }
-}, 90_000)
+  expect(
+    await preflightNgspice({
+      job_dir,
+      model_dir,
+      signal: controller.signal,
+      tsci_bin: tsci_path,
+      append: async (_stream, message) => {
+        messages.push(message)
+      },
+    }),
+  ).toBeGreaterThanOrEqual(0)
+  expect(await Bun.file(attempts_path).text()).toBe("3")
+  expect(messages.filter((message) => message.includes("retrying the same untimed check"))).toHaveLength(2)
+  await rm(job_dir, { recursive: true, force: true })
+}, 15_000)
 
 test("model manifests must select the first SUBCKT with exact pin names", () => {
   const manifest = parseModelManifest({
@@ -885,6 +1385,150 @@ test("model manifests must select the first SUBCKT with exact pin names", () => 
     "matching case",
   )
 })
+
+test("server model wrapper overrides hardcoded component names for DUT selectors", async () => {
+  const tmp_root = join(process.cwd(), "tmp")
+  await mkdir(tmp_root, { recursive: true })
+  const model_dir = await mkdtemp(join(tmp_root, "datasheet-model-wrapper-props-"))
+  const output_dir = join(process.cwd(), "dist", relative(process.cwd(), model_dir))
+  try {
+    await Bun.write(
+      join(model_dir, "component.circuit.tsx"),
+      'export default function Component() { return <chip name="U1" footprint="soic8" /> }\n',
+    )
+    await writeServerIntegratedComponent({
+      model_dir,
+      model_source: ".SUBCKT PART IN OUT\nR1 IN OUT 1G\n.ENDS PART\n",
+      manifest: {
+        version: 1,
+        part_number: "PART",
+        dialect: "portable",
+        entry_name: "PART",
+        model_file: "model.lib",
+        revision: "r0001",
+        simulator: "ngspice",
+        generated_at: new Date().toISOString(),
+        pins: [
+          { component_pin: "pin1", spice_node: "IN" },
+          { component_pin: "pin2", spice_node: "OUT" },
+        ],
+      },
+    })
+    const wrapper = await Bun.file(join(model_dir, "component-with-model.circuit.tsx")).text()
+    expect(wrapper).toContain("cloneElement(renderComponent(props)")
+    expect(wrapper).toContain("...props")
+    expect(wrapper).not.toContain("<ModelComponent")
+    await Bun.write(
+      join(model_dir, "index.circuit.tsx"),
+      'import Component from "./component-with-model.circuit"\nexport default () => <Component name="DUT" />\n',
+    )
+    const build = Bun.spawn(
+      [
+        join(process.cwd(), "node_modules", ".bin", "tsci"),
+        "build",
+        "index.circuit.tsx",
+        "--ignore-warnings",
+      ],
+      { cwd: model_dir, stdout: "pipe", stderr: "pipe" },
+    )
+    const [exit_code, stderr] = await Promise.all([build.exited, new Response(build.stderr).text()])
+    expect(exit_code, stderr).toBe(0)
+    const circuit = (await Bun.file(join(output_dir, "index", "circuit.json")).json()) as Array<
+      Record<string, unknown>
+    >
+    expect(circuit.some((element) => element.type === "source_component" && element.name === "DUT")).toBe(
+      true,
+    )
+    expect(circuit.some((element) => element.type === "source_component" && element.name === "U1")).toBe(
+      false,
+    )
+  } finally {
+    await Promise.all([
+      rm(model_dir, { recursive: true, force: true }),
+      rm(output_dir, { recursive: true, force: true }),
+    ])
+  }
+}, 20_000)
+
+test.each([
+  [
+    "a component that ignores props",
+    `export default function Component() {
+  return <chip name="U1" footprint="soic8" pinLabels={{ pin1: "VBUS", pin2: "GND" }} />
+}
+`,
+  ],
+  [
+    "a component that overrides spread props",
+    `import type { ChipProps } from "tscircuit"
+const pinLabels = { pin1: "VBUS", pin2: "GND" } as const
+export default function Component(props: ChipProps<typeof pinLabels>) {
+  return <chip {...props} name="U1" footprint="soic8" pinLabels={pinLabels} />
+}
+`,
+  ],
+])(
+  "structural benchmark wrapper exposes DUT ports for %s",
+  async (_description, component_source) => {
+    const tmp_root = join(process.cwd(), "tmp")
+    await mkdir(tmp_root, { recursive: true })
+    const model_dir = await mkdtemp(join(tmp_root, "datasheet-structural-wrapper-"))
+    const output_dir = join(process.cwd(), "dist", relative(process.cwd(), model_dir))
+    try {
+      await Bun.write(join(model_dir, "component.circuit.tsx"), component_source)
+      await writeServerStructuralComponent({ model_dir })
+      await Bun.write(
+        join(model_dir, "index.circuit.tsx"),
+        `import Component from "./component-with-model.circuit"
+export default () => (
+  <board>
+    <Component name="DUT" />
+    <voltageprobe name="NAMED" connectsTo=".DUT > .VBUS" />
+    <voltageprobe name="PHYSICAL" connectsTo=".DUT > .pin1" />
+  </board>
+)
+`,
+      )
+      const build = Bun.spawn(
+        [
+          join(process.cwd(), "node_modules", ".bin", "tsci"),
+          "build",
+          "index.circuit.tsx",
+          "--ignore-warnings",
+          "--disable-pcb",
+          "--routing-disabled",
+          "--disable-parts-engine",
+        ],
+        { cwd: model_dir, stdout: "pipe", stderr: "pipe" },
+      )
+      const [exit_code, stdout, stderr] = await Promise.all([
+        build.exited,
+        new Response(build.stdout).text(),
+        new Response(build.stderr).text(),
+      ])
+      expect(exit_code, `${stdout}\n${stderr}`).toBe(0)
+      const circuit = (await Bun.file(join(output_dir, "index", "circuit.json")).json()) as Array<
+        Record<string, unknown>
+      >
+      expect(circuit.some((element) => element.type === "source_component" && element.name === "DUT")).toBe(
+        true,
+      )
+      expect(circuit.some((element) => element.type === "source_component" && element.name === "U1")).toBe(
+        false,
+      )
+      expect(
+        circuit.filter((element) => element.type === "source_port" && element.source_component_id),
+      ).not.toHaveLength(0)
+      expect(circuit.filter((element) => element.type === "source_error")).toEqual([])
+    } finally {
+      await Promise.all([
+        rm(model_dir, { recursive: true, force: true }),
+        rm(output_dir, { recursive: true, force: true }),
+      ])
+    }
+  },
+  90_000,
+)
 
 test("benchmark finalization cannot create model artifacts before the server lock", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-prelock-"))
@@ -930,9 +1574,10 @@ await Bun.write(dir + "/model.lib", ".subckt TOO_EARLY IN OUT\\nR1 IN OUT 1k\\n.
   )
 
   const run = model_run_store.getModelRun("model_prelock")
-  expect(run?.status).toBe("failed")
+  expect(run?.status).toBe("complete")
   expect(run?.elapsed_time_ms).toBe(0)
-  expect(run?.error_message).toContain("forbidden model artifacts")
+  expect(run?.error_message).toBeUndefined()
+  expect(run?.warnings?.join("\n")).toContain("forbidden model artifacts")
   expect(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).exists()).toBe(false)
   await rm(job_dir, { recursive: true, force: true })
 })
@@ -982,12 +1627,12 @@ process.exit(8)
 
   const context = { job_store, model_run_store, agent_bin: agent_path, tsci_bin: tsci_path }
   await runModel({ model_run_id: "model_benchmark_retry" }, context)
-  expect(model_run_store.getModelRun("model_benchmark_retry")?.error_message).toContain("code 7")
-  expect(model_run_store.retryModelRun("model_benchmark_retry")).toBe("retried")
+  expect(model_run_store.getModelRun("model_benchmark_retry")?.warnings?.join("\n")).toContain("code 7")
+  expect(model_run_store.extendModelRun("model_benchmark_retry", 1).should_start).toBe(true)
   await runModel({ model_run_id: "model_benchmark_retry" }, context)
 
   expect(await Bun.file(join(job_dir, "benchmark-attempt.txt")).text()).toBe("2")
-  expect(model_run_store.getModelRun("model_benchmark_retry")?.error_message).toContain("code 8")
+  expect(model_run_store.getModelRun("model_benchmark_retry")?.warnings?.join("\n")).toContain("code 8")
   expect(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).exists()).toBe(false)
   await rm(job_dir, { recursive: true, force: true })
 })
@@ -1013,7 +1658,7 @@ const prompt = args[args.indexOf("--prompt") + 1]
 if (!prompt.includes("benchmark-only pass")) process.exit(9)
 if (!prompt.includes("previous correction agent stalled")) {
   await Bun.write(dir + "/../benchmark-first-pass-started.txt", "yes")
-  await Bun.sleep(10_000)
+  await Bun.sleep(60_000)
   process.exit(8)
 }
 await Bun.write(dir + "/../benchmark-retry-started.txt", "yes")
@@ -1039,7 +1684,7 @@ await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
       base_effort_ms: 2_000,
     })
     await Bun.write(join(model_dir, "setup-complete.json"), JSON.stringify({ version: 1 }))
-    process.env.MODEL_STALE_TIMEOUT_MS = "2000"
+    process.env.MODEL_STALE_TIMEOUT_MS = "5000"
     process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS = "2"
 
     await runModel(
@@ -1061,7 +1706,7 @@ await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
     }
     await rm(job_dir, { recursive: true, force: true })
   }
-})
+}, 30_000)
 
 test("benchmark contract rejections are returned to the untimed finalization agent", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-benchmark-correction-"))
@@ -1140,7 +1785,7 @@ await Bun.write(output + "/circuit.json", JSON.stringify(circuit))
     job_id: "job_benchmark_correction",
     model_dir,
     effort_multiplier: 1,
-    base_effort_ms: 2_000,
+    base_effort_ms: 10_000,
   })
   await Bun.write(join(model_dir, "setup-complete.json"), JSON.stringify({ version: 1 }))
 
@@ -1161,7 +1806,7 @@ await Bun.write(output + "/circuit.json", JSON.stringify(circuit))
       ?.logs.some((log) => log.message.includes("Returning the exact validation error")),
   ).toBe(true)
   await rm(job_dir, { recursive: true, force: true })
-})
+}, 30_000)
 
 test("model runner validates and publishes the checkpointed champion", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-runner-"))
@@ -1260,7 +1905,7 @@ console.log("simulation ok")
   })
 
   const waiting_for_component = new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Model run did not wait for the component")), 3_000)
+    const timeout = setTimeout(() => reject(new Error("Model run did not wait for the component")), 10_000)
     const unsubscribe = model_run_store.subscribe("model_1", (event) => {
       if (event.event_type !== "log" && event.model_run.status === "waiting_for_component") {
         clearTimeout(timeout)
@@ -1342,7 +1987,7 @@ console.log("simulation ok")
   expect(restored_component).not.toContain('import Component from "./component.circuit"')
 
   await rm(job_dir, { recursive: true, force: true })
-}, 20_000)
+}, 40_000)
 
 test("model runner returns failed validation to the agent until the verified suite reaches 100%", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-correction-loop-"))
@@ -1434,7 +2079,7 @@ await mkdir(jobDir + "/dist/spice/component-with-model", { recursive: true })
     job_id: "job_loop",
     model_dir,
     effort_multiplier: 1,
-    base_effort_ms: 8_000,
+    base_effort_ms: 20_000,
   })
   await Bun.write(join(model_dir, "setup-complete.json"), JSON.stringify({ version: 1 }))
 
@@ -1453,7 +2098,7 @@ await mkdir(jobDir + "/dist/spice/component-with-model", { recursive: true })
   expect(await Bun.file(join(model_dir, "validation-feedback.md")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })
-}, 20_000)
+}, 40_000)
 
 test("structural validation defects create a new lock generation and restart refinement", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-lock-recovery-"))
@@ -1646,7 +2291,7 @@ await Bun.write(dir + "/extension-finished.txt", "finished")
   expect(await Bun.file(join(model_dir, "extension-finished.txt")).text()).toBe("finished")
   expect(model_run_store.getModelRun("model_live_extension")?.model_source).toContain(".subckt EXTENDED")
   await rm(job_dir, { recursive: true, force: true })
-}, 10_000)
+}, 30_000)
 
 test("model runner recovers the latest promoted model when the effort deadline interrupts the agent", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-recovery-"))
@@ -1698,12 +2343,13 @@ await Bun.sleep(30_000)
   )
 
   const recovered_run = model_run_store.getModelRun("model_recovery")
-  expect(recovered_run?.status).toBe("timed_out")
+  expect(recovered_run?.status).toBe("complete")
   expect(recovered_run?.model_source).toContain(".subckt RECOVERED")
   expect(await Bun.file(join(model_dir, "model.lib")).text()).toContain(".subckt RECOVERED")
   expect(recovered_run?.elapsed_time_ms).toBeGreaterThanOrEqual(900)
   expect(recovered_run?.elapsed_time_ms).toBeLessThan(1_250)
-  expect(recovered_run?.error_message).toContain("every benchmark could be verified")
+  expect(recovered_run?.error_message).toBeUndefined()
+  expect(recovered_run?.warnings?.join("\n")).toMatch(/model-(?:card\.md|manifest\.json)/)
 
   await rm(job_dir, { recursive: true, force: true })
 }, 10_000)

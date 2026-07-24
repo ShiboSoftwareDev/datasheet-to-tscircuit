@@ -41,6 +41,7 @@ test("persisted component and model jobs survive a server restart and deletion r
   const model_dir = join(job_dir, "spice")
   await Promise.all([
     mkdir(join(job_dir, "dist", "index"), { recursive: true }),
+    mkdir(join(job_dir, "dist", "spice", "component-with-model"), { recursive: true }),
     mkdir(join(job_dir, "dist", "typical-application"), { recursive: true }),
   ])
   await Promise.all([
@@ -56,7 +57,17 @@ test("persisted component and model jobs survive a server restart and deletion r
     ),
     Bun.write(
       join(job_dir, "dist", "index", "circuit.json"),
-      JSON.stringify([{ type: "source_component", source_component_id: "restored" }]),
+      JSON.stringify([
+        { type: "source_component", source_component_id: "restored" },
+        { type: "pcb_component", source_component_id: "restored" },
+      ]),
+    ),
+    Bun.write(
+      join(job_dir, "dist", "spice", "component-with-model", "circuit.json"),
+      JSON.stringify([
+        { type: "source_component", source_component_id: "restored" },
+        { type: "simulation_spice_subcircuit", source_component_id: "restored" },
+      ]),
     ),
     Bun.write(
       join(job_dir, "dist", "typical-application", "circuit.json"),
@@ -82,6 +93,7 @@ test("persisted component and model jobs survive a server restart and deletion r
     model_run_id: "model_restore",
     job_id: "job_restore",
     model_dir,
+    use_openai: true,
     effort_multiplier: 2,
     base_effort_ms: 1_000,
   })
@@ -102,17 +114,22 @@ test("persisted component and model jobs survive a server restart and deletion r
 
   expect(restored).toEqual({ jobs_restored: 1, model_runs_restored: 1 })
   expect(restored_jobs.getJob("job_restore")?.file_name).toBe("original-sensor.pdf")
+  expect(restored_jobs.getJob("job_restore")?.use_openai).toBe(true)
   expect(restored_jobs.getJob("job_restore")?.display_status).toBe("complete")
   expect(restored_jobs.getJob("job_restore")?.component_ready).toBe(true)
   expect(restored_jobs.getJob("job_restore")?.typical_application_title).toBe("Restored sensor application")
   expect(restored_jobs.getJob("job_restore")?.logs[0]?.message).toBe("Original component log\n")
   expect(restored_jobs.getJob("job_restore")?.circuit_json?.[0]?.type).toBe("source_component")
+  expect(
+    restored_jobs.getJob("job_restore")?.circuit_json?.some((element) => element.type === "pcb_component"),
+  ).toBe(true)
   expect(restored_jobs.getJob("job_restore")?.typical_application_circuit_json?.[0]?.type).toBe(
     "source_component",
   )
 
   const restored_model = restored_models.getModelRunForJob("job_restore")
   expect(restored_model?.model_run_id).toBe("model_restore")
+  expect(restored_model?.use_openai).toBe(true)
   expect(restored_model?.status).toBe("failed")
   expect(restored_model?.error_message).toContain("server restarted")
   expect(restored_model?.model_source).toContain(".SUBCKT RESTORED")
@@ -158,6 +175,7 @@ test("failed component validation is not restored as ready", async () => {
     job_id: "failed_component",
     job_dir,
     file_name: "failed-component.pdf",
+    use_openai: true,
   })
   original_jobs.updateJob("failed_component", {
     display_status: "failed",
@@ -187,6 +205,7 @@ test("failed component validation is not restored as ready", async () => {
   })
 
   expect(restored_jobs.getJob("failed_component")?.display_status).toBe("failed")
+  expect(restored_jobs.getJob("failed_component")?.use_openai).toBe(true)
   expect(restored_jobs.getJob("failed_component")?.validation?.component_drc).toBe("failed")
   expect(restored_jobs.getJob("failed_component")?.component_ready).toBe(false)
 

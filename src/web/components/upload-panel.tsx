@@ -1,15 +1,26 @@
 import { ArrowRight, Bot, Cloud, FileText, FlaskConical, Sparkles, UploadCloud, X } from "lucide-react"
 import { useRef, useState } from "react"
 import { createJob } from "../api"
+import { getInitialUseOpenai, saveAgentProvider } from "../agent-provider-preference"
 import type { Job } from "@/shared/job-types"
 
 const MODEL_ENABLED_STORAGE_KEY = "datasheet-create-pspice-model"
 const MODEL_EFFORT_STORAGE_KEY = "datasheet-model-effort"
 
+type PreferenceStorage = Pick<Storage, "getItem" | "setItem">
+
+function getPreferenceStorage(): PreferenceStorage | undefined {
+  try {
+    return typeof window === "undefined" ? undefined : window.localStorage
+  } catch {
+    return undefined
+  }
+}
+
 function getInitialModelEnabled(): boolean {
   try {
-    const saved = window.localStorage.getItem(MODEL_ENABLED_STORAGE_KEY)
-    return saved === null ? true : saved === "true"
+    const saved = getPreferenceStorage()?.getItem(MODEL_ENABLED_STORAGE_KEY)
+    return saved == null ? true : saved === "true"
   } catch {
     return true
   }
@@ -17,7 +28,7 @@ function getInitialModelEnabled(): boolean {
 
 function getInitialModelEffort(): number {
   try {
-    const saved = Number(window.localStorage.getItem(MODEL_EFFORT_STORAGE_KEY))
+    const saved = Number(getPreferenceStorage()?.getItem(MODEL_EFFORT_STORAGE_KEY))
     return [1, 2, 4, 8].includes(saved) ? saved : 1
   } catch {
     return 1
@@ -38,7 +49,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
   const [file, setFile] = useState<File>()
   const [is_dragging, setIsDragging] = useState(false)
   const [additional_instructions, setAdditionalInstructions] = useState("")
-  const [use_openai, setUseOpenai] = useState(false)
+  const [use_openai, setUseOpenai] = useState(getInitialUseOpenai)
   const [create_pspice_model, setCreatePspiceModel] = useState(getInitialModelEnabled)
   const [model_effort, setModelEffort] = useState(getInitialModelEffort)
   const [is_uploading, setIsUploading] = useState(false)
@@ -52,6 +63,11 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
     } catch {
       // The preference is optional when storage is unavailable.
     }
+  }
+
+  const updateUseOpenai = (next_use_openai: boolean) => {
+    setUseOpenai(next_use_openai)
+    saveAgentProvider(next_use_openai)
   }
 
   const updateModelEffort = (effort: number) => {
@@ -187,7 +203,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
               type="radio"
               name="agent-provider"
               checked={!use_openai}
-              onChange={() => setUseOpenai(false)}
+              onChange={() => updateUseOpenai(false)}
             />
           </label>
           <label className={`agent-provider-card ${use_openai ? "selected" : ""}`}>
@@ -202,7 +218,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
               type="radio"
               name="agent-provider"
               checked={use_openai}
-              onChange={() => setUseOpenai(true)}
+              onChange={() => updateUseOpenai(true)}
             />
           </label>
         </div>

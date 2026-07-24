@@ -3,6 +3,7 @@ import { dirname, join } from "node:path"
 import type { JobLogStream } from "@/shared/job-types"
 import ts from "typescript"
 import { getCircuitBuildDiagnostics } from "../model-simulation-validator"
+import { writeServerStructuralComponent } from "./attach-model-to-generated-component"
 import { listModelBenchFiles } from "./list-model-bench-files"
 import { ModelInfrastructureError, streamModelProcess } from "./stream-model-process"
 import { captureProcessOutput, summarizeProcessFailure } from "./model-process-output"
@@ -20,10 +21,7 @@ export async function validateBenchmarkSources(input: {
   if (await Bun.file(temporary_component).exists()) {
     throw new Error("A model wrapper exists before provisional benchmark validation")
   }
-  await Bun.write(
-    temporary_component,
-    'import Component from "./component.circuit"\n\nexport default Component\n',
-  )
+  await writeServerStructuralComponent({ model_dir: input.model_dir })
   try {
     const benchmark_files = await listModelBenchFiles(input.model_dir)
     if (input.signal.aborted) throw new Error("Provisional benchmark validation was cancelled")

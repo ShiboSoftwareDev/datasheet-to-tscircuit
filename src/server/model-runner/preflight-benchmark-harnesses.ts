@@ -2,7 +2,11 @@ import { readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 import type { JobLogStream } from "@/shared/job-types"
 import { parseTypicalApplicationPlan } from "../job-runner"
-import { parseBenchmarkManifest, resolveWorkspaceFile } from "../model-scorer/parse-benchmark-manifest"
+import {
+  type Point,
+  parseBenchmarkManifest,
+  resolveWorkspaceFile,
+} from "../model-scorer/parse-benchmark-manifest"
 import {
   getBenchmarkRangeCoverageError,
   readCsvPoints,
@@ -30,6 +34,21 @@ import {
   runValidationTaskPool,
   type ValidationBuildResult,
 } from "./validate-champion"
+
+export interface BenchmarkHarnessPreflightFailure {
+  benchmark_file: string
+  error_message: string
+}
+
+export class BenchmarkHarnessPreflightError extends Error {
+  readonly failures: BenchmarkHarnessPreflightFailure[]
+
+  constructor(failures: BenchmarkHarnessPreflightFailure[]) {
+    super(`Benchmark simulation preflight failed: ${formatGroupedBenchmarkFailures(failures)}`)
+    this.name = "BenchmarkHarnessPreflightError"
+    this.failures = failures
+  }
+}
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
@@ -66,6 +85,61 @@ export function getUnpoweredRequiredPinErrors(circuit_json: unknown, probe_names
       ? [`required-power stimulus ${probe_name} remained effectively unpowered (peak ${peak_magnitude} V)`]
       : []
   })
+}
+
+export function formatGroupedBenchmarkFailures(
+  failures: Array<{ benchmark_file: string; error_message: string }>,
+): string {
+  const files_by_error = new Map<string, string[]>()
+  for (const failure of failures) {
+    const files = files_by_error.get(failure.error_message) ?? []
+    files.push(failure.benchmark_file)
+    files_by_error.set(failure.error_message, files)
+  }
+  return [...files_by_error.entries()]
+    .map(([error_message, benchmark_files]) =>
+      benchmark_files.length === 1
+        ? `${benchmark_files[0]}: ${error_message}`
+        : `${benchmark_files.length} benchmarks (${benchmark_files.join(", ")}): ${error_message}`,
+    )
+    .join(" | ")
+}
+
+export function removeAmbiguousStimulusEdgePoints(reference_points: Point[]): Point[] {
+  if (reference_points.length < 3) return reference_points
+  const x_values = reference_points.map((point) => point.x)
+  const y_values = reference_points.map((point) => point.y)
+  const x_span = Math.max(...x_values) - Math.min(...x_values)
+  const y_span = Math.max(...y_values) - Math.min(...y_values)
+  if (!(x_span > 0) || !(y_span > 0)) return reference_points
+  return reference_points.filter((point, index) => {
+    const next = reference_points[index + 1]
+    if (!next) return true
+    const is_nearby_edge = next.x - point.x <= x_span * 0.02 && Math.abs(next.y - point.y) >= y_span * 0.25
+    // Either side of an ideal discontinuity is valid at its exact timestamp.
+    // The adjacent post-edge sample still enforces the transition.
+    return !is_nearby_edge
+  })
+}
+
+export function summarizeStimulusTransitions(points: Point[]): string {
+  if (points.length < 2) return "insufficient waveform points"
+  const values = points.map((point) => point.y)
+  const low = Math.min(...values)
+  const high = Math.max(...values)
+  const midpoint = low + (high - low) / 2
+  const transitions: string[] = []
+  let previous_high = points[0]!.y >= midpoint
+  for (let index = 1; index < points.length; index += 1) {
+    const current_high = points[index]!.y >= midpoint
+    if (current_high === previous_high) continue
+    transitions.push(`${previous_high ? "high→low" : "low→high"} at x≈${points[index]!.x}`)
+    previous_high = current_high
+    if (transitions.length >= 6) break
+  }
+  return `starts ${points[0]!.y}, ends ${points.at(-1)!.y}; ${
+    transitions.length > 0 ? transitions.join(", ") : "no level transition"
+  }`
 }
 
 export async function preflightBenchmarkHarnesses(input: {
@@ -135,6 +209,15 @@ export async function preflightBenchmarkHarnesses(input: {
       signal: input.signal,
       run: async (benchmark_file) => {
         const benchmark_id = benchmark_file.replace(/\.circuit\.tsx$/i, "")
+        const benchmark = benchmarks_by_id.get(benchmark_id)
+        if (!benchmark) {
+          results.set(benchmark_file, {
+            exit_code: 1,
+            failure_kind: "benchmark_structure",
+            error_message: `benchmarks.json has no ${benchmark_id} benchmark`,
+          })
+          return
+        }
         const benchmark_source_path = join(input.model_dir, "benchmarks", benchmark_file)
         const power_probe_contract_errors = getRequiredPowerProbeContractErrors(
           await readFile(benchmark_source_path, "utf8"),
@@ -165,6 +248,11 @@ export async function preflightBenchmarkHarnesses(input: {
           const application_errors = await getBenchmarkApplicationErrors(
             benchmark_application_plan,
             result.path,
+            {
+              transparent_component_names: benchmark.series.flatMap((series) =>
+                series.simulation.sense_resistor ? [series.simulation.sense_resistor] : [],
+              ),
+            },
           )
           if (application_errors.length > 0) {
             result = {
@@ -177,8 +265,6 @@ export async function preflightBenchmarkHarnesses(input: {
         }
         if (result.exit_code === 0 && result.path) {
           try {
-            const benchmark = benchmarks_by_id.get(benchmark_id)
-            if (!benchmark) throw new Error(`benchmarks.json has no ${benchmark_id} benchmark`)
             const circuit_json: unknown = JSON.parse(await readFile(result.path, "utf8"))
             for (const series of benchmark.series) {
               const definition = parseSimulationDefinition(series.simulation, {
@@ -217,7 +303,7 @@ export async function preflightBenchmarkHarnesses(input: {
               if (series.role === "stimulus") {
                 const stimulus_score = scoreSeriesPoints({
                   series,
-                  reference_points,
+                  reference_points: removeAmbiguousStimulusEdgePoints(reference_points),
                   result_points,
                   x_scale: benchmark.x_scale,
                 })
@@ -231,7 +317,9 @@ export async function preflightBenchmarkHarnesses(input: {
                       stimulus_score.error_message
                         ? `: ${stimulus_score.error_message}`
                         : ` (NRMSE ${stimulus_score.normalized_rmse}, max ${stimulus_score.normalized_max_error})`
-                    }; reference range ${reference_range} ${series.unit}, simulated range ${simulated_range} ${series.unit}`,
+                    }; reference range ${reference_range} ${series.unit}, simulated range ${simulated_range} ${series.unit}; expected ${summarizeStimulusTransitions(
+                      reference_points,
+                    )}; simulated ${summarizeStimulusTransitions(result_points)}`,
                   )
                 }
               }
@@ -267,14 +355,15 @@ export async function preflightBenchmarkHarnesses(input: {
       const result = results.get(benchmark_file)
       return !result || result.exit_code !== 0 || !result.path
         ? [
-            `${benchmark_file}: ${
-              result?.error_message ?? "stub-model simulation did not produce Circuit JSON"
-            }`,
+            {
+              benchmark_file,
+              error_message: result?.error_message ?? "stub-model simulation did not produce Circuit JSON",
+            },
           ]
         : []
     })
     if (failures.length > 0) {
-      throw new Error(`Benchmark simulation preflight failed: ${failures.join(" | ")}`)
+      throw new BenchmarkHarnessPreflightError(failures)
     }
     await input.append("system", "Every provisional benchmark harness completed stub-model simulation.\n")
   } finally {

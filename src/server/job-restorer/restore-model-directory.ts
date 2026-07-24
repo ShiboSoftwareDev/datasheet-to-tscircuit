@@ -31,8 +31,12 @@ export async function restoreModelDirectory(input: {
     typeof saved?.status === "string" && MODEL_STATUSES.has(saved.status as ModelRunStatus)
       ? (saved.status as ModelRunStatus)
       : "timed_out"
+  const saved_warnings = Array.isArray(saved?.warnings)
+    ? saved.warnings.filter((warning): warning is string => typeof warning === "string")
+    : []
   const has_verified_simulation = await hasCompleteVerifiedSimulationReport(input.model_dir)
-  const invalidated_legacy_completion = saved_status === "complete" && !has_verified_simulation
+  const invalidated_legacy_completion =
+    saved_status === "complete" && saved_warnings.length === 0 && !has_verified_simulation
   if (invalidated_legacy_completion) saved_status = "timed_out"
   const run_control = await readJson(join(input.model_dir, "run-control.json"))
   const control = isRecord(run_control) ? run_control : undefined
@@ -51,6 +55,7 @@ export async function restoreModelDirectory(input: {
   const model_run: ModelRun = {
     model_run_id: typeof saved?.model_run_id === "string" ? saved.model_run_id : `restored-${input.job_id}`,
     job_id: input.job_id,
+    use_openai: typeof saved?.use_openai === "boolean" ? saved.use_openai : undefined,
     created_at:
       typeof saved?.created_at === "string" ? saved.created_at : directory_stat.birthtime.toISOString(),
     updated_at: typeof saved?.updated_at === "string" ? saved.updated_at : directory_stat.mtime.toISOString(),
@@ -65,6 +70,7 @@ export async function restoreModelDirectory(input: {
       : typeof saved?.error_message === "string"
         ? saved.error_message
         : undefined,
+    warnings: saved_warnings,
     effort_multiplier,
     base_effort_ms,
     allocated_time_ms:

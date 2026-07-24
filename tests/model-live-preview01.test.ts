@@ -105,3 +105,34 @@ test("the reference section warns when the current graph is outside tolerance", 
   expect(html).toContain("NRMSE 40.0%")
   expect(html).toContain("max error 75.0%")
 })
+
+test("benchmark previews render one selectable graph instead of every graph at once", () => {
+  const html = renderToStaticMarkup(
+    createElement(ModelLivePreview, {
+      job_id: "job_1",
+      is_complete: true,
+      preview_options: [
+        {
+          benchmark_id: "line-wide",
+          title: "Line transient",
+          circuit_file: "benchmarks/line-wide.circuit.tsx",
+        },
+        {
+          benchmark_id: "line-full",
+          title: "Line transient",
+          circuit_file: "benchmarks/line-full.circuit.tsx",
+        },
+        {
+          benchmark_id: "startup",
+          title: "Startup",
+          circuit_file: "benchmarks/startup.circuit.tsx",
+        },
+      ],
+    }),
+  )
+
+  expect(html).toContain('aria-label="Select benchmark graph"')
+  expect(html).toContain("Showing one of 3 benchmarks")
+  expect(html).toContain("Line transient · line-wide")
+  expect(html.match(/model-preview-workspace/g)).toHaveLength(1)
+})

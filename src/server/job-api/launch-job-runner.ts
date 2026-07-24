@@ -15,6 +15,13 @@ async function recordUnexpectedRunnerFailure(
     const job = job_store.getJob(job_id)
     if (!job || job.is_complete) return
     const detail = error instanceof Error ? error.message : String(error)
+    const has_publishable_output = Boolean(
+      job.evidence_available ||
+        job.component_code ||
+        job.circuit_json ||
+        job.typical_application_code ||
+        job.typical_application_circuit_json,
+    )
     await job_store
       .appendLog(job_id, {
         stream: "system",
@@ -22,11 +29,19 @@ async function recordUnexpectedRunnerFailure(
       })
       .catch(() => undefined)
     job_store.updateJob(job_id, {
-      display_status: "failed",
+      display_status: has_publishable_output ? "complete" : "failed",
       is_complete: true,
-      has_errors: true,
+      has_errors: !has_publishable_output,
       completed_at: new Date().toISOString(),
-      error_message: detail,
+      error_message: has_publishable_output ? undefined : detail,
+      ...(has_publishable_output
+        ? {
+            warnings: [
+              ...(job.warnings ?? []),
+              `The best available output was published after an unexpected runner recovery: ${detail}`,
+            ],
+          }
+        : {}),
     })
   } catch {
     // This is the final background-task boundary. Never leak a rejected runner promise.

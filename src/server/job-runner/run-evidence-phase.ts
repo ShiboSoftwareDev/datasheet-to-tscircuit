@@ -156,9 +156,12 @@ async function verifyEvidenceIndependently(
     return first
   }
 
-  const noConsensusError = (): AutomatedConversionUnavailableError => {
-    const comparisons = valid_disagreements.map(
-      ({ attempt, primary_errors }) => `primary versus independent-${attempt}: ${primary_errors.join("; ")}`,
+  const getConsensusFailureAudit = (): { details: string; disputed_checks: string[] } => {
+    const comparisons: Array<{ label: string; errors: string[] }> = valid_disagreements.map(
+      ({ attempt, primary_errors }) => ({
+        label: `primary versus independent-${attempt}`,
+        errors: primary_errors,
+      }),
     )
     for (let left_index = 0; left_index < valid_disagreements.length; left_index += 1) {
       for (let right_index = left_index + 1; right_index < valid_disagreements.length; right_index += 1) {
@@ -167,15 +170,67 @@ async function verifyEvidenceIndependently(
         if (!left || !right) continue
         const errors = getPairwiseErrors(left.evidence, right.evidence)
         if (errors.length > 0) {
-          comparisons.push(
-            `independent-${left.attempt} versus independent-${right.attempt}: ${errors.join("; ")}`,
-          )
+          comparisons.push({
+            label: `independent-${left.attempt} versus independent-${right.attempt}`,
+            errors,
+          })
         }
       }
     }
-    return new AutomatedConversionUnavailableError(
-      `Evidence extracts did not reach consensus after ${valid_disagreements.length} valid independent verification(s): ${comparisons.join("; ")}`,
+    const unique_facts = [...new Set(comparisons.flatMap(({ errors }) => errors))]
+    const disputed_checks = [
+      ...new Set(
+        unique_facts.map((fact) =>
+          fact
+            .replace(/\s+differs:.*$/i, "")
+            .replace(/\s+disagrees:.*$/i, "")
+            .trim(),
+        ),
+      ),
+    ]
+    return {
+      disputed_checks,
+      details:
+        `Comparison counts: ${comparisons
+          .map(({ label, errors }) => `${label} (${errors.length})`)
+          .join(", ")}. ` +
+        `Unique disputed facts: ${unique_facts.join("; ")}. Full extraction artifacts are retained for audit.`,
+    }
+  }
+
+  const retainPrimaryWithConsensusWarning = async (): Promise<PrimaryEvidenceExtraction> => {
+    const audit = getConsensusFailureAudit()
+    await Bun.write(join(execution.job_dir, "evidence-consensus-audit.txt"), `${audit.details}\n`)
+    const shown_checks = audit.disputed_checks.slice(0, 12)
+    const warning =
+      `Independent datasheet extractions did not fully agree after ${valid_disagreements.length} valid verification attempts. ` +
+      "The intrinsically valid primary extraction was retained because no independent value achieved consensus; the output remains available, but disputed footprint and application details are unverified. " +
+      `Disputed checks: ${shown_checks.join(", ")}${
+        audit.disputed_checks.length > shown_checks.length
+          ? `, and ${audit.disputed_checks.length - shown_checks.length} more`
+          : ""
+      }. Full details are in evidence-consensus-audit.txt and the retained extraction artifacts.`
+    await execution.addWarning(warning)
+    execution.updateValidation({ evidence: "warning" })
+    await execution.append(
+      "system",
+      "Evidence consensus remained split; retaining the intrinsically valid primary extraction instead of promoting an unconfirmed medoid candidate, and publishing the uncertainty as a warning.\n",
     )
+    return primary_evidence
+  }
+
+  const retainPrimaryWithoutIndependentVerification = async (
+    reason: string,
+  ): Promise<PrimaryEvidenceExtraction> => {
+    await execution.addWarning(
+      `The primary datasheet extraction passed its intrinsic checks, but independent verification could not complete: ${reason}. Verify the footprint and application details before production use.`,
+    )
+    execution.updateValidation({ evidence: "warning" })
+    await execution.append(
+      "system",
+      "Independent evidence verification was unavailable; continuing with the valid primary extraction and publishing the limitation as a warning.\n",
+    )
+    return primary_evidence
   }
 
   const getTargetedConsensusFeedback = (): string => {
@@ -220,10 +275,9 @@ async function verifyEvidenceIndependently(
         )
         continue
       }
-      if (valid_disagreements.length > 0) throw noConsensusError()
-      if (error instanceof AutomatedConversionUnavailableError) throw error
-      throw new AutomatedConversionUnavailableError(
-        `Independent evidence extraction could not complete after ${attempt} attempt(s): ${reason}`,
+      if (valid_disagreements.length > 0) return retainPrimaryWithConsensusWarning()
+      return retainPrimaryWithoutIndependentVerification(
+        `independent extraction could not complete after ${attempt} attempt(s): ${reason}`,
       )
     }
 
@@ -315,7 +369,9 @@ async function verifyEvidenceIndependently(
       )
       return promoted
     }
-    if (valid_disagreements.length >= max_valid_disagreements) throw noConsensusError()
+    if (valid_disagreements.length >= max_valid_disagreements) {
+      return retainPrimaryWithConsensusWarning()
+    }
 
     independent_retry_feedback =
       valid_disagreements.length === 1
@@ -335,9 +391,9 @@ async function verifyEvidenceIndependently(
     )
   }
 
-  if (valid_disagreements.length > 0) throw noConsensusError()
-  throw new AutomatedConversionUnavailableError(
-    `Independent evidence extraction could not produce a valid verification after ${max_extraction_attempts} attempt(s)${last_retryable_error ? `: ${last_retryable_error}` : ""}`,
+  if (valid_disagreements.length > 0) return retainPrimaryWithConsensusWarning()
+  return retainPrimaryWithoutIndependentVerification(
+    `no valid independent verification was produced after ${max_extraction_attempts} attempt(s)${last_retryable_error ? `: ${last_retryable_error}` : ""}`,
   )
 }
 
@@ -407,10 +463,12 @@ export async function runEvidencePhase(execution: JobExecution): Promise<Approve
   const component_schematic_plan_text = `${JSON.stringify(component_schematic_plan, null, 2)}\n`
   await Bun.write(join(execution.job_dir, "component-schematic-plan.json"), component_schematic_plan_text)
   const locked_visual_references = await snapshotProtectedTree(join(execution.job_dir, "visual-reference"))
-  execution.updateValidation({ evidence: "passed" })
+  if (execution.validation.evidence === "pending") execution.updateValidation({ evidence: "passed" })
   await execution.append(
     "system",
-    "Evidence approved. The consensus-selected evidence is locked; all extraction artifacts are retained for audit.\n",
+    execution.validation.evidence === "warning"
+      ? "Evidence selected with a warning. The best-supported evidence is locked; all extraction artifacts are retained for audit.\n"
+      : "Evidence approved. The consensus-selected evidence is locked; all extraction artifacts are retained for audit.\n",
   )
   return {
     component_evidence: approved_evidence.component_evidence,

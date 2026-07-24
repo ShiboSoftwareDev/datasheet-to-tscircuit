@@ -70,9 +70,10 @@ function engineeringValue(value: string | undefined): number | undefined {
   const normalized = value
     .trim()
     .replace(/[\u00b5\u03bc]/g, "u")
-    .replace(/\s+/g, "")
-    .replace(/ohms?|\u03a9/gi, "")
-  const match = normalized.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([pnumkKMG]?)(?:[FfHh])?$/)
+    .replace(/^\d+\s*[x×]\s*/i, "")
+  const match = normalized.match(
+    /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*([pnumkKMG]?)(?:\s*(?:ohms?|\u03a9|[FfHh]))?(?=$|[\s,;])/i,
+  )
   if (!match) return undefined
   const amount = Number(match[1])
   const multiplier = ENGINEERING_PREFIXES[match[2] ?? ""]

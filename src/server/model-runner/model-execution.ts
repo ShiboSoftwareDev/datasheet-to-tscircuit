@@ -11,6 +11,7 @@ export class ModelExecution {
   readonly model_dir: string
   readonly cancellation_signal: AbortSignal
   readonly context: ModelRunnerContext
+  warnings: string[]
   process_controller = new AbortController()
   budget_exhausted = false
   stale_timeout = false
@@ -32,10 +33,25 @@ export class ModelExecution {
     this.model_dir = input.model_dir
     this.cancellation_signal = input.cancellation_signal
     this.context = input.context
+    this.warnings = input.model_run.warnings ?? []
   }
 
   async append(stream: JobLogStream, message: string): Promise<void> {
     await this.context.model_run_store.appendLog(this.model_run_id, { stream, message })
+  }
+
+  async addWarning(message: string): Promise<void> {
+    const warning = message.trim()
+    if (!warning) return
+    const persisted_warnings =
+      this.context.model_run_store.getModelRun(this.model_run_id)?.warnings ?? this.warnings
+    if (persisted_warnings.includes(warning)) {
+      this.warnings = persisted_warnings
+      return
+    }
+    this.warnings = [...persisted_warnings, warning]
+    this.context.model_run_store.updateModelRun(this.model_run_id, { warnings: this.warnings })
+    await this.append("system", `Warning: ${warning}\n`)
   }
 
   cancelProcess(): void {

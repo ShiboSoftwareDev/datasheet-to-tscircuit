@@ -1,4 +1,5 @@
 import { VisualInspectionInconclusiveError } from "../job-artifact-validator"
+import type { JobValidation } from "@/shared/job-types"
 import type { JobExecution } from "./job-execution"
 import { AutomatedConversionUnavailableError, JobCancelledError } from "./stream-job-process"
 
@@ -18,6 +19,14 @@ export async function handleJobExecutionError(error: unknown, execution: JobExec
   }
 
   const error_message = error instanceof Error ? error.message : String(error)
+  const current_job = execution.context.job_store.getJob(execution.job_id)
+  const has_publishable_output = Boolean(
+    current_job?.evidence_available ||
+      current_job?.component_code ||
+      current_job?.circuit_json ||
+      current_job?.typical_application_code ||
+      current_job?.typical_application_circuit_json,
+  )
   const automatic_stop =
     error instanceof AutomatedConversionUnavailableError || error instanceof VisualInspectionInconclusiveError
   const failed_status =
@@ -40,6 +49,35 @@ export async function handleJobExecutionError(error: unknown, execution: JobExec
     execution.validation.application_build === "pending"
   ) {
     execution.updateValidation({ application_visual: failed_status })
+  }
+  if (has_publishable_output) {
+    const warning_validation = Object.fromEntries(
+      Object.entries(execution.validation).map(([phase, status]) => [
+        phase,
+        status === "failed" || status === "inconclusive" || status === "unresolved" ? "warning" : status,
+      ]),
+    ) as JobValidation
+    execution.validation = warning_validation
+    execution.context.job_store.updateJob(execution.job_id, { validation: warning_validation })
+    await execution
+      .addWarning(
+        `The best available artifact was published after automatic recovery, but it did not pass every check: ${error_message}`,
+      )
+      .catch(() => undefined)
+    await execution
+      .append(
+        "system",
+        "\nRecovery completed with warnings. The best available evidence or circuit artifact remains available; review the warning before production use.\n",
+      )
+      .catch(() => undefined)
+    execution.context.job_store.updateJob(execution.job_id, {
+      display_status: "complete",
+      is_complete: true,
+      has_errors: false,
+      completed_at: new Date().toISOString(),
+      error_message: undefined,
+    })
+    return
   }
   await execution
     .append(

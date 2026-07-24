@@ -183,6 +183,10 @@ async function runComponentGenerationAttempt(
   execution.updateValidation({ component_visual: "passed" })
   await execution.append("system", "Authoritative component build reproduced the agent-inspected images.\n")
   const component_circuit_json = component_build.circuit_json
+  await Bun.write(
+    join(execution.job_dir, "component.circuit.json"),
+    `${JSON.stringify(component_circuit_json)}\n`,
+  )
 
   const footprint_errors = getFootprintPlanErrors(evidence.footprint_plan, component_circuit_json)
   if (footprint_errors.length > 0) {

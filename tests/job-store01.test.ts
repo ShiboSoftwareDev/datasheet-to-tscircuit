@@ -9,7 +9,12 @@ test("JobStore streams updates and persists every log chunk", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-store-"))
   const job_store = new JobStore()
   const event_types: string[] = []
-  job_store.createJob({ job_id: "job_1", job_dir, file_name: "sensor.pdf" })
+  job_store.createJob({
+    job_id: "job_1",
+    job_dir,
+    file_name: "sensor.pdf",
+    use_openai: true,
+  })
   const unsubscribe = job_store.subscribe("job_1", (job_event) => event_types.push(job_event.event_type))
 
   await job_store.appendLog("job_1", {
@@ -27,9 +32,11 @@ test("JobStore streams updates and persists every log chunk", async () => {
   expect(event_types).toEqual(["log", "job_updated"])
   expect(job_store.getJob("job_1")?.logs).toHaveLength(1)
   expect(job_store.getJob("job_1")?.component_ready).toBe(true)
+  expect(job_store.getJob("job_1")?.use_openai).toBe(true)
   expect(job_store.getJob("job_1")?.typical_application_title).toBe("5 V regulator")
   expect(await readFile(join(job_dir, "agent.log"), "utf8")).toContain("[tool] read datasheet.pdf")
   expect(JSON.parse(await readFile(join(job_dir, "job.json"), "utf8"))).toMatchObject({
+    use_openai: true,
     component_ready: true,
     typical_application_title: "5 V regulator",
   })
@@ -97,10 +104,12 @@ test("JobStore deletes only completed jobs and broadcasts their removal", async 
     job_id: "job_delete",
     job_dir,
     file_name: "sensor.pdf",
+    use_openai: true,
     additional_instructions: "Use QFN",
   })
 
   expect(job_store.getJobRetrySource("job_delete")?.additional_instructions).toBe("Use QFN")
+  expect(job_store.getJobRetrySource("job_delete")?.use_openai).toBe(true)
   expect(job_store.deleteJob("job_delete")).toBe(false)
   job_store.updateJob("job_delete", { display_status: "cancelled", is_complete: true })
   expect(job_store.deleteJob("job_delete")).toBe(true)

@@ -33,8 +33,8 @@ export async function hasBenchmarkReferenceImageContract(model_dir: string): Pro
 export async function validateBenchmarkSuiteForLock(
   model_dir: string,
   options: { require_source_images?: boolean } = {},
-): Promise<void> {
-  await readCurrentLock(model_dir, options)
+): Promise<string[]> {
+  return (await readCurrentLock(model_dir, options)).warnings
 }
 
 export async function createOrVerifyBenchmarkLock(model_dir: string): Promise<BenchmarkLock> {

@@ -2,10 +2,10 @@ import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { writeJobScaffold } from "../job-scaffold"
 import { launchModelRun } from "../model-run-api"
-import { JobApiContext } from "./job-api-context"
+import type { JobApiContext } from "./job-api-context"
 import { errorResponse, jsonResponse } from "./job-api-responses"
-import { validatePdf } from "./validate-pdf"
 import { launchJobRunner } from "./launch-job-runner"
+import { validatePdf } from "./validate-pdf"
 
 async function isOpenAiAuthenticated(agent_bin: string): Promise<boolean> {
   try {
@@ -92,17 +92,18 @@ export async function createJobFromRequest(request: Request, context: JobApiCont
     job_id,
     job_dir,
     file_name: datasheet.name,
+    use_openai,
     additional_instructions,
   })
   await context.job_store.appendLog(job_id, {
     stream: "system",
     message: `Uploaded ${datasheet.name} (${datasheet.size} bytes).\n`,
   })
-  let model_run
-  if (create_pspice_model) {
+  let model_run: Awaited<ReturnType<typeof launchModelRun>> | undefined
+  if (create_pspice_model && model_effort_multiplier && context.model_run_store) {
     model_run = await launchModelRun(
-      { job_id, job_dir, effort_multiplier: model_effort_multiplier! },
-      { ...context, model_run_store: context.model_run_store!, use_openai },
+      { job_id, job_dir, effort_multiplier: model_effort_multiplier },
+      { ...context, model_run_store: context.model_run_store, use_openai },
     )
   }
 

@@ -75,17 +75,14 @@ export async function restoreJobDirectory(input: {
     "component_schematic",
     "component_visual",
   ] as const
-  const has_component_validation = required_component_validations.some(
-    (field) => saved_validation?.[field] !== undefined,
-  )
   const component_validation_passed = required_component_validations.every(
     (field) => saved_validation?.[field] === "passed",
   )
   const component_ready = Boolean(
     has_component_artifact &&
-      (has_component_validation
-        ? component_validation_passed
-        : saved?.component_ready === true || has_complete_artifact),
+      (component_validation_passed ||
+        (saved_status === "complete" && saved?.component_ready === true) ||
+        has_complete_artifact),
   )
   let recovered_layout_failure = false
   if (
@@ -144,6 +141,7 @@ export async function restoreJobDirectory(input: {
     job_id: input.job_id,
     job_dir: input.job_dir,
     file_name: typeof saved?.file_name === "string" ? saved.file_name : inferFileName(logs, input.job_id),
+    use_openai: typeof saved?.use_openai === "boolean" ? saved.use_openai : undefined,
     additional_instructions:
       typeof saved?.additional_instructions === "string" ? saved.additional_instructions : undefined,
     retry_source_job_id:
@@ -166,6 +164,9 @@ export async function restoreJobDirectory(input: {
       display_status === "cancelled",
     has_errors: recovered_layout_failure ? false : display_status === "failed" || Boolean(saved?.has_errors),
     error_message,
+    warnings: Array.isArray(saved?.warnings)
+      ? saved.warnings.filter((warning): warning is string => typeof warning === "string")
+      : [],
     logs,
     component_ready,
     component_code,

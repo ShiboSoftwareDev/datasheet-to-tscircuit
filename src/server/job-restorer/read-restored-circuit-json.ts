@@ -1,15 +1,7 @@
 import { join } from "node:path"
 import type { Job, JobLog } from "@/shared/job-types"
+import { selectPreferredComponentCircuitJson } from "../component-circuit-json"
 import { readJson } from "./read-persisted-logs"
-
-function isCircuitJson(value: unknown): value is Job["circuit_json"] {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (element) => typeof element === "object" && element !== null && typeof element.type === "string",
-    )
-  )
-}
 
 export async function readRestoredCircuitJson(
   job_dir: string,
@@ -19,14 +11,12 @@ export async function readRestoredCircuitJson(
     artifact === "component"
       ? [
           join(job_dir, "dist", "spice", "component-with-model", "circuit.json"),
+          join(job_dir, "component.circuit.json"),
           join(job_dir, "dist", "index", "circuit.json"),
         ]
       : [join(job_dir, "dist", "typical-application", "circuit.json")]
-  for (const candidate of candidates) {
-    const value = await readJson(candidate)
-    if (isCircuitJson(value)) return value
-  }
-  return undefined
+  const values = await Promise.all(candidates.map((candidate) => readJson(candidate)))
+  return selectPreferredComponentCircuitJson(...values)
 }
 
 export function inferFileName(logs: JobLog[], job_id: string): string {

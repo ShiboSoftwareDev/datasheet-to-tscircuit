@@ -15,6 +15,7 @@ import {
   captureProcessOutput,
   classifyFatalSimulationFailure,
   getFatalSimulationProcessFailure,
+  isTransientAgentTransportFailure,
   summarizeProcessFailure,
 } from "./model-process-output"
 import { readIterationCount } from "./model-checkpoint"
@@ -101,12 +102,15 @@ async function prepareBenchmarkValidation(input: {
 }
 
 function isInfrastructureFailure(message: string): boolean {
-  return /SPICE engine .* not found in platform config|Available engines:\s*\[\]|spiceEngine\.simulate is not a function|Cannot find package ['"]@tscircuit\/ngspice-spice-engine|ngspice executable .*not found|ENOENT.*\b(?:tsci|ngspice)\b/i.test(
-    message,
+  return (
+    isTransientAgentTransportFailure(message) ||
+    /SPICE engine .* not found in platform config|Available engines:\s*\[\]|spiceEngine\.simulate is not a function|Cannot find package ['"]@tscircuit\/ngspice-spice-engine|ngspice executable .*not found|ENOENT.*\b(?:tsci|ngspice)\b/i.test(
+      message,
+    )
   )
 }
 
-export async function executeValidationBuild(input: {
+async function executeValidationBuildOnce(input: {
   benchmark_file: string
   run: ValidationBuildRun
   model_dir: string
@@ -200,23 +204,70 @@ export async function executeValidationBuild(input: {
   }
 }
 
+export async function executeValidationBuild(input: {
+  benchmark_file: string
+  run: ValidationBuildRun
+  model_dir: string
+  signal: AbortSignal
+  tsci_bin: string
+  append: (stream: JobLogStream, message: string) => Promise<void>
+}): Promise<ValidationBuildResult> {
+  const configured_retries = Number(process.env.MODEL_VALIDATION_TRANSPORT_RETRIES ?? 4)
+  const retry_count = Number.isInteger(configured_retries) ? Math.max(0, Math.min(5, configured_retries)) : 4
+  const configured_base_delay_ms = Number(process.env.MODEL_VALIDATION_TRANSPORT_RETRY_BASE_DELAY_MS ?? 500)
+  const base_delay_ms =
+    Number.isFinite(configured_base_delay_ms) && configured_base_delay_ms >= 0
+      ? configured_base_delay_ms
+      : 500
+  for (let attempt = 0; attempt <= retry_count; attempt += 1) {
+    const result = await executeValidationBuildOnce(input)
+    const is_transient =
+      result.exit_code !== 0 &&
+      Boolean(result.error_message && isTransientAgentTransportFailure(result.error_message))
+    if (!is_transient || input.signal.aborted || attempt >= retry_count) return result
+    await input.append(
+      "system",
+      `Validation transport closed while building ${input.benchmark_file}; retrying the same build (${attempt + 2}/${retry_count + 1}) without consuming a benchmark-correction attempt.\n`,
+    )
+    await Bun.sleep(Math.min(5_000, base_delay_ms * 2 ** attempt))
+  }
+  return {
+    exit_code: 1,
+    error_message: "Validation build retry loop ended unexpectedly",
+    failure_kind: "infrastructure",
+  }
+}
+
 export async function runValidationTaskPool<T>(input: {
   tasks: T[]
   concurrency: number
   signal: AbortSignal
   run: (task: T) => Promise<void>
+  on_error?: (task: T, error: unknown) => Promise<void>
 }): Promise<void> {
   let next_index = 0
+  const unhandled_errors: unknown[] = []
   const worker = async () => {
     while (!input.signal.aborted) {
       const task_index = next_index
       next_index += 1
       const task = input.tasks[task_index]
       if (!task) return
-      await input.run(task)
+      try {
+        await input.run(task)
+      } catch (error) {
+        if (input.on_error) await input.on_error(task, error)
+        else unhandled_errors.push(error)
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(input.concurrency, input.tasks.length) }, () => worker()))
+  if (unhandled_errors.length > 0) {
+    throw new AggregateError(
+      unhandled_errors,
+      `${unhandled_errors.length} validation task${unhandled_errors.length === 1 ? "" : "s"} failed`,
+    )
+  }
 }
 
 export async function validateChampion(
@@ -315,12 +366,21 @@ export async function validateChampion(
     )
     return report_write
   }
-  const failState = async (state: BenchmarkValidationState, result: ValidationBuildResult): Promise<void> => {
+  const failState = async (
+    state: BenchmarkValidationState,
+    result: ValidationBuildResult,
+    phase: "build" | "verification" = "build",
+  ): Promise<void> => {
     if (state.verification) return
     state.failure_kind = result.failure_kind ?? "process"
-    const error_message = `${state.benchmark_file} build exited with code ${result.exit_code}${
-      result.error_message ? `: ${result.error_message}` : ""
-    }`
+    const error_message =
+      phase === "build"
+        ? `${state.benchmark_file} build exited with code ${result.exit_code}${
+            result.error_message ? `: ${result.error_message}` : ""
+          }`
+        : `${state.benchmark_file} verification failed${
+            result.error_message ? `: ${result.error_message}` : ""
+          }`
     state.verification = {
       benchmark_id: state.benchmark_id,
       passed: false,
@@ -348,6 +408,7 @@ export async function validateChampion(
         path: result!.path!,
       })),
     })
+    if (!state.verification.passed) state.failure_kind ??= "simulation"
     await publishReport()
   }
   let infrastructure_failure_message: string | undefined
@@ -356,36 +417,56 @@ export async function validateChampion(
     run: ValidationBuildRun
   }): Promise<void> => {
     if (task.state.verification || input.signal.aborted || infrastructure_failure_message) return
-    const result = await executeValidationBuild({
-      benchmark_file: task.state.benchmark_file,
-      run: task.run,
-      model_dir: input.model_dir,
-      signal: input.signal,
-      tsci_bin: context.tsci_bin,
-      append,
-    })
-    task.state.results[0] = result
-    if (result.exit_code !== 0 || !result.path) {
-      await failState(task.state, result)
-      if (result.failure_kind === "infrastructure") {
-        infrastructure_failure_message = result.error_message ?? "Simulation infrastructure failed"
-      }
-      return
-    }
-    task.state.partial_write = task.state.partial_write.then(async () => {
-      const successful_paths = task.state.results.flatMap((candidate) =>
-        candidate?.path ? [{ path: candidate.path }] : [],
-      )
-      task.state.building_verification = await verifyPartialSimulationBenchmark({
+    try {
+      const result = await executeValidationBuild({
+        benchmark_file: task.state.benchmark_file,
+        run: task.run,
         model_dir: input.model_dir,
-        benchmark_id: task.state.benchmark_id,
-        source_signature: task.state.source_signature,
-        circuit_json_paths: successful_paths,
+        signal: input.signal,
+        tsci_bin: context.tsci_bin,
+        append,
       })
-      await publishReport()
-      await finalizeState(task.state)
-    })
-    await task.state.partial_write
+      task.state.results[0] = result
+      if (result.exit_code !== 0 || !result.path) {
+        await failState(task.state, result)
+        if (result.failure_kind === "infrastructure") {
+          infrastructure_failure_message = result.error_message ?? "Simulation infrastructure failed"
+        }
+        return
+      }
+      task.state.partial_write = task.state.partial_write.then(async () => {
+        const successful_paths = task.state.results.flatMap((candidate) =>
+          candidate?.path ? [{ path: candidate.path }] : [],
+        )
+        task.state.building_verification = await verifyPartialSimulationBenchmark({
+          model_dir: input.model_dir,
+          benchmark_id: task.state.benchmark_id,
+          source_signature: task.state.source_signature,
+          circuit_json_paths: successful_paths,
+        })
+        await publishReport()
+        await finalizeState(task.state)
+      })
+      await task.state.partial_write
+    } catch (error) {
+      // A rejected per-benchmark publication/verification promise must not be
+      // rethrown later when the pool waits for every benchmark to settle.
+      task.state.partial_write = Promise.resolve()
+      const error_message = error instanceof Error ? error.message : String(error)
+      const failure_kind = isInfrastructureFailure(error_message) ? "infrastructure" : "simulation"
+      if (failure_kind === "infrastructure") {
+        infrastructure_failure_message = error_message
+      }
+      await failState(
+        task.state,
+        {
+          exit_code: 1,
+          error_message,
+          failure_kind,
+        },
+        "verification",
+      )
+    }
   }
 
   const concurrency = getValidationConcurrency()
@@ -398,6 +479,18 @@ export async function validateChampion(
     concurrency,
     signal: input.signal,
     run: runTask,
+    on_error: async (task, error) => {
+      const error_message = error instanceof Error ? error.message : String(error)
+      await failState(
+        task.state,
+        {
+          exit_code: 1,
+          error_message,
+          failure_kind: isInfrastructureFailure(error_message) ? "infrastructure" : "simulation",
+        },
+        "verification",
+      )
+    },
   })
   await Promise.all(states.map((state) => state.partial_write))
   await Promise.all(states.map(finalizeState))

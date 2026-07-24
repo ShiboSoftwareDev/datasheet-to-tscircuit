@@ -12,6 +12,7 @@ export class JobExecution {
   readonly protected_event_log_file: string
   readonly published_event_log_file: string
   active_validation_phase: JobValidationPhase = "evidence"
+  warnings: string[]
   validation: JobValidation = {
     evidence: "pending",
     component_build: "pending",
@@ -42,6 +43,7 @@ export class JobExecution {
     this.context = input.context
     this.protected_event_log_file = input.protected_event_log_file
     this.published_event_log_file = input.published_event_log_file
+    this.warnings = input.context.job_store.getJob(input.job_id)?.warnings ?? []
   }
 
   async append(stream: JobLogStream, message: string): Promise<void> {
@@ -51,5 +53,13 @@ export class JobExecution {
   updateValidation(update: Partial<JobValidation>): void {
     this.validation = { ...this.validation, ...update }
     this.context.job_store.updateJob(this.job_id, { validation: this.validation })
+  }
+
+  async addWarning(message: string): Promise<void> {
+    const warning = message.trim()
+    if (!warning || this.warnings.includes(warning)) return
+    this.warnings = [...this.warnings, warning]
+    this.context.job_store.updateJob(this.job_id, { warnings: this.warnings })
+    await this.append("system", `Warning: ${warning}\n`)
   }
 }

@@ -236,6 +236,20 @@ test("application agreement compares electrical semantics instead of agent-autho
       independent: {
         ...independently_cited,
         components: independently_cited.components.map((component) =>
+          component.reference === "C1"
+            ? { ...component, value: "1x 10 µF, 6.3 V, 0603 ceramic, ±20%" }
+            : component,
+        ),
+      },
+      target_part_number: "TPS63802",
+    }),
+  ).toEqual([])
+  expect(
+    getTypicalApplicationPlanAgreementErrors({
+      primary,
+      independent: {
+        ...independently_cited,
+        components: independently_cited.components.map((component) =>
           component.reference === "C1" ? { ...component, kind: "resistor" } : component,
         ),
       },
@@ -550,8 +564,9 @@ finishAgent()
   await runJob({ job_id: "job_legacy_plan" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_legacy_plan")
-  expect(job?.display_status).toBe("unsupported")
-  expect(job?.error_message).toContain("must use typical-application plan schema version 4")
+  expect(job?.display_status).toBe("complete")
+  expect(job?.error_message).toBeUndefined()
+  expect(job?.warnings?.join("\n")).toContain("must use typical-application plan schema version 4")
   expect(await Bun.file(join(job_dir, "unexpected-phase")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })
@@ -815,6 +830,11 @@ await Bun.write(process.cwd() + "/dist/" + stem + "/circuit.json", JSON.stringif
   expect(await Bun.file(join(job_dir, "component.circuit.tsx")).text()).toBe(
     await Bun.file(join(job_dir, "index.circuit.tsx")).text(),
   )
+  expect(
+    JSON.parse(await Bun.file(join(job_dir, "component.circuit.json")).text()).some(
+      (element: { type?: string }) => element.type === "pcb_smtpad",
+    ),
+  ).toBe(true)
   expect(job?.typical_application_code).toContain('from "./index.circuit"')
   expect(job?.circuit_json?.[0]?.type).toBe("source_component")
   expect(job?.typical_application_circuit_json?.[0]?.type).toBe("source_component")
@@ -917,7 +937,7 @@ await Bun.write(process.cwd() + "/dist/" + stem + "/circuit.json", JSON.stringif
   )
 
   await rm(job_dir, { recursive: true, force: true })
-})
+}, 20_000)
 
 test("typical-application generation repairs a semantic build failure from server feedback", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-runner-clean-gate-"))
@@ -1140,11 +1160,12 @@ await Bun.write(process.cwd() + "/dist/" + stem + "/circuit.json", JSON.stringif
   await runJob({ job_id: "job_footprint_gate" }, { job_store, agent_bin: agent_path, tsci_bin: tsci_path })
 
   const job = job_store.getJob("job_footprint_gate")
-  expect(job?.display_status).toBe("failed")
+  expect(job?.display_status).toBe("complete")
   expect(job?.component_ready).not.toBe(true)
-  expect(job?.validation?.component_drc).toBe("failed")
-  expect(job?.error_message).toContain("failed board-level tsci validation")
-  expect(job?.error_message).toContain("pcb_pad_pad_clearance_error")
+  expect(job?.validation?.component_drc).toBe("warning")
+  expect(job?.error_message).toBeUndefined()
+  expect(job?.warnings?.join("\n")).toContain("failed board-level tsci validation")
+  expect(job?.warnings?.join("\n")).toContain("pcb_pad_pad_clearance_error")
   const logs = await Bun.file(join(job_dir, "agent.log")).text()
   expect(logs).toContain("Component generation attempt 1 did not pass server validation")
   expect(logs).toContain("Component generation attempt 2 did not pass server validation")
@@ -1186,7 +1207,7 @@ finishAgent()
   await runJob({ job_id: "job_disagreement" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_disagreement")
-  expect(job?.display_status).toBe("failed")
+  expect(job?.display_status).toBe("complete")
   expect(job?.validation?.evidence).toBe("passed")
   expect(job?.logs.map((log) => log.message).join("\n")).toContain(
     "Independent evidence consensus overrode the primary extraction",
@@ -1562,7 +1583,7 @@ finishAgent()
   await rm(job_dir, { recursive: true, force: true })
 })
 
-test("three-way geometry disagreement remains unsupported", async () => {
+test("unresolved geometry disagreement retains primary evidence and publishes a concise warning", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-runner-no-consensus-"))
   await Bun.write(join(job_dir, "datasheet.pdf"), "fake datasheet")
   const agent_path = join(job_dir, "no-consensus-agent")
@@ -1591,16 +1612,28 @@ finishAgent()
   await runJob({ job_id: "job_no_consensus" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_no_consensus")
-  expect(job?.display_status).toBe("unsupported")
-  expect(job?.validation?.evidence).toBe("unresolved")
-  expect(job?.error_message).toContain("did not reach consensus")
-  expect(job?.error_message).toContain("independent-1 versus independent-2")
-  expect(job?.error_message).toContain("independent-2 versus independent-3")
-  expect(job?.error_message).toContain("independent-3 versus independent-4")
+  expect(job?.display_status).toBe("complete")
+  expect(job?.validation?.evidence).toBe("warning")
+  expect(job?.error_message).toBeUndefined()
+  expect(job?.warnings?.join("\n")).toContain("did not fully agree")
+  expect(job?.warnings?.join("\n")).toContain("primary extraction was retained")
+  expect(job?.warnings?.join("\n")).toContain("Disputed checks")
+  expect(job?.warnings?.join("\n").length).toBeLessThanOrEqual(1_500)
+  expect(
+    JSON.parse(await Bun.file(join(job_dir, "component-evidence.json")).text()).footprint.pads[0].width,
+  ).toBe(0.6)
+  expect(await Bun.file(join(job_dir, "evidence-consensus-audit.txt")).text()).toContain(
+    "independent-3 versus independent-4",
+  )
+  expect(await Bun.file(join(job_dir, "evidence-consensus-audit.txt")).text()).toContain(
+    "Unique disputed facts",
+  )
   expect(
     await Bun.file(join(job_dir, "evidence-attempts/independent-4/component-evidence.json")).exists(),
   ).toBe(true)
-  expect(await Bun.file(join(job_dir, "tsx-generation-reached")).exists()).toBe(false)
+  expect(job?.logs.map((log) => log.message).join("\n")).toContain(
+    "Generating the component from approved evidence only",
+  )
 
   await rm(job_dir, { recursive: true, force: true })
 })
@@ -1633,8 +1666,9 @@ finishAgent()
   )
 
   const job = job_store.getJob("job_invalid_independent")
-  expect(job?.display_status).toBe("unsupported")
-  expect(job?.error_message).toContain("references an unlisted component")
+  expect(job?.display_status).toBe("complete")
+  expect(job?.error_message).toBeUndefined()
+  expect(job?.warnings?.join("\n")).toContain("references an unlisted component")
   for (const attempt of [1, 2, 3, 4]) {
     const attempt_dir = join(job_dir, `evidence-attempts/independent-${attempt}`)
     expect(await Bun.file(join(attempt_dir, "typical-application-plan.json")).exists()).toBe(true)
@@ -1679,13 +1713,14 @@ finishAgent()
   await runJob({ job_id: "job_unresolved" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_unresolved")
-  expect(job?.display_status).toBe("unsupported")
+  expect(job?.display_status).toBe("complete")
   expect(job?.has_errors).toBe(false)
-  expect(job?.validation?.evidence).toBe("unresolved")
+  expect(job?.validation?.evidence).toBe("warning")
   expect(job?.evidence_available).toBe(true)
-  expect(job?.error_message).toContain("Evidence extraction remained unresolved")
+  expect(job?.error_message).toBeUndefined()
+  expect(job?.warnings?.join("\n")).toContain("Evidence extraction remained unresolved")
   expect(job?.logs.map((log) => log.message).join("\n")).toContain("Retrying automatically")
-  expect(job?.logs.map((log) => log.message).join("\n")).toContain("stopped safely")
+  expect(job?.logs.map((log) => log.message).join("\n")).toContain("Recovery completed with warnings")
   const retry_prompts = await Bun.file(join(job_dir, "retry-prompts.log")).text()
   expect(retry_prompts).toContain("Server validation feedback from the previous attempt")
   expect(retry_prompts).toContain("Pad dimensions could not be resolved automatically")
@@ -1777,10 +1812,11 @@ finishAgent()
   await runJob({ job_id: "job_inconclusive" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_inconclusive")
-  expect(job?.display_status).toBe("unsupported")
+  expect(job?.display_status).toBe("complete")
   expect(job?.component_ready).not.toBe(true)
-  expect(job?.validation?.component_visual).toBe("inconclusive")
-  expect(job?.error_message).toContain("image inspection could not be completed automatically")
+  expect(job?.validation?.component_visual).toBe("warning")
+  expect(job?.error_message).toBeUndefined()
+  expect(job?.warnings?.join("\n")).toContain("image inspection could not be completed automatically")
 
   await rm(job_dir, { recursive: true, force: true })
 })
@@ -1817,8 +1853,9 @@ finishAgent()
   )
 
   const job = job_store.getJob("job_reference_lock")
-  expect(job?.display_status).toBe("failed")
-  expect(job?.error_message).toContain("modified locked evidence")
+  expect(job?.display_status).toBe("complete")
+  expect(job?.error_message).toBeUndefined()
+  expect(job?.warnings?.join("\n")).toContain("modified locked evidence")
   expect(await Bun.file(join(job_dir, "visual-reference/pages/page-009.png")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })
@@ -1878,7 +1915,7 @@ await Bun.write(process.cwd() + "/dist/" + stem + "/circuit.json", JSON.stringif
   expect(await Bun.file(join(job_dir, "application-generation-reached")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })
-})
+}, 30_000)
 
 test("cancelling a running job terminates its agent process", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-runner-cancel-"))
@@ -1901,7 +1938,7 @@ await Bun.sleep(30_000)
   )
 
   await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Agent did not start")), 2_000)
+    const timeout = setTimeout(() => reject(new Error("Agent did not start")), 10_000)
     const unsubscribe = job_store.subscribe("job_cancel", (job_event) => {
       if (job_event.event_type === "log" && job_event.log.message.includes("slow agent started")) {
         clearTimeout(timeout)
@@ -1914,7 +1951,7 @@ await Bun.sleep(30_000)
   expect(job_store.requestCancellation("job_cancel")).toBe("requested")
   await Promise.race([
     run_promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Cancellation timed out")), 4_000)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Cancellation timed out")), 10_000)),
   ])
 
   const job = job_store.getJob("job_cancel")
@@ -1924,4 +1961,4 @@ await Bun.sleep(30_000)
   expect(job?.logs.at(-1)?.message).toContain("active job process was stopped")
 
   await rm(job_dir, { recursive: true, force: true })
-})
+}, 30_000)

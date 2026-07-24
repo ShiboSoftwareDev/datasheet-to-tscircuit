@@ -4,6 +4,7 @@ import { isRecord } from "./read-persisted-logs"
 const validationStatuses = new Set<JobValidationStatus>([
   "pending",
   "passed",
+  "warning",
   "failed",
   "inconclusive",
   "unresolved",

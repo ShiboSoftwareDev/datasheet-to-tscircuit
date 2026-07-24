@@ -1,15 +1,17 @@
 import { copyFile, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ModelManifest } from "@/shared/job-types"
+import { isCircuitJson, selectPreferredComponentCircuitJson } from "../component-circuit-json"
 import type { JobStore } from "../job-store"
 
-export function isCircuitJson(value: unknown): value is import("circuit-json").AnyCircuitElement[] {
-  return (
-    Array.isArray(value) &&
-    value.every(
-      (element) => typeof element === "object" && element !== null && typeof element.type === "string",
-    )
-  )
+export { isCircuitJson } from "../component-circuit-json"
+
+export function selectPublishedComponentCircuitJson(input: {
+  existing: unknown
+  integrated: unknown
+  recovered?: unknown[]
+}): import("circuit-json").AnyCircuitElement[] | undefined {
+  return selectPreferredComponentCircuitJson(input.integrated, input.existing, ...(input.recovered ?? []))
 }
 
 export async function attachModelToGeneratedComponent(input: {
@@ -25,15 +27,27 @@ export async function attachModelToGeneratedComponent(input: {
     copyFile(original_component, join(input.job_dir, "component.circuit.tsx")),
     copyFile(join(input.model_dir, "model.lib"), join(input.job_dir, "model.lib")),
   ])
-  const [component_code, circuit_json_value] = await Promise.all([
-    readFile(integrated_component, "utf8"),
-    readFile(join(input.job_dir, "dist", "spice", "component-with-model", "circuit.json"), "utf8")
-      .then((text) => JSON.parse(text))
-      .catch(() => undefined),
-  ])
+  const [component_code, circuit_json_value, durable_component_circuit_json, built_component_circuit_json] =
+    await Promise.all([
+      readFile(integrated_component, "utf8"),
+      readFile(join(input.job_dir, "dist", "spice", "component-with-model", "circuit.json"), "utf8")
+        .then((text) => JSON.parse(text))
+        .catch(() => undefined),
+      readFile(join(input.job_dir, "component.circuit.json"), "utf8")
+        .then((text) => JSON.parse(text))
+        .catch(() => undefined),
+      readFile(join(input.job_dir, "dist", "index", "circuit.json"), "utf8")
+        .then((text) => JSON.parse(text))
+        .catch(() => undefined),
+    ])
+  const circuit_json = selectPublishedComponentCircuitJson({
+    existing: input.job_store.getJob(input.job_id)?.circuit_json,
+    integrated: circuit_json_value,
+    recovered: [durable_component_circuit_json, built_component_circuit_json],
+  })
   input.job_store.updateJob(input.job_id, {
     component_code,
-    ...(isCircuitJson(circuit_json_value) ? { circuit_json: circuit_json_value } : {}),
+    ...(circuit_json ? { circuit_json } : {}),
   })
 }
 
@@ -47,31 +61,43 @@ export async function writeServerIntegratedComponent(input: {
   )
   await Bun.write(
     join(input.model_dir, "component-with-model.circuit.tsx"),
-    `import type { ComponentProps } from "react"
-import Component from "./component.circuit"
-
-const modelSource = ${JSON.stringify(input.model_source)}
-const ModelComponent = Component as import("react").ComponentType<
-  ComponentWithModelProps & { spiceModel: import("react").ReactNode }
->
-
-export type ComponentWithModelProps = ComponentProps<typeof Component>
-
-export default function ComponentWithModel(props: ComponentWithModelProps) {
-  return (
-    <ModelComponent
-      {...props}
-      spiceModel={
-        <spicemodel
-          source={modelSource}
-          spicePinMapping={${JSON.stringify(spice_pin_mapping, null, 2)}}
-        />
-      }
-    />
+    getServerComponentWrapperSource({
+      spice_model: `(
+      <spicemodel
+        source={modelSource}
+        spicePinMapping={${JSON.stringify(spice_pin_mapping, null, 2)}}
+      />
+    )`,
+      model_source: input.model_source,
+    }),
   )
 }
-`,
+
+export async function writeServerStructuralComponent(input: { model_dir: string }): Promise<void> {
+  await Bun.write(
+    join(input.model_dir, "component-with-model.circuit.tsx"),
+    getServerComponentWrapperSource(),
   )
+}
+
+function getServerComponentWrapperSource(input?: { spice_model: string; model_source: string }): string {
+  return `import { cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react"
+import Component from "./component.circuit"
+
+${input ? `const modelSource = ${JSON.stringify(input.model_source)}\n` : ""}
+export type ComponentWithModelProps = ComponentProps<typeof Component>
+type ModelElementProps = ComponentWithModelProps & { name?: string; spiceModel?: ReactNode }
+const renderComponent = Component as unknown as (
+  props: ComponentWithModelProps,
+) => ReactElement<ModelElementProps>
+
+export default function ComponentWithModel(props: ComponentWithModelProps) {
+  return cloneElement(renderComponent(props), {
+    ...props,
+    ${input ? `spiceModel: ${input.spice_model},` : ""}
+  })
+}
+`
 }
 
 function normalizeModelSource(source: string): string {

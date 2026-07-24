@@ -1,6 +1,6 @@
-import { ModelRunApiContext } from "./model-run-api-context"
-import { errorResponse, getJobId, jsonResponse, readEffort } from "./model-run-api-responses"
 import { launchModelRun } from "./launch-model-run"
+import type { ModelRunApiContext } from "./model-run-api-context"
+import { errorResponse, getJobId, jsonResponse, readEffort } from "./model-run-api-responses"
 
 export async function createModelRun(request: Request, context: ModelRunApiContext): Promise<Response> {
   const request_url = new URL(request.url)
@@ -32,6 +32,17 @@ export async function createModelRun(request: Request, context: ModelRunApiConte
       status: 400,
     })
   }
-  const model_run = await launchModelRun({ job_id, job_dir, effort_multiplier }, context)
+  const requested_provider = request_url.searchParams.get("use_openai")
+  const fallback_use_openai =
+    requested_provider === "true"
+      ? true
+      : requested_provider === "false"
+        ? false
+        : (context.use_openai ?? false)
+  const use_openai = job.use_openai ?? fallback_use_openai
+  if (job.use_openai === undefined) {
+    context.job_store.updateJob(job_id, { use_openai })
+  }
+  const model_run = await launchModelRun({ job_id, job_dir, effort_multiplier }, { ...context, use_openai })
   return jsonResponse({ model_run }, 202)
 }

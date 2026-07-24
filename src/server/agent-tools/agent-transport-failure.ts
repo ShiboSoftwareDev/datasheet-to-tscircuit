@@ -3,7 +3,7 @@ export function captureAgentProcessOutput(current: string, message: string): str
 }
 
 export function isTransientAgentTransportFailure(output: string): boolean {
-  return /connection (?:error|closed|failed|lost|reset)|failed to connect|unable to connect|econn(?:reset|refused|aborted)|network error|socket hang up|fetch failed|temporarily unavailable|service unavailable|gateway timeout|http (?:502|503|504)\b|was there a typo in the (?:url|host) or port/i.test(
+  return /connection (?:was )?(?:error|closed|failed|lost|reset)|failed to connect|unable to connect|econn(?:reset|refused|aborted)|network error|socket hang up|fetch failed|temporarily unavailable|service unavailable|gateway timeout|http (?:502|503|504)\b|was there a typo in the (?:url|host) or port/i.test(
     output,
   )
 }

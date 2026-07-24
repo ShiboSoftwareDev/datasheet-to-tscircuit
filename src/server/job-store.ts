@@ -17,6 +17,7 @@ interface JobRecord extends Job {
 export interface JobRetrySource {
   job_dir: string
   file_name: string
+  use_openai?: boolean
   additional_instructions?: string
   display_status: Job["display_status"]
 }
@@ -27,6 +28,7 @@ export interface CreateJobInput {
   job_id: string
   job_dir: string
   file_name: string
+  use_openai?: boolean
   additional_instructions?: string
   retry_source_job_id?: string
 }
@@ -38,6 +40,7 @@ export interface RestoreJobInput extends CreateJobInput {
   is_complete: boolean
   has_errors: boolean
   error_message?: string
+  warnings: string[]
   logs: JobLog[]
   component_ready?: boolean
   component_code?: string
@@ -54,9 +57,11 @@ export type JobUpdate = Partial<
   Pick<
     Job,
     | "display_status"
+    | "use_openai"
     | "is_complete"
     | "has_errors"
     | "error_message"
+    | "warnings"
     | "completed_at"
     | "component_ready"
     | "component_code"
@@ -74,12 +79,14 @@ function getPublicJob(job_record: JobRecord): Job {
   return {
     job_id: job_record.job_id,
     file_name: job_record.file_name,
+    use_openai: job_record.use_openai,
     created_at: job_record.created_at,
     completed_at: job_record.completed_at,
     display_status: job_record.display_status,
     is_complete: job_record.is_complete,
     has_errors: job_record.has_errors,
     error_message: job_record.error_message,
+    warnings: [...(job_record.warnings ?? [])],
     logs: [...job_record.logs],
     component_ready: job_record.component_ready,
     component_code: job_record.component_code,
@@ -103,6 +110,7 @@ function getJobSummary(job_record: JobRecord): JobSummary {
     is_complete: job_record.is_complete,
     has_errors: job_record.has_errors,
     error_message: job_record.error_message,
+    warnings: [...(job_record.warnings ?? [])],
   }
 }
 
@@ -115,12 +123,14 @@ export class JobStore {
       job_id: input.job_id,
       job_dir: input.job_dir,
       file_name: input.file_name,
+      use_openai: input.use_openai,
       additional_instructions: input.additional_instructions,
       retry_source_job_id: input.retry_source_job_id,
       created_at: new Date().toISOString(),
       display_status: "queued",
       is_complete: false,
       has_errors: false,
+      warnings: [],
       logs: [],
       cancellation_controller: new AbortController(),
       subscriber_set: new Set(),
@@ -167,6 +177,7 @@ export class JobStore {
     return {
       job_dir: job_record.job_dir,
       file_name: job_record.file_name,
+      use_openai: job_record.use_openai,
       additional_instructions: job_record.additional_instructions,
       display_status: job_record.display_status,
     }
@@ -266,12 +277,14 @@ export class JobStore {
           version: 2,
           job_id: job_record.job_id,
           file_name: job_record.file_name,
+          use_openai: job_record.use_openai,
           created_at: job_record.created_at,
           completed_at: job_record.completed_at,
           display_status: job_record.display_status,
           is_complete: job_record.is_complete,
           has_errors: job_record.has_errors,
           error_message: job_record.error_message,
+          warnings: job_record.warnings,
           additional_instructions: job_record.additional_instructions,
           retry_source_job_id: job_record.retry_source_job_id,
           component_ready: job_record.component_ready,

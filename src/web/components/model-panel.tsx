@@ -35,6 +35,9 @@ const STATUS_COPY: Record<ModelRunStatus, string> = {
 }
 
 function getStatusCopy(model_run: ModelRun): string {
+  if (model_run.status === "complete" && (model_run.warnings?.length ?? 0) > 0) {
+    return "Available with warnings"
+  }
   if (model_run.status === "timed_out" && model_run.error_message?.toLowerCase().includes("no output")) {
     return "Timed out"
   }
@@ -96,7 +99,14 @@ export function getModelMatchMetrics(model_run: ModelRun): {
   match_score?: number
   normalized_rmse?: number
 } {
-  const normalized_rmse = model_run.validation?.score ?? model_run.progress?.champion?.score
+  const completed_with_warnings = model_run.is_complete && (model_run.warnings?.length ?? 0) > 0
+  const normalized_rmse = completed_with_warnings
+    ? undefined
+    : model_run.validation?.score !== undefined
+      ? model_run.validation.score
+      : model_run.is_complete
+        ? undefined
+        : model_run.progress?.champion?.score
   return {
     normalized_rmse,
     match_score: normalized_rmse === undefined ? undefined : Math.max(0, Math.min(1, 1 - normalized_rmse)),
@@ -105,6 +115,7 @@ export function getModelMatchMetrics(model_run: ModelRun): {
 
 function formatModelMetric(value: number | undefined, model_run: ModelRun): string {
   if (value !== undefined) return `${(value * 100).toFixed(1)}%`
+  if (model_run.is_complete && (model_run.warnings?.length ?? 0) > 0) return "Unverified"
   return model_run.has_errors ? "Unavailable" : "Pending"
 }
 

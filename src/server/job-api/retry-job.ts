@@ -2,7 +2,7 @@ import { copyFile, mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job } from "@/shared/job-types"
 import { writeJobScaffold } from "../job-scaffold"
-import { JobApiContext } from "./job-api-context"
+import type { JobApiContext } from "./job-api-context"
 import { errorResponse, getJobId, jsonResponse } from "./job-api-responses"
 import { launchJobRunner } from "./launch-job-runner"
 
@@ -39,6 +39,17 @@ export async function retryJob(
       status: 409,
     })
   }
+  const requested_provider = request_url.searchParams.get("use_openai")
+  const fallback_use_openai =
+    requested_provider === "true"
+      ? true
+      : requested_provider === "false"
+        ? false
+        : (context.use_openai ?? false)
+  const use_openai = source.use_openai ?? fallback_use_openai
+  if (source.use_openai === undefined) {
+    context.job_store.updateJob(source_job_id, { use_openai })
+  }
 
   const active_retry = context.job_store.getActiveRetryForSource(source_job_id)
   if (active_retry) return jsonResponse({ job: active_retry }, 202)
@@ -59,6 +70,7 @@ export async function retryJob(
         job_id,
         job_dir,
         file_name: source.file_name,
+        use_openai,
         additional_instructions: source.additional_instructions,
         retry_source_job_id: source_job_id,
       })
@@ -67,7 +79,10 @@ export async function retryJob(
         message: `Retrying ${source.display_status} task ${source_job_id}.\n`,
       })
 
-      launchJobRunner({ job_id, additional_instructions: source.additional_instructions }, context)
+      launchJobRunner(
+        { job_id, additional_instructions: source.additional_instructions },
+        { ...context, use_openai },
+      )
       return job
     })()
     pending_retries.set(source_job_id, pending_retry)

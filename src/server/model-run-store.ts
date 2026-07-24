@@ -29,6 +29,7 @@ export interface CreateModelRunInput {
   model_run_id: string
   job_id: string
   model_dir: string
+  use_openai?: boolean
   effort_multiplier: number
   base_effort_ms: number
 }
@@ -46,12 +47,14 @@ export type ModelRunUpdate = Partial<
     | "is_complete"
     | "has_errors"
     | "error_message"
+    | "warnings"
     | "completed_at"
     | "iteration"
     | "model_source"
     | "manifest"
     | "validation"
     | "model_card"
+    | "use_openai"
   >
 >
 
@@ -90,6 +93,7 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
   return {
     model_run_id: record.model_run_id,
     job_id: record.job_id,
+    use_openai: record.use_openai,
     created_at: record.created_at,
     updated_at: record.updated_at,
     completed_at: record.completed_at,
@@ -97,6 +101,7 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
     is_complete: record.is_complete,
     has_errors: record.has_errors,
     error_message: record.error_message,
+    warnings: [...(record.warnings ?? [])],
     effort_multiplier: record.effort_multiplier,
     base_effort_ms: record.base_effort_ms,
     allocated_time_ms: record.allocated_time_ms,
@@ -127,11 +132,13 @@ export class ModelRunStore {
       model_run_id: input.model_run_id,
       job_id: input.job_id,
       model_dir: input.model_dir,
+      use_openai: input.use_openai ?? false,
       created_at: now,
       updated_at: now,
       status: "queued",
       is_complete: false,
       has_errors: false,
+      warnings: [],
       effort_multiplier: input.effort_multiplier,
       base_effort_ms: input.base_effort_ms,
       allocated_time_ms: input.base_effort_ms * input.effort_multiplier,
@@ -164,12 +171,14 @@ export class ModelRunStore {
     const record: ModelRunRecord = {
       ...input.model_run,
       model_dir: input.model_dir,
+      use_openai: input.model_run.use_openai,
       status: was_active ? "failed" : input.model_run.status,
       is_complete: was_active ? true : input.model_run.is_complete,
       has_errors: was_active ? true : input.model_run.has_errors,
       error_message: was_active
         ? "The server restarted while this model run was active. Retry to continue from its checkpoints."
         : input.model_run.error_message,
+      warnings: input.model_run.warnings ?? [],
       completed_at: was_active ? new Date().toISOString() : input.model_run.completed_at,
       elapsed_time_ms: Math.min(
         input.model_run.allocated_time_ms,

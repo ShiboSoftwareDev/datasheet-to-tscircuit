@@ -391,6 +391,29 @@ test("application component gate enforces sourced manufacturer part numbers", ()
   )
 })
 
+test("application component gate trusts the generated target IC ordering code", () => {
+  const plan = {
+    components: [
+      {
+        reference: "U1",
+        kind: "buck-boost converter",
+        manufacturer_part_number: "TPS63802DLA",
+      },
+    ],
+    connections: [],
+  }
+  const circuit = [
+    {
+      type: "source_component",
+      source_component_id: "u1",
+      name: "U1",
+      manufacturer_part_number: "TPS63802DLAR",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationComponentValueErrors(plan, circuit)).toEqual([])
+})
+
 test("visual gate accepts honest inconclusive reports but rejects unsupported pass claims", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-visual-gate-"))
   const png = Uint8Array.from(

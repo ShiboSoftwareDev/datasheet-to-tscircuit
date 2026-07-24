@@ -1,4 +1,5 @@
 import type { ApiError, Job, JobSummary, ModelRun, ModelSelectedPreview } from "@/shared/job-types"
+import { getInitialUseOpenai } from "./agent-provider-preference"
 
 interface JobResponse {
   job: Job
@@ -72,7 +73,10 @@ export async function cancelJob(job_id: string): Promise<Job> {
 }
 
 export async function retryJob(job_id: string): Promise<Job> {
-  const response = await fetch(`/api/job/retry?job_id=${encodeURIComponent(job_id)}`, { method: "POST" })
+  const response = await fetch(
+    `/api/job/retry?job_id=${encodeURIComponent(job_id)}&use_openai=${getInitialUseOpenai()}`,
+    { method: "POST" },
+  )
   if (!response.ok) throw new Error(await readApiError(response))
   const job_response = (await response.json()) as JobResponse
   return job_response.job
@@ -110,21 +114,27 @@ export async function getModelRun(job_id: string): Promise<ModelRun | undefined>
 }
 
 export async function createModelRun(job_id: string, effort_multiplier: number): Promise<ModelRun> {
-  const response = await fetch(`/api/model-run/create?job_id=${encodeURIComponent(job_id)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ effort_multiplier }),
-  })
+  const response = await fetch(
+    `/api/model-run/create?job_id=${encodeURIComponent(job_id)}&use_openai=${getInitialUseOpenai()}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ effort_multiplier }),
+    },
+  )
   if (!response.ok) throw new Error(await readApiError(response))
   return ((await response.json()) as ModelRunResponse).model_run
 }
 
 export async function extendModelRun(job_id: string, additional_effort: number): Promise<ModelRun> {
-  const response = await fetch(`/api/model-run/extend?job_id=${encodeURIComponent(job_id)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ additional_effort }),
-  })
+  const response = await fetch(
+    `/api/model-run/extend?job_id=${encodeURIComponent(job_id)}&use_openai=${getInitialUseOpenai()}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ additional_effort }),
+    },
+  )
   if (!response.ok) throw new Error(await readApiError(response))
   return ((await response.json()) as ModelRunResponse).model_run
 }
@@ -138,9 +148,10 @@ export async function cancelModelRun(job_id: string): Promise<ModelRun> {
 }
 
 export async function retryModelRun(job_id: string): Promise<ModelRun> {
-  const response = await fetch(`/api/model-run/retry?job_id=${encodeURIComponent(job_id)}`, {
-    method: "POST",
-  })
+  const response = await fetch(
+    `/api/model-run/retry?job_id=${encodeURIComponent(job_id)}&use_openai=${getInitialUseOpenai()}`,
+    { method: "POST" },
+  )
   if (!response.ok) throw new Error(await readApiError(response))
   return ((await response.json()) as ModelRunResponse).model_run
 }

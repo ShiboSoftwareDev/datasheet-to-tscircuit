@@ -252,6 +252,12 @@ export function markModelCardAsUnverified(model_card: string): string {
   return model_card.startsWith(notice) ? model_card : `${notice}${model_card}`
 }
 
+export function markModelCardWithEvidenceWarning(model_card: string): string {
+  const notice =
+    "> **Datasheet evidence status:** The simulator suite completed, but evidence-quality warnings prevent treating its match score as an independent accuracy claim.\n\n"
+  return model_card.startsWith(notice) ? model_card : `${notice}${model_card}`
+}
+
 export async function preserveCheckpointAndMarkCancelled(input: {
   model_run_id: string
   model_dir: string

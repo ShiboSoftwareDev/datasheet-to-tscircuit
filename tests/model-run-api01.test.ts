@@ -10,22 +10,30 @@ test("model API starts and extends the same fixed run using time-only effort", a
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-api-"))
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
-  job_store.createJob({ job_id: "job_1", job_dir, file_name: "sensor.pdf" })
+  job_store.createJob({
+    job_id: "job_1",
+    job_dir,
+    file_name: "sensor.pdf",
+    use_openai: true,
+  })
   job_store.updateJob("job_1", { display_status: "agent_running", is_complete: false })
   const started_run_ids: string[] = []
+  const started_with_openai: Array<boolean | undefined> = []
   const handle = createModelRunApiHandler({
     job_store,
     model_run_store,
     agent_bin: "unused-agent",
     tsci_bin: "unused-tsci",
     model_base_effort_ms: 1_000,
-    run_model: async ({ model_run_id }) => {
+    use_openai: false,
+    run_model: async ({ model_run_id }, context) => {
       started_run_ids.push(model_run_id)
+      started_with_openai.push(context.use_openai)
     },
   })
 
   const create_response = await handle(
-    new Request("http://localhost/api/model-run/create?job_id=job_1", {
+    new Request("http://localhost/api/model-run/create?job_id=job_1&use_openai=false", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ effort_multiplier: 2 }),
@@ -48,7 +56,9 @@ test("model API starts and extends the same fixed run using time-only effort", a
   expect(extended.model_run.model_run_id).toBe(created.model_run.model_run_id)
   expect(extended.model_run.effort_multiplier).toBe(3)
   expect(extended.model_run.allocated_time_ms).toBe(3_000)
+  expect(extended.model_run).toMatchObject({ use_openai: true })
   expect(started_run_ids).toEqual([created.model_run.model_run_id])
+  expect(started_with_openai).toEqual([true])
 
   model_run_store.updateModelRun(created.model_run.model_run_id, {
     status: "failed",
@@ -67,7 +77,88 @@ test("model API starts and extends the same fixed run using time-only effort", a
   expect(retried.model_run.status).toBe("queued")
   expect(retried.model_run.effort_multiplier).toBe(3)
   expect(started_run_ids).toEqual([created.model_run.model_run_id, created.model_run.model_run_id])
+  expect(started_with_openai).toEqual([true, true])
 
+  model_run_store.updateModelRun(created.model_run.model_run_id, {
+    status: "complete",
+    is_complete: true,
+    has_errors: false,
+  })
+  const request_context_without_provider = createModelRunApiHandler({
+    job_store,
+    model_run_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    model_base_effort_ms: 1_000,
+    run_model: async (_input, context) => {
+      started_with_openai.push(context.use_openai)
+    },
+  })
+  await request_context_without_provider(
+    new Request("http://localhost/api/model-run/extend?job_id=job_1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ additional_effort: 1 }),
+    }),
+  )
+  expect(started_with_openai).toEqual([true, true, true])
+
+  await rm(job_dir, { recursive: true, force: true })
+})
+
+test("a legacy run adopts the saved UI provider when added effort first resumes it", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-api-legacy-provider-"))
+  const model_dir = join(job_dir, "spice")
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  await mkdir(model_dir, { recursive: true })
+  job_store.createJob({ job_id: "job_legacy", job_dir, file_name: "sensor.pdf" })
+  model_run_store.restoreModelRun({
+    model_dir,
+    logs: [],
+    model_run: {
+      model_run_id: "model_legacy",
+      job_id: "job_legacy",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      status: "complete",
+      is_complete: true,
+      has_errors: false,
+      effort_multiplier: 1,
+      base_effort_ms: 1_000,
+      allocated_time_ms: 1_000,
+      elapsed_time_ms: 1_000,
+      iteration: 1,
+      logs: [],
+      progress_history: [],
+      preview_options: [],
+    },
+  })
+  const providers: Array<boolean | undefined> = []
+  const handle = createModelRunApiHandler({
+    job_store,
+    model_run_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_model: async (_input, context) => {
+      providers.push(context.use_openai)
+    },
+  })
+
+  const response = await handle(
+    new Request("http://localhost/api/model-run/extend?job_id=job_legacy&use_openai=true", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ additional_effort: 1 }),
+    }),
+  )
+
+  expect(response?.status).toBe(202)
+  expect(providers).toEqual([true])
+  expect(model_run_store.getModelRun("model_legacy")?.use_openai).toBe(true)
+  expect(job_store.getJob("job_legacy")?.use_openai).toBe(true)
+  expect((await Bun.file(join(model_dir, "model-run.json")).json()).use_openai).toBe(true)
+  expect((await Bun.file(join(job_dir, "job.json")).json()).use_openai).toBe(true)
   await rm(job_dir, { recursive: true, force: true })
 })
 

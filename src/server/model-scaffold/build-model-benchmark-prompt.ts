@@ -66,7 +66,12 @@ whose \`<spicemodel>\` contains a single
 pins. Map its SPICE nodes to the helper chip pins in the correct direction and
 probe the stimulus at the DUT port, never at the helper source. For a
 nonzero-low current step, combine a separate DC current source with pulse sources
-and verify the actual current through an explicit sense resistor. Measure every
+and verify the actual current through an explicit sense resistor. Native square
+current sources can begin in their high phase even when \`pulseDelay\` is set. If
+the digitized current starts low, use a harness-local SPICE
+\`PULSE(0 step delay rise fall width period)\` current-source helper plus the
+separate DC source, then confirm that the measured sense-resistor waveform starts
+low and transitions in the same direction at the same elapsed times. Measure every
 voltage stimulus at the driven DUT port (for example \`.DUT > .VIN\` or
 \`.DUT > .EN\`), never at the source component's pin. Measure current stimuli
 differentially across their sense resistor and set simulation.scale to convert the
