@@ -16,9 +16,10 @@ export function ArtifactWarningsDialog({
           className="workspace-warning-trigger"
           type="button"
           aria-label={`View ${warnings.length} ${artifact_label} warning${warnings.length === 1 ? "" : "s"}`}
+          title={`${warnings.length} ${artifact_label} warning${warnings.length === 1 ? "" : "s"}`}
         >
           <TriangleAlert size={13} />
-          <span>{warnings.length === 1 ? "1 warning" : `${warnings.length} warnings`}</span>
+          <span className="workspace-warning-count">{warnings.length}</span>
         </button>
       </Dialog.Trigger>
       <Dialog.Portal>

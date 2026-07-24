@@ -1168,16 +1168,17 @@ a {
 
 .workspace-status-bar {
   display: flex;
+  height: 40px;
   min-width: 0;
   min-height: 40px;
   grid-column: 1;
   align-items: center;
   justify-self: end;
-  gap: 2px;
+  gap: 1px;
   padding: 3px;
   border: 1px solid #e1e1dd;
   border-radius: 10px;
-  background: #f1f1ee;
+  background: #f3f3f0;
 }
 
 .workspace-artifact-status,
@@ -1187,32 +1188,52 @@ a {
   height: 32px;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
-  padding: 0 8px;
+  gap: 3px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 6px;
   color: #686d73;
-  background: rgba(255, 255, 255, 0.72);
   font-size: 9px;
   font-weight: 600;
   white-space: nowrap;
 }
 
+.workspace-artifact-status {
+  padding: 0 6px;
+  background: transparent;
+}
+
+.workspace-artifact-group {
+  display: inline-flex;
+  height: 32px;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.workspace-artifact-group + .workspace-artifact-group {
+  border-left: 1px solid #dedfdb;
+}
+
 .workspace-artifact-status > svg {
+  width: 11px;
+  height: 11px;
   color: #777d84;
+}
+
+.workspace-status-name {
+  color: #6e747b;
 }
 
 .workspace-artifact-status strong {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   color: #3e454d;
   font-weight: 700;
 }
 
 .workspace-artifact-status strong i {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   flex: 0 0 auto;
   border-radius: 50%;
   background: #a6abb1;
@@ -1251,7 +1272,10 @@ a {
 }
 
 .workspace-download-trigger {
-  gap: 5px;
+  width: 28px;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
   color: #4b5f78;
   background: white;
   box-shadow: 0 1px 2px rgba(32, 33, 35, 0.06);
@@ -1259,11 +1283,34 @@ a {
 }
 
 .workspace-warning-trigger {
-  gap: 5px;
+  position: relative;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  justify-content: center;
+  margin-right: 3px;
+  padding: 0;
   color: #8a5a0a;
   background: #fff7e5;
   box-shadow: inset 0 0 0 1px rgba(200, 139, 35, 0.2);
   cursor: pointer;
+}
+
+.workspace-warning-count {
+  display: grid;
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 10px;
+  height: 10px;
+  place-items: center;
+  padding: 0 2px;
+  border-radius: 5px;
+  color: white;
+  background: #c97a12;
+  font-size: 7px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
 
 .workspace-warning-trigger:hover {
@@ -4154,19 +4201,13 @@ a {
 }
 
 @media (max-width: 420px) {
-  .workspace-artifact-status > span {
+  .workspace-status-name {
     display: none;
   }
 
-  .workspace-artifact-status,
-  .workspace-download-trigger,
-  .workspace-warning-trigger {
+  .workspace-artifact-status {
     padding-right: 6px;
     padding-left: 6px;
-  }
-
-  .workspace-warning-trigger > span {
-    display: none;
   }
 }
 

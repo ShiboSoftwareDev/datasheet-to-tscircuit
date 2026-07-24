@@ -179,12 +179,6 @@ export default function App() {
                 job={job}
                 model_run={model_run_state.model_run}
                 is_model_loading={model_run_state.is_loading}
-                warnings={
-                  workspace_tab === "component"
-                    ? (job.warnings ?? [])
-                    : (model_run_state.model_run?.warnings ?? [])
-                }
-                warning_artifact_label={workspace_tab === "component" ? "Component" : "SPICE model"}
               />
               <nav className="workspace-tabs" aria-label="Datasheet artifacts">
                 <button
