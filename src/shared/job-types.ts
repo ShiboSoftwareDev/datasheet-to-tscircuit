@@ -262,6 +262,10 @@ export interface ModelReferencePreview {
   title: string
   source_file: string
   result_file?: string
+  x_axis_label?: string
+  x_axis_unit?: string
+  y_axis_label?: string
+  y_axis_unit?: string
   x_scale: "linear" | "log"
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]

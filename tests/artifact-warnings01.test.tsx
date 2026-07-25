@@ -10,8 +10,9 @@ test("artifact warnings stay behind a compact header dialog trigger", () => {
     />,
   )
 
-  expect(html).toContain("2 warnings")
+  expect(html).toContain('class="workspace-warning-count">2</span>')
   expect(html).toContain("View 2 SPICE model warnings")
+  expect(html).toContain('title="2 SPICE model warnings"')
   expect(html).not.toContain("Benchmark validation was incomplete.")
   expect(html).not.toContain("One graph was duplicated.")
 })

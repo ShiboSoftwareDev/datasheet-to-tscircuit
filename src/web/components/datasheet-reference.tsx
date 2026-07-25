@@ -80,20 +80,14 @@ export function DatasheetReference({
         {!job.evidence_available || image_failed ? (
           <ReferenceEmpty job={job} failed={image_failed} />
         ) : (
-          <a
-            className="datasheet-reference-image-link"
-            href={image_url}
-            target="_blank"
-            rel="noreferrer"
-            title={`Open the full datasheet ${image_label} reference`}
-          >
-            <img
-              key={image_url}
-              src={image_url}
-              alt={`Datasheet ${image_label} reference for ${job.file_name}`}
-              onError={() => setImageFailed(true)}
-            />
-          </a>
+          <img
+            className="datasheet-reference-image"
+            key={image_url}
+            src={image_url}
+            alt={`Datasheet ${image_label} reference for ${job.file_name}`}
+            draggable={false}
+            onError={() => setImageFailed(true)}
+          />
         )}
       </div>
     </section>

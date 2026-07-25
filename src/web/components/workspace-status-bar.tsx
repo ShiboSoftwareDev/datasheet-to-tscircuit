@@ -1,5 +1,5 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
-import { Boxes, ChevronDown, ChevronRight, CircuitBoard, Download, FlaskConical } from "lucide-react"
+import { Boxes, ChevronRight, CircuitBoard, Download, FlaskConical } from "lucide-react"
 import type { Job, JobDisplayStatus, ModelRun, ModelRunStatus } from "@/shared/job-types"
 import { getJobFileUrl, getModelRunFileUrl } from "../api"
 import { ArtifactWarningsDialog } from "./artifact-warnings"
@@ -50,18 +50,21 @@ function getModelStatus(model_run: ModelRun | undefined, is_loading: boolean): s
   return MODEL_STATUS_COPY[model_run.status]
 }
 
+function getCompactStatus(status: string): string {
+  if (status === "Ready with warnings" || status === "Output with warnings") return "Ready"
+  if (status === "Not convertible") return "Unavailable"
+  if (status === "Not started") return "Off"
+  return status
+}
+
 export function WorkspaceStatusBar({
   job,
   model_run,
   is_model_loading,
-  warnings,
-  warning_artifact_label,
 }: {
   job: Job
   model_run?: ModelRun
   is_model_loading: boolean
-  warnings: string[]
-  warning_artifact_label: string
 }) {
   const component_status = job.component_ready
     ? (job.warnings?.length ?? 0) > 0
@@ -75,29 +78,38 @@ export function WorkspaceStatusBar({
 
   return (
     <section className="workspace-status-bar" aria-label="Artifact status and downloads">
-      <span
-        className={`workspace-artifact-status status-${getStatusTone(component_status)}`}
-        role="status"
-        aria-label={`Component status: ${component_status}`}
-      >
-        <Boxes size={12} />
-        <span>Component:</span>
-        <strong>
-          <i /> {component_status}
-        </strong>
-      </span>
-      <span
-        className={`workspace-artifact-status status-${getStatusTone(model_status)}`}
-        role="status"
-        aria-label={`SPICE model status: ${model_status}`}
-      >
-        <FlaskConical size={12} />
-        <span>SPICE model:</span>
-        <strong>
-          <i /> {model_status}
-        </strong>
-      </span>
-      <ArtifactWarningsDialog warnings={warnings} artifact_label={warning_artifact_label} />
+      <div className="workspace-artifact-group">
+        <span
+          className={`workspace-artifact-status status-${getStatusTone(component_status)}`}
+          role="status"
+          aria-label={`Component status: ${component_status}`}
+          title={`Component: ${component_status}`}
+        >
+          <Boxes size={12} />
+          <span className="workspace-status-name">Component</span>
+          <strong>
+            <i />
+            <span>{getCompactStatus(component_status)}</span>
+          </strong>
+        </span>
+        <ArtifactWarningsDialog warnings={job.warnings ?? []} artifact_label="Component" />
+      </div>
+      <div className="workspace-artifact-group">
+        <span
+          className={`workspace-artifact-status status-${getStatusTone(model_status)}`}
+          role="status"
+          aria-label={`SPICE model status: ${model_status}`}
+          title={`SPICE model: ${model_status}`}
+        >
+          <FlaskConical size={12} />
+          <span className="workspace-status-name">SPICE</span>
+          <strong>
+            <i />
+            <span>{getCompactStatus(model_status)}</span>
+          </strong>
+        </span>
+        <ArtifactWarningsDialog warnings={model_run?.warnings ?? []} artifact_label="SPICE model" />
+      </div>
       <DropdownMenu.Root>
         <DropdownMenu.Trigger asChild>
           <button
@@ -105,8 +117,9 @@ export function WorkspaceStatusBar({
             type="button"
             disabled={!has_downloads}
             aria-label="Download artifacts"
+            title="Download artifacts"
           >
-            <Download size={13} /> <span>Download</span> <ChevronDown size={11} />
+            <Download size={13} />
           </button>
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
