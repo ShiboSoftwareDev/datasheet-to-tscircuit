@@ -1,16 +1,11 @@
-import { join } from "node:path"
 import { hasBenchmarkManifest, verifyBenchmarkLock } from "../model-benchmark-lock"
 import { buildModelAgentPrompt } from "../model-scaffold"
 import { publishAvailableModelCheckpoint, restoreBestReportedModelCheckpoint } from "./model-checkpoint"
 import type { ModelExecution } from "./model-execution"
-import {
-  captureProcessOutput,
-  isTransientAgentTransportFailure,
-  summarizeProcessFailure,
-} from "./model-process-output"
+import { summarizeProcessFailure } from "./model-process-output"
 import type { ModelRefinementState } from "./model-refinement-state"
 import { updateServerProgress } from "./model-run-state"
-import { streamModelProcess } from "./stream-model-process"
+import { runModelAgentProcess } from "./run-model-agent-process"
 
 export interface RefinementAgentPassResult {
   was_cancelled: boolean
@@ -60,46 +55,17 @@ export async function runRefinementAgentPass(
   let agent_exit_code = 1
   let agent_process_output = ""
   try {
-    const configured_transport_retries = Number(process.env.MODEL_AGENT_TRANSPORT_RETRIES ?? 2)
-    const transport_retry_limit = Number.isInteger(configured_transport_retries)
-      ? Math.max(0, Math.min(5, configured_transport_retries))
-      : 2
-    let transport_retry = 0
-    while (true) {
-      agent_process_output = ""
-      agent_exit_code = await streamModelProcess({
-        command: [
-          execution.context.agent_bin,
-          "do",
-          ...(execution.context.use_openai ? ["--use-openai"] : []),
-          "--prompt",
-          buildModelAgentPrompt(),
-          "--dir",
-          execution.model_dir,
-        ],
-        cwd: execution.model_dir,
-        signal: agent_controller.signal,
-        activity_paths: [join(execution.model_dir, "model-progress.json")],
-        workspace_root: execution.model_dir,
-        on_chunk: async (stream, message) => {
-          agent_process_output = captureProcessOutput(agent_process_output, message)
-          await execution.append(stream, message)
-        },
-      })
-      if (
-        agent_exit_code === 0 ||
-        agent_controller.signal.aborted ||
-        !isTransientAgentTransportFailure(agent_process_output) ||
-        transport_retry >= transport_retry_limit
-      ) {
-        break
-      }
-      transport_retry += 1
-      await execution.append(
-        "system",
-        `Agent transport failed; restarting the same refinement workspace (${transport_retry}/${transport_retry_limit}) without discarding its checkpoint or remaining effort.\n`,
-      )
-    }
+    const agent_result = await runModelAgentProcess({
+      agent_bin: execution.context.agent_bin,
+      use_openai: Boolean(execution.context.use_openai),
+      prompt: buildModelAgentPrompt(),
+      model_dir: execution.model_dir,
+      signal: agent_controller.signal,
+      append: execution.append.bind(execution),
+      phase_label: "Refinement agent",
+    })
+    agent_exit_code = agent_result.exit_code
+    agent_process_output = agent_result.process_output
   } finally {
     clearInterval(refinement_monitor)
     execution.process_controller.signal.removeEventListener("abort", cancel_agent)

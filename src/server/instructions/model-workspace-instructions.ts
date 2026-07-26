@@ -16,6 +16,11 @@ evidence and can silently propagate stale benchmark defects. The source files ar
   saved benchmark build, run \`bun score-benchmark.ts <benchmark-id>\`; it extracts
   the simulator trace and writes a score plus reference/result comparison SVG
   under \`diagnostics/<benchmark-id>/\`. Do not edit it.
+- \`sync-model-wrapper.ts\`: the server-owned model integration helper. After
+  creating or changing \`model.lib\` or \`model-manifest.json\`, run
+  \`bun sync-model-wrapper.ts\` before every targeted build. Never hand-write or
+  edit \`component-with-model.circuit.tsx\`; the helper preserves component props,
+  name forwarding, symbol, footprint, and canonical inline model source.
 - \`validation-feedback.md\`: server-owned feedback from the previous independent
   validation pass, when present. Fix every listed failure before exiting.
 - \`simulation-validation.json\` and \`validation-artifacts/<benchmark-id>/\`:
@@ -26,6 +31,16 @@ evidence and can silently propagate stale benchmark defects. The source files ar
 - \`render-svg-to-png.ts\`: the server-provided renderer for turning tscircuit's
   schematic and simulation SVG outputs into PNGs that the vision tool can open.
   Use it, but do not edit it.
+- \`prepare-vision-image.ts\`: the server-provided Sharp helper for making an
+  oversized rendered graph readable by the vision tool. Run it with an input PNG
+  and an output .jpg path, then inspect that JPEG with \`read\`. Do not edit it.
+- \`validate-setup-evidence.ts\`: the exact server evidence validator. During
+  setup, write \`setup-complete.json\`, run this validator, correct every reported
+  benchmark error, and rerun it until it passes before exiting. Do not edit it.
+
+Use Bun/TypeScript and \`JSON.parse\` for local automation and validation. Use the
+installed \`sharp\` package for image crops and pixel processing. Do not depend on
+jq, ImageMagick, Python Pillow, or other optional utilities.
 
 Your task has untimed evidence setup, component waiting, and benchmark-finalization
 phases followed by a time-budgeted refinement phase. Those untimed phases do not
@@ -42,14 +57,24 @@ extra effort only permits more refinement iterations.
    graph PNG before digitizing it. OCR, extracted text, SVG/XML text, filenames,
    or shell metadata do not count as graph inspection. Check for an official
    vendor model when network access is available; preserve its provenance if used.
+   Search the complete extracted document, not only typical-characteristics pages
+   and not a \`head\`-truncated grep result. Inspect Figure captions and all pages
+   mentioning transient, waveform, response time, startup/start-up, turn-on,
+   turn-off, or a printed time-per-division axis. If a rendered PNG is too large
+   for \`read\`, run
+   \`bun prepare-vision-image.ts <input.png> <review.jpg>\` and read that JPEG one
+   at a time. Keep reusable Sharp inspection scripts inside this workspace rather
+   than /tmp.
    Retain the full rendered source page for every drafted benchmark under
    \`evidence/pages/datasheet-page-<page>.png\`, using the same page number stored
    in that benchmark's source.
 2. Create executable evidence only for datasheet figures whose printed x-axis is
-   time. Inventory every visibly distinct channel in each eligible figure before
-   drafting it. Record the exact channel count and classify each channel as either
+   time. Inventory every distinct plotted pane and every visibly distinct trace in
+   each eligible figure before drafting it. Record \`source.subplot_count\` and
+   \`source.channel_count\`, assign every trace a \`subplot_index\`, and classify it as either
    a DUT \`response\` or a harness \`stimulus\`; no visible channel may be silently
-   dropped. Digitize every channel's complete time waveform into its own two-column
+   dropped and no subplot may be unrepresented. A pane can contain several traces;
+   do not assume two panes or two channels. Digitize every trace's complete time waveform into its own two-column
    CSV with an \`x,y\` header, where x is elapsed time in milliseconds. Do not digitize,
    draft, or preserve executable benchmark definitions for static curves whose
    x-axis is voltage, current, load, temperature, frequency, or another
@@ -60,12 +85,17 @@ extra effort only permits more refinement iterations.
    with that benchmark, not the whole datasheet page or another graph from the same page.
    Also crop each channel, including its label and scale legend, to
    \`evidence/figures/<benchmark-id>/<series-id>.png\`. Store its numeric reference at
-   \`evidence/curves/<benchmark-id>/<series-id>.csv\`. Load current, input voltage,
+   \`evidence/curves/<benchmark-id>/<series-id>.csv\` and its calibrated pixel trace at
+   \`evidence/traces/<benchmark-id>/<series-id>.json\`. The trace provenance must
+   map every CSV point to an actual plotted pixel and declared trace color in the
+   retained channel crop; generated analytic waveform families are prohibited.
+   Load current, input voltage,
    enable, and other applied channels are stimuli; output voltage, power-good,
-   inductor current, and other device-produced channels are responses. Then write
-   Also include \`figure_inventory[]\` with every reviewed graph classified as
+   inductor current, and other device-produced channels are responses. Also include
+   \`figure_inventory[]\` with every reviewed graph classified as
    \`x_axis: "time"\` or \`x_axis: "static"\`. Every time entry must have
-   \`status: "drafted"\` and a \`benchmark_id\` that exists in \`benchmarks[]\`;
+   \`status: "drafted"\`, a \`benchmark_id\` that exists in \`benchmarks[]\`, and
+   matching \`subplot_count\` and \`channel_count\`;
    there is no supported reason for omitting a time-domain figure. Write
    \`setup-complete.json\` version 2. Do not create or tune a model during setup.
    Use benchmark and series ids matching \`^[A-Za-z0-9][A-Za-z0-9._-]*$\` from
@@ -73,7 +103,10 @@ extra effort only permits more refinement iterations.
 3. When component.circuit.tsx becomes available, the server starts a separate,
    untimed benchmark-finalization pass. During that pass, verify the pinout and
    convert the draft into \`benchmarks.json\` plus one executable tscircuit test
-   bench per benchmark. Do not create, tune, or run a model in this pass. When the
+   bench per benchmark. The server has already hashed \`benchmark-draft.json\`,
+   \`setup-complete.json\`, and every file under \`evidence/\`; never create,
+   edit, delete, or rename any of them during finalization. Do not create, tune,
+   or run a model in this pass. When the
    pass exits, the server snapshots the manifest, evidence CSVs, and benchmark TSX
    outside this workspace before any refinement is allowed to begin.
 4. Only after the server reports that the benchmark lock exists, create a baseline
@@ -155,9 +188,9 @@ extra effort only permits more refinement iterations.
   generated time, and explicit component-pin to SPICE-node mapping.
 - \`component-with-model.circuit.tsx\`: a reusable default-exported tscircuit
    component attaching the model with \`<spicemodel source={...} spicePinMapping={...} />\`.
-   It must preserve the authoritative component's symbol and footprint and build
-   independently. The server always replaces this file with its own canonical
-   wrapper before validation and publication.
+   Generate it only with \`bun sync-model-wrapper.ts\`. It must build independently.
+   The server also replaces it with the same canonical wrapper before validation
+   and publication.
 - \`benchmarks.json\`: the locked benchmark manifest described below.
 - \`benchmarks/*.circuit.tsx\`: one reproducible tscircuit bench per benchmark.
 - \`evidence/curves/<benchmark-id>/<series-id>.csv\`: one digitized \`x,y\` reference per visible channel.
@@ -165,6 +198,8 @@ extra effort only permits more refinement iterations.
 - \`evidence/figures/<benchmark-id>.png\`: the exact graph crop referenced by each benchmark's
   \`source.image\`.
 - \`evidence/figures/<benchmark-id>/<series-id>.png\`: a channel crop retaining its label and scale.
+- \`evidence/traces/<benchmark-id>/<series-id>.json\`: pixel coordinates, axis calibration,
+  and trace color proving that every reference CSV value was read from the retained image.
 - \`results/champion/<benchmark-id>/<series-id>.csv\`: champion results as \`x,y\`.
 - \`results/verified/<benchmark-id>/<series-id>.csv\`: server-owned results extracted
   from Circuit JSON. These are diagnostic mirrors; never create or edit this directory.
@@ -256,7 +291,8 @@ workspace and every referenced CSV contains numeric \`x,y\` rows:
       "page": 10,
       "figure": "Figure 4",
       "image": "evidence/figures/stable-id.png",
-      "channel_count": 2
+      "channel_count": 2,
+      "subplot_count": 2
     },
     "critical": true,
     "weight": 1,
@@ -267,10 +303,12 @@ workspace and every referenced CSV contains numeric \`x,y\` rows:
       "id": "vout",
       "title": "Output voltage",
       "role": "response",
+      "subplot_index": 1,
       "quantity": "voltage",
       "unit": "V",
       "weight": 1,
       "source_image": "evidence/figures/stable-id/vout.png",
+      "trace_file": "evidence/traces/stable-id/vout.json",
       "reference_file": "evidence/curves/stable-id/vout.csv",
       "result_file": "results/champion/stable-id/vout.csv",
       "simulation": {
@@ -283,9 +321,11 @@ workspace and every referenced CSV contains numeric \`x,y\` rows:
       "id": "vin",
       "title": "Input-voltage step",
       "role": "stimulus",
+      "subplot_index": 2,
       "quantity": "voltage",
       "unit": "V",
       "source_image": "evidence/figures/stable-id/vin.png",
+      "trace_file": "evidence/traces/stable-id/vin.json",
       "reference_file": "evidence/curves/stable-id/vin.csv",
       "result_file": "results/champion/stable-id/vin.csv",
       "simulation": {
@@ -335,7 +375,7 @@ the sensed voltage into the printed current unit.
 
 Every benchmark must import \`../component-with-model.circuit\`, instantiate exactly
 one model component with \`name="DUT"\`, declare every series' named \`<voltageprobe>\`, and
-run \`<analogsimulation spiceEngine="ngspice" ... />\`. The server verifies
+run \`<analogsimulation spiceEngine="ngspice" graphIndependentAxes ... />\`. The server verifies
 from Circuit JSON that DUT owns the canonical model.lib subcircuit and that the
 named probe is electrically connected to DUT.
 Set every voltage response probe's \`connectsTo\` to a direct DUT port selector such as
@@ -355,4 +395,6 @@ Do not label a model or application region as validated in model.lib or model-ca
 only the server may add that status after the complete locked suite passes.
 For \`<analogsimulation>\`, omit \`simulationType\` or set it exactly to
 \`"spice_transient_analysis"\`; \`"transient"\` is not a valid tscircuit prop value.
+Always set the boolean \`graphIndependentAxes\` flag so traces with different units
+and magnitudes are automatically aligned and scaled independently.
 `

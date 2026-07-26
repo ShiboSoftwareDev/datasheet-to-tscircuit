@@ -43,6 +43,7 @@
         "react-error-boundary": "^6.0.0",
         "react-hot-toast": "^2.5.2",
         "react-query": "^3.39.3",
+        "sharp": "0.32.6",
         "tailwind-merge": "^2.6.0",
         "tsci-agent": "0.1.11",
         "tscircuit": "0.0.2110",

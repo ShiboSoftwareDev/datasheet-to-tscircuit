@@ -23,6 +23,9 @@ The server controls three strictly separated phases:
 - Render selected pages at exactly 200 DPI into \`visual-reference/pages/\` using stable filenames.
   Use the agent's built-in \`read\` tool on the PNGs; OCR, SVG text, metadata, and filenames do not
   count as pixel inspection.
+- Use Bun and \`JSON.parse\` for local automation and JSON validation. Use the installed \`sharp\`
+  package for deterministic high-zoom crops or resizes. Do not depend on jq, ImageMagick, Python
+  Pillow, or other optional utilities.
 - Resolve one exact orderable part and package. Never combine pin or package data from different
   ordering codes. If that mapping cannot be resolved automatically, record \`unresolved\` rather than guess.
 - Distinguish PCB-top copper land patterns from package-top, package-bottom, outline, stencil, and

@@ -14,6 +14,7 @@ import {
 
 interface ReadCurrentLockOptions {
   require_source_images?: boolean
+  require_trace_provenance?: boolean
 }
 
 type LockedFileContent = LockedFile & { content: Buffer }
@@ -80,6 +81,7 @@ export async function readCurrentLock(
     for (const series of record.series) {
       assertEvidenceFile(model_dir, series.reference_file)
       if (series.source_image) assertEvidenceFile(model_dir, series.source_image)
+      if (series.trace_file) assertEvidenceFile(model_dir, series.trace_file)
     }
     if (options.require_source_images && !record.source_image) {
       throw new Error(
@@ -88,7 +90,9 @@ export async function readCurrentLock(
     }
     if (record.source_image) assertEvidenceFile(model_dir, record.source_image)
   }
-  const warnings = await validateBenchmarkReferenceFiles(model_dir, manifest)
+  const warnings = await validateBenchmarkReferenceFiles(model_dir, manifest, {
+    require_trace_provenance: options.require_trace_provenance,
+  })
   await validateSimulationDefinitions(
     model_dir,
     records.map((record) => record.id),
@@ -109,6 +113,9 @@ export async function readCurrentLock(
     ...records.flatMap((record) =>
       record.series.flatMap((series) => (series.source_image ? [series.source_image] : [])),
     ),
+    ...records.flatMap((record) =>
+      record.series.flatMap((series) => (series.trace_file ? [series.trace_file] : [])),
+    ),
   ]
   const unique_paths = [...new Set(paths)]
   const files = await Promise.all(
@@ -117,10 +124,24 @@ export async function readCurrentLock(
       return { file, content, sha256: hashContent(content) }
     }),
   )
+  const source_contract_errors: string[] = []
   for (const record of records) {
     const source_file = files.find((file) => file.file === join("benchmarks", `${record.id}.circuit.tsx`))
     if (!source_file) throw new Error(`Benchmark ${record.id} source is missing`)
-    assertBenchmarkSourceContract(source_file.content.toString("utf8"), record)
+    try {
+      assertBenchmarkSourceContract(source_file.content.toString("utf8"), record)
+    } catch (error) {
+      source_contract_errors.push(error instanceof Error ? error.message : String(error))
+    }
+  }
+  if (source_contract_errors.length > 0) {
+    throw new Error(
+      `Benchmark source contract failed with ${source_contract_errors.length} error${
+        source_contract_errors.length === 1 ? "" : "s"
+      }:\n${source_contract_errors.map((error) => `- ${error}`).join("\n")}`,
+    )
+  }
+  for (const record of records) {
     if (record.source_image) {
       const image = files.find((file) => file.file === record.source_image)?.content
       if (!image || !isPng(image)) {

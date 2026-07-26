@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import { join, resolve } from "node:path"
 import { repositoryRoot } from "../paths/repository-paths"
 import { getPinnedTscircuitVersion } from "../runtime-versions"
+import { getRuntimeSourceCommit } from "../runtime-source-commit"
 import { isRecord } from "./parse-typical-application-plan"
 import { buildAgentPrompt } from "./build-agent-prompt"
 import { buildTypicalApplicationEvidenceVerificationPrompt } from "./build-typical-application-evidence-verification-prompt"
@@ -19,25 +20,6 @@ async function readInstalledPackageVersion(package_name: string): Promise<string
   return isRecord(value) && typeof value.version === "string" ? value.version : "unknown"
 }
 
-async function readSourceCommit(): Promise<string> {
-  const configured =
-    process.env.SOURCE_COMMIT ??
-    process.env.GIT_COMMIT ??
-    process.env.VERCEL_GIT_COMMIT_SHA ??
-    process.env.GITHUB_SHA
-  if (configured?.trim()) return configured.trim()
-  const child = Bun.spawn(["git", "rev-parse", "HEAD"], {
-    cwd: repositoryRoot,
-    stdout: "pipe",
-    stderr: "ignore",
-  })
-  const [exit_code, output] = await Promise.all([child.exited, new Response(child.stdout).text()]).catch(
-    () => [-1, ""] as const,
-  )
-  const commit = output.trim()
-  return exit_code === 0 && /^[0-9a-f]{40}$/i.test(commit) ? commit : "unavailable"
-}
-
 export async function collectJobProvenance(input: {
   job_dir: string
   additional_instructions?: string
@@ -48,7 +30,7 @@ export async function collectJobProvenance(input: {
       readFile(resolve(repositoryRoot, "bun.lock")).catch(() => undefined),
       readInstalledPackageVersion("tsci-agent").catch(() => "unknown"),
       getPinnedTscircuitVersion(),
-      readSourceCommit(),
+      getRuntimeSourceCommit(),
     ])
   return {
     source_commit,

@@ -17,6 +17,9 @@ data, recommended land pattern, board layout, and typical application. Sort cand
 page number. Render every selected page at exactly 200 DPI with deterministic filenames under
 visual-reference/pages/, then inspect the pixels with the built-in read tool. Page numbers in JSON
 are one-based PDF page numbers, not printed document folios.
+Use Bun and \`JSON.parse\` for local automation and JSON validation. When a high-zoom crop is
+needed, use Bun with the installed \`sharp\` package. Do not depend on jq, ImageMagick, Python
+Pillow, or other optional utilities that may not exist in the agent container.
 
 Write component-evidence.json with this schema:
 { "version": 1, "status": "resolved" | "unresolved",
@@ -47,9 +50,14 @@ outline, package-bottom view, stencil aperture, or generic footprint-library nam
 Record every copper pad, including repeated pads on one electrical pin. Use null only for a
 mechanical copper pad that has no electrical pin. Coordinates and dimensions
 are millimeters about the land-pattern origin. Derive center coordinates only from cited dimensions
-and record the formula in a source note. Never choose between conflicting dimension leaders by
-appearance alone. If the exact package, orientation, pin mapping, a required dimension, or any
-conflict cannot be resolved automatically, set status to unresolved and describe it; do not guess.
+and record the formula in a source note. Trace every dimension's extension lines and arrowheads:
+distinguish a pad edge-to-edge size from a package-centerline-to-pad-center offset, and treat a
+multiplicity prefix such as 5X only as a count. Do not derive a pad center as half its width unless
+the drawing explicitly places one pad edge on the package origin. For pcb_top coordinates, use +x
+to the right and +y upward, and verify the resulting row order against the visible pin numbers.
+Never choose between conflicting dimension leaders by appearance alone. If the exact package,
+orientation, pin mapping, a required dimension, or any conflict cannot be resolved automatically,
+set status to unresolved and describe it; do not guess.
 When status is resolved, unresolved_ambiguities must be empty; record resolved or non-material
 datasheet discrepancies in the relevant source note instead.
 Classify each pin role from its cited electrical function. The role describes the pin, not a desired

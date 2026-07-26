@@ -2,12 +2,12 @@ import { readFile, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { JobLogStream } from "@/shared/job-types"
 import ts from "typescript"
+import { isTransientAgentTransportFailure } from "../agent-tools/agent-transport-failure"
 import { getCircuitBuildDiagnostics } from "../model-simulation-validator"
 import { writeServerStructuralComponent } from "./attach-model-to-generated-component"
 import { listModelBenchFiles } from "./list-model-bench-files"
 import { ModelInfrastructureError, streamModelProcess } from "./stream-model-process"
 import { captureProcessOutput, summarizeProcessFailure } from "./model-process-output"
-import { getValidationConcurrency } from "./validate-champion"
 
 export async function validateBenchmarkSources(input: {
   job_dir: string
@@ -15,6 +15,8 @@ export async function validateBenchmarkSources(input: {
   signal: AbortSignal
   tsci_bin: string
   append: (stream: JobLogStream, message: string) => Promise<void>
+  transport_retry_count?: number
+  transport_retry_base_delay_ms?: number
 }): Promise<void> {
   const temporary_component = join(input.model_dir, "component-with-model.circuit.tsx")
   const output_root = join(input.model_dir, ".benchmark-source-check")
@@ -67,10 +69,23 @@ export async function validateBenchmarkSources(input: {
         "system",
         `Structurally rendering ${benchmark_files.length} provisional benchmark circuit(s) before locking; analog simulation remains disabled…\n`,
       )
+      const configured_retries =
+        input.transport_retry_count ?? Number(process.env.MODEL_VALIDATION_TRANSPORT_RETRIES ?? 4)
+      const retry_count = Number.isInteger(configured_retries)
+        ? Math.max(0, Math.min(5, configured_retries))
+        : 4
+      const configured_base_delay_ms =
+        input.transport_retry_base_delay_ms ??
+        Number(process.env.MODEL_VALIDATION_TRANSPORT_RETRY_BASE_DELAY_MS ?? 500)
+      const base_delay_ms =
+        Number.isFinite(configured_base_delay_ms) && configured_base_delay_ms >= 0
+          ? configured_base_delay_ms
+          : 500
       let next_index = 0
       const failures: string[] = []
+      let infrastructure_failure: string | undefined
       const worker = async () => {
-        while (!input.signal.aborted) {
+        while (!input.signal.aborted && !infrastructure_failure) {
           const benchmark_file = benchmark_files[next_index]
           next_index += 1
           if (!benchmark_file) return
@@ -83,31 +98,55 @@ export async function validateBenchmarkSources(input: {
             benchmark_id,
             "circuit.json",
           )
-          await rm(dirname(generated_path), { recursive: true, force: true })
           let process_output = ""
-          const exit_code = await streamModelProcess({
-            command: [
-              input.tsci_bin,
-              "build",
-              `benchmarks/${benchmark_file}`,
-              "--ignore-warnings",
-              "--disable-pcb",
-              "--routing-disabled",
-              "--disable-parts-engine",
-            ],
-            cwd: input.model_dir,
-            signal: input.signal,
-            on_chunk: async (stream, message) => {
-              process_output = captureProcessOutput(process_output, message)
-              await input.append(stream, message)
-            },
-          })
+          let exit_code = 1
+          for (let attempt = 0; attempt <= retry_count; attempt += 1) {
+            await rm(dirname(generated_path), { recursive: true, force: true })
+            process_output = ""
+            exit_code = await streamModelProcess({
+              command: [
+                input.tsci_bin,
+                "build",
+                `benchmarks/${benchmark_file}`,
+                "--ignore-warnings",
+                "--disable-pcb",
+                "--routing-disabled",
+                "--disable-parts-engine",
+              ],
+              cwd: input.model_dir,
+              signal: input.signal,
+              on_chunk: async (stream, message) => {
+                process_output = captureProcessOutput(process_output, message)
+                await input.append(stream, message)
+              },
+            })
+            const is_resource_pressure = exit_code === 137
+            const is_transient =
+              exit_code !== 0 && (is_resource_pressure || isTransientAgentTransportFailure(process_output))
+            if (exit_code === 0 || !is_transient || input.signal.aborted || attempt >= retry_count) {
+              break
+            }
+            await input.append(
+              "system",
+              `${
+                is_resource_pressure
+                  ? `Structural-render worker was killed by resource pressure while building ${benchmark_file}`
+                  : `Structural-render transport closed while building ${benchmark_file}`
+              }; retrying the same unmodified benchmark (${attempt + 2}/${retry_count + 1}) with backoff without consuming a benchmark-correction attempt.\n`,
+            )
+            await Bun.sleep(Math.min(5_000, base_delay_ms * 2 ** attempt))
+          }
           if (exit_code !== 0) {
-            const failure = summarizeProcessFailure(process_output)
+            const failure = `${
+              summarizeProcessFailure(process_output) ?? "No process diagnostic was emitted"
+            } (exit code ${exit_code})`
             if (/jsxDEV\d*\s+is not a function/i.test(process_output)) {
-              throw new ModelInfrastructureError(
-                `Benchmark structural-render JSX runtime failed: ${benchmark_file}: ${failure}`,
-              )
+              infrastructure_failure = `Benchmark structural-render JSX runtime failed: ${benchmark_file}: ${failure}`
+              return
+            }
+            if (exit_code === 137 || isTransientAgentTransportFailure(process_output)) {
+              infrastructure_failure = `Benchmark structural-render infrastructure failed after retries: ${benchmark_file}: ${failure}`
+              return
             }
             failures.push(`${benchmark_file}: ${failure}`)
             continue
@@ -122,10 +161,15 @@ export async function validateBenchmarkSources(input: {
           }
         }
       }
-      await Promise.all(
-        Array.from({ length: Math.min(getValidationConcurrency(), benchmark_files.length) }, () => worker()),
-      )
+      // This pass is untimed and its builds are deliberately short. Running
+      // several detached Bun/tsci structural renders at once can leave a
+      // completed child's stdio transport open on macOS, stalling the lock
+      // phase even though every circuit.json was written. Serialize this
+      // source-only gate; simulation preflight and independent validation
+      // retain their bounded concurrency.
+      await worker()
       if (input.signal.aborted) throw new Error("Provisional benchmark validation was cancelled")
+      if (infrastructure_failure) throw new ModelInfrastructureError(infrastructure_failure)
       if (failures.length > 0) {
         throw new Error(`Benchmark structural render failed: ${failures.join(" | ")}`)
       }
@@ -194,6 +238,22 @@ function assertAnalogSimulationContract(input: {
   })
   if (spice_engine !== "ngspice") {
     throw new Error(`Benchmark ${benchmark_file} analogsimulation spiceEngine must be "ngspice"`)
+  }
+  const graph_axes_matches = attributes.properties.filter(
+    (property): property is ts.JsxAttribute =>
+      ts.isJsxAttribute(property) && property.name.getText(source_file) === "graphIndependentAxes",
+  )
+  const graph_axes_attribute = graph_axes_matches[0]
+  const graph_axes_enabled =
+    graph_axes_matches.length === 1 &&
+    graph_axes_attribute !== undefined &&
+    (graph_axes_attribute.initializer === undefined ||
+      (ts.isJsxExpression(graph_axes_attribute.initializer) &&
+        graph_axes_attribute.initializer.expression?.kind === ts.SyntaxKind.TrueKeyword))
+  if (!graph_axes_enabled) {
+    throw new Error(
+      `Benchmark ${benchmark_file} analogsimulation must set the boolean graphIndependentAxes flag`,
+    )
   }
   const simulation_type = readRequiredLiteralJsxAttribute({
     attributes,

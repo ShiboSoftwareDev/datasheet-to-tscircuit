@@ -1,3 +1,4 @@
+import { normalizeElectricalPinLabel } from "../pin-label-normalization"
 import {
   canonicalizeTypicalApplicationPlan,
   type TypicalApplicationPlan,
@@ -124,29 +125,91 @@ function componentValuesAgree(input: {
 
 type ApplicationComponent = TypicalApplicationPlan["components"][number]
 
-function normalizedEndpoint(endpoint: string, reference_map?: Map<string, string>): string {
+function symmetricTwoTerminalReferences(plan: TypicalApplicationPlan): Set<string> {
+  return new Set(
+    plan.components.flatMap((component) =>
+      ["resistor", "inductor", "fuse"].includes(componentKind(component.kind, component.reference))
+        ? [normalizedIdentifier(component.reference)]
+        : [],
+    ),
+  )
+}
+
+function normalizedEndpoint(
+  endpoint: string,
+  input: {
+    reference_map?: Map<string, string>
+    symmetric_references: Set<string>
+  },
+): string {
   const separator = endpoint.indexOf(".")
   const original_component = normalizedIdentifier(endpoint.slice(0, separator))
-  const component = reference_map?.get(original_component) ?? original_component
-  const port = normalizedIdentifier(endpoint.slice(separator + 1)).replace(/^pin(?=\d+$)/, "")
+  const component = input.reference_map?.get(original_component) ?? original_component
+  let port = normalizeElectricalPinLabel(endpoint.slice(separator + 1)).replace(/^pin(?=\d+$)/, "")
+  if (input.symmetric_references.has(original_component) && (port === "1" || port === "2")) {
+    port = "terminal"
+  }
   return `${component}.${port}`
 }
 
 function getConnectionGroups(plan: TypicalApplicationPlan, reference_map?: Map<string, string>) {
+  const symmetric_references = symmetricTwoTerminalReferences(plan)
   return new Map(
     plan.connections.map((connection) => {
-      const pins = connection.pins.map((endpoint) => normalizedEndpoint(endpoint, reference_map)).sort()
+      const pins = connection.pins
+        .map((endpoint) => normalizedEndpoint(endpoint, { reference_map, symmetric_references }))
+        .sort()
       return [JSON.stringify(pins), { net: connection.net, pins }] as const
     }),
   )
 }
 
 function getConnectionGroupKeys(plan: TypicalApplicationPlan, reference_map?: Map<string, string>): string[] {
+  const symmetric_references = symmetricTwoTerminalReferences(plan)
   return plan.connections
     .map((connection) =>
-      JSON.stringify(connection.pins.map((endpoint) => normalizedEndpoint(endpoint, reference_map)).sort()),
+      JSON.stringify(
+        connection.pins
+          .map((endpoint) => normalizedEndpoint(endpoint, { reference_map, symmetric_references }))
+          .sort(),
+      ),
     )
     .sort()
+}
+
+function getConnectionAgreementErrors(input: {
+  primary: TypicalApplicationPlan
+  independent: TypicalApplicationPlan
+  independent_reference_map?: Map<string, string>
+}): string[] {
+  const errors: string[] = []
+  const independent_connections = getConnectionGroups(input.independent, input.independent_reference_map)
+  for (const connection of getConnectionGroups(input.primary).values()) {
+    const key = JSON.stringify(connection.pins)
+    if (!independent_connections.delete(key)) {
+      errors.push(
+        `independent typical application is missing the endpoint group from net ${JSON.stringify(connection.net)}: ${connection.pins.join(", ")}`,
+      )
+    }
+  }
+  for (const connection of independent_connections.values()) {
+    errors.push(
+      `independent typical application has an unexpected endpoint group on net ${JSON.stringify(connection.net)}: ${connection.pins.join(", ")}`,
+    )
+  }
+  return errors
+}
+
+function connectionGroupDifferenceCount(left: string[], right: string[]): number {
+  const right_counts = new Map<string, number>()
+  for (const key of right) right_counts.set(key, (right_counts.get(key) ?? 0) + 1)
+  let differences = 0
+  for (const key of left) {
+    const remaining = right_counts.get(key) ?? 0
+    if (remaining === 0) differences += 1
+    else right_counts.set(key, remaining - 1)
+  }
+  return differences + [...right_counts.values()].reduce((sum, count) => sum + count, 0)
 }
 
 function componentsAgreeForReferenceMapping(input: {
@@ -193,7 +256,9 @@ function componentConnectionSignature(plan: TypicalApplicationPlan, reference: s
     for (const endpoint of connection.pins) {
       const separator = endpoint.indexOf(".")
       if (normalizedIdentifier(endpoint.slice(0, separator)) !== "u1") continue
-      target_ports.push(normalizedIdentifier(endpoint.slice(separator + 1)).replace(/^pin(?=\d+$)/, ""))
+      target_ports.push(
+        normalizeElectricalPinLabel(endpoint.slice(separator + 1)).replace(/^pin(?=\d+$)/, ""),
+      )
     }
   }
   return JSON.stringify({
@@ -238,22 +303,23 @@ function findSemanticReferenceMap(input: {
   const candidates = primary_components.map((primary_component) => ({
     primary: primary_component,
     independent: independent_components
-      .filter(
-        (independent_component) =>
-          componentsAgreeForReferenceMapping({
-            primary: primary_component,
-            independent: independent_component,
-            pcb_implementation: primary.pcb_implementation,
-            target_part_number,
-          }) &&
-          componentConnectionSignature(primary, primary_component.reference) ===
-            componentConnectionSignature(independent, independent_component.reference),
+      .filter((independent_component) =>
+        componentsAgreeForReferenceMapping({
+          primary: primary_component,
+          independent: independent_component,
+          pcb_implementation: primary.pcb_implementation,
+          target_part_number,
+        }),
       )
       .sort((left, right) => {
         const primary_reference = normalizedIdentifier(primary_component.reference)
         const left_exact = normalizedIdentifier(left.reference) === primary_reference ? 0 : 1
         const right_exact = normalizedIdentifier(right.reference) === primary_reference ? 0 : 1
-        return left_exact - right_exact
+        if (left_exact !== right_exact) return left_exact - right_exact
+        const primary_signature = componentConnectionSignature(primary, primary_component.reference)
+        const left_signature = componentConnectionSignature(independent, left.reference)
+        const right_signature = componentConnectionSignature(independent, right.reference)
+        return Number(left_signature !== primary_signature) - Number(right_signature !== primary_signature)
       }),
   }))
   if (candidates.some((candidate) => candidate.independent.length === 0)) return undefined
@@ -263,31 +329,33 @@ function findSemanticReferenceMap(input: {
   const reference_map = new Map<string, string>([["u1", "u1"]])
   const used_independent_references = new Set<string>(["u1"])
   let searches = 0
-  const search = (index: number): Map<string, string> | undefined => {
+  let best: { differences: number; reference_map: Map<string, string> } | undefined
+  const search = (index: number): void => {
     searches += 1
-    if (searches > 50_000) return undefined
+    if (searches > 50_000) return
     if (index >= candidates.length) {
       const independent_connection_keys = getConnectionGroupKeys(independent, reference_map)
-      return independent_connection_keys.every((key, key_index) => key === primary_connection_keys[key_index])
-        ? new Map(reference_map)
-        : undefined
+      const differences = connectionGroupDifferenceCount(primary_connection_keys, independent_connection_keys)
+      if (!best || differences < best.differences) {
+        best = { differences, reference_map: new Map(reference_map) }
+      }
+      return
     }
     const candidate = candidates[index]
-    if (!candidate) return undefined
+    if (!candidate) return
     const primary_reference = normalizedIdentifier(candidate.primary.reference)
     for (const independent_component of candidate.independent) {
       const independent_reference = normalizedIdentifier(independent_component.reference)
       if (used_independent_references.has(independent_reference)) continue
       reference_map.set(independent_reference, primary_reference)
       used_independent_references.add(independent_reference)
-      const result = search(index + 1)
-      if (result) return result
+      search(index + 1)
       used_independent_references.delete(independent_reference)
       reference_map.delete(independent_reference)
     }
-    return undefined
   }
-  return search(0)
+  search(0)
+  return best?.reference_map
 }
 
 export function getTypicalApplicationPlanAgreementErrors(input: {
@@ -317,7 +385,16 @@ export function getTypicalApplicationPlanAgreementErrors(input: {
     independent,
     target_part_number,
   })
-  if (semantic_reference_map) return errors
+  if (semantic_reference_map) {
+    errors.push(
+      ...getConnectionAgreementErrors({
+        primary,
+        independent,
+        independent_reference_map: semantic_reference_map,
+      }),
+    )
+    return errors
+  }
 
   const independent_components = new Map(
     independent.components.map(
@@ -378,19 +455,6 @@ export function getTypicalApplicationPlanAgreementErrors(input: {
     errors.push(`independent typical application has unexpected component ${independent_component.reference}`)
   }
 
-  const independent_connections = getConnectionGroups(independent)
-  for (const connection of getConnectionGroups(primary).values()) {
-    const key = JSON.stringify(connection.pins)
-    if (!independent_connections.delete(key)) {
-      errors.push(
-        `independent typical application is missing the endpoint group from net ${JSON.stringify(connection.net)}: ${connection.pins.join(", ")}`,
-      )
-    }
-  }
-  for (const connection of independent_connections.values()) {
-    errors.push(
-      `independent typical application has an unexpected endpoint group on net ${JSON.stringify(connection.net)}: ${connection.pins.join(", ")}`,
-    )
-  }
+  errors.push(...getConnectionAgreementErrors({ primary, independent }))
   return errors
 }

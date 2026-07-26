@@ -3,7 +3,7 @@ export function captureAgentProcessOutput(current: string, message: string): str
 }
 
 export function isTransientAgentTransportFailure(output: string): boolean {
-  return /connection (?:was )?(?:error|closed|failed|lost|reset)|failed to connect|unable to connect|econn(?:reset|refused|aborted)|network error|socket hang up|fetch failed|temporarily unavailable|service unavailable|gateway timeout|http (?:502|503|504)\b|was there a typo in the (?:url|host) or port/i.test(
+  return /connection (?:was )?(?:error|closed|failed|lost|reset|terminated)|connection termination|failed to connect|unable to connect|econn(?:reset|refused|aborted)|network error|socket hang up|websocket (?:was )?(?:closed|failed|lost)|upstream connect error|disconnect\/reset before headers|fetch failed|temporarily unavailable|service unavailable|gateway timeout|internal server error|server had an error processing your request|["']server_error["']|too many concurrent requests|rate limit(?:ed| exceeded)?|http (?:429|502|503|504)\b|was there a typo in the (?:url|host) or port/i.test(
     output,
   )
 }
@@ -15,7 +15,7 @@ export function summarizeAgentProcessFailure(output: string): string | undefined
     .map((line) => line.trim())
     .filter(Boolean)
   const diagnostic_lines = lines.filter((line) =>
-    /(?:error:|connection|connect|network|socket|unavailable|gateway|timed out|timeout|url or port)/i.test(
+    /(?:error|connection|connect|network|socket|websocket|concurrent requests|rate limit|unavailable|gateway|timed out|timeout|url or port)/i.test(
       line,
     ),
   )

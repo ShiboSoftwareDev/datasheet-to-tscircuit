@@ -124,6 +124,7 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
 export class ModelRunStore {
   private run_map = new Map<string, ModelRunRecord>()
   private job_run_map = new Map<string, string>()
+  private active_execution_ids = new Set<string>()
 
   createModelRun(input: CreateModelRunInput): ModelRun {
     if (this.job_run_map.has(input.job_id)) throw new Error(`Job ${input.job_id} already has a model run`)
@@ -219,6 +220,16 @@ export class ModelRunStore {
 
   getCancellationSignal(model_run_id: string): AbortSignal | undefined {
     return this.run_map.get(model_run_id)?.cancellation_controller.signal
+  }
+
+  claimModelExecution(model_run_id: string): boolean {
+    if (!this.run_map.has(model_run_id) || this.active_execution_ids.has(model_run_id)) return false
+    this.active_execution_ids.add(model_run_id)
+    return true
+  }
+
+  releaseModelExecution(model_run_id: string): void {
+    this.active_execution_ids.delete(model_run_id)
   }
 
   rememberBenchmarkLock(model_run_id: string, benchmark_lock: BenchmarkLock): void {

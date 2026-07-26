@@ -7,25 +7,31 @@ import {
   createOrVerifyBenchmarkLock,
   hasBenchmarkManifest,
   hasBenchmarkReferenceImageContract,
-  requiresCompleteTimeGraphInventory,
   replaceBenchmarkLockAfterCircuitRepair,
+  requiresCompleteTimeGraphInventory,
+  requiresTraceProvenance,
   validateBenchmarkSuiteForLock,
+  verifySetupEvidenceLock,
 } from "../model-benchmark-lock"
 import { buildModelBenchmarkPrompt } from "../model-scaffold"
+import { summarizeProcessFailure } from "./model-process-output"
+import { updateServerProgress } from "./model-run-state"
+import { findPrematureRefinementArtifacts, validateFinalizedBenchmarksMatchDraft } from "./model-setup-state"
+import { BenchmarkHarnessPreflightError, preflightBenchmarkHarnesses } from "./preflight-benchmark-harnesses"
+import { runModelAgentProcess } from "./run-model-agent-process"
 import {
   ModelInfrastructureError,
+  ModelPreparationError,
   ModelProcessStaleError,
   type ModelRunnerContext,
-  streamModelProcess,
 } from "./stream-model-process"
-import { findPrematureRefinementArtifacts, validateFinalizedBenchmarksMatchDraft } from "./model-setup-state"
 import { validateBenchmarkSources } from "./strip-analog-simulation-for-structural-check"
-import { BenchmarkHarnessPreflightError, preflightBenchmarkHarnesses } from "./preflight-benchmark-harnesses"
-import { updateServerProgress } from "./model-run-state"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
+
+const MINIMUM_EXECUTABLE_BENCHMARK_FRACTION = 0.75
 
 async function writeJsonAtomically(file_path: string, value: unknown): Promise<void> {
   const temporary_path = `${file_path}.${randomUUID()}.tmp`
@@ -82,6 +88,19 @@ export async function excludeFailedBenchmarkHarnesses(input: {
       `All ${excluded_ids.length} benchmark harnesses failed preflight; no trustworthy executable benchmark remains`,
     )
   }
+  const retained_fraction = remaining_ids.length / manifest.benchmarks.length
+  const material_exclusion = excluded_ids.length > 1
+  if (material_exclusion && retained_fraction < MINIMUM_EXECUTABLE_BENCHMARK_FRACTION) {
+    throw new Error(
+      `Cannot continue with evidence-only benchmark fallback: excluding ${excluded_ids.length} of ${manifest.benchmarks.length} drafts would retain only ${remaining_ids.length} executable benchmark${
+        remaining_ids.length === 1 ? "" : "s"
+      } (${(retained_fraction * 100).toFixed(1)}%), below the required ${(
+        MINIMUM_EXECUTABLE_BENCHMARK_FRACTION * 100
+      ).toFixed(
+        0,
+      )}% coverage. Repair the evidence or harnesses before refinement; no partial-coverage model was started.`,
+    )
+  }
 
   await writeJsonAtomically(manifest_path, { ...manifest, benchmarks: remaining_benchmarks })
   await Promise.all(
@@ -118,29 +137,27 @@ export async function finalizeAndLockBenchmarks(input: {
   let benchmark_validation_feedback = input.initial_feedback
   for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
     let benchmark_exit_code: number
+    let benchmark_process_output = ""
     try {
-      benchmark_exit_code = await streamModelProcess({
-        command: [
-          input.context.agent_bin,
-          "do",
-          ...(input.context.use_openai ? ["--use-openai"] : []),
-          "--prompt",
-          buildModelBenchmarkPrompt(benchmark_validation_feedback, {
-            locked_circuit_repair: Boolean(input.repair_lock),
-          }),
-          "--dir",
-          input.model_dir,
-        ],
-        cwd: input.model_dir,
+      const agent_result = await runModelAgentProcess({
+        agent_bin: input.context.agent_bin,
+        use_openai: Boolean(input.context.use_openai),
+        prompt: buildModelBenchmarkPrompt(benchmark_validation_feedback, {
+          locked_circuit_repair: Boolean(input.repair_lock),
+        }),
+        model_dir: input.model_dir,
         signal: input.signal,
-        activity_paths: [join(input.model_dir, "model-progress.json")],
-        workspace_root: input.model_dir,
-        on_chunk: input.append,
+        append: input.append,
+        phase_label: "Benchmark-finalization agent",
       })
+      benchmark_exit_code = agent_result.exit_code
+      benchmark_process_output = agent_result.process_output
     } catch (error) {
-      if (!(error instanceof ModelProcessStaleError) || input.signal.aborted) throw error
+      if (!(error instanceof ModelProcessStaleError) || input.signal.aborted) {
+        throw new ModelPreparationError(error instanceof Error ? error.message : String(error))
+      }
       if (attempt >= max_attempts) {
-        throw error
+        throw new ModelPreparationError(error.message)
       }
       benchmark_validation_feedback = [
         benchmark_validation_feedback,
@@ -155,11 +172,21 @@ export async function finalizeAndLockBenchmarks(input: {
       continue
     }
     if (benchmark_exit_code !== 0) {
-      throw new Error(`Benchmark-finalization agent exited with code ${benchmark_exit_code}`)
+      const detail = summarizeProcessFailure(benchmark_process_output)
+      throw new ModelPreparationError(
+        `Benchmark-finalization agent exited with code ${benchmark_exit_code}${detail ? `: ${detail}` : ""}`,
+      )
+    }
+    if (!input.repair_lock && (await hasBenchmarkReferenceImageContract(input.model_dir))) {
+      try {
+        await verifySetupEvidenceLock(input.model_dir)
+      } catch (error) {
+        throw new ModelPreparationError(error instanceof Error ? error.message : String(error))
+      }
     }
     const forbidden_artifacts = await findPrematureRefinementArtifacts(input.model_dir)
     if (forbidden_artifacts.length > 0) {
-      throw new Error(
+      throw new ModelPreparationError(
         `Benchmark finalization created forbidden model artifacts before the suite was locked: ${forbidden_artifacts.join(", ")}`,
       )
     }
@@ -175,6 +202,7 @@ export async function finalizeAndLockBenchmarks(input: {
         const reference_warnings = await validateBenchmarkSuiteForLock(input.model_dir, {
           require_source_images:
             !input.repair_lock && (await hasBenchmarkReferenceImageContract(input.model_dir)),
+          require_trace_provenance: !input.repair_lock && (await requiresTraceProvenance(input.model_dir)),
         })
         if (reference_warnings.length > 0) {
           const current_warnings =
@@ -217,6 +245,10 @@ export async function finalizeAndLockBenchmarks(input: {
           const recovered = await excludeFailedBenchmarkHarnesses({
             model_dir: input.model_dir,
             failures: error.failures,
+          }).catch((recovery_error) => {
+            throw new ModelPreparationError(
+              recovery_error instanceof Error ? recovery_error.message : String(recovery_error),
+            )
           })
           const warning = `Evidence quality: ${recovered.excluded_ids.length} benchmark draft${
             recovered.excluded_ids.length === 1 ? "" : "s"
@@ -239,7 +271,7 @@ export async function finalizeAndLockBenchmarks(input: {
     }
     if (!rejection) rejection = "The benchmark suite did not pass server validation"
     if (attempt >= max_attempts) {
-      throw new Error(
+      throw new ModelPreparationError(
         `Benchmark finalization still failed server validation after ${attempt} attempts: ${rejection}`,
       )
     }
@@ -257,5 +289,5 @@ export async function finalizeAndLockBenchmarks(input: {
       input.context.model_run_store,
     )
   }
-  throw new Error("The benchmark suite could not be locked")
+  throw new ModelPreparationError("The benchmark suite could not be locked")
 }

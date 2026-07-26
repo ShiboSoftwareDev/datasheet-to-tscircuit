@@ -1,9 +1,11 @@
-import { publishAvailableModelCheckpoint, restoreBestReportedModelCheckpoint } from "./model-checkpoint"
+import { ComponentNotReadyError } from "../model-scaffold"
 import { createUnverifiedFallbackModel } from "./create-unverified-fallback-model"
+import { publishAvailableModelCheckpoint, restoreBestReportedModelCheckpoint } from "./model-checkpoint"
 import type { ModelExecution } from "./model-execution"
 import { updateServerProgress } from "./model-run-state"
 import {
   ModelInfrastructureError,
+  ModelPreparationError,
   ModelProcessStaleError,
   ModelWorkspaceIsolationError,
 } from "./stream-model-process"
@@ -26,7 +28,7 @@ export function getModelExecutionRecoveryWarning(input: {
   const normalized_message = normalizeModelExecutionErrorMessage(input.error_message)
   return normalized_message === "The model provider quota is exhausted." && input.preserved_existing_output
     ? "Additional SPICE refinement could not start because the model provider quota is exhausted. The previously published SPICE output was preserved unchanged."
-    : `The best available SPICE output was published after recovery: ${normalized_message}`
+    : `The latest recoverable SPICE artifact was retained after workflow failure: ${normalized_message}`
 }
 
 export async function handleModelExecutionError(error: unknown, execution: ModelExecution): Promise<void> {
@@ -45,6 +47,43 @@ export async function handleModelExecutionError(error: unknown, execution: Model
       : String(error)
   const error_message = normalizeModelExecutionErrorMessage(raw_error_message)
   const is_quota_error = error_message === "The model provider quota is exhausted."
+  if (error instanceof ComponentNotReadyError || error instanceof ModelPreparationError) {
+    const preparation_failure = error instanceof ModelPreparationError
+    await execution
+      .append(
+        "system",
+        `\n${
+          preparation_failure
+            ? "SPICE model workflow stopped before refinement"
+            : "SPICE model workflow failed"
+        }: ${error_message}\n`,
+      )
+      .catch(() => undefined)
+    updateServerProgress(
+      {
+        model_run_id: execution.model_run_id,
+        phase: "failed",
+        message: preparation_failure
+          ? "SPICE generation stopped because setup evidence or benchmarks did not pass validation"
+          : "SPICE generation stopped because no authoritative component passed validation",
+      },
+      execution.context.model_run_store,
+    )
+    const update = {
+      status: "failed" as const,
+      is_complete: true,
+      has_errors: true,
+      completed_at: new Date().toISOString(),
+      error_message,
+    }
+    const current_run = execution.context.model_run_store.getModelRun(execution.model_run_id)
+    if (current_run?.segment_started_at) {
+      execution.context.model_run_store.finishSegment(execution.model_run_id, update)
+    } else {
+      execution.context.model_run_store.updateModelRun(execution.model_run_id, update)
+    }
+    return
+  }
   if (is_stale_error || error instanceof ModelWorkspaceIsolationError) {
     const restored_revision = await restoreBestReportedModelCheckpoint(execution.model_dir).catch(
       () => undefined,
@@ -78,7 +117,8 @@ export async function handleModelExecutionError(error: unknown, execution: Model
     .catch(() => undefined)
   let current_run = execution.context.model_run_store.getModelRun(execution.model_run_id)
   const preserved_existing_output = Boolean(current_run?.model_source)
-  if (!current_run?.model_source) {
+  const preserved_verified_output = Boolean(current_run?.model_source && current_run.validation?.all_passed)
+  if (!current_run?.model_source || !current_run.manifest) {
     const fallback = await createUnverifiedFallbackModel(execution)
     current_run = execution.context.model_run_store.updateModelRun(execution.model_run_id, fallback)
   }
@@ -90,18 +130,31 @@ export async function handleModelExecutionError(error: unknown, execution: Model
       }),
     )
     .catch(() => undefined)
-  const update = {
-    status: "complete" as const,
-    is_complete: true,
-    has_errors: false,
-    completed_at: new Date().toISOString(),
-    error_message: undefined,
-  }
+  const can_finish_with_recovery = preserved_verified_output || execution.budget_exhausted
+  const update = can_finish_with_recovery
+    ? {
+        status: "complete" as const,
+        is_complete: true,
+        has_errors: false,
+        completed_at: new Date().toISOString(),
+        error_message: undefined,
+      }
+    : {
+        status: "failed" as const,
+        is_complete: true,
+        has_errors: true,
+        completed_at: new Date().toISOString(),
+        error_message,
+      }
   updateServerProgress(
     {
       model_run_id: execution.model_run_id,
-      phase: "complete",
-      message: "Best available SPICE output published with warnings",
+      phase: can_finish_with_recovery ? "complete" : "failed",
+      message: can_finish_with_recovery
+        ? preserved_verified_output
+          ? "Previously verified SPICE output preserved with warnings"
+          : "Refinement effort expired; the latest recoverable artifact was retained"
+        : "SPICE workflow failed; the latest recoverable artifact was retained for retry",
     },
     execution.context.model_run_store,
   )

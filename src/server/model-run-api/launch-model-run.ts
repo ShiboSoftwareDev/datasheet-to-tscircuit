@@ -2,6 +2,7 @@ import { join } from "node:path"
 import { runModel } from "../model-runner"
 import { handleModelExecutionError } from "../model-runner/handle-model-execution-error"
 import { ModelExecution } from "../model-runner/model-execution"
+import { getRuntimeSourceCommit } from "../runtime-source-commit"
 import type { ModelRunApiContext } from "./model-run-api-context"
 
 export async function launchModelRun(
@@ -23,9 +24,10 @@ export async function launchModelRun(
     effort_multiplier: input.effort_multiplier,
     base_effort_ms,
   })
+  const source_commit = await getRuntimeSourceCommit()
   await context.model_run_store.appendLog(model_run_id, {
     stream: "system",
-    message: `Created a ${input.effort_multiplier}× SPICE behavioral-model run validated with ngspice. Evidence setup, component waiting, and benchmark locking are untimed; effort applies only to refinement.\n`,
+    message: `Created a ${input.effort_multiplier}× SPICE behavioral-model run validated with ngspice using workflow source ${source_commit}. Evidence setup, component waiting, and benchmark locking are untimed; effort applies only to refinement.\n`,
   })
   const execution_context = { ...context, use_openai: context.use_openai ?? false }
   const runner = context.run_model ?? runModel

@@ -18,20 +18,26 @@ export {
 } from "./get-benchmark-application-plan"
 export {
   formatGroupedBenchmarkFailures,
+  getBehaviorallyIndistinguishableBenchmarkFailures,
   getRequiredPowerPreflightProbeName,
   getRequiredPowerProbeContractErrors,
   getUnpoweredRequiredPinErrors,
-  removeAmbiguousStimulusEdgePoints,
   summarizeStimulusTransitions,
 } from "./preflight-benchmark-harnesses"
+export { removeAmbiguousStimulusEdgePoints } from "../model-scorer/score-single-model-benchmark"
 export { executeValidationBuild, runValidationTaskPool } from "./validate-champion"
+export { getStimulusScoringContractError } from "./run-independent-model-validation"
+export { runModelAgentProcess } from "./run-model-agent-process"
 export { excludeFailedBenchmarkHarnesses } from "./finalize-and-lock-benchmarks"
 export { selectPublishedComponentCircuitJson } from "./attach-model-to-generated-component"
 export {
   getModelExecutionRecoveryWarning,
   normalizeModelExecutionErrorMessage,
 } from "./handle-model-execution-error"
-export { stripAnalogSimulationForStructuralCheck } from "./strip-analog-simulation-for-structural-check"
+export {
+  stripAnalogSimulationForStructuralCheck,
+  validateBenchmarkSources,
+} from "./strip-analog-simulation-for-structural-check"
 export { preflightNgspice } from "./preflight-ngspice"
 export type {
   ShiftedBenchmarkSource,
@@ -51,12 +57,14 @@ export {
   validateFeedbackSensitivity,
 } from "./validate-feedback-sensitivity"
 export { runModel } from "./run-model"
+export { createCheckpointSimulationSignature } from "./run-model-refinement"
 export { listModelBenchFiles } from "./list-model-bench-files"
 export {
   validateCompletedSetup,
   validateFinalizedBenchmarksMatchDraft,
 } from "./model-setup-state"
 export {
+  ModelPreparationError,
   ModelProcessStaleError,
   ModelWorkspaceIsolationError,
   streamModelProcess,

@@ -2,16 +2,19 @@ import { expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
+import sharp from "sharp"
 import { getTypicalApplicationConnectivityErrors } from "@/server/job-artifact-validator"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import {
   classifyFatalSimulationFailure,
   compareTimeShiftedResults,
+  createCheckpointSimulationSignature,
   excludeFailedBenchmarkHarnesses,
   executeValidationBuild,
   findSuspiciousBenchmarkConditioning,
   formatGroupedBenchmarkFailures,
+  getBehaviorallyIndistinguishableBenchmarkFailures,
   getBenchmarkApplicationErrors,
   getBenchmarkApplicationPlan,
   getFatalSimulationProcessFailure,
@@ -19,9 +22,11 @@ import {
   getRequiredPowerPinLabels,
   getRequiredPowerPreflightProbeName,
   getRequiredPowerProbeContractErrors,
+  getStimulusScoringContractError,
   getStubComponentPins,
   getUnpoweredRequiredPinErrors,
   isTransientAgentTransportFailure,
+  ModelPreparationError,
   ModelProcessStaleError,
   ModelWorkspaceIsolationError,
   modelUsesAbsoluteTime,
@@ -31,8 +36,9 @@ import {
   removeAmbiguousStimulusEdgePoints,
   restoreBestReportedModelCheckpoint,
   restoreLastPromotedModelCheckpoint,
-  runValidationTaskPool,
   runModel,
+  runModelAgentProcess,
+  runValidationTaskPool,
   selectPublishedComponentCircuitJson,
   shiftLiteralPulseDelays,
   shiftNamedResistorResistance,
@@ -40,21 +46,119 @@ import {
   stripAnalogSimulationForStructuralCheck,
   summarizeStimulusTransitions,
   validateAbsoluteTimeShift,
+  validateBenchmarkSources,
   validateCompletedSetup,
   validateFinalizedBenchmarksMatchDraft,
   validateManifestAgainstModel,
 } from "@/server/model-runner"
 import {
   attachModelToGeneratedComponent,
+  syncModelComponentWrapper,
   writeServerIntegratedComponent,
   writeServerStructuralComponent,
 } from "@/server/model-runner/attach-model-to-generated-component"
+import { handleModelExecutionError } from "@/server/model-runner/handle-model-execution-error"
+import registerModelAgentReadExtension from "@/server/model-runner/model-agent-read-extension"
+import { ModelExecution } from "@/server/model-runner/model-execution"
+import { waitForComponent } from "@/server/model-runner/model-run-state"
 import {
   buildModelAgentPrompt,
   buildModelBenchmarkPrompt,
   buildModelSetupPrompt,
+  copyComponentIntoModelWorkspace,
 } from "@/server/model-scaffold"
+import { validateTraceProvenance } from "@/server/model-scorer"
 import { scoreSeriesPoints } from "@/server/model-scorer/score-single-model-benchmark"
+
+async function publishAuthoritativeComponentForModelTest(input: {
+  job_store: JobStore
+  job_id: string
+  job_dir: string
+  keep_job_running?: boolean
+}): Promise<void> {
+  const component_path = join(input.job_dir, "component.circuit.tsx")
+  if (!(await Bun.file(component_path).exists())) {
+    const working_path = join(input.job_dir, "index.circuit.tsx")
+    if (!(await Bun.file(working_path).exists())) {
+      throw new Error(`Model test ${input.job_id} has no component source to publish`)
+    }
+    await Bun.write(component_path, await Bun.file(working_path).text())
+  }
+  input.job_store.updateJob(input.job_id, {
+    display_status: input.keep_job_running ? "agent_running" : "complete",
+    is_complete: !input.keep_job_running,
+    component_ready: true,
+  })
+}
+
+test("a recovered complete job without component readiness cannot release SPICE", async () => {
+  const job_store = new JobStore()
+  job_store.createJob({ job_id: "job_degraded_component", job_dir: "/tmp/job", file_name: "part.pdf" })
+  job_store.updateJob("job_degraded_component", {
+    display_status: "complete",
+    is_complete: true,
+  })
+
+  expect(
+    await waitForComponent(
+      { job_id: "job_degraded_component", signal: new AbortController().signal },
+      job_store,
+    ),
+  ).toBe("failed")
+})
+
+test("model startup fails without publishing a fallback when the component never became ready", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-degraded-component-"))
+  const model_dir = join(job_dir, "spice")
+  await mkdir(model_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nfixture"),
+    Bun.write(join(job_dir, "index.circuit.tsx"), "export default () => <chip />\n"),
+    Bun.write(join(model_dir, "AGENTS.md"), "fixture\n"),
+    Bun.write(join(model_dir, "setup-complete.json"), JSON.stringify({ version: 1 })),
+  ])
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  job_store.createJob({ job_id: "job_degraded", job_dir, file_name: "datasheet.pdf" })
+  job_store.updateJob("job_degraded", { display_status: "complete", is_complete: true })
+  model_run_store.createModelRun({
+    model_run_id: "model_degraded",
+    job_id: "job_degraded",
+    model_dir,
+    effort_multiplier: 1,
+    base_effort_ms: 1_000,
+  })
+
+  await runModel(
+    { model_run_id: "model_degraded" },
+    {
+      job_store,
+      model_run_store,
+      agent_bin: join(job_dir, "unused-agent"),
+      tsci_bin: join(job_dir, "unused-tsci"),
+    },
+  )
+
+  const model_run = model_run_store.getModelRun("model_degraded")
+  expect(model_run?.status).toBe("failed")
+  expect(model_run?.has_errors).toBe(true)
+  expect(model_run?.model_source).toBeUndefined()
+  expect(model_run?.error_message).toContain("authoritative component-ready gate")
+  await rm(job_dir, { recursive: true, force: true })
+})
+
+test("model workspace copying requires the authoritative component-ready snapshot", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-component-handoff-"))
+  const model_dir = join(job_dir, "spice")
+  await mkdir(model_dir, { recursive: true })
+  await Bun.write(join(job_dir, "index.circuit.tsx"), "export default () => <chip />\n")
+
+  await expect(copyComponentIntoModelWorkspace({ job_dir, model_dir })).rejects.toThrow(
+    "authoritative component-ready snapshot is missing",
+  )
+  expect(await Bun.file(join(model_dir, "component.circuit.tsx")).exists()).toBe(false)
+  await rm(job_dir, { recursive: true, force: true })
+})
 
 test("validation task pools report one task error and continue the remaining benchmarks", async () => {
   const completed: number[] = []
@@ -76,6 +180,42 @@ test("validation task pools report one task error and continue the remaining ben
   expect(warnings).toEqual(["canonical DUT current pin L1 is forced directly"])
 })
 
+test("checkpoint signatures ignore reporting metadata but change with simulation behavior", () => {
+  const benchmark_lock = {
+    version: 1 as const,
+    generation: 1,
+    locked_at: "2026-07-25T00:00:00.000Z",
+    benchmark_ids: ["transfer"],
+    files: [{ file: "benchmarks.json", sha256: "abc" }],
+  }
+  const manifest = {
+    entry_name: "PART",
+    dialect: "portable",
+    simulator: "ngspice",
+    revision: "r0001",
+    generated_at: "2026-07-25T00:00:00.000Z",
+    pins: [{ component_pin: "pin1", spice_node: "IN" }],
+  }
+  const first = createCheckpointSimulationSignature({
+    model_source: ".subckt PART IN\nR1 IN 0 1k\n.ends PART\n",
+    manifest,
+    benchmark_lock,
+  })
+  const metadata_only = createCheckpointSimulationSignature({
+    model_source: ".subckt PART IN\nR1 IN 0 1k\n.ends PART\n",
+    manifest: { ...manifest, revision: "r0042", generated_at: "2026-07-25T01:00:00.000Z" },
+    benchmark_lock,
+  })
+  const changed_model = createCheckpointSimulationSignature({
+    model_source: ".subckt PART IN\nR1 IN 0 2k\n.ends PART\n",
+    manifest,
+    benchmark_lock,
+  })
+
+  expect(metadata_only).toBe(first)
+  expect(changed_model).not.toBe(first)
+})
+
 test("failed benchmark harnesses become evidence-only while valid harnesses remain executable", async () => {
   const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-benchmark-exclusions-"))
   try {
@@ -86,12 +226,13 @@ test("failed benchmark harnesses become evidence-only while valid harnesses rema
         JSON.stringify({
           version: 2,
           locked_at: new Date().toISOString(),
-          benchmarks: [{ id: "valid-a" }, { id: "bad-b" }, { id: "valid-c" }],
+          benchmarks: [{ id: "valid-a" }, { id: "bad-b" }, { id: "valid-c" }, { id: "valid-d" }],
         }),
       ),
       Bun.write(join(model_dir, "benchmarks", "valid-a.circuit.tsx"), "valid a"),
       Bun.write(join(model_dir, "benchmarks", "bad-b.circuit.tsx"), "bad b"),
       Bun.write(join(model_dir, "benchmarks", "valid-c.circuit.tsx"), "valid c"),
+      Bun.write(join(model_dir, "benchmarks", "valid-d.circuit.tsx"), "valid d"),
     ])
 
     const recovered = await excludeFailedBenchmarkHarnesses({
@@ -104,17 +245,107 @@ test("failed benchmark harnesses become evidence-only while valid harnesses rema
       ],
     })
 
-    expect(recovered).toEqual({ excluded_ids: ["bad-b"], remaining_ids: ["valid-a", "valid-c"] })
+    expect(recovered).toEqual({
+      excluded_ids: ["bad-b"],
+      remaining_ids: ["valid-a", "valid-c", "valid-d"],
+    })
     expect(
       JSON.parse(await Bun.file(join(model_dir, "benchmarks.json")).text()).benchmarks.map(
         (benchmark: { id: string }) => benchmark.id,
       ),
-    ).toEqual(["valid-a", "valid-c"])
+    ).toEqual(["valid-a", "valid-c", "valid-d"])
     expect(await Bun.file(join(model_dir, "benchmarks", "bad-b.circuit.tsx")).exists()).toBe(false)
     expect(await Bun.file(join(model_dir, "benchmarks", "valid-a.circuit.tsx")).exists()).toBe(true)
     expect(await Bun.file(join(model_dir, "benchmark-exclusions.json")).text()).toContain(
       "stimulus does not match its digitized channel",
     )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("material benchmark coverage loss blocks refinement without mutating the suite", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-benchmark-coverage-floor-"))
+  try {
+    await mkdir(join(model_dir, "benchmarks"), { recursive: true })
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmarks.json"),
+        JSON.stringify({
+          version: 2,
+          locked_at: new Date().toISOString(),
+          benchmarks: [{ id: "valid-a" }, { id: "bad-b" }, { id: "bad-c" }],
+        }),
+      ),
+      Bun.write(join(model_dir, "benchmarks", "valid-a.circuit.tsx"), "valid a"),
+      Bun.write(join(model_dir, "benchmarks", "bad-b.circuit.tsx"), "bad b"),
+      Bun.write(join(model_dir, "benchmarks", "bad-c.circuit.tsx"), "bad c"),
+    ])
+
+    await expect(
+      excludeFailedBenchmarkHarnesses({
+        model_dir,
+        failures: [
+          {
+            benchmark_file: "bad-b.circuit.tsx",
+            error_message: "stimulus does not match its digitized channel",
+          },
+          {
+            benchmark_file: "bad-c.circuit.tsx",
+            error_message: "DUT supply is unpowered",
+          },
+        ],
+      }),
+    ).rejects.toThrow("below the required 75% coverage")
+    expect(
+      JSON.parse(await Bun.file(join(model_dir, "benchmarks.json")).text()).benchmarks.map(
+        (benchmark: { id: string }) => benchmark.id,
+      ),
+    ).toEqual(["valid-a", "bad-b", "bad-c"])
+    expect(await Bun.file(join(model_dir, "benchmarks", "bad-b.circuit.tsx")).exists()).toBe(true)
+    expect(await Bun.file(join(model_dir, "benchmark-exclusions.json")).exists()).toBe(false)
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("one unsupported harness may become evidence-only in a two-benchmark suite", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-small-benchmark-fallback-"))
+  try {
+    await mkdir(join(model_dir, "benchmarks"), { recursive: true })
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmarks.json"),
+        JSON.stringify({
+          version: 2,
+          locked_at: new Date().toISOString(),
+          benchmarks: [{ id: "supported" }, { id: "unsupported" }],
+        }),
+      ),
+      Bun.write(join(model_dir, "benchmarks", "supported.circuit.tsx"), "supported"),
+      Bun.write(join(model_dir, "benchmarks", "unsupported.circuit.tsx"), "unsupported"),
+    ])
+
+    await expect(
+      excludeFailedBenchmarkHarnesses({
+        model_dir,
+        failures: [
+          {
+            benchmark_file: "unsupported.circuit.tsx",
+            error_message: "documented configuration is not electrically encoded",
+          },
+        ],
+      }),
+    ).resolves.toEqual({
+      excluded_ids: ["unsupported"],
+      remaining_ids: ["supported"],
+    })
+    expect(
+      JSON.parse(await Bun.file(join(model_dir, "benchmarks.json")).text()).benchmarks.map(
+        (benchmark: { id: string }) => benchmark.id,
+      ),
+    ).toEqual(["supported"])
+    expect(await Bun.file(join(model_dir, "benchmark-exclusions.json")).exists()).toBe(true)
   } finally {
     await rm(model_dir, { recursive: true, force: true })
   }
@@ -193,7 +424,7 @@ test("benchmark preflight requires and validates a power probe for every require
   expect(power_pins).toEqual(["VIN"])
 
   const probe_name = getRequiredPowerPreflightProbeName("VIN")
-  const source = `<board>\n  <voltageprobe name="${probe_name}" connectsTo=".DUT > .VIN" referenceTo="net.GND" />\n  <analogsimulation duration="1ms" timePerStep="0.1ms" />\n</board>`
+  const source = `<board>\n  <voltageprobe name="${probe_name}" connectsTo=".DUT > .VIN" referenceTo="net.GND" />\n  <analogsimulation duration="1ms" timePerStep="0.1ms" graphIndependentAxes />\n</board>`
   expect(getRequiredPowerProbeContractErrors(source, power_pins)).toEqual([])
   expect(getRequiredPowerProbeContractErrors(source.replace(".VIN", ".EN"), power_pins)).toContain(
     "benchmark must probe required-power pin VIN with voltageprobe SERVER_PREFLIGHT_POWER_VIN connected directly to .DUT > .VIN",
@@ -276,7 +507,108 @@ test("server benchmark stubs expose unique semantic SPICE nodes and group repeat
   expect(grouped).toContain("startup.circuit.tsx: stimulus timing mismatch")
 })
 
-test("stimulus preflight tolerates only the ambiguous sample at an ideal step edge", () => {
+test("benchmark preflight rejects conflicting responses under indistinguishable DUT stimuli", () => {
+  const source = (duration: string, threshold_fixture = "") => `
+import Component from "../component-with-model.circuit"
+export default function Benchmark() {
+  return <board>
+    <Component name="DUT" connections={{ VBUS: "net.VBUS", ALERT: "net.ALERT" }} />
+    <voltagesource name="VBUS_STEP" voltage="2V" pulseDelay="0.02ms" />
+    ${threshold_fixture}
+    <voltageprobe name="STIMULUS" connectsTo=".DUT > .VBUS" />
+    <voltageprobe name="RESULT" connectsTo=".DUT > .ALERT" />
+    <analogsimulation duration="${duration}" timePerStep="1us" spiceEngine="ngspice" graphIndependentAxes />
+  </board>
+}`
+  const common = {
+    critical: true,
+    stimuli: [
+      {
+        quantity: "voltage",
+        unit: "V",
+        points: [
+          { x: 0, y: 0 },
+          { x: 0.02, y: 2 },
+          { x: 0.1, y: 2 },
+        ],
+      },
+    ],
+  }
+  const first = {
+    ...common,
+    benchmark_file: "above-threshold.circuit.tsx",
+    source: source("0.1ms"),
+    responses: [
+      {
+        dut_spice_node: "ALERT",
+        quantity: "voltage",
+        unit: "V",
+        points: [
+          { x: 0, y: 3 },
+          { x: 0.0324, y: 0 },
+        ],
+      },
+    ],
+  }
+  const second = {
+    ...common,
+    benchmark_file: "slightly-above-threshold.circuit.tsx",
+    source: source("0.14ms"),
+    responses: [
+      {
+        dut_spice_node: "ALERT",
+        quantity: "voltage",
+        unit: "V",
+        points: [
+          { x: 0, y: 3 },
+          { x: 0.0932, y: 0 },
+        ],
+      },
+    ],
+  }
+
+  const failures = getBehaviorallyIndistinguishableBenchmarkFailures([first, second])
+  expect(failures.map((failure) => failure.benchmark_file)).toEqual(["slightly-above-threshold.circuit.tsx"])
+  expect(failures[0]?.error_message).toContain("behaviorally indistinguishable")
+
+  const shifted_second = {
+    ...second,
+    source: source("0.14ms")
+      .replace('pulseDelay="0.02ms"', 'pulseDelay="0.0189ms"')
+      .replace('timePerStep="1us"', 'timePerStep="0.1us"'),
+    stimuli: [
+      {
+        quantity: "voltage",
+        unit: "V",
+        points: [
+          { x: 0, y: 0 },
+          { x: 0.0189, y: 2.093023 },
+          { x: 0.1, y: 2.093023 },
+        ],
+      },
+    ],
+  }
+  expect(
+    getBehaviorallyIndistinguishableBenchmarkFailures([first, shifted_second]).map(
+      (failure) => failure.benchmark_file,
+    ),
+  ).toEqual(["slightly-above-threshold.circuit.tsx"])
+
+  expect(
+    getBehaviorallyIndistinguishableBenchmarkFailures([
+      first,
+      {
+        ...second,
+        source: source(
+          "0.14ms",
+          '<voltagesource name="THRESHOLD_CONFIG" voltage="1.9V" connections={{ pin1: ".DUT > .CONFIG", pin2: "net.GND" }} />',
+        ),
+      },
+    ]),
+  ).toEqual([])
+})
+
+test("stimulus preflight compares stable physical levels, phases, and edge timing", () => {
   const reference = [
     { x: 0, y: 0.1 },
     { x: 0.05, y: 0.1 },
@@ -315,19 +647,180 @@ test("stimulus preflight tolerates only the ambiguous sample at an ideal step ed
   expect(
     scoreSeriesPoints({
       series,
-      reference_points: removeAmbiguousStimulusEdgePoints(reference),
+      reference_points: reference,
       result_points: simulator_edge_convention,
     }).passed,
   ).toBe(true)
   expect(
     scoreSeriesPoints({
       series,
-      reference_points: removeAmbiguousStimulusEdgePoints(reference),
+      reference_points: reference,
       result_points: wrong_high_first_phase,
+    }).passed,
+  ).toBe(false)
+  const measured_rise = [
+    { x: 0, y: 0 },
+    { x: 0.1, y: 0 },
+    { x: 0.101, y: 0.35 },
+    { x: 0.102, y: 0.72 },
+    { x: 0.103, y: 1 },
+    { x: 0.3, y: 1 },
+  ]
+  expect(removeAmbiguousStimulusEdgePoints(measured_rise)).toEqual(measured_rise)
+  expect(
+    scoreSeriesPoints({
+      series,
+      reference_points: measured_rise,
+      result_points: simulator_edge_convention,
     }).passed,
   ).toBe(false)
   expect(summarizeStimulusTransitions(reference)).toContain("low→high at x≈0.101")
   expect(summarizeStimulusTransitions(wrong_high_first_phase)).toContain("starts 1")
+})
+
+test("stimulus preflight ignores short scope-tracing artifacts around a documented step", () => {
+  const scope_trace_with_artifacts = [
+    { x: 0, y: 1.2 },
+    { x: 0.02, y: 0.28 },
+    { x: 0.1, y: 0.1 },
+    { x: 0.2, y: 1 },
+    { x: 0.3, y: 1.38 },
+    { x: 0.4, y: 0.2 },
+    { x: 0.44, y: 1 },
+    { x: 0.65, y: 1 },
+    { x: 0.7, y: 0.22 },
+    { x: 0.74, y: 1 },
+    { x: 0.8, y: 0.1 },
+    { x: 1, y: 0.28 },
+  ]
+  const compact_physical_step = [
+    { x: 0, y: 0.1 },
+    { x: 0.199, y: 0.1 },
+    { x: 0.2, y: 1 },
+    { x: 0.799, y: 1 },
+    { x: 0.8, y: 0.1 },
+    { x: 1, y: 0.1 },
+  ]
+  const series = {
+    id: "iload",
+    title: "Load current",
+    role: "stimulus" as const,
+    unit: "A",
+    tolerance: 0.05,
+  }
+  const documented_stimulus_range = {
+    low: 0.1,
+    high: 1,
+    label: "IO 100 mA to 1 A",
+  }
+
+  expect(
+    scoreSeriesPoints({
+      series,
+      reference_points: scope_trace_with_artifacts,
+      result_points: compact_physical_step,
+      documented_stimulus_range,
+    }).passed,
+  ).toBe(true)
+  expect(
+    scoreSeriesPoints({
+      series,
+      reference_points: scope_trace_with_artifacts,
+      result_points: compact_physical_step.map((point) => ({
+        ...point,
+        y: point.y === 0.1 ? 0.3 : 0.8,
+      })),
+      documented_stimulus_range,
+    }).error_message,
+  ).toContain("stable stimulus levels")
+  expect(
+    scoreSeriesPoints({
+      series,
+      reference_points: scope_trace_with_artifacts,
+      result_points: [
+        { x: 0, y: 1 },
+        { x: 0.5, y: 1 },
+        { x: 0.501, y: 0.1 },
+        { x: 1, y: 0.1 },
+      ],
+      documented_stimulus_range,
+    }).error_message,
+  ).toContain("stable stimulus phase sequence")
+  expect(
+    scoreSeriesPoints({
+      series,
+      reference_points: scope_trace_with_artifacts,
+      result_points: [
+        { x: 0, y: 1 },
+        { x: 0.5, y: 1 },
+        { x: 0.501, y: 0.1 },
+        { x: 1, y: 0.1 },
+      ],
+      documented_stimulus_range,
+    }).error_message,
+  ).toContain("expected stable transitions")
+})
+
+test("a continuous stimulus ramp retains exact waveform scoring", () => {
+  const ramp = Array.from({ length: 11 }, (_, index) => ({
+    x: index / 10,
+    y: index / 10,
+  }))
+  const step = [
+    { x: 0, y: 0 },
+    { x: 0.49, y: 0 },
+    { x: 0.5, y: 1 },
+    { x: 1, y: 1 },
+  ]
+  expect(
+    scoreSeriesPoints({
+      series: {
+        id: "vin",
+        title: "Input voltage",
+        role: "stimulus",
+        unit: "V",
+        tolerance: 0.05,
+      },
+      reference_points: ramp,
+      result_points: step,
+    }).passed,
+  ).toBe(false)
+})
+
+test("a stimulus-only scoring failure is routed to controlled benchmark repair", () => {
+  expect(
+    getStimulusScoringContractError({
+      benchmarks: [
+        {
+          benchmark_id: "alert-high-overdrive",
+          series: [
+            {
+              series_id: "bus",
+              role: "stimulus",
+              passed: false,
+              normalized_rmse: 0.123,
+              normalized_max_error: 0.36,
+            },
+            {
+              series_id: "alert",
+              role: "response",
+              passed: true,
+            },
+          ],
+        },
+      ],
+    }),
+  ).toContain("alert-high-overdrive/bus")
+  expect(
+    getStimulusScoringContractError({
+      benchmarks: [
+        {
+          benchmark_id: "alert-high-overdrive",
+          series: [{ series_id: "alert", role: "response", passed: false }],
+        },
+      ],
+    }),
+  ).toBeUndefined()
 })
 
 test("provider quota failures preserve a concise recovery reason", () => {
@@ -344,6 +837,120 @@ test("provider quota failures preserve a concise recovery reason", () => {
   expect(warning).not.toContain("tsci-agent exited")
   expect(warning).not.toContain("billing details")
   expect(normalizeModelExecutionErrorMessage("ngspice failed to converge")).toBe("ngspice failed to converge")
+})
+
+test("unexpected model workflow failures retain recovery artifacts but remain failed", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-failed-recovery-"))
+  const model_dir = join(job_dir, "spice")
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  try {
+    await mkdir(model_dir, { recursive: true })
+    job_store.createJob({ job_id: "job_failed_recovery", job_dir, file_name: "sensor.pdf" })
+    job_store.updateJob("job_failed_recovery", {
+      component_ready: true,
+      component_code:
+        'export default () => <chip name="U1" pinLabels={{ pin1: "IN" }} footprint="soic8" />\n',
+      circuit_json: [
+        {
+          type: "source_component",
+          source_component_id: "part",
+          name: "U1",
+          ftype: "simple_chip",
+          manufacturer_part_number: "PART",
+        },
+        {
+          type: "source_port",
+          source_port_id: "in",
+          source_component_id: "part",
+          name: "IN",
+          pin_number: 1,
+          port_hints: ["1", "IN"],
+        },
+      ],
+    })
+    model_run_store.createModelRun({
+      model_run_id: "model_failed_recovery",
+      job_id: "job_failed_recovery",
+      model_dir,
+      effort_multiplier: 1,
+      base_effort_ms: 1_000,
+    })
+    const model_run = model_run_store.getModelRun("model_failed_recovery")!
+    const execution = new ModelExecution({
+      model_run_id: model_run.model_run_id,
+      model_run,
+      job_dir,
+      model_dir,
+      cancellation_signal: model_run_store.getCancellationSignal(model_run.model_run_id)!,
+      context: {
+        job_store,
+        model_run_store,
+        agent_bin: "unused-agent",
+        tsci_bin: "unused-tsci",
+      },
+    })
+
+    await handleModelExecutionError(
+      new Error('tsci-agent exited with code 1: {"error":"Too many concurrent requests"}'),
+      execution,
+    )
+
+    const recovered = model_run_store.getModelRun(model_run.model_run_id)
+    expect(recovered?.status).toBe("failed")
+    expect(recovered?.has_errors).toBe(true)
+    expect(recovered?.error_message).toContain("Too many concurrent requests")
+    expect(recovered?.manifest?.revision).toBe("fallback-unverified")
+    expect(recovered?.model_source).toContain("UNVERIFIED high-impedance fallback")
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})
+
+test("pre-refinement validation failures do not publish a fallback model or recovery warning", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-preparation-failure-"))
+  const model_dir = join(job_dir, "spice")
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  try {
+    await mkdir(model_dir, { recursive: true })
+    job_store.createJob({ job_id: "job_preparation_failure", job_dir, file_name: "sensor.pdf" })
+    model_run_store.createModelRun({
+      model_run_id: "model_preparation_failure",
+      job_id: "job_preparation_failure",
+      model_dir,
+      effort_multiplier: 1,
+      base_effort_ms: 1_000,
+    })
+    const model_run = model_run_store.getModelRun("model_preparation_failure")!
+    const execution = new ModelExecution({
+      model_run_id: model_run.model_run_id,
+      model_run,
+      job_dir,
+      model_dir,
+      cancellation_signal: model_run_store.getCancellationSignal(model_run.model_run_id)!,
+      context: {
+        job_store,
+        model_run_store,
+        agent_bin: "unused-agent",
+        tsci_bin: "unused-tsci",
+      },
+    })
+
+    await handleModelExecutionError(
+      new ModelPreparationError("Completed setup evidence changed after it was locked"),
+      execution,
+    )
+
+    const failed = model_run_store.getModelRun(model_run.model_run_id)
+    expect(failed?.status).toBe("failed")
+    expect(failed?.has_errors).toBe(true)
+    expect(failed?.model_source).toBeUndefined()
+    expect(failed?.manifest).toBeUndefined()
+    expect(failed?.warnings).toEqual([])
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
 })
 
 test("strict setup inventory rejects omitted time-domain figures", async () => {
@@ -403,6 +1010,663 @@ test("strict setup inventory rejects omitted time-domain figures", async () => {
       JSON.stringify({ version: 2, benchmarks: [{ id: "switching-pfm" }] }),
     )
     await expect(validateFinalizedBenchmarksMatchDraft(model_dir)).resolves.toBeUndefined()
+
+    const traced_png = Uint8Array.from(
+      atob(
+        "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAjUlEQVR4nN3Wuw3AMAhFUQ/h/SfLLk6kFJYJxnzea4IoqO5paYMwV+/Pvncj1VmAqIOBbx0JqHUYsKtjAKMOAOx6FTjWS4Cnngec9STgr2eAUD0MROsxIFEPALm6F0jXXUClfgaK9QNQr1sApL4FUHUdANYVAFuXALy+AIz6BEh1CcDrC8CoD8Zv+jvgBmCfUOtk2kbCAAAAAElFTkSuQmCC",
+      ),
+      (character) => character.charCodeAt(0),
+    )
+    const trace_values = [
+      [2, 27, 0],
+      [5, 24, 3 / 27],
+      [9, 20, 7 / 27],
+      [13, 16, 11 / 27],
+      [17, 12, 15 / 27],
+      [21, 8, 19 / 27],
+      [25, 4, 23 / 27],
+      [29, 0, 1],
+    ]
+    const strict_draft = {
+      version: 2,
+      figure_inventory: [
+        {
+          page: 24,
+          figure: "Figure 10-15",
+          x_axis: "time",
+          status: "drafted",
+          benchmark_id: "switching-pfm",
+          subplot_count: 2,
+          channel_count: 1,
+        },
+      ],
+      benchmarks: [
+        {
+          id: "switching-pfm",
+          source: {
+            page: 24,
+            image: "evidence/figures/switching-pfm.png",
+            subplot_count: 2,
+            channel_count: 1,
+          },
+          series: [
+            {
+              id: "vout",
+              title: "Output voltage",
+              role: "response",
+              quantity: "voltage",
+              unit: "V",
+              subplot_index: 1,
+              source_image: "evidence/figures/switching-pfm/vout.png",
+              reference_file: "evidence/curves/switching-pfm/vout.csv",
+              trace_file: "evidence/traces/switching-pfm/vout.json",
+            },
+          ],
+        },
+      ],
+    }
+    await Promise.all([
+      mkdir(join(model_dir, "evidence", "figures", "switching-pfm"), { recursive: true }),
+      mkdir(join(model_dir, "evidence", "curves", "switching-pfm"), { recursive: true }),
+      mkdir(join(model_dir, "evidence", "traces", "switching-pfm"), { recursive: true }),
+    ])
+    await Promise.all([
+      Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(strict_draft)),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: 1 }),
+      ),
+      Bun.write(join(model_dir, "evidence", "figures", "switching-pfm.png"), traced_png),
+      Bun.write(join(model_dir, "evidence", "figures", "switching-pfm", "vout.png"), traced_png),
+      Bun.write(
+        join(model_dir, "evidence", "curves", "switching-pfm", "vout.csv"),
+        `x,y\n${trace_values.map(([, , value]) => `${value},${value}`).join("\n")}\n`,
+      ),
+      Bun.write(
+        join(model_dir, "evidence", "traces", "switching-pfm", "vout.json"),
+        JSON.stringify({
+          version: 1,
+          method: "manual_pixel_trace",
+          source_image: "evidence/figures/switching-pfm/vout.png",
+          trace_color: { r: 220, g: 20, b: 20, tolerance: 20 },
+          x_axis: {
+            scale: "linear",
+            first: { pixel: 2, value: 0 },
+            second: { pixel: 29, value: 1 },
+          },
+          y_axis: {
+            scale: "linear",
+            first: { pixel: 27, value: 0 },
+            second: { pixel: 0, value: 1 },
+          },
+          points: trace_values.map(([pixel_x, pixel_y, value]) => ({
+            pixel_x,
+            pixel_y,
+            x: value,
+            y: value,
+          })),
+        }),
+      ),
+    ])
+    await expect(validateCompletedSetup(model_dir, { require_trace_provenance: true })).rejects.toThrow(
+      "omits source subplot 2",
+    )
+
+    strict_draft.figure_inventory[0]!.subplot_count = 1
+    strict_draft.benchmarks[0]!.source.subplot_count = 1
+    await Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(strict_draft))
+    await expect(
+      validateCompletedSetup(model_dir, { require_trace_provenance: true }),
+    ).resolves.toBeUndefined()
+
+    strict_draft.benchmarks[0]!.series[0]!.title = "Inductor current"
+    await Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(strict_draft))
+    await expect(validateCompletedSetup(model_dir, { require_trace_provenance: true })).rejects.toThrow(
+      'current channels must use quantity "current"',
+    )
+    strict_draft.benchmarks[0]!.series[0]!.title = "Output voltage"
+    await Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(strict_draft))
+
+    await Bun.write(
+      join(model_dir, "evidence", "curves", "switching-pfm", "vout.csv"),
+      `x,y\n${trace_values.map(([, , value], index) => `${value},${index === 4 ? 0.9 : value}`).join("\n")}\n`,
+    )
+    await expect(validateCompletedSetup(model_dir, { require_trace_provenance: true })).rejects.toThrow(
+      "does not match its reference CSV",
+    )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("setup validates elapsed-time references before evidence is locked", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-setup-reference-time-"))
+  try {
+    await mkdir(join(model_dir, "evidence", "curves", "startup"), { recursive: true })
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmark-draft.json"),
+        JSON.stringify({
+          version: 2,
+          figure_inventory: [
+            {
+              page: 12,
+              figure: "Figure 8-1",
+              x_axis: "time",
+              status: "drafted",
+              benchmark_id: "startup",
+            },
+          ],
+          benchmarks: [
+            {
+              id: "startup",
+              source: { page: 12, figure: "Figure 8-1" },
+              series: [
+                {
+                  id: "output",
+                  role: "response",
+                  quantity: "voltage",
+                  unit: "V",
+                  reference_file: "evidence/curves/startup/output.csv",
+                },
+              ],
+            },
+          ],
+        }),
+      ),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: 1 }),
+      ),
+      Bun.write(
+        join(model_dir, "evidence", "curves", "startup", "output.csv"),
+        "x,y\n-0.0001,0\n0.01,1\n0.02,2\n",
+      ),
+    ])
+
+    await expect(validateCompletedSetup(model_dir)).resolves.toBeUndefined()
+    await Bun.write(
+      join(model_dir, "evidence", "curves", "startup", "output.csv"),
+      "x,y\n-0.001,0\n0.01,1\n0.02,2\n",
+    )
+    await expect(validateCompletedSetup(model_dir)).rejects.toThrow(
+      "exceeds the 1% trace-span edge tolerance",
+    )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("setup rejects stimulus traces whose levels disagree with printed operating conditions", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-stimulus-range-"))
+  try {
+    await mkdir(join(model_dir, "evidence", "curves", "load-step"), { recursive: true })
+    const draft = {
+      version: 2,
+      figure_inventory: [
+        {
+          page: 12,
+          figure: "Figure 8-1",
+          x_axis: "time",
+          status: "drafted",
+          benchmark_id: "load-step",
+        },
+      ],
+      benchmarks: [
+        {
+          id: "load-step",
+          conditions: "VI=3.3 V, IO 100 mA to 1 A, tr=tf=1 µs",
+          source: { page: 12, figure: "Figure 8-1" },
+          series: [
+            {
+              id: "iload",
+              title: "Load current",
+              role: "stimulus",
+              quantity: "current",
+              unit: "A",
+              reference_file: "evidence/curves/load-step/iload.csv",
+            },
+          ],
+        },
+      ],
+    }
+    const stimulusCsv = (low: number) =>
+      `x,y\n${Array.from({ length: 20 }, (_, index) => `${index},${index < 10 ? low : 1}`).join("\n")}\n`
+    await Promise.all([
+      Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(draft)),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: 1 }),
+      ),
+      Bun.write(join(model_dir, "evidence", "curves", "load-step", "iload.csv"), stimulusCsv(0.3)),
+    ])
+
+    await expect(validateCompletedSetup(model_dir)).rejects.toThrow(
+      'printed condition "IO 100 mA to 1 A" requires 0.10000 to 1.0000 A',
+    )
+
+    await Bun.write(join(model_dir, "evidence", "curves", "load-step", "iload.csv"), stimulusCsv(0.1))
+    await expect(validateCompletedSetup(model_dir)).resolves.toBeUndefined()
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("setup rejects a rising enable trace calibrated below its channel ground marker", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-enable-ground-"))
+  try {
+    await mkdir(join(model_dir, "evidence", "curves", "startup"), { recursive: true })
+    const draft = {
+      version: 2,
+      figure_inventory: [
+        {
+          page: 10,
+          figure: "Figure 10-30",
+          x_axis: "time",
+          status: "drafted",
+          benchmark_id: "startup",
+        },
+      ],
+      benchmarks: [
+        {
+          id: "startup",
+          conditions: "VI=4.2 V, rising EN edge",
+          source: { page: 10, figure: "Figure 10-30" },
+          series: [
+            {
+              id: "en",
+              title: "Enable voltage",
+              role: "stimulus",
+              quantity: "voltage",
+              unit: "V",
+              reference_file: "evidence/curves/startup/en.csv",
+            },
+          ],
+        },
+      ],
+    }
+    const stimulusCsv = (low: number, high: number) =>
+      `x,y\n${Array.from({ length: 20 }, (_, index) => `${index},${index < 10 ? low : high}`).join("\n")}\n`
+    await Promise.all([
+      Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(draft)),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: 1 }),
+      ),
+      Bun.write(join(model_dir, "evidence", "curves", "startup", "en.csv"), stimulusCsv(-0.8, 0.5)),
+    ])
+
+    await expect(validateCompletedSetup(model_dir)).rejects.toThrow("an enable edge must start at ground")
+
+    draft.benchmarks[0]!.conditions = "VI=4.2 V, EN -0.8 V to 0.5 V"
+    await Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(draft))
+    await expect(validateCompletedSetup(model_dir)).resolves.toBeUndefined()
+
+    draft.benchmarks[0]!.conditions = "VI=4.2 V, rising EN edge"
+    await Bun.write(join(model_dir, "benchmark-draft.json"), JSON.stringify(draft))
+    await Bun.write(join(model_dir, "evidence", "curves", "startup", "en.csv"), stimulusCsv(0, 2.8))
+    await expect(validateCompletedSetup(model_dir)).resolves.toBeUndefined()
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("trace provenance must sample the complete plotted time span at image-scaled density", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-trace-density-"))
+  try {
+    await mkdir(join(model_dir, "evidence", "figures", "waveform"), { recursive: true })
+    await mkdir(join(model_dir, "evidence", "traces", "waveform"), { recursive: true })
+    const width = 240
+    const height = 20
+    const source_image = "evidence/figures/waveform/output.png"
+    const trace_file = "evidence/traces/waveform/output.json"
+    const image = await sharp({
+      create: {
+        width,
+        height,
+        channels: 3,
+        background: { r: 255, g: 255, b: 255 },
+      },
+    })
+      .composite([
+        {
+          input: Buffer.from(
+            `<svg width="${width}" height="${height}"><path d="M 0 10 H ${width - 1}" stroke="rgb(220,20,20)" stroke-width="2"/></svg>`,
+          ),
+        },
+      ])
+      .png()
+      .toBuffer()
+    const points = Array.from({ length: 10 }, (_, index) => {
+      const pixel_x = (index * (width - 1)) / 9
+      return { pixel_x, pixel_y: 10, x: pixel_x / (width - 1), y: 10 }
+    })
+    await Promise.all([
+      Bun.write(join(model_dir, source_image), image),
+      Bun.write(
+        join(model_dir, trace_file),
+        JSON.stringify({
+          version: 1,
+          method: "manual_pixel_trace",
+          source_image,
+          trace_color: { r: 220, g: 20, b: 20, tolerance: 20 },
+          x_axis: {
+            scale: "linear",
+            first: { pixel: 0, value: 0 },
+            second: { pixel: width - 1, value: 1 },
+          },
+          y_axis: {
+            scale: "linear",
+            first: { pixel: 0, value: 0 },
+            second: { pixel: height - 1, value: height - 1 },
+          },
+          points,
+        }),
+      ),
+    ])
+
+    await expect(
+      validateTraceProvenance({
+        model_dir,
+        benchmark_id: "waveform",
+        series_id: "output",
+        source_image,
+        trace_file,
+        points: points.map(({ x, y }) => ({ x, y })),
+        x_scale: "linear",
+        y_scale: "linear",
+      }),
+    ).rejects.toThrow("at least 20 distributed points are required")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("stimulus trace provenance cannot jump between disconnected labels and waveform segments", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-stimulus-trace-continuity-"))
+  try {
+    await mkdir(join(model_dir, "evidence", "figures", "waveform"), { recursive: true })
+    await mkdir(join(model_dir, "evidence", "traces", "waveform"), { recursive: true })
+    const width = 240
+    const height = 100
+    const source_image = "evidence/figures/waveform/input.png"
+    const trace_file = "evidence/traces/waveform/input.json"
+    const points = Array.from({ length: 24 }, (_, index) => {
+      const pixel_x = (index * (width - 1)) / 23
+      const pixel_y = index < 10 ? 75 : 20
+      return { pixel_x, pixel_y, x: pixel_x, y: pixel_y }
+    })
+    const polyline = points.map(({ pixel_x, pixel_y }) => `${pixel_x},${pixel_y}`).join(" ")
+    const image = await sharp({
+      create: {
+        width,
+        height,
+        channels: 3,
+        background: { r: 255, g: 255, b: 255 },
+      },
+    })
+      .composite([
+        {
+          input: Buffer.from(
+            `<svg width="${width}" height="${height}"><polyline points="${polyline}" fill="none" stroke="rgb(220,20,20)" stroke-width="2"/></svg>`,
+          ),
+        },
+      ])
+      .png()
+      .toBuffer()
+    await Promise.all([
+      Bun.write(join(model_dir, source_image), image),
+      Bun.write(
+        join(model_dir, trace_file),
+        JSON.stringify({
+          version: 1,
+          method: "manual_pixel_trace",
+          source_image,
+          trace_color: { r: 220, g: 20, b: 20, tolerance: 20 },
+          x_axis: {
+            scale: "linear",
+            first: { pixel: 0, value: 0 },
+            second: { pixel: width - 1, value: width - 1 },
+          },
+          y_axis: {
+            scale: "linear",
+            first: { pixel: 0, value: 0 },
+            second: { pixel: height - 1, value: height - 1 },
+          },
+          points,
+        }),
+      ),
+    ])
+
+    await expect(
+      validateTraceProvenance({
+        model_dir,
+        benchmark_id: "waveform",
+        series_id: "input",
+        role: "stimulus",
+        source_image,
+        trace_file,
+        points: points.map(({ x, y }) => ({ x, y })),
+        x_scale: "linear",
+        y_scale: "linear",
+      }),
+    ).rejects.toThrow("trace the actual waveform centerline, not labels or markers")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("benchmark finalization cannot relabel immutable draft channel semantics", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-finalized-semantics-"))
+  try {
+    const source = {
+      page: 24,
+      figure: "Figure 10-15",
+      image: "evidence/figures/switching.png",
+      channel_count: 1,
+      subplot_count: 1,
+    }
+    const draft_series = {
+      id: "il",
+      title: "Inductor current",
+      role: "response",
+      subplot_index: 1,
+      quantity: "current",
+      unit: "A",
+      source_image: "evidence/figures/switching/il.png",
+      trace_file: "evidence/traces/switching/il.json",
+      reference_file: "evidence/curves/switching/il.csv",
+    }
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmark-draft.json"),
+        JSON.stringify({
+          version: 2,
+          benchmarks: [
+            {
+              id: "switching",
+              title: "Switching waveform",
+              source,
+              proposed_tolerance: 0.1,
+              series: [draft_series],
+            },
+          ],
+        }),
+      ),
+      Bun.write(
+        join(model_dir, "benchmarks.json"),
+        JSON.stringify({
+          version: 2,
+          benchmarks: [
+            {
+              id: "switching",
+              title: "Switching waveform",
+              source,
+              tolerance: 0.1,
+              series: [{ ...draft_series, quantity: "voltage", unit: "V" }],
+            },
+          ],
+        }),
+      ),
+    ])
+
+    await expect(validateFinalizedBenchmarksMatchDraft(model_dir)).rejects.toThrow(
+      "switching.series.il.quantity",
+    )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("setup rejects copied critical response evidence before creating an immutable lock", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-setup-duplicate-response-"))
+  const benchmark_ids = ["startup-pfm", "startup-pwm"]
+  try {
+    await Promise.all(
+      benchmark_ids.map((benchmark_id) =>
+        mkdir(join(model_dir, "evidence", "curves", benchmark_id), { recursive: true }),
+      ),
+    )
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmark-draft.json"),
+        JSON.stringify({
+          version: 2,
+          figure_inventory: benchmark_ids.map((benchmark_id, index) => ({
+            page: 26,
+            figure: `Figure 10-${30 + index}`,
+            x_axis: "time",
+            status: "drafted",
+            benchmark_id,
+          })),
+          benchmarks: benchmark_ids.map((id, index) => ({
+            id,
+            source: {
+              page: 26,
+              figure: `Figure 10-${30 + index}`,
+              image: `evidence/figures/${id}.png`,
+            },
+            critical: true,
+            series: [
+              {
+                id: "pg",
+                role: "response",
+                quantity: "voltage",
+                unit: "V",
+                reference_file: `evidence/curves/${id}/pg.csv`,
+              },
+            ],
+          })),
+        }),
+      ),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: 2 }),
+      ),
+      ...benchmark_ids.map((benchmark_id) =>
+        Bun.write(join(model_dir, "evidence", "curves", benchmark_id, "pg.csv"), "x,y\n0,0\n1,1\n2,1\n"),
+      ),
+    ])
+
+    await expect(validateCompletedSetup(model_dir)).rejects.toThrow(
+      "Critical benchmark reference evidence contains 1 copied response curve",
+    )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("strict setup evidence reports all benchmark errors in one pass", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-setup-aggregate-"))
+  try {
+    const benchmark_ids = ["startup", "load-step"]
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "benchmark-draft.json"),
+        JSON.stringify({
+          version: 2,
+          figure_inventory: benchmark_ids.map((benchmark_id, index) => ({
+            page: 20 + index,
+            figure: `Figure 10-${index + 1}`,
+            x_axis: "time",
+            status: "drafted",
+            benchmark_id,
+            subplot_count: 0,
+            channel_count: 0,
+          })),
+          benchmarks: benchmark_ids.map((id) => ({
+            id,
+            source: {
+              image: `evidence/figures/${id}.png`,
+              subplot_count: 0,
+              channel_count: 0,
+            },
+            series: [],
+          })),
+        }),
+      ),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: benchmark_ids.length }),
+      ),
+    ])
+
+    const validation = validateCompletedSetup(model_dir, { require_trace_provenance: true })
+    await expect(validation).rejects.toThrow("Evidence validation found 2 benchmark errors")
+    await expect(validation).rejects.toThrow("startup:")
+    await expect(validation).rejects.toThrow("load-step:")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("complete datasheet scanning catches timing figures outside typical-characteristics pages", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-complete-scan-"))
+  try {
+    const page_35 = `
+BUS Voltage
+(1V / div)
+TIME (10 µs / div)                         TIME (10 µs / div)
+Figure 8-3. Alert Response Time            Figure 8-4. Alert Response Time
+`
+    await Promise.all([
+      Bun.write(join(model_dir, "datasheet.txt"), `${"\f".repeat(34)}${page_35}`),
+      Bun.write(
+        join(model_dir, "benchmark-draft.json"),
+        JSON.stringify({
+          version: 2,
+          figure_inventory: [{ page: 8, figure: "Figure 6-1", x_axis: "static" }],
+          benchmarks: [],
+        }),
+      ),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: 0 }),
+      ),
+    ])
+
+    await expect(
+      validateCompletedSetup(model_dir, { require_complete_datasheet_scan: true }),
+    ).rejects.toThrow("PDF page 35 Figure 8-3")
+    await expect(
+      validateCompletedSetup(model_dir, { require_complete_datasheet_scan: true }),
+    ).rejects.toThrow("Figure 8-4")
+
+    await Bun.write(
+      join(model_dir, "benchmark-draft.json"),
+      JSON.stringify({
+        version: 2,
+        figure_inventory: [
+          { page: 8, figure: "Figure 6-1", x_axis: "static" },
+          { page: 35, figure: "Figure 8-3", x_axis: "static" },
+          { page: 35, figure: "Figure 8-4", x_axis: "static" },
+        ],
+        benchmarks: [],
+      }),
+    )
+    await expect(
+      validateCompletedSetup(model_dir, { require_complete_datasheet_scan: true }),
+    ).resolves.toBeUndefined()
   } finally {
     await rm(model_dir, { recursive: true, force: true })
   }
@@ -511,6 +1775,7 @@ await Bun.sleep(30_000)
         command: [agent_path],
         cwd: workspace,
         signal: new AbortController().signal,
+        cleanup_workspace_processes: true,
         on_chunk: async () => undefined,
       }),
     ).rejects.toBeInstanceOf(ModelProcessStaleError)
@@ -523,6 +1788,101 @@ await Bun.sleep(30_000)
   }
 })
 
+test("successful agent exit kills descendants before they can rewrite locked evidence", async () => {
+  if (process.platform !== "linux") {
+    try {
+      if (
+        Bun.spawnSync(["ps", "-axo", "pid=,ppid="], { stdout: "ignore", stderr: "ignore" }).exitCode !== 0
+      ) {
+        return
+      }
+    } catch {
+      return
+    }
+  }
+  const workspace = await mkdtemp(join(tmpdir(), "datasheet-model-success-process-tree-"))
+  const agent_path = join(workspace, "successful-parent-agent")
+  const child_path = join(workspace, "late-setup-writer")
+  const late_artifact = join(workspace, "late-evidence.txt")
+  try {
+    await Bun.write(
+      child_path,
+      `#!/usr/bin/env bun
+await Bun.sleep(800)
+await Bun.write(${JSON.stringify(late_artifact)}, "late setup rewrite")
+`,
+    )
+    await Bun.write(
+      agent_path,
+      `#!/usr/bin/env bun
+const child = Bun.spawn([${JSON.stringify(child_path)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+child.unref()
+await Bun.sleep(100)
+`,
+    )
+    await Promise.all([chmod(agent_path, 0o755), chmod(child_path, 0o755)])
+    await expect(
+      streamModelProcess({
+        command: [agent_path],
+        cwd: workspace,
+        signal: new AbortController().signal,
+        cleanup_workspace_processes: true,
+        on_chunk: async () => undefined,
+      }),
+    ).resolves.toBe(0)
+    await Bun.sleep(1_000)
+    expect(await Bun.file(late_artifact).exists()).toBe(false)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("ordinary commands do not kill concurrent processes that share their workspace", async () => {
+  if (process.platform !== "linux") return
+  const workspace = await mkdtemp(join(tmpdir(), "datasheet-model-shared-workspace-"))
+  const command_path = join(workspace, "short-command")
+  const sibling_path = join(workspace, "concurrent-command")
+  const sibling_artifact = join(workspace, "concurrent-complete.txt")
+  let sibling: Bun.Subprocess | undefined
+  try {
+    await Bun.write(
+      command_path,
+      `#!/usr/bin/env bun
+await Bun.sleep(100)
+`,
+    )
+    await Bun.write(
+      sibling_path,
+      `#!/usr/bin/env bun
+await Bun.sleep(500)
+await Bun.write(${JSON.stringify(sibling_artifact)}, "complete")
+`,
+    )
+    await Promise.all([chmod(command_path, 0o755), chmod(sibling_path, 0o755)])
+    sibling = Bun.spawn([sibling_path], {
+      cwd: workspace,
+      detached: true,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    sibling.unref()
+    await expect(
+      streamModelProcess({
+        command: [command_path],
+        cwd: workspace,
+        signal: new AbortController().signal,
+        on_chunk: async () => undefined,
+      }),
+    ).resolves.toBe(0)
+    await Bun.sleep(600)
+    expect(await Bun.file(sibling_artifact).exists()).toBe(true)
+  } finally {
+    sibling?.kill()
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
 const lockedBenchmarkSource = `import Component from "../component-with-model.circuit"
 
 export default function Benchmark() {
@@ -530,7 +1890,7 @@ export default function Benchmark() {
     <board routingDisabled>
       <Component name="DUT" />
       <voltageprobe name="VOUT_PROBE" connectsTo="DUT.pin2" />
-      <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" />
+      <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" graphIndependentAxes />
     </board>
   )
 }
@@ -552,7 +1912,7 @@ await mkdir(output, { recursive: true })
 await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "VOUT_PROBE", timestamps_ms: [0, 1], voltage_levels: [0, 1] }]))
 `
 
-test("persistent harness failures become evidence-only and refinement still starts", async () => {
+test("persistent harness failures stop before refinement when executable coverage would be too low", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-preflight-recovery-"))
   const model_dir = join(job_dir, "spice")
   const agent_path = join(job_dir, "preflight-recovery-agent")
@@ -569,7 +1929,10 @@ test("persistent harness failures become evidence-only and refinement still star
       Bun.write(join(model_dir, "setup-complete.json"), JSON.stringify({ version: 1 })),
       Bun.write(
         join(model_dir, "benchmark-draft.json"),
-        JSON.stringify({ version: 2, benchmarks: [{ id: "valid" }, { id: "bad-range" }] }),
+        JSON.stringify({
+          version: 2,
+          benchmarks: [{ id: "valid" }, { id: "bad-range" }, { id: "bad-range-2" }],
+        }),
       ),
       Bun.write(
         agent_path,
@@ -584,13 +1947,16 @@ if (prompt.includes("benchmark-only pass")) {
   const source = ${JSON.stringify(lockedBenchmarkSource)}
   await Bun.write(dir + "/benchmarks/valid.circuit.tsx", source)
   await Bun.write(dir + "/benchmarks/bad-range.circuit.tsx", source)
+  await Bun.write(dir + "/benchmarks/bad-range-2.circuit.tsx", source)
   const simulation = { kind: "transient_voltage", x_axis: "time_ms", probe_name: "VOUT_PROBE", dut_spice_node: "OUT" }
   await Bun.write(dir + "/benchmarks.json", JSON.stringify({ version: 1, locked_at: new Date().toISOString(), benchmarks: [
     { id: "valid", title: "Valid", source: { page: 2 }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/valid.csv", result_file: "results/champion/valid.csv", simulation },
     { id: "bad-range", title: "Bad range", source: { page: 3 }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/bad-range.csv", result_file: "results/champion/bad-range.csv", simulation },
+    { id: "bad-range-2", title: "Bad range 2", source: { page: 4 }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/bad-range-2.csv", result_file: "results/champion/bad-range-2.csv", simulation },
   ] }))
   await Bun.write(dir + "/evidence/curves/valid.csv", "x,y\\n0,0\\n1,1\\n")
   await Bun.write(dir + "/evidence/curves/bad-range.csv", "x,y\\n0,0\\n2,1\\n")
+  await Bun.write(dir + "/evidence/curves/bad-range-2.csv", "x,y\\n0,0\\n3,1\\n")
   process.exit(0)
 }
 await Bun.write(dir + "/../refinement-started.txt", "yes")
@@ -612,6 +1978,7 @@ if (!benchmarkId) process.exit(2)
 const output = process.cwd() + "/../dist/spice/benchmarks/" + benchmarkId
 await mkdir(output, { recursive: true })
 await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_transient_voltage_graph", name: "VOUT_PROBE", timestamps_ms: [0, 1], voltage_levels: [0, 1] }]))
+process.exit(0)
 `,
       ),
     ])
@@ -620,10 +1987,10 @@ await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_tr
     const job_store = new JobStore()
     const model_run_store = new ModelRunStore()
     job_store.createJob({ job_id: "job_preflight_recovery", job_dir, file_name: "part.pdf" })
-    job_store.updateJob("job_preflight_recovery", {
-      display_status: "complete",
-      is_complete: true,
-      component_ready: true,
+    await publishAuthoritativeComponentForModelTest({
+      job_store,
+      job_id: "job_preflight_recovery",
+      job_dir,
     })
     model_run_store.createModelRun({
       model_run_id: "model_preflight_recovery",
@@ -639,16 +2006,12 @@ await Bun.write(output + "/circuit.json", JSON.stringify([{ type: "simulation_tr
       { job_store, model_run_store, agent_bin: agent_path, tsci_bin: tsci_path },
     )
 
-    expect(await Bun.file(join(job_dir, "refinement-started.txt")).text()).toBe("yes")
-    expect(
-      JSON.parse(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).text()).benchmark_ids,
-    ).toEqual(["valid"])
-    expect(model_run_store.getModelRun("model_preflight_recovery")?.warnings?.join("\n")).toContain(
-      "bad-range",
-    )
-    expect(await Bun.file(join(model_dir, "benchmark-exclusions.json")).text()).toContain(
-      "simulation ends at x=1 but the reference requires x=2",
-    )
+    expect(await Bun.file(join(job_dir, "refinement-started.txt")).exists()).toBe(false)
+    expect(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).exists()).toBe(false)
+    const failed_run = model_run_store.getModelRun("model_preflight_recovery")
+    expect(failed_run?.status).toBe("failed")
+    expect(failed_run?.error_message).toContain("below the required 75% coverage")
+    expect(await Bun.file(join(model_dir, "benchmark-exclusions.json")).exists()).toBe(false)
   } finally {
     if (previous_attempts === undefined) delete process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS
     else process.env.MODEL_BENCHMARK_FINALIZATION_ATTEMPTS = previous_attempts
@@ -671,6 +2034,8 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(prompt).toContain("--simulation-svgs")
   expect(prompt).toContain("render-svg-to-png.ts")
   expect(prompt).toContain("score-benchmark.ts")
+  expect(prompt).toContain("bun sync-model-wrapper.ts")
+  expect(prompt).toContain("Never create or edit")
   expect(prompt).toContain("comparison.svg")
   expect(prompt).toContain("built-in `read` tool")
   expect(prompt).toContain("visual review is required")
@@ -688,11 +2053,26 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(setup_prompt).toContain("model-progress.json")
   expect(setup_prompt).toContain("time in milliseconds as x")
   expect(setup_prompt).toContain("call the built-in `read` tool on every graph PNG")
+  expect(setup_prompt).toContain("prepare-vision-image.ts")
+  expect(setup_prompt).toContain("bun validate-setup-evidence.ts")
+  expect(setup_prompt).toContain("correct every reported")
+  expect(setup_prompt).toContain("do not truncate graph discovery with `head`")
   expect(setup_prompt).toContain("evidence/pages/datasheet-page-<page>.png")
   expect(setup_prompt).toContain("evidence/figures/<benchmark-id>.png")
   expect(setup_prompt).toContain("source.channel_count")
+  expect(setup_prompt).toContain("source.subplot_count")
+  expect(setup_prompt).toContain("trace_file")
+  expect(setup_prompt).toContain('quantity `"current"`')
+  expect(setup_prompt).toContain("channel's own")
+  expect(setup_prompt).toContain("rising enable")
+  expect(setup_prompt).toContain("0 V")
+  expect(setup_prompt).toContain("exclude same-colored labels")
+  expect(setup_prompt).toContain("analytic formulas")
   expect(setup_prompt).toContain("silently omitted")
   expect(setup_prompt).toContain("Commas and spaces are not valid ids")
+  expect(buildModelSetupPrompt("trace point 4 is off the source curve")).toContain(
+    "server-evidence-validation-feedback",
+  )
   const benchmark_prompt = buildModelBenchmarkPrompt()
   expect(benchmark_prompt).toContain("benchmark-only pass")
   expect(benchmark_prompt).toContain("version-2 benchmarks.json")
@@ -703,6 +2083,8 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(benchmark_prompt).toContain("Do not create or modify model.lib")
   expect(benchmark_prompt).toContain("server-owned stub model")
   expect(benchmark_prompt).toContain("one timePerStep beyond the final reference")
+  expect(benchmark_prompt).toContain("graphIndependentAxes")
+  expect(benchmark_prompt).toContain("never create, edit, delete, or rename `benchmark-draft.json`")
   expect(benchmark_prompt).toContain("probes every DUT pin marked requiresPower")
   expect(benchmark_prompt).toContain('source.image: "evidence/figures/<benchmark-id>.png"')
   expect(benchmark_prompt).toContain("A square `voltagesource` is always")
@@ -710,6 +2092,11 @@ test("model prompt keeps benchmarks fixed while effort only extends iteration ti
   expect(benchmark_prompt).toContain("never put voltage-source components")
   expect(benchmark_prompt).toContain("shorted VSRC")
   expect(benchmark_prompt).toContain("`PULSE(low high delay rise fall width period)`")
+  expect(benchmark_prompt).toContain('spicePinMapping={{ OUT: "pin1", GND: "pin2" }}')
+  expect(benchmark_prompt).toContain("keys are SPICE terminal names")
+  expect(benchmark_prompt).toContain("unwanted periodic edge")
+  expect(benchmark_prompt).toContain("PWL containing only the physical plateau")
+  expect(benchmark_prompt).toContain("Do not construct a long PWL")
   expect(benchmark_prompt).toContain("never at the source component's pin")
   expect(benchmark_prompt).toContain("must not contain commas or spaces")
   const corrected_benchmark_prompt = buildModelBenchmarkPrompt(
@@ -879,7 +2266,7 @@ test("literal pulse delays and simulation duration can be shifted without changi
   const source = `<board>
   <voltagesource pulseDelay="0.5ms" />
   <voltagesource pulseDelay="750us" />
-  <analogsimulation duration="2ms" timePerStep="10us" />
+  <analogsimulation duration="2ms" timePerStep="10us" graphIndependentAxes />
 </board>`
   const shifted = shiftLiteralPulseDelays(source, 0.137)
   expect(shifted?.first_pulse_delay_ms).toBe(0.5)
@@ -1091,9 +2478,213 @@ test("fatal ngspice output is recognized even when tsci exits zero", () => {
 test("temporary agent transport failures are retryable but model errors are not", () => {
   expect(isTransientAgentTransportFailure("Connection error: socket hang up")).toBe(true)
   expect(isTransientAgentTransportFailure("The socket connection was closed unexpectedly.")).toBe(true)
+  expect(isTransientAgentTransportFailure("[retry] attempt 1/3: WebSocket closed 1008")).toBe(true)
+  expect(isTransientAgentTransportFailure('{"error":"Too many concurrent requests"}')).toBe(true)
+  expect(
+    isTransientAgentTransportFailure(
+      "upstream connect error or disconnect/reset before headers. reset reason: connection termination",
+    ),
+  ).toBe(true)
+  expect(
+    isTransientAgentTransportFailure(
+      '{"error":{"message":"The server had an error processing your request.","type":"server_error"}}',
+    ),
+  ).toBe(true)
   expect(isTransientAgentTransportFailure("HTTP 503 Service Unavailable")).toBe(true)
   expect(isTransientAgentTransportFailure("Was there a typo in the url or port?")).toBe(true)
+  expect(isTransientAgentTransportFailure("You exceeded your current quota")).toBe(false)
   expect(isTransientAgentTransportFailure("Error: model.lib has invalid syntax")).toBe(false)
+})
+
+test("model agent phases back off and resume after provider concurrency saturation", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-agent-throttle-"))
+  const agent_path = join(model_dir, "flaky-agent")
+  const attempts_path = join(model_dir, "attempts.txt")
+  const messages: string[] = []
+  try {
+    await Bun.write(
+      agent_path,
+      `#!/usr/bin/env bun
+const attemptsPath = ${JSON.stringify(attempts_path)}
+const attempt = Number(await Bun.file(attemptsPath).text().catch(() => "0")) + 1
+await Bun.write(attemptsPath, String(attempt))
+if (attempt < 3) {
+  console.error('tsci-agent: {"detail":"{\\"error\\":\\"Too many concurrent requests\\"}"}')
+  process.exit(1)
+}
+console.log("completed")
+process.exit(0)
+`,
+    )
+    await chmod(agent_path, 0o755)
+    const result = await runModelAgentProcess({
+      agent_bin: agent_path,
+      use_openai: false,
+      prompt: "continue",
+      model_dir,
+      signal: new AbortController().signal,
+      append: async (_stream, message) => {
+        messages.push(message)
+      },
+      phase_label: "Benchmark-finalization agent",
+      transport_retry_limit: 3,
+      transport_retry_base_delay_ms: 0,
+    })
+    expect(result.exit_code).toBe(0)
+    expect(await Bun.file(attempts_path).text()).toBe("3")
+    expect(messages.filter((message) => message.includes("transport was throttled"))).toHaveLength(2)
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("model image reads bypass the unavailable production resizer for prepared images", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "datasheet-model-image-read-"))
+  const image_path = join(workspace, "prepared.jpg")
+  let read_tool: any
+  try {
+    await Bun.write(
+      image_path,
+      Uint8Array.from(
+        atob(
+          "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/AP/EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAQUCf//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8Bf//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8Bf//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEABj8Cf//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8hf//aAAwDAQACAAMAAAAQH//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQMBAT8Qf//EABQRAQAAAAAAAAAAAAAAAAAAABD/2gAIAQIBAT8Qf//EABQQAQAAAAAAAAAAAAAAAAAAABD/2gAIAQEAAT8Qf//Z",
+        ),
+        (character) => character.charCodeAt(0),
+      ),
+    )
+    registerModelAgentReadExtension({
+      registerTool(tool: unknown) {
+        read_tool = tool
+      },
+    } as Parameters<typeof registerModelAgentReadExtension>[0])
+    const result = await read_tool.execute("image-read", { path: image_path }, new AbortController().signal)
+    expect(result.content.some((block: { type: string }) => block.type === "image")).toBe(true)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("model agent image-read observer reports unavailable vision to the server", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-image-observer-"))
+  const agent_path = join(model_dir, "image-observer-agent")
+  try {
+    await Bun.write(
+      agent_path,
+      `#!/usr/bin/env bun
+console.error('[datasheet-model-image-read]{"path":"page.png","has_image":false,"reason":"decoder unavailable"}')
+`,
+    )
+    await chmod(agent_path, 0o755)
+    const result = await runModelAgentProcess({
+      agent_bin: agent_path,
+      use_openai: false,
+      prompt: "inspect",
+      model_dir,
+      signal: new AbortController().signal,
+      append: async () => undefined,
+      phase_label: "Evidence-setup agent",
+      transport_retry_limit: 0,
+    })
+    expect(result.image_reads).toEqual({
+      attempted: 1,
+      successful: 0,
+      failures: [{ path: "page.png", reason: "decoder unavailable" }],
+    })
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("structural benchmark render retries exit 137 without requesting a circuit correction", async () => {
+  const tmp_root = join(process.cwd(), "tmp")
+  await mkdir(tmp_root, { recursive: true })
+  const job_dir = await mkdtemp(join(tmp_root, "datasheet-structural-resource-retry-"))
+  const model_dir = join(job_dir, "spice")
+  const benchmark_dir = join(model_dir, "benchmarks")
+  const attempts_path = join(job_dir, "attempts.txt")
+  const tsci_path = join(job_dir, "flaky-tsci")
+  const messages: string[] = []
+  try {
+    await mkdir(benchmark_dir, { recursive: true })
+    await Bun.write(
+      join(model_dir, "component.circuit.tsx"),
+      `export default function Component(props: any) {
+  return <chip name={props.name ?? "U1"} pinLabels={{ pin1: "IN", pin2: "GND" }} connections={props.connections} />
+}
+`,
+    )
+    await Bun.write(
+      join(benchmark_dir, "resource.circuit.tsx"),
+      `import DUT from "../component-with-model.circuit"
+export default function Benchmark() {
+  return (
+    <board>
+      <DUT name="DUT" connections={{ IN: "net.IN", GND: "net.GND" }} />
+      <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" graphIndependentAxes />
+    </board>
+  )
+}
+`,
+    )
+    await Bun.write(
+      join(model_dir, "benchmarks.json"),
+      JSON.stringify({
+        version: 1,
+        locked_at: new Date().toISOString(),
+        benchmarks: [
+          {
+            id: "resource",
+            title: "Resource retry",
+            source: { page: 1 },
+            critical: true,
+            weight: 1,
+            tolerance: 0.1,
+            reference_file: "evidence/resource.csv",
+            result_file: "results/champion/resource.csv",
+            simulation: {
+              kind: "transient_voltage",
+              x_axis: "time_ms",
+              probe_name: "RESULT",
+              dut_spice_node: "IN",
+            },
+          },
+        ],
+      }),
+    )
+    await Bun.write(
+      tsci_path,
+      `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const attemptsPath = ${JSON.stringify(attempts_path)}
+const attempt = Number(await Bun.file(attemptsPath).text().catch(() => "0")) + 1
+await Bun.write(attemptsPath, String(attempt))
+if (attempt === 1) process.exit(137)
+const output = ${JSON.stringify(job_dir)} + "/dist/spice/benchmarks/resource"
+await mkdir(output, { recursive: true })
+await Bun.write(output + "/circuit.json", "[]")
+`,
+    )
+    await chmod(tsci_path, 0o755)
+    await validateBenchmarkSources({
+      job_dir,
+      model_dir,
+      signal: new AbortController().signal,
+      tsci_bin: tsci_path,
+      append: async (_stream, message) => {
+        messages.push(message)
+      },
+      transport_retry_count: 2,
+      transport_retry_base_delay_ms: 0,
+    })
+    expect(await Bun.file(attempts_path).text()).toBe("2")
+    expect(messages.some((message) => message.includes("retrying the same unmodified benchmark"))).toBe(true)
+    expect(await Bun.file(join(model_dir, "component-with-model.circuit.tsx")).exists()).toBe(false)
+    expect(await Bun.file(join(benchmark_dir, "resource.circuit.tsx")).text()).toContain(
+      "graphIndependentAxes",
+    )
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
 })
 
 test("validation builds retry a closed transport without consuming benchmark correction", async () => {
@@ -1154,6 +2745,56 @@ await Bun.write(generatedPath, JSON.stringify([]))
   }
 })
 
+test("validation builds retry exit 137 resource kills without consuming benchmark correction", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-validation-resource-kill-"))
+  const model_dir = join(job_dir, "spice")
+  const source_path = join(model_dir, "benchmarks", "transient.circuit.tsx")
+  const generated_path = join(job_dir, "dist", "spice", "benchmarks", "transient", "circuit.json")
+  const saved_path = join(model_dir, "validation-artifacts", "transient", "circuit.json")
+  const attempts_path = join(job_dir, "attempts.txt")
+  const tsci_path = join(job_dir, "resource-flaky-tsci")
+  try {
+    await mkdir(join(model_dir, "benchmarks"), { recursive: true })
+    await Bun.write(source_path, "export default () => <board />\n")
+    await Bun.write(
+      tsci_path,
+      `#!/usr/bin/env bun
+import { mkdir } from "node:fs/promises"
+const attemptsPath = ${JSON.stringify(attempts_path)}
+const generatedPath = ${JSON.stringify(generated_path)}
+const attempt = Number(await Bun.file(attemptsPath).text().catch(() => "0")) + 1
+await Bun.write(attemptsPath, String(attempt))
+if (attempt < 3) process.exit(137)
+await mkdir(generatedPath.slice(0, generatedPath.lastIndexOf("/")), { recursive: true })
+await Bun.write(generatedPath, JSON.stringify([]))
+`,
+    )
+    await chmod(tsci_path, 0o755)
+    const messages: string[] = []
+    const result = await executeValidationBuild({
+      benchmark_file: "transient.circuit.tsx",
+      run: {
+        run_id: "preflight",
+        source_path,
+        generated_path,
+        saved_path,
+      },
+      model_dir,
+      signal: new AbortController().signal,
+      tsci_bin: tsci_path,
+      append: async (_stream, message) => {
+        messages.push(message)
+      },
+    })
+
+    expect(result).toMatchObject({ exit_code: 0, path: saved_path })
+    expect(await Bun.file(attempts_path).text()).toBe("3")
+    expect(messages.filter((message) => message.includes("resource pressure"))).toHaveLength(2)
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})
+
 test("absolute-TIME models receive one shifted simulation after nominal results exist", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-time-shift-"))
   const model_dir = join(job_dir, "spice")
@@ -1170,7 +2811,7 @@ test("absolute-TIME models receive one shifted simulation after nominal results 
     Bun.write(
       join(model_dir, "benchmarks", "startup.circuit.tsx"),
       `import Component from "../component-with-model.circuit"
-export default () => <board><Component name="DUT" /><voltagesource pulseDelay="0.5ms" /><voltageprobe name="RESULT" connectsTo="DUT.pin2" /><analogsimulation duration="1ms" timePerStep="0.01ms" spiceEngine="ngspice" /></board>
+export default () => <board><Component name="DUT" /><voltagesource pulseDelay="0.5ms" /><voltageprobe name="RESULT" connectsTo="DUT.pin2" /><analogsimulation duration="1ms" timePerStep="0.01ms" spiceEngine="ngspice" graphIndependentAxes /></board>
 `,
     ),
     Bun.write(
@@ -1268,16 +2909,22 @@ test("model manifests cannot claim an unexecuted simulator", () => {
 test("benchmark prelock rejects invalid analogsimulation props before stripping simulation", () => {
   expect(() =>
     stripAnalogSimulationForStructuralCheck(
-      '<board><analogsimulation simulationType="transient" spiceEngine="ngspice" /></board>',
+      '<board><analogsimulation simulationType="transient" spiceEngine="ngspice" graphIndependentAxes /></board>',
       "invalid.circuit.tsx",
     ),
   ).toThrow('simulationType must be "spice_transient_analysis" or omitted')
   expect(() =>
     stripAnalogSimulationForStructuralCheck(
-      '<board><analogsimulation simulationType="spice_transient_analysis" spiceEngine="ngspice" /></board>',
+      '<board><analogsimulation simulationType="spice_transient_analysis" spiceEngine="ngspice" graphIndependentAxes /></board>',
       "valid.circuit.tsx",
     ),
   ).not.toThrow()
+  expect(() =>
+    stripAnalogSimulationForStructuralCheck(
+      '<board><analogsimulation simulationType="spice_transient_analysis" spiceEngine="ngspice" /></board>',
+      "missing-independent-axes.circuit.tsx",
+    ),
+  ).toThrow("must set the boolean graphIndependentAxes flag")
 })
 
 test("ngspice preflight fails on an empty engine map and passes after the engine is available", async () => {
@@ -1450,6 +3097,49 @@ test("server model wrapper overrides hardcoded component names for DUT selectors
   }
 }, 20_000)
 
+test("server wrapper sync derives integration only from the canonical model and manifest", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-wrapper-sync-"))
+  try {
+    await Promise.all([
+      Bun.write(
+        join(model_dir, "component.circuit.tsx"),
+        'export default function Component() { return <chip name="U1" footprint="soic8" /> }\n',
+      ),
+      Bun.write(join(model_dir, "model.lib"), ".SUBCKT PART IN OUT\nR1 IN OUT 1G\n.ENDS PART\n"),
+      Bun.write(
+        join(model_dir, "model-manifest.json"),
+        JSON.stringify({
+          version: 1,
+          part_number: "PART",
+          dialect: "portable",
+          entry_name: "PART",
+          model_file: "model.lib",
+          revision: "r0001",
+          simulator: "ngspice",
+          generated_at: new Date().toISOString(),
+          pins: [
+            { component_pin: "pin1", spice_node: "IN" },
+            { component_pin: "pin2", spice_node: "OUT" },
+          ],
+        }),
+      ),
+    ])
+
+    await syncModelComponentWrapper(model_dir)
+    const first_wrapper = await Bun.file(join(model_dir, "component-with-model.circuit.tsx")).text()
+    expect(first_wrapper).toContain("cloneElement(renderComponent(props)")
+    expect(first_wrapper).toContain("R1 IN OUT 1G")
+
+    await Bun.write(join(model_dir, "model.lib"), ".SUBCKT PART IN OUT\nR1 IN OUT 2G\n.ENDS PART\n")
+    await syncModelComponentWrapper(model_dir)
+    const updated_wrapper = await Bun.file(join(model_dir, "component-with-model.circuit.tsx")).text()
+    expect(updated_wrapper).toContain("R1 IN OUT 2G")
+    expect(updated_wrapper).not.toContain("R1 IN OUT 1G")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
 test.each([
   [
     "a component that ignores props",
@@ -1558,7 +3248,7 @@ await Bun.write(dir + "/model.lib", ".subckt TOO_EARLY IN OUT\\nR1 IN OUT 1k\\n.
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_prelock", job_dir, file_name: "part.pdf" })
-  job_store.updateJob("job_prelock", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({ job_store, job_id: "job_prelock", job_dir })
   model_run_store.createModelRun({
     model_run_id: "model_prelock",
     job_id: "job_prelock",
@@ -1574,10 +3264,12 @@ await Bun.write(dir + "/model.lib", ".subckt TOO_EARLY IN OUT\\nR1 IN OUT 1k\\n.
   )
 
   const run = model_run_store.getModelRun("model_prelock")
-  expect(run?.status).toBe("complete")
+  expect(run?.status).toBe("failed")
+  expect(run?.has_errors).toBe(true)
   expect(run?.elapsed_time_ms).toBe(0)
-  expect(run?.error_message).toBeUndefined()
-  expect(run?.warnings?.join("\n")).toContain("forbidden model artifacts")
+  expect(run?.error_message).toContain("forbidden model artifacts")
+  expect(run?.warnings).toEqual([])
+  expect(run?.model_source).toBeUndefined()
   expect(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).exists()).toBe(false)
   await rm(job_dir, { recursive: true, force: true })
 })
@@ -1615,7 +3307,11 @@ process.exit(8)
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_benchmark_retry", job_dir, file_name: "part.pdf" })
-  job_store.updateJob("job_benchmark_retry", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({
+    job_store,
+    job_id: "job_benchmark_retry",
+    job_dir,
+  })
   model_run_store.createModelRun({
     model_run_id: "model_benchmark_retry",
     job_id: "job_benchmark_retry",
@@ -1627,12 +3323,14 @@ process.exit(8)
 
   const context = { job_store, model_run_store, agent_bin: agent_path, tsci_bin: tsci_path }
   await runModel({ model_run_id: "model_benchmark_retry" }, context)
-  expect(model_run_store.getModelRun("model_benchmark_retry")?.warnings?.join("\n")).toContain("code 7")
+  expect(model_run_store.getModelRun("model_benchmark_retry")?.error_message).toContain("code 7")
+  expect(model_run_store.getModelRun("model_benchmark_retry")?.warnings).toEqual([])
   expect(model_run_store.extendModelRun("model_benchmark_retry", 1).should_start).toBe(true)
   await runModel({ model_run_id: "model_benchmark_retry" }, context)
 
   expect(await Bun.file(join(job_dir, "benchmark-attempt.txt")).text()).toBe("2")
-  expect(model_run_store.getModelRun("model_benchmark_retry")?.warnings?.join("\n")).toContain("code 8")
+  expect(model_run_store.getModelRun("model_benchmark_retry")?.error_message).toContain("code 8")
+  expect(model_run_store.getModelRun("model_benchmark_retry")?.warnings).toEqual([])
   expect(await Bun.file(join(job_dir, ".model-benchmark-lock", "lock.json")).exists()).toBe(false)
   await rm(job_dir, { recursive: true, force: true })
 })
@@ -1675,7 +3373,11 @@ await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
     const job_store = new JobStore()
     const model_run_store = new ModelRunStore()
     job_store.createJob({ job_id: "job_benchmark_stall", job_dir, file_name: "part.pdf" })
-    job_store.updateJob("job_benchmark_stall", { display_status: "complete", is_complete: true })
+    await publishAuthoritativeComponentForModelTest({
+      job_store,
+      job_id: "job_benchmark_stall",
+      job_dir,
+    })
     model_run_store.createModelRun({
       model_run_id: "model_benchmark_stall",
       job_id: "job_benchmark_stall",
@@ -1779,7 +3481,11 @@ await Bun.write(output + "/circuit.json", JSON.stringify(circuit))
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_benchmark_correction", job_dir, file_name: "part.pdf" })
-  job_store.updateJob("job_benchmark_correction", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({
+    job_store,
+    job_id: "job_benchmark_correction",
+    job_dir,
+  })
   model_run_store.createModelRun({
     model_run_id: "model_benchmark_correction",
     job_id: "job_benchmark_correction",
@@ -1827,8 +3533,12 @@ const args = process.argv.slice(2)
 const dir = args[args.indexOf("--dir") + 1]
 const prompt = args[args.indexOf("--prompt") + 1]
 if (prompt.includes("untimed evidence")) {
+  await Bun.write(dir + "/../.model-benchmark-lock/reference-image-contract.json", JSON.stringify({ version: 2 }))
   await mkdir(dir + "/evidence/figures", { recursive: true })
+  await mkdir(dir + "/evidence/curves", { recursive: true })
+  await Bun.write(dir + "/datasheet.txt", "fixture with no printed timing figure captions")
   await Bun.write(dir + "/evidence/figures/transfer.png", Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (character) => character.charCodeAt(0)))
+  await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
   await Bun.write(dir + "/benchmark-draft.json", JSON.stringify({ version: 2, figure_inventory: [{ page: 3, figure: "Transfer", x_axis: "time", status: "drafted", benchmark_id: "transfer" }], benchmarks: [{ id: "transfer", source: { page: 3, image: "evidence/figures/transfer.png" } }] }))
   await Bun.write(dir + "/model-progress.json", JSON.stringify({ sequence: 2, phase: "digitizing_graphs", message: "Digitized the transfer graph", updated_at: new Date().toISOString(), iteration: 0, evidence: { pages_reviewed: 4, graphs_found: 1, graphs_digitized: 1, benchmark_drafts: 1 } }))
   await Bun.write(dir + "/setup-complete.json", JSON.stringify({ version: 2, completed_at: new Date().toISOString(), evidence_file_count: 2, draft_benchmark_count: 1 }))
@@ -1838,7 +3548,6 @@ if (prompt.includes("untimed evidence")) {
 if (prompt.includes("benchmark-only pass")) {
   await Bun.write(dir + "/benchmarks/transfer.circuit.tsx", ${JSON.stringify(lockedBenchmarkSource)})
   await Bun.write(dir + "/benchmarks.json", JSON.stringify({ version: 1, locked_at: new Date().toISOString(), benchmarks: [{ id: "transfer", title: "Transfer", source: { page: 3, image: "evidence/figures/transfer.png" }, critical: true, weight: 1, tolerance: 0.05, reference_file: "evidence/curves/transfer.csv", result_file: "results/champion/transfer.csv", simulation: { kind: "transient_voltage", x_axis: "time_ms", probe_name: "VOUT_PROBE", dut_spice_node: "OUT" } }] }))
-  await Bun.write(dir + "/evidence/curves/transfer.csv", "x,y\\n0,0\\n1,1\\n")
   await Bun.write(dir + "/model-progress.json", JSON.stringify({ sequence: 3, phase: "locking_benchmarks", message: "Finalized transfer benchmark", updated_at: new Date().toISOString(), iteration: 0, benchmark: { current: "transfer", completed: 1, total: 1 } }))
   console.log("benchmarks finalized")
   process.exit(0)
@@ -1925,10 +3634,11 @@ console.log("simulation ok")
   expect(waiting_run?.progress?.phase).toBe("waiting_for_component")
   expect(waiting_run?.progress?.evidence?.graphs_digitized).toBe(1)
 
-  job_store.updateJob("job_1", {
-    display_status: "agent_running",
-    is_complete: false,
-    component_ready: true,
+  await publishAuthoritativeComponentForModelTest({
+    job_store,
+    job_id: "job_1",
+    job_dir,
+    keep_job_running: true,
   })
   await run_promise
 
@@ -2027,7 +3737,7 @@ if (attempt > 1 && await Bun.file(dir + "/validation-artifacts/transfer/circuit.
 await mkdir(dir + "/benchmarks", { recursive: true })
 await mkdir(dir + "/evidence/curves", { recursive: true })
 await mkdir(dir + "/results/champion", { recursive: true })
-await Bun.write(dir + "/model.lib", ".subckt LOOP IN OUT\\nR1 IN OUT 1k\\n.ends LOOP\\n")
+await Bun.write(dir + "/model.lib", ".subckt LOOP IN OUT\\nR1 IN OUT " + (attempt === 1 ? "2k" : "1k") + "\\n.ends LOOP\\n")
 await Bun.write(dir + "/model-manifest.json", JSON.stringify({ version: 1, part_number: "LOOP", dialect: "portable", entry_name: "LOOP", model_file: "model.lib", revision: "r000" + attempt, simulator: "ngspice", generated_at: new Date().toISOString(), pins: [{ component_pin: "pin1", spice_node: "IN" }, { component_pin: "pin2", spice_node: "OUT" }] }))
 await Bun.write(dir + "/component-with-model.circuit.tsx", "export default () => <chip name=\\"U1\\" />\\n")
 await Bun.write(dir + "/results/champion/transfer.csv", "x,y\\n0,0\\n1," + (attempt === 1 ? "2" : "1") + "\\n")
@@ -2073,7 +3783,7 @@ await mkdir(jobDir + "/dist/spice/component-with-model", { recursive: true })
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_loop", job_dir, file_name: "loop.pdf" })
-  job_store.updateJob("job_loop", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({ job_store, job_id: "job_loop", job_dir })
   model_run_store.createModelRun({
     model_run_id: "model_loop",
     job_id: "job_loop",
@@ -2191,7 +3901,11 @@ await Bun.write(benchmarkOutput + "/circuit.json", JSON.stringify([...integrity,
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_lock_recovery", job_dir, file_name: "recovery.pdf" })
-  job_store.updateJob("job_lock_recovery", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({
+    job_store,
+    job_id: "job_lock_recovery",
+    job_dir,
+  })
   model_run_store.createModelRun({
     model_run_id: "model_lock_recovery",
     job_id: "job_lock_recovery",
@@ -2260,7 +3974,11 @@ await Bun.write(dir + "/extension-finished.txt", "finished")
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_live_extension", job_dir, file_name: "part.pdf" })
-  job_store.updateJob("job_live_extension", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({
+    job_store,
+    job_id: "job_live_extension",
+    job_dir,
+  })
   model_run_store.createModelRun({
     model_run_id: "model_live_extension",
     job_id: "job_live_extension",
@@ -2327,7 +4045,7 @@ await Bun.sleep(30_000)
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_recovery", job_dir, file_name: "sensor.pdf" })
-  job_store.updateJob("job_recovery", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({ job_store, job_id: "job_recovery", job_dir })
   model_run_store.createModelRun({
     model_run_id: "model_recovery",
     job_id: "job_recovery",
@@ -2366,7 +4084,7 @@ export default function WaveformBenchmark() {
     <board routingDisabled>
       <Component name="DUT" />
       <voltageprobe name="VOUT" connectsTo="DUT.pin2" />
-      <analogsimulation duration="2ms" timePerStep="0.1ms" spiceEngine="ngspice" />
+      <analogsimulation duration="2ms" timePerStep="0.1ms" spiceEngine="ngspice" graphIndependentAxes />
     </board>
   )
 }
@@ -2444,6 +4162,7 @@ await Bun.sleep(benchmarkId === "waveform-a" ? 80 : 220)
 await mkdir(jobDir + "/dist/spice/benchmarks/" + benchmarkId, { recursive: true })
 await Bun.write(jobDir + "/dist/spice/benchmarks/" + benchmarkId + "/circuit.json", JSON.stringify([...integrity, { type: "simulation_transient_voltage_graph", name: "VOUT", timestamps_ms: [0, 1, 2], voltage_levels: [0, 2, 4] }]))
 await appendFile(jobDir + "/waveform-timing.log", benchmarkId + ",end," + Date.now() + "\\n")
+process.exit(0)
 `,
     ),
   ])
@@ -2452,7 +4171,7 @@ await appendFile(jobDir + "/waveform-timing.log", benchmarkId + ",end," + Date.n
   const job_store = new JobStore()
   const model_run_store = new ModelRunStore()
   job_store.createJob({ job_id: "job_waveform", job_dir, file_name: "waveform.pdf" })
-  job_store.updateJob("job_waveform", { display_status: "complete", is_complete: true })
+  await publishAuthoritativeComponentForModelTest({ job_store, job_id: "job_waveform", job_dir })
   model_run_store.createModelRun({
     model_run_id: "model_waveform",
     job_id: "job_waveform",

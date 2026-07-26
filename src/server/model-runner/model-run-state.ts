@@ -15,8 +15,8 @@ class ComponentWaiter {
 
   getOutcome(): ComponentOutcome | undefined {
     const job = this.job_store.getJob(this.input.job_id)
-    if (job?.component_ready || job?.display_status === "complete") return "complete"
-    if (job?.display_status === "failed") return "failed"
+    if (job?.component_ready) return "complete"
+    if (job?.display_status === "complete" || job?.display_status === "failed") return "failed"
     if (job?.display_status === "cancelled") return "cancelled"
     return undefined
   }

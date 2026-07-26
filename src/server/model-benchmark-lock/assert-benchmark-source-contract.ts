@@ -7,13 +7,16 @@ export function parseBenchmarkRecords(value: unknown): BenchmarkRecord[] {
   return parseBenchmarkManifest(value).benchmarks.map((entry) => ({
     id: entry.id,
     source_image: entry.source.image,
+    subplot_count: entry.source.subplot_count,
     series: entry.series.map((series) => ({
       id: series.id,
       role: series.role,
+      subplot_index: series.subplot_index,
       quantity: series.quantity,
       unit: series.unit,
       reference_file: series.reference_file,
       source_image: series.source_image,
+      trace_file: series.trace_file,
       simulation: series.simulation,
     })),
   }))
@@ -106,6 +109,22 @@ function assertAnalogSimulationProps(source_file: ts.SourceFile, benchmark_id: s
       node.tagName.getText() === "analogsimulation"
     ) {
       count += 1
+      const graph_axes_attributes = node.attributes.properties.filter(
+        (property): property is ts.JsxAttribute =>
+          ts.isJsxAttribute(property) && property.name.getText() === "graphIndependentAxes",
+      )
+      const graph_axes_attribute = graph_axes_attributes[0]
+      const graph_axes_enabled =
+        graph_axes_attributes.length === 1 &&
+        graph_axes_attribute !== undefined &&
+        (graph_axes_attribute.initializer === undefined ||
+          (ts.isJsxExpression(graph_axes_attribute.initializer) &&
+            graph_axes_attribute.initializer.expression?.kind === ts.SyntaxKind.TrueKeyword))
+      if (!graph_axes_enabled) {
+        throw new Error(
+          `Benchmark ${benchmark_id} analogsimulation must set the boolean graphIndependentAxes flag`,
+        )
+      }
       const attribute = node.attributes.properties.find(
         (property): property is ts.JsxAttribute =>
           ts.isJsxAttribute(property) && property.name.getText() === "simulationType",

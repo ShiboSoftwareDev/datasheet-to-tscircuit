@@ -15,15 +15,23 @@ export async function hasBenchmarkLock(model_dir: string): Promise<boolean> {
 export async function enableBenchmarkReferenceImageContract(model_dir: string): Promise<void> {
   await writeTextAtomically(
     getReferenceImageContractFile(model_dir),
-    `${JSON.stringify({ version: 2, enabled_at: new Date().toISOString() }, null, 2)}\n`,
+    `${JSON.stringify({ version: 3, enabled_at: new Date().toISOString() }, null, 2)}\n`,
   )
 }
 
-export async function requiresCompleteTimeGraphInventory(model_dir: string): Promise<boolean> {
+async function getReferenceEvidenceContractVersion(model_dir: string): Promise<number | undefined> {
   const value = await readFile(getReferenceImageContractFile(model_dir), "utf8")
     .then((text) => JSON.parse(text) as { version?: unknown })
     .catch(() => undefined)
-  return value !== undefined
+  return typeof value?.version === "number" ? value.version : undefined
+}
+
+export async function requiresCompleteTimeGraphInventory(model_dir: string): Promise<boolean> {
+  return (await getReferenceEvidenceContractVersion(model_dir)) !== undefined
+}
+
+export async function requiresTraceProvenance(model_dir: string): Promise<boolean> {
+  return ((await getReferenceEvidenceContractVersion(model_dir)) ?? 0) >= 3
 }
 
 export async function hasBenchmarkReferenceImageContract(model_dir: string): Promise<boolean> {
@@ -32,7 +40,7 @@ export async function hasBenchmarkReferenceImageContract(model_dir: string): Pro
 
 export async function validateBenchmarkSuiteForLock(
   model_dir: string,
-  options: { require_source_images?: boolean } = {},
+  options: { require_source_images?: boolean; require_trace_provenance?: boolean } = {},
 ): Promise<string[]> {
   return (await readCurrentLock(model_dir, options)).warnings
 }

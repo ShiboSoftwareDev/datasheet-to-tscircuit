@@ -17,6 +17,40 @@ import {
 import { validateChampion } from "./validate-champion"
 import { validateFeedbackSensitivity } from "./validate-feedback-sensitivity"
 
+export function getStimulusScoringContractError(validation: {
+  benchmarks: Array<{
+    benchmark_id: string
+    series?: Array<{
+      series_id: string
+      role: string
+      passed: boolean
+      normalized_rmse?: number
+      normalized_max_error?: number
+      error_message?: string
+    }>
+  }>
+}): string | undefined {
+  const failures = validation.benchmarks.flatMap((benchmark) =>
+    (benchmark.series ?? []).flatMap((series) =>
+      series.role === "stimulus" && !series.passed
+        ? [
+            `${benchmark.benchmark_id}/${series.series_id}: ${
+              series.error_message ??
+              `NRMSE ${series.normalized_rmse ?? "unavailable"}, max ${
+                series.normalized_max_error ?? "unavailable"
+              }`
+            }`,
+          ]
+        : [],
+    ),
+  )
+  return failures.length > 0
+    ? `Locked benchmark harness stimulus failed the authoritative scorer and requires controlled circuit repair: ${failures.join(
+        " | ",
+      )}`
+    : undefined
+}
+
 async function validateModelIntegrity(input: {
   state: ModelRefinementState
   execution: ModelExecution
@@ -142,6 +176,11 @@ export async function runIndependentModelValidation(
       state.final_validation = await scoreModelBenchmarks(execution.model_dir, {
         results_directory_override: getVerifiedResultsDirectory(execution.model_dir),
       })
+      const stimulus_contract_error = getStimulusScoringContractError(state.final_validation)
+      if (stimulus_contract_error) {
+        state.final_champion.benchmark_contract_error = stimulus_contract_error
+        state.final_error_message = stimulus_contract_error
+      }
       await Bun.write(
         join(execution.model_dir, "validation-report.json"),
         `${JSON.stringify(state.final_validation, null, 2)}\n`,

@@ -3,6 +3,7 @@ import { join } from "node:path"
 import type { ModelManifest } from "@/shared/job-types"
 import { isCircuitJson, selectPreferredComponentCircuitJson } from "../component-circuit-json"
 import type { JobStore } from "../job-store"
+import { parseModelManifest, validateManifestAgainstModel } from "./parse-model-manifest"
 
 export { isCircuitJson } from "../component-circuit-json"
 
@@ -71,6 +72,16 @@ export async function writeServerIntegratedComponent(input: {
       model_source: input.model_source,
     }),
   )
+}
+
+export async function syncModelComponentWrapper(model_dir: string): Promise<void> {
+  const [model_source, manifest_value] = await Promise.all([
+    readFile(join(model_dir, "model.lib"), "utf8"),
+    readFile(join(model_dir, "model-manifest.json"), "utf8").then((text) => JSON.parse(text)),
+  ])
+  const manifest = parseModelManifest(manifest_value)
+  validateManifestAgainstModel(manifest, model_source)
+  await writeServerIntegratedComponent({ model_dir, manifest, model_source })
 }
 
 export async function writeServerStructuralComponent(input: { model_dir: string }): Promise<void> {

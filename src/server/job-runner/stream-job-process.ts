@@ -40,6 +40,13 @@ export class AgentTransportUnavailableError extends AutomatedConversionUnavailab
   }
 }
 
+export class EvidenceConsensusUnavailableError extends AutomatedConversionUnavailableError {
+  constructor(message: string) {
+    super(message)
+    this.name = "EvidenceConsensusUnavailableError"
+  }
+}
+
 export function throwIfCancelled(signal: AbortSignal): void {
   if (signal.aborted) throw new JobCancelledError()
 }

@@ -6,7 +6,7 @@ import { prepareModelWorkspace } from "./prepare-model-workspace"
 import { runModelRefinement } from "./run-model-refinement"
 import type { ModelRunnerContext } from "./stream-model-process"
 
-export async function runModel(input: { model_run_id: string }, context: ModelRunnerContext): Promise<void> {
+async function runClaimedModel(input: { model_run_id: string }, context: ModelRunnerContext): Promise<void> {
   const model_run = context.model_run_store.getModelRun(input.model_run_id)
   if (!model_run) throw new Error(`Model run ${input.model_run_id} was not found`)
   const job_dir = context.job_store.getJobDir(model_run.job_id)
@@ -45,5 +45,14 @@ export async function runModel(input: { model_run_id: string }, context: ModelRu
     execution.stopMonitors()
     execution.stopBudgetMonitor()
     cancellation_signal.removeEventListener("abort", cancel_process)
+  }
+}
+
+export async function runModel(input: { model_run_id: string }, context: ModelRunnerContext): Promise<void> {
+  if (!context.model_run_store.claimModelExecution(input.model_run_id)) return
+  try {
+    await runClaimedModel(input, context)
+  } finally {
+    context.model_run_store.releaseModelExecution(input.model_run_id)
   }
 }

@@ -3,10 +3,14 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  clearSetupEvidenceLockForCorrection,
   createOrVerifyBenchmarkLock,
+  createOrVerifySetupEvidenceLock,
   replaceBenchmarkLockAfterCircuitRepair,
+  restoreSetupEvidenceFromSnapshot,
   validateBenchmarkSuiteForLock,
   verifyBenchmarkLock,
+  verifySetupEvidenceLock,
 } from "@/server/model-benchmark-lock"
 import { assertBenchmarkSourceContract } from "@/server/model-benchmark-lock/assert-benchmark-source-contract"
 import type { BenchmarkRecord } from "@/server/model-benchmark-lock/types"
@@ -23,11 +27,56 @@ export default function TransferBenchmark() {
     <board routingDisabled>
       <Component name="DUT" />
       <voltageprobe name="VOUT" connectsTo="DUT.pin2" />
-      <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" />
+      <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" graphIndependentAxes />
     </board>
   )
 }
 `
+
+test("completed setup evidence is immutable before benchmark finalization", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-setup-evidence-lock-"))
+  const model_dir = join(job_dir, "spice")
+  const draft = JSON.stringify({ version: 2, benchmarks: [{ id: "response" }] })
+  try {
+    await mkdir(join(model_dir, "evidence", "curves"), { recursive: true })
+    await Promise.all([
+      Bun.write(join(model_dir, "benchmark-draft.json"), draft),
+      Bun.write(
+        join(model_dir, "setup-complete.json"),
+        JSON.stringify({ version: 2, draft_benchmark_count: 1 }),
+      ),
+      Bun.write(join(model_dir, "evidence", "curves", "response.csv"), "x,y\n0,0\n1,1\n"),
+    ])
+
+    await createOrVerifySetupEvidenceLock(model_dir)
+    expect(
+      await Bun.file(
+        join(job_dir, ".model-benchmark-lock", "setup-snapshot", "benchmark-draft.json"),
+      ).exists(),
+    ).toBe(true)
+    await expect(verifySetupEvidenceLock(model_dir)).resolves.toBeUndefined()
+
+    await Bun.write(
+      join(model_dir, "benchmark-draft.json"),
+      JSON.stringify({ version: 2, benchmarks: [{ id: "fabricated-late" }] }),
+    )
+    await expect(verifySetupEvidenceLock(model_dir)).rejects.toThrow("modified server-locked setup evidence")
+
+    await Bun.write(join(model_dir, "benchmark-draft.json"), draft)
+    await Bun.write(join(model_dir, "evidence", "late-added.csv"), "x,y\n0,0\n")
+    await expect(verifySetupEvidenceLock(model_dir)).rejects.toThrow("evidence/late-added.csv")
+    expect(await restoreSetupEvidenceFromSnapshot(model_dir)).toEqual(["evidence/late-added.csv"])
+    await expect(verifySetupEvidenceLock(model_dir)).resolves.toBeUndefined()
+    expect(await Bun.file(join(model_dir, "evidence", "late-added.csv")).exists()).toBe(false)
+
+    await clearSetupEvidenceLockForCorrection(model_dir)
+    await Bun.write(join(model_dir, "evidence", "curves", "response.csv"), "x,y\n0,0\n1,2\n")
+    await createOrVerifySetupEvidenceLock(model_dir)
+    await expect(verifySetupEvidenceLock(model_dir)).resolves.toBeUndefined()
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})
 
 async function createLockedFixture(model_dir: string): Promise<void> {
   await Promise.all([
@@ -87,6 +136,12 @@ test("new benchmark suites require and lock one exact graph crop per benchmark",
   )
 
   await Bun.write(join(model_dir, "evidence", "figures", "transfer.png"), referencePng)
+  await expect(
+    validateBenchmarkSuiteForLock(model_dir, {
+      require_source_images: true,
+      require_trace_provenance: true,
+    }),
+  ).rejects.toThrow("source.subplot_count")
   const lock = await createOrVerifyBenchmarkLock(model_dir)
   expect(lock.files.some(({ file }) => file === "evidence/figures/transfer.png")).toBe(true)
   expect(
@@ -269,7 +324,7 @@ export default () => <board>
   <Component name="DUT" />
   <voltageprobe name="VOUT" connectsTo=".DUT > .VOUT" />
   <voltageprobe name="VIN" connectsTo=".DUT > .VIN" />
-  <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" />
+  <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" graphIndependentAxes />
 </board>`
 
   expect(() => assertBenchmarkSourceContract(direct_probe_source, benchmark)).not.toThrow()
@@ -299,6 +354,14 @@ test("benchmark locks reject invalid analogsimulation props before refinement", 
 
   await expect(createOrVerifyBenchmarkLock(model_dir)).rejects.toThrow(
     'simulationType must be omitted or exactly "spice_transient_analysis"',
+  )
+
+  await Bun.write(
+    join(model_dir, "benchmarks", "transfer.circuit.tsx"),
+    benchmarkSource.replace(" graphIndependentAxes", ""),
+  )
+  await expect(createOrVerifyBenchmarkLock(model_dir)).rejects.toThrow(
+    "must set the boolean graphIndependentAxes flag",
   )
 
   await Bun.write(
@@ -404,7 +467,7 @@ export default () => <board>
   <Component name="DUT" />
   <resistor name="R_IL_SENSE" resistance="10m" />
   <voltageprobe name="RESULT_IL" connectsTo=".DUT > .L1" referenceTo="net.GND" />
-  <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" />
+  <analogsimulation duration="1ms" timePerStep="0.1ms" spiceEngine="ngspice" graphIndependentAxes />
 </board>`
   expect(() => assertBenchmarkSourceContract(direct_pin_probe, benchmark)).toThrow(
     "must measure differentially across both pins",
@@ -417,7 +480,61 @@ export default () => <board>
   expect(() => assertBenchmarkSourceContract(sensed_probe, benchmark)).not.toThrow()
 })
 
-test("benchmark locks warn about copied response digitization without withholding output", async () => {
+test("benchmark locking reports source-contract defects from the whole suite at once", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-benchmark-source-errors-"))
+  const model_dir = join(job_dir, "spice")
+  await Promise.all([
+    mkdir(join(model_dir, "benchmarks"), { recursive: true }),
+    mkdir(join(model_dir, "evidence", "curves"), { recursive: true }),
+  ])
+  const invalid_source = benchmarkSource.replace(
+    'import Component from "../component-with-model.circuit"',
+    'import Component from "../component.circuit"',
+  )
+  await Promise.all([
+    Bun.write(join(model_dir, "benchmarks", "first.circuit.tsx"), invalid_source),
+    Bun.write(join(model_dir, "benchmarks", "second.circuit.tsx"), invalid_source),
+    Bun.write(join(model_dir, "evidence", "curves", "first.csv"), "x,y\n0,0\n1,1\n"),
+    Bun.write(join(model_dir, "evidence", "curves", "second.csv"), "x,y\n0,0\n1,2\n"),
+    Bun.write(
+      join(model_dir, "benchmarks.json"),
+      JSON.stringify({
+        version: 1,
+        locked_at: new Date().toISOString(),
+        benchmarks: ["first", "second"].map((id, index) => ({
+          id,
+          title: id,
+          source: { page: index + 1 },
+          critical: true,
+          weight: 1,
+          tolerance: 0.1,
+          reference_file: `evidence/curves/${id}.csv`,
+          result_file: `results/champion/${id}.csv`,
+          simulation: {
+            kind: "transient_voltage",
+            x_axis: "time_ms",
+            probe_name: "VOUT",
+            dut_spice_node: "OUT",
+          },
+        })),
+      }),
+    ),
+  ])
+
+  try {
+    await validateBenchmarkSuiteForLock(model_dir)
+    throw new Error("Expected benchmark source validation to fail")
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    expect(message).toContain("2 errors")
+    expect(message).toContain("Benchmark first must import component-with-model.circuit")
+    expect(message).toContain("Benchmark second must import component-with-model.circuit")
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})
+
+test("benchmark locks reject copied critical response digitization from distinct figures", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-benchmark-duplicate-response-"))
   const model_dir = join(job_dir, "spice")
   await Promise.all([
@@ -454,9 +571,9 @@ test("benchmark locks warn about copied response digitization without withholdin
     ),
   ])
 
-  const warnings = await validateBenchmarkSuiteForLock(model_dir)
-  expect(warnings).toHaveLength(1)
-  expect(warnings[0]).toContain("independently digitize each datasheet figure")
+  await expect(validateBenchmarkSuiteForLock(model_dir)).rejects.toThrow(
+    "Critical benchmark reference evidence contains 1 copied response curve",
+  )
   await rm(job_dir, { recursive: true, force: true })
 })
 

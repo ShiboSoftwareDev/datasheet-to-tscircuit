@@ -6,6 +6,7 @@ import type {
   ModelReferencePreview,
   ModelReferenceSeriesPreview,
 } from "@/shared/job-types"
+import { findDocumentedStimulusRange } from "../model-scorer/documented-stimulus-range"
 import { scoreSeriesPoints } from "../model-scorer/score-single-model-benchmark"
 import { extractSimulationResultPoints, parseSimulationDefinition } from "../model-simulation-validator"
 
@@ -26,6 +27,7 @@ interface BenchmarkPreviewSeriesRecord {
 interface BenchmarkPreviewRecord {
   id?: string
   title?: string
+  conditions?: string
   x_scale?: "linear" | "log"
   series: BenchmarkPreviewSeriesRecord[]
   reference_file?: string
@@ -52,6 +54,7 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
     if (!isRecord(benchmark)) return []
     const id = typeof benchmark.id === "string" ? benchmark.id : undefined
     const title = typeof benchmark.title === "string" ? benchmark.title : id
+    const conditions = typeof benchmark.conditions === "string" ? benchmark.conditions : undefined
     const x_scale = benchmark.x_scale === "log" ? "log" : "linear"
     const tolerance = positiveNumber(benchmark.tolerance)
     const max_error_tolerance = positiveNumber(benchmark.max_error_tolerance)
@@ -108,7 +111,7 @@ function parseBenchmarks(value: unknown): BenchmarkPreviewRecord[] {
             ]
           : []
     return series.length > 0
-      ? [{ id, title, x_scale, series, reference_file: series[0]?.reference_file }]
+      ? [{ id, title, conditions, x_scale, series, reference_file: series[0]?.reference_file }]
       : []
   })
 }
@@ -260,6 +263,15 @@ export async function readReferencePreview(input: {
                   reference_points,
                   result_points,
                   x_scale: selected_benchmark.x_scale,
+                  documented_stimulus_range:
+                    series.role === "stimulus" && selected_benchmark.conditions
+                      ? findDocumentedStimulusRange({
+                          conditions: selected_benchmark.conditions,
+                          title: series.title,
+                          series_id: series.id,
+                          series_unit: series.unit,
+                        })
+                      : undefined,
                 })
               : undefined
           return {

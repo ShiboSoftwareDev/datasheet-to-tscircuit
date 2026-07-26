@@ -3,12 +3,16 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { writeModelScaffold } from "@/server/model-scaffold"
+import sharp from "sharp"
 import {
   getBenchmarkRangeCoverageError,
+  getReferenceTimeAxisError,
   parseBenchmarkManifest,
   renderModelBenchmarkComparisonSvg,
   scoreModelBenchmarks,
+  scoreSeriesPoints,
   scoreSingleModelBenchmark,
+  validateFigureTraceColorCoverage,
 } from "@/server/model-scorer"
 
 test("benchmark range coverage rejects a missing terminal sample but tolerates floating-point noise", () => {
@@ -34,6 +38,46 @@ test("benchmark range coverage rejects a missing terminal sample but tolerates f
       ],
     }),
   ).toBeUndefined()
+})
+
+test("subpixel negative elapsed-time noise is normalized but material negative time is rejected", () => {
+  const tiny_edge_noise = [
+    { x: -0.0001, y: 0 },
+    { x: 0.01, y: 1 },
+    { x: 0.02, y: 2 },
+  ]
+  const simulated = [
+    { x: 0, y: 0 },
+    { x: 0.01, y: 1 },
+    { x: 0.02, y: 2 },
+  ]
+  expect(getReferenceTimeAxisError(tiny_edge_noise)).toBeUndefined()
+  expect(
+    getBenchmarkRangeCoverageError({
+      reference_points: tiny_edge_noise,
+      result_points: simulated,
+    }),
+  ).toBeUndefined()
+  expect(
+    scoreSeriesPoints({
+      series: {
+        id: "output",
+        title: "Output",
+        role: "response",
+        unit: "V",
+        tolerance: 0.01,
+      },
+      reference_points: tiny_edge_noise,
+      result_points: simulated,
+    }).passed,
+  ).toBe(true)
+  expect(
+    getReferenceTimeAxisError([
+      { x: -0.001, y: 0 },
+      { x: 0.01, y: 1 },
+      { x: 0.02, y: 2 },
+    ]),
+  ).toContain("exceeds the 1% trace-span edge tolerance")
 })
 
 test("model scorer evaluates every locked benchmark from numeric CSV data", async () => {
@@ -125,6 +169,9 @@ test("targeted benchmark helper extracts and overlays one saved simulator trace"
       Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nfixture"),
     ])
     await writeModelScaffold({ job_dir, model_dir })
+    expect(await Bun.file(join(model_dir, "sync-model-wrapper.ts")).exists()).toBe(true)
+    expect(await Bun.file(join(model_dir, "prepare-vision-image.ts")).exists()).toBe(true)
+    expect(await Bun.file(join(model_dir, "validate-setup-evidence.ts")).exists()).toBe(true)
     await Promise.all([
       Bun.write(
         join(model_dir, "benchmarks.json"),
@@ -344,6 +391,76 @@ test("multi-channel figures keep and score every response and stimulus series in
     expect(() => parseBenchmarkManifest(missing_channel)).toThrow(
       "source.channel_count=3 but series[] contains 2 channels",
     )
+
+    const missing_subplot = structuredClone({
+      version: 2,
+      locked_at: new Date().toISOString(),
+      benchmarks: [benchmark],
+    })
+    ;(missing_subplot.benchmarks[0]!.source as { subplot_count?: number }).subplot_count = 4
+    missing_subplot.benchmarks[0]!.series.forEach((series, index) => {
+      ;(series as typeof series & { subplot_index?: number }).subplot_index = index + 1
+    })
+    expect(() => parseBenchmarkManifest(missing_subplot)).toThrow("omits source subplot 4")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("figure evidence rejects four colored traces when only two were inventoried", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-trace-color-coverage-"))
+  const source_image = "evidence/figures/four-traces.png"
+  const image = Uint8Array.from(
+    atob(
+      "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAiElEQVR4nO3YMQ3AMBAEQYN4/igMIiDMJSmd4hsrxeqiXR0AT/fyuMMb9AO+JoBOAJ0Auh8BVlXQBNBrAKEJoBNAJ4BOAJ0Aug2oWUETQK8BhCaATgCdADoBdALoXrcQ/912MAH0GkBoAugE0AmgE0AngG4DrppBE0CvAYQmgE4AnQA6AXTxgAcaM7l35H1tqAAAAABJRU5ErkJggg==",
+    ),
+    (character) => character.charCodeAt(0),
+  )
+  try {
+    await mkdir(join(model_dir, "evidence", "figures"), { recursive: true })
+    await Bun.write(join(model_dir, source_image), image)
+    const rejection = expect(
+      validateFigureTraceColorCoverage({
+        model_dir,
+        benchmark_id: "four-traces",
+        source_image,
+        trace_colors: [
+          { r: 220, g: 20, b: 20, tolerance: 20 },
+          { r: 20, g: 180, b: 20, tolerance: 20 },
+        ],
+      }),
+    ).rejects
+    await rejection.toThrow("contains at least 4 distinct colored waveform traces but only 2")
+    await rejection.toThrow("Visible hue buckets")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("figure evidence ignores localized colored UI decorations", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-trace-color-ui-"))
+  const source_image = "evidence/figures/two-traces-with-ui.png"
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="300">
+    <rect width="600" height="300" fill="white"/>
+    <path d="M20 90 C150 20 320 170 580 80" fill="none" stroke="rgb(30,90,220)" stroke-width="4"/>
+    <path d="M20 210 C190 280 360 120 580 220" fill="none" stroke="rgb(210,30,180)" stroke-width="4"/>
+    <path d="M18 15 L48 30 L18 45 Z" fill="rgb(220,30,30)"/>
+    <rect x="68" y="15" width="35" height="30" fill="rgb(235,140,20)"/>
+  </svg>`
+  try {
+    await mkdir(join(model_dir, "evidence", "figures"), { recursive: true })
+    await Bun.write(join(model_dir, source_image), await sharp(Buffer.from(svg)).png().toBuffer())
+    await expect(
+      validateFigureTraceColorCoverage({
+        model_dir,
+        benchmark_id: "two-traces-with-ui",
+        source_image,
+        trace_colors: [
+          { r: 30, g: 90, b: 220, tolerance: 20 },
+          { r: 210, g: 30, b: 180, tolerance: 20 },
+        ],
+      }),
+    ).resolves.toBeUndefined()
   } finally {
     await rm(model_dir, { recursive: true, force: true })
   }

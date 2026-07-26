@@ -28,6 +28,7 @@ export interface BenchmarkSeriesDefinition {
   id: string
   title: string
   role: BenchmarkSeriesRole
+  subplot_index?: number
   quantity: string
   unit: string
   critical: boolean
@@ -36,6 +37,7 @@ export interface BenchmarkSeriesDefinition {
   max_error_tolerance?: number
   y_scale?: "linear" | "log"
   source_image?: string
+  trace_file?: string
   reference_file: string
   result_file: string
   simulation: BenchmarkSimulationDefinition
@@ -44,11 +46,13 @@ export interface BenchmarkSeriesDefinition {
 export interface BenchmarkDefinition {
   id: string
   title: string
+  conditions?: string
   source: {
     page: number
     figure?: string
     image?: string
     channel_count?: number
+    subplot_count?: number
   }
   critical: boolean
   weight: number
@@ -216,8 +220,18 @@ function parseMultiSeries(input: {
   max_error_tolerance?: number
   y_scale?: "linear" | "log"
   channel_count: number
+  subplot_count?: number
 }): BenchmarkSeriesDefinition[] {
-  const { entry, benchmark_id, critical, tolerance, max_error_tolerance, y_scale, channel_count } = input
+  const {
+    entry,
+    benchmark_id,
+    critical,
+    tolerance,
+    max_error_tolerance,
+    y_scale,
+    channel_count,
+    subplot_count,
+  } = input
   if (!Array.isArray(entry.series) || entry.series.length === 0) {
     throw new Error(`Benchmark ${benchmark_id} must declare every visible channel in series[]`)
   }
@@ -256,6 +270,29 @@ function parseMultiSeries(input: {
     if (source_image !== expected_source_image) {
       throw new Error(`Benchmark ${benchmark_id} series ${id} source_image must be ${expected_source_image}`)
     }
+    const trace_file =
+      raw.trace_file === undefined
+        ? undefined
+        : requiredString(raw.trace_file, `Benchmark ${benchmark_id} series ${id} trace_file`)
+    const expected_trace_file = `evidence/traces/${benchmark_id}/${id}.json`
+    if (trace_file !== undefined && trace_file !== expected_trace_file) {
+      throw new Error(`Benchmark ${benchmark_id} series ${id} trace_file must be ${expected_trace_file}`)
+    }
+    const subplot_index =
+      raw.subplot_index === undefined
+        ? undefined
+        : Number.isInteger(raw.subplot_index) && (raw.subplot_index as number) > 0
+          ? (raw.subplot_index as number)
+          : (() => {
+              throw new Error(
+                `Benchmark ${benchmark_id} series ${id} subplot_index must be a positive integer`,
+              )
+            })()
+    if (subplot_count !== undefined && (subplot_index === undefined || subplot_index > subplot_count)) {
+      throw new Error(
+        `Benchmark ${benchmark_id} series ${id} subplot_index must identify one of source.subplot_count=${subplot_count} plotted panes`,
+      )
+    }
     const series_critical = typeof raw.critical === "boolean" ? raw.critical : critical
     const series_tolerance =
       raw.tolerance === undefined
@@ -291,6 +328,7 @@ function parseMultiSeries(input: {
       id,
       title: requiredString(raw.title, `Benchmark ${benchmark_id} series ${id} title`),
       role,
+      subplot_index,
       quantity,
       unit,
       critical: series_critical,
@@ -299,6 +337,7 @@ function parseMultiSeries(input: {
       max_error_tolerance: series_max_error_tolerance,
       y_scale: scale(raw.y_scale, `Benchmark ${benchmark_id} series ${id} y_scale`) ?? y_scale,
       source_image,
+      trace_file,
       reference_file,
       result_file,
       simulation: parseSimulation(
@@ -317,6 +356,17 @@ function parseMultiSeries(input: {
   }
   if (!series.some((entry) => entry.role === "response")) {
     throw new Error(`Benchmark ${benchmark_id} must contain at least one DUT response series`)
+  }
+  if (subplot_count !== undefined) {
+    const represented_subplots = new Set(series.map((entry) => entry.subplot_index))
+    const missing_subplots = Array.from({ length: subplot_count }, (_, index) => index + 1).filter(
+      (index) => !represented_subplots.has(index),
+    )
+    if (missing_subplots.length > 0) {
+      throw new Error(
+        `Benchmark ${benchmark_id} omits source subplot${missing_subplots.length === 1 ? "" : "s"} ${missing_subplots.join(", ")}`,
+      )
+    }
   }
   return series
 }
@@ -378,6 +428,14 @@ export function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
               throw new Error(`Benchmark ${id} source.channel_count must be a positive integer`)
             })()
         : 1
+    const subplot_count =
+      version === 2 && source.subplot_count !== undefined
+        ? Number.isInteger(source.subplot_count) && (source.subplot_count as number) > 0
+          ? (source.subplot_count as number)
+          : (() => {
+              throw new Error(`Benchmark ${id} source.subplot_count must be a positive integer`)
+            })()
+        : undefined
     const series =
       version === 2
         ? parseMultiSeries({
@@ -388,6 +446,7 @@ export function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
             max_error_tolerance,
             y_scale,
             channel_count,
+            subplot_count,
           })
         : parseLegacySeries({
             entry,
@@ -403,11 +462,13 @@ export function parseBenchmarkManifest(value: unknown): BenchmarkManifest {
     return {
       id,
       title,
+      conditions: typeof entry.conditions === "string" ? entry.conditions : undefined,
       source: {
         page: source.page as number,
         figure: typeof source.figure === "string" ? source.figure : undefined,
         image: typeof source.image === "string" ? source.image : undefined,
         channel_count,
+        subplot_count,
       },
       critical: entry.critical,
       weight,

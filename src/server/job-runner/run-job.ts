@@ -40,6 +40,10 @@ export async function runJob(
       validation: execution.validation,
       provenance,
     })
+    await execution.append(
+      "system",
+      `Workflow runtime source: ${provenance.source_commit}. This identifier must match the code revision intended for the task.\n`,
+    )
 
     const evidence = await runEvidencePhase(execution)
     const component = await runComponentGenerationPhase(evidence, execution)

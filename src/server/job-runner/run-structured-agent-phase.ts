@@ -157,7 +157,9 @@ export async function runStructuredAgentPhase(input: {
         ).length
         await input.append(
           "system",
-          `Agent phase completed with ${successful_image_reads}/${image_reads.length} read result(s) containing pixels.\n`,
+          `Agent phase completed with ${successful_image_reads} pixel-bearing image read result(s); ${
+            image_reads.length - successful_image_reads
+          } other read result(s) were text or non-image content.\n`,
         )
         return events
       }

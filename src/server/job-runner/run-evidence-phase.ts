@@ -22,7 +22,11 @@ import { snapshotProtectedTree } from "./generation-workspace"
 import { getTypicalApplicationPlanAgreementErrors } from "./get-typical-application-plan-agreement-errors"
 import type { JobExecution } from "./job-execution"
 import type { TypicalApplicationPlan } from "./parse-typical-application-plan"
-import { AutomatedConversionUnavailableError, throwIfCancelled } from "./stream-job-process"
+import {
+  AutomatedConversionUnavailableError,
+  EvidenceConsensusUnavailableError,
+  throwIfCancelled,
+} from "./stream-job-process"
 
 export interface ApprovedJobEvidence {
   component_evidence: ComponentEvidence
@@ -109,8 +113,11 @@ async function verifyEvidenceIndependently(
     primary_errors: string[]
   }
 
-  const max_extraction_attempts = 4
-  const max_valid_disagreements = max_extraction_attempts
+  // Invalid attempts do not consume a consensus vote. Leave two raw-attempt
+  // slots for parser/intrinsic failures while still permitting four valid
+  // independent votes, including the final targeted adjudication.
+  const max_extraction_attempts = 6
+  const max_valid_disagreements = 4
   let independent_retry_feedback: string | undefined
   let last_retryable_error: string | undefined
   const valid_disagreements: ValidDisagreement[] = []
@@ -130,6 +137,19 @@ async function verifyEvidenceIndependently(
     ...getApplicationErrors(left, right),
   ]
 
+  const getDisputedCheck = (error: string): string =>
+    error
+      .replace(/\s+differs:.*$/i, "")
+      .replace(/\s+disagrees:.*$/i, "")
+      .replace(/\s+differs between evidence and plan$/i, "")
+      .trim()
+
+  const isScalarComponentCheck = (check: string): boolean =>
+    /^(?:part number|package code|package name|pin count|drawing orientation)$/i.test(check) ||
+    /^(?:pin .+|unassigned mechanical pad) (?:labels|schematic role|open-drain behavior|x|y|width|height|hole width|hole height)$/i.test(
+      check,
+    )
+
   const getDomainConsensusCandidate = (): ValidDisagreement | undefined => {
     const candidates = valid_disagreements.filter((candidate) => {
       const component_supported =
@@ -148,12 +168,39 @@ async function verifyEvidenceIndependently(
         )
       return component_supported && application_supported
     })
-    const first = candidates[0]
-    if (!first) return undefined
-    if (candidates.some((candidate) => getPairwiseErrors(first.evidence, candidate.evidence).length > 0)) {
-      return undefined
-    }
-    return first
+    // Every candidate has independent support for each domain. Prefer the most
+    // recent candidate because later passes receive the exact unresolved facts
+    // and perform the targeted adjudication; requiring all otherwise-qualified
+    // candidates to agree wholesale would defeat domain-level consensus.
+    return candidates.sort((left, right) => right.attempt - left.attempt)[0]
+  }
+
+  const getFactLevelComponentConsensusCandidate = (): ValidDisagreement | undefined => {
+    if (valid_disagreements.length < max_valid_disagreements) return undefined
+    const candidates = valid_disagreements.filter((candidate) => {
+      const application_supported =
+        candidate.primary_application_errors.length === 0 ||
+        valid_disagreements.some(
+          (other) =>
+            other.attempt !== candidate.attempt &&
+            getApplicationErrors(candidate.evidence, other.evidence).length === 0,
+        )
+      if (!application_supported) return false
+
+      return candidate.primary_component_errors.every((error) => {
+        const disputed_check = getDisputedCheck(error)
+        if (!isScalarComponentCheck(disputed_check)) return false
+        return valid_disagreements.some((other) => {
+          if (other.attempt === candidate.attempt) return false
+          const errors = getComponentErrors(candidate.evidence, other.evidence)
+          return !errors.some((other_error) => getDisputedCheck(other_error) === disputed_check)
+        })
+      })
+    })
+    // Only use this fallback after the final targeted adjudication. Retain one
+    // coherent extraction rather than synthesizing geometry from multiple JSON
+    // files, and prefer the adjudicator that saw the narrowed dispute.
+    return candidates.sort((left, right) => right.attempt - left.attempt)[0]
   }
 
   const getConsensusFailureAudit = (): { details: string; disputed_checks: string[] } => {
@@ -178,16 +225,7 @@ async function verifyEvidenceIndependently(
       }
     }
     const unique_facts = [...new Set(comparisons.flatMap(({ errors }) => errors))]
-    const disputed_checks = [
-      ...new Set(
-        unique_facts.map((fact) =>
-          fact
-            .replace(/\s+differs:.*$/i, "")
-            .replace(/\s+disagrees:.*$/i, "")
-            .trim(),
-        ),
-      ),
-    ]
+    const disputed_checks = [...new Set(unique_facts.map((fact) => getDisputedCheck(fact)))]
     return {
       disputed_checks,
       details:
@@ -198,53 +236,34 @@ async function verifyEvidenceIndependently(
     }
   }
 
-  const retainPrimaryWithConsensusWarning = async (): Promise<PrimaryEvidenceExtraction> => {
+  const stopForConsensusFailure = async (): Promise<never> => {
     const audit = getConsensusFailureAudit()
     await Bun.write(join(execution.job_dir, "evidence-consensus-audit.txt"), `${audit.details}\n`)
     const shown_checks = audit.disputed_checks.slice(0, 12)
-    const warning =
+    throw new EvidenceConsensusUnavailableError(
       `Independent datasheet extractions did not fully agree after ${valid_disagreements.length} valid verification attempts. ` +
-      "The intrinsically valid primary extraction was retained because no independent value achieved consensus; the output remains available, but disputed footprint and application details are unverified. " +
-      `Disputed checks: ${shown_checks.join(", ")}${
-        audit.disputed_checks.length > shown_checks.length
-          ? `, and ${audit.disputed_checks.length - shown_checks.length} more`
-          : ""
-      }. Full details are in evidence-consensus-audit.txt and the retained extraction artifacts.`
-    await execution.addWarning(warning)
-    execution.updateValidation({ evidence: "warning" })
-    await execution.append(
-      "system",
-      "Evidence consensus remained split; retaining the intrinsically valid primary extraction instead of promoting an unconfirmed medoid candidate, and publishing the uncertainty as a warning.\n",
+        "Component generation was stopped because no independently supported value achieved consensus for critical footprint or application facts. " +
+        `Disputed checks: ${shown_checks.join(", ")}${
+          audit.disputed_checks.length > shown_checks.length
+            ? `, and ${audit.disputed_checks.length - shown_checks.length} more`
+            : ""
+        }. Full details are in evidence-consensus-audit.txt and the retained extraction artifacts.`,
     )
-    return primary_evidence
   }
 
-  const retainPrimaryWithoutIndependentVerification = async (
-    reason: string,
-  ): Promise<PrimaryEvidenceExtraction> => {
-    await execution.addWarning(
-      `The primary datasheet extraction passed its intrinsic checks, but independent verification could not complete: ${reason}. Verify the footprint and application details before production use.`,
+  const stopWithoutIndependentVerification = async (reason: string): Promise<never> => {
+    throw new EvidenceConsensusUnavailableError(
+      `The primary datasheet extraction passed its intrinsic checks, but independent verification could not complete: ${reason}. Component generation was stopped before using unverified footprint or application facts.`,
     )
-    execution.updateValidation({ evidence: "warning" })
-    await execution.append(
-      "system",
-      "Independent evidence verification was unavailable; continuing with the valid primary extraction and publishing the limitation as a warning.\n",
-    )
-    return primary_evidence
   }
 
   const getTargetedConsensusFeedback = (): string => {
-    const differences = new Set<string>()
-    for (const disagreement of valid_disagreements) {
-      for (const error of disagreement.primary_errors) differences.add(error)
-    }
-    for (let left_index = 0; left_index < valid_disagreements.length; left_index += 1) {
-      for (let right_index = left_index + 1; right_index < valid_disagreements.length; right_index += 1) {
-        const left = valid_disagreements.at(left_index)
-        const right = valid_disagreements.at(right_index)
-        if (!left || !right) continue
-        for (const error of getPairwiseErrors(left.evidence, right.evidence)) differences.add(error)
-      }
+    const latest = valid_disagreements.at(-1)
+    if (!latest) return ""
+    const differences = new Set(latest.primary_errors)
+    const previous = valid_disagreements.at(-2)
+    if (previous) {
+      for (const error of getPairwiseErrors(previous.evidence, latest.evidence)) differences.add(error)
     }
     return [...differences].join("; ").slice(0, 6_000)
   }
@@ -275,8 +294,8 @@ async function verifyEvidenceIndependently(
         )
         continue
       }
-      if (valid_disagreements.length > 0) return retainPrimaryWithConsensusWarning()
-      return retainPrimaryWithoutIndependentVerification(
+      if (valid_disagreements.length > 0) return stopForConsensusFailure()
+      return stopWithoutIndependentVerification(
         `independent extraction could not complete after ${attempt} attempt(s): ${reason}`,
       )
     }
@@ -370,7 +389,23 @@ async function verifyEvidenceIndependently(
       return promoted
     }
     if (valid_disagreements.length >= max_valid_disagreements) {
-      return retainPrimaryWithConsensusWarning()
+      const fact_level_consensus = getFactLevelComponentConsensusCandidate()
+      if (fact_level_consensus) {
+        const promoted = await promoteIndependentConsensus({
+          execution,
+          independently_verified: fact_level_consensus.evidence,
+          attempt: fact_level_consensus.attempt,
+        })
+        await execution.append(
+          "system",
+          `Fact-level component evidence consensus recovered on final targeted adjudication attempt ${attempt}. Independent attempt ${fact_level_consensus.attempt} is retained because every component fact that differs from the primary extraction has separate independent support, and its typical-application plan is independently supported.\n`,
+        )
+        return promoted
+      }
+      return stopForConsensusFailure()
+    }
+    if (attempt >= max_extraction_attempts) {
+      return stopForConsensusFailure()
     }
 
     independent_retry_feedback =
@@ -391,8 +426,8 @@ async function verifyEvidenceIndependently(
     )
   }
 
-  if (valid_disagreements.length > 0) return retainPrimaryWithConsensusWarning()
-  return retainPrimaryWithoutIndependentVerification(
+  if (valid_disagreements.length > 0) return stopForConsensusFailure()
+  return stopWithoutIndependentVerification(
     `no valid independent verification was produced after ${max_extraction_attempts} attempt(s)${last_retryable_error ? `: ${last_retryable_error}` : ""}`,
   )
 }

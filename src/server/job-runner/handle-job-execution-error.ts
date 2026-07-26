@@ -20,12 +20,8 @@ export async function handleJobExecutionError(error: unknown, execution: JobExec
 
   const error_message = error instanceof Error ? error.message : String(error)
   const current_job = execution.context.job_store.getJob(execution.job_id)
-  const has_publishable_output = Boolean(
-    current_job?.evidence_available ||
-      current_job?.component_code ||
-      current_job?.circuit_json ||
-      current_job?.typical_application_code ||
-      current_job?.typical_application_circuit_json,
+  const has_authoritative_recovery_output = Boolean(
+    execution.active_validation_phase === "application_generation" && current_job?.component_ready,
   )
   const automatic_stop =
     error instanceof AutomatedConversionUnavailableError || error instanceof VisualInspectionInconclusiveError
@@ -50,7 +46,20 @@ export async function handleJobExecutionError(error: unknown, execution: JobExec
   ) {
     execution.updateValidation({ application_visual: failed_status })
   }
-  if (has_publishable_output) {
+  if (automatic_stop) {
+    await execution
+      .append("system", `\nAutomatic conversion stopped safely: ${error_message}\n`)
+      .catch(() => undefined)
+    execution.context.job_store.updateJob(execution.job_id, {
+      display_status: "unsupported",
+      is_complete: true,
+      has_errors: false,
+      completed_at: new Date().toISOString(),
+      error_message,
+    })
+    return
+  }
+  if (has_authoritative_recovery_output) {
     const warning_validation = Object.fromEntries(
       Object.entries(execution.validation).map(([phase, status]) => [
         phase,
@@ -79,18 +88,11 @@ export async function handleJobExecutionError(error: unknown, execution: JobExec
     })
     return
   }
-  await execution
-    .append(
-      "system",
-      automatic_stop
-        ? `\nAutomatic conversion stopped safely: ${error_message}\n`
-        : `\nConversion failed: ${error_message}\n`,
-    )
-    .catch(() => undefined)
+  await execution.append("system", `\nConversion failed: ${error_message}\n`).catch(() => undefined)
   execution.context.job_store.updateJob(execution.job_id, {
-    display_status: automatic_stop ? "unsupported" : "failed",
+    display_status: "failed",
     is_complete: true,
-    has_errors: !automatic_stop,
+    has_errors: true,
     completed_at: new Date().toISOString(),
     error_message,
   })

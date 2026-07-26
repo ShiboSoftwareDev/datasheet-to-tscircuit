@@ -12,13 +12,13 @@ RUN bun run build:web
 
 FROM oven/bun:1.3.9 AS runtime
 
-ARG SOURCE_COMMIT=unavailable
-
 WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gosu ngspice poppler-utils \
     && rm -rf /var/lib/apt/lists/*
+
+ARG SOURCE_COMMIT=unavailable
 
 ENV HOST=0.0.0.0 \
     NODE_ENV=production \

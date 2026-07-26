@@ -25,14 +25,22 @@ unchanged. Do not weaken, remove, or replace benchmarks to avoid the error. ${
 
 The authoritative component.circuit.tsx and typical-application-plan.json are now available.
 Read AGENTS.md, benchmark-draft.json, component.circuit.tsx,
-typical-application-plan.json, and the evidence package. Create the
+typical-application-plan.json, and the evidence package. Use Bun/TypeScript and
+\`JSON.parse\` for local automation and validation; do not depend on Python, jq,
+or other optional utilities. The server hashed the completed setup before this
+phase: never create, edit, delete, or rename \`benchmark-draft.json\`,
+\`setup-complete.json\`, or anything under \`evidence/\`. A mismatch stops the
+workflow instead of becoming correction feedback. Create the
 complete version-2 benchmarks.json manifest and exactly one benchmarks/<id>.circuit.tsx per
 benchmark figure. Preserve every draft series and declare its server-verifiable
 simulation mapping. Every series needs a unique probe_name; response series also
 need dut_spice_node. Every visible source channel must be classified and cited under
-evidence/. Preserve each draft's exact graph crop as
+evidence/. Preserve source.subplot_count, source.channel_count, every
+series.subplot_index, every series.trace_file, and each draft's exact graph crop as
 \`source.image: "evidence/figures/<benchmark-id>.png"\`; the server rejects a
-missing, renamed, or invalid PNG crop. Update model-progress.json while working.
+missing, renamed, or invalid PNG crop, incomplete subplot/trace coverage, or trace
+provenance that no longer matches its CSV and source pixels. Update
+model-progress.json while working.
 Benchmark and series ids may contain only letters, digits, dots, underscores, and
 hyphens, must start with a letter or digit, and must not contain commas or spaces.
 
@@ -63,8 +71,10 @@ in series to create a DC offset: that collapses the middle node and produces a
 shorted VSRC. For a nonzero-low input step, use one harness-local helper \`<chip>\`
 whose \`<spicemodel>\` contains a single
 \`PULSE(low high delay rise fall width period)\` source between mapped OUT and GND
-pins. Map its SPICE nodes to the helper chip pins in the correct direction and
-probe the stimulus at the DUT port, never at the helper source. For a
+pins. Map its SPICE nodes to the helper chip pins in the correct direction:
+\`spicePinMapping={{ OUT: "pin1", GND: "pin2" }}\`; the keys are SPICE terminal names
+from \`.SUBCKT HELPER OUT GND\` and the values are tscircuit component pin
+names. Probe the stimulus at the DUT port, never at the helper source. For a
 nonzero-low current step, combine a separate DC current source with pulse sources
 and verify the actual current through an explicit sense resistor. Native square
 current sources can begin in their high phase even when \`pulseDelay\` is set. If
@@ -80,10 +90,17 @@ responses: declare simulation.sense_resistor, measure its two distinct pins with
 connectsTo/referenceTo, and use a scale equal to 1/R for A (1000/R for mA,
 1000000/R for uA; negative is allowed for reversed probe polarity). Never drive a
 switch or inductor pin with a behavioral voltage source to manufacture a waveform
-labelled as current.
+labelled as current. Encode the documented stimulus levels and transition times
+with compact DC/PULSE sources. If the stable phase sequence cannot be represented
+by a PULSE without an unwanted periodic edge before the simulation ends, a minimal
+PWL containing only the physical plateau and edge points is allowed.
+Do not construct a long PWL from reference CSV samples to reproduce oscilloscope pixel
+noise, labels, markers, or display artifacts.
 
-Omit the analogsimulation \`simulationType\` prop or set it exactly to
-\`"spice_transient_analysis"\`. Before committing the lock, the server performs
+Set \`graphIndependentAxes\` on the analogsimulation so every emitted waveform is
+automatically aligned and scaled on its own axis. Omit the analogsimulation
+\`simulationType\` prop or set it exactly to \`"spice_transient_analysis"\`.
+Before committing the lock, the server performs
 static contract validation, source compilation, and one simulation of every
 harness using a simple server-owned stub model. Fix every shorted source, unresolved
 node, simulator abort, and source/simulation error found by that preflight. The server

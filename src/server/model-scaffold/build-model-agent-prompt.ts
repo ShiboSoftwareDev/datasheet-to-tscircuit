@@ -7,6 +7,10 @@ refinement timer is running. Read AGENTS.md,
 benchmarks.json, component.circuit.tsx, and run-control.json first. Do not modify
 benchmarks.json, benchmark TSX, or evidence. Follow the simulation, deterministic
 scoring, champion-promotion, and checkpoint workflow.
+After creating or changing \`model.lib\` or \`model-manifest.json\`, run
+\`bun sync-model-wrapper.ts\` before any benchmark build. Never create or edit
+\`component-with-model.circuit.tsx\` manually; it is a server-generated canonical
+wrapper that forwards DUT props and embeds the current model source.
 Continue the existing model-progress.json sequence and update it before and after
 every benchmark simulation, score, candidate decision, and champion promotion.
 Re-read run-control.json before every refinement iteration because the user may

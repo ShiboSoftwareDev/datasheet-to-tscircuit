@@ -43,6 +43,28 @@ test("ModelRunStore extends only the time budget and persists run control", asyn
   await rm(model_dir, { recursive: true, force: true })
 })
 
+test("ModelRunStore permits only one active execution per model run", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-execution-lease-"))
+  const store = new ModelRunStore()
+  try {
+    store.createModelRun({
+      model_run_id: "model_lease",
+      job_id: "job_lease",
+      model_dir,
+      effort_multiplier: 1,
+      base_effort_ms: 10_000,
+    })
+
+    expect(store.claimModelExecution("model_lease")).toBe(true)
+    expect(store.claimModelExecution("model_lease")).toBe(false)
+    store.releaseModelExecution("model_lease")
+    expect(store.claimModelExecution("model_lease")).toBe(true)
+    store.releaseModelExecution("model_lease")
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
 test("ModelRunStore publishes structured progress and keeps a bounded timeline", async () => {
   const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-progress-store-"))
   const store = new ModelRunStore()

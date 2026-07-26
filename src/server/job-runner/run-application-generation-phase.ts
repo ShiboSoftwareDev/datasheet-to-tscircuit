@@ -205,7 +205,8 @@ async function runApplicationGenerationAttempt(input: {
     append: execution.append.bind(execution),
     render_outputs: true,
     pcb_disabled: pcb_implementation === "schematic_only",
-    required_checks: ["netlist"],
+    required_checks:
+      pcb_implementation === "schematic_only" ? ["netlist"] : ["netlist", "placement", "routing-difficulty"],
   })
   if (typical_application_build.errors.length > 0) {
     execution.updateValidation({ application_build: "failed" })
@@ -234,9 +235,13 @@ async function runApplicationGenerationAttempt(input: {
     typical_application_circuit_json,
   )
   if (application_schematic_advisories.length > 0) {
-    await execution.append(
-      "system",
-      `Schematic layout advisory (accepted because build, image, and connectivity validation are authoritative): ${application_schematic_advisories.join("; ")}\n`,
+    execution.updateValidation({ application_schematic: "failed" })
+    execution.context.job_store.updateJob(execution.job_id, {
+      typical_application_code,
+      typical_application_circuit_json,
+    })
+    throw new Error(
+      `Typical application failed schematic layout validation: ${application_schematic_advisories.join("; ")}`,
     )
   }
   execution.updateValidation({ application_schematic: "passed" })

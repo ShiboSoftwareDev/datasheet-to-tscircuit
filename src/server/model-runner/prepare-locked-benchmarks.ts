@@ -1,4 +1,9 @@
-import { hasBenchmarkLock, type BenchmarkLock, verifyBenchmarkLock } from "../model-benchmark-lock"
+import {
+  hasBenchmarkLock,
+  restoreSetupEvidenceFromSnapshot,
+  type BenchmarkLock,
+  verifyBenchmarkLock,
+} from "../model-benchmark-lock"
 import { getSimulationRunCount } from "../model-simulation-validator"
 import { finalizeAndLockBenchmarks } from "./finalize-and-lock-benchmarks"
 import { ModelExecution } from "./model-execution"
@@ -20,6 +25,16 @@ async function establishBenchmarkLock(execution: ModelExecution): Promise<Benchm
   }
   if (execution.model_run.manifest?.revision.endsWith("-unverified")) {
     await clearRefinementArtifacts(execution.model_dir)
+  }
+
+  const restored_setup_files = await restoreSetupEvidenceFromSnapshot(execution.model_dir)
+  if (restored_setup_files.length > 0) {
+    await execution.append(
+      "system",
+      `Restored ${restored_setup_files.length} setup-evidence file${
+        restored_setup_files.length === 1 ? "" : "s"
+      } from the immutable server snapshot before benchmark finalization; a completed setup process had written after the lock.\n`,
+    )
   }
 
   const premature_artifacts = await findPrematureRefinementArtifacts(execution.model_dir)

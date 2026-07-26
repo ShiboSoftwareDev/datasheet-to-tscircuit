@@ -17,6 +17,55 @@ export async function writeModelScaffold(input: { job_dir: string; model_dir: st
     Bun.write(join(input.model_dir, "AGENTS.md"), modelWorkspaceInstructions),
     writeVisionRenderer(input.model_dir),
     Bun.write(
+      join(input.model_dir, "prepare-vision-image.ts"),
+      `import sharp from "sharp"
+
+const [inputFile, outputFile] = process.argv.slice(2)
+if (!inputFile || !outputFile) {
+  throw new Error("Usage: bun prepare-vision-image.ts <input-image> <output.jpg>")
+}
+if (!/\\.jpe?g$/i.test(outputFile)) {
+  throw new Error("The prepared vision image must use a .jpg or .jpeg extension")
+}
+
+await sharp(inputFile)
+  .rotate()
+  .resize({ width: 1400, height: 1400, fit: "inside", withoutEnlargement: true })
+  .flatten({ background: "#fff" })
+  .jpeg({ quality: 78, progressive: true })
+  .toFile(outputFile)
+
+const outputBytes = Bun.file(outputFile).size
+if (outputBytes > ${3 * 1024 * 1024}) {
+  throw new Error(\`Prepared image is \${outputBytes} bytes; crop the graph more tightly and try again\`)
+}
+console.log(\`Prepared \${outputFile} (\${outputBytes} bytes)\`)
+`,
+    ),
+    Bun.write(
+      join(input.model_dir, "validate-setup-evidence.ts"),
+      `import { validateCompletedSetup } from ${JSON.stringify(
+        pathToFileURL(join(serverDirectory, "model-runner", "model-setup-state.ts")).href,
+      )}
+
+await validateCompletedSetup(process.cwd(), {
+  require_trace_provenance: true,
+  require_complete_datasheet_scan: true,
+})
+console.log("Setup evidence passed the exact server validator")
+`,
+    ),
+    Bun.write(
+      join(input.model_dir, "sync-model-wrapper.ts"),
+      `import { syncModelComponentWrapper } from ${JSON.stringify(
+        pathToFileURL(join(serverDirectory, "model-runner", "attach-model-to-generated-component.ts")).href,
+      )}
+
+await syncModelComponentWrapper(process.cwd())
+console.log("Synchronized component-with-model.circuit.tsx from model.lib and model-manifest.json")
+`,
+    ),
+    Bun.write(
       join(input.model_dir, "score-benchmarks.ts"),
       `import { scoreModelBenchmarks } from ${JSON.stringify(
         pathToFileURL(join(serverDirectory, "model-scorer", "index.ts")).href,

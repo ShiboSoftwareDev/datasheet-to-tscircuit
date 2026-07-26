@@ -28,7 +28,7 @@ export async function preflightNgspice(input: {
       <voltagesource name="VTEST" voltage="1V" connections={{ pin1: "net.TEST", pin2: "net.GND" }} />
       <resistor name="RTEST" resistance="1kohm" connections={{ pin1: "net.TEST", pin2: "net.GND" }} />
       <voltageprobe name="RESULT" connectsTo=".RTEST > .pin1" />
-      <analogsimulation duration="10us" timePerStep="1us" spiceEngine="ngspice" />
+      <analogsimulation duration="10us" timePerStep="1us" spiceEngine="ngspice" graphIndependentAxes />
     </board>
   )
 }

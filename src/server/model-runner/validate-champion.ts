@@ -56,8 +56,8 @@ interface BenchmarkValidationState {
 }
 
 export function getValidationConcurrency(): number {
-  const concurrency_value = Number(process.env.MODEL_VALIDATION_CONCURRENCY ?? 4)
-  return Number.isInteger(concurrency_value) ? Math.max(1, Math.min(8, concurrency_value)) : 4
+  const concurrency_value = Number(process.env.MODEL_VALIDATION_CONCURRENCY ?? 2)
+  return Number.isInteger(concurrency_value) ? Math.max(1, Math.min(8, concurrency_value)) : 2
 }
 
 async function prepareBenchmarkValidation(input: {
@@ -157,11 +157,17 @@ async function executeValidationBuildOnce(input: {
     }
   }
   if (exit_code !== 0) {
-    const error_message = summarizeProcessFailure(process_output)
+    const resource_failure = exit_code === 137
+    const error_message =
+      summarizeProcessFailure(process_output) ||
+      (resource_failure
+        ? "The validation build was killed with exit code 137, usually because the worker exceeded its memory limit"
+        : `The validation build exited with code ${exit_code}`)
     return {
       exit_code,
       error_message,
-      failure_kind: isInfrastructureFailure(process_output) ? "infrastructure" : "process",
+      failure_kind:
+        resource_failure || isInfrastructureFailure(process_output) ? "infrastructure" : "process",
     }
   }
   const fatal_simulation_failure = getFatalSimulationProcessFailure(process_output)
@@ -221,13 +227,19 @@ export async function executeValidationBuild(input: {
       : 500
   for (let attempt = 0; attempt <= retry_count; attempt += 1) {
     const result = await executeValidationBuildOnce(input)
+    const is_resource_pressure = result.exit_code === 137
     const is_transient =
       result.exit_code !== 0 &&
-      Boolean(result.error_message && isTransientAgentTransportFailure(result.error_message))
+      (is_resource_pressure ||
+        Boolean(result.error_message && isTransientAgentTransportFailure(result.error_message)))
     if (!is_transient || input.signal.aborted || attempt >= retry_count) return result
     await input.append(
       "system",
-      `Validation transport closed while building ${input.benchmark_file}; retrying the same build (${attempt + 2}/${retry_count + 1}) without consuming a benchmark-correction attempt.\n`,
+      `${
+        is_resource_pressure
+          ? `Validation worker was killed by resource pressure while building ${input.benchmark_file}`
+          : `Validation transport closed while building ${input.benchmark_file}`
+      }; retrying the same build (${attempt + 2}/${retry_count + 1}) with backoff without consuming a benchmark-correction attempt.\n`,
     )
     await Bun.sleep(Math.min(5_000, base_delay_ms * 2 ** attempt))
   }

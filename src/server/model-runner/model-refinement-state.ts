@@ -14,6 +14,7 @@ export class ModelRefinementState {
   model_integrity_error?: string
   agent_attempt = 0
   benchmark_recovery_count = 0
+  last_validated_checkpoint_signature?: string
 
   constructor(benchmark_lock: BenchmarkLock) {
     this.benchmark_lock = benchmark_lock

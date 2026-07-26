@@ -78,7 +78,7 @@ async function recordEvidence(plan, options = {}) {
       view: "pcb_top",
       units: "mm",
       drawing_orientation: { value: "pcb_top", sources: [source] },
-      pads: options.emptyPads ? [] : [{ pin: "1", kind: "smt", x: 0, y: 0, width: options.padWidth ?? 0.6, height: 0.25, sources: [source] }],
+      pads: options.emptyPads ? [] : [{ pin: "1", kind: "smt", x: options.padX ?? 0, y: 0, width: options.padWidth ?? 0.6, height: 0.25, sources: [source] }],
     },
     unresolved_ambiguities: options.ambiguities ?? [],
   }
@@ -370,13 +370,13 @@ test("application agreement ignores arbitrary passive reference designators", ()
         { reference: "R4", kind: "resistor", value: "10 kΩ" },
       ],
       connections: [
-        { net: "SUPPLY", pins: ["C1.1", "R2.1", "R3.1", "R4.1", "U1.VS"] },
+        { net: "SUPPLY", pins: ["C1.1", "R2.2", "R3.2", "R4.2", "U1.VS"] },
         { net: "GROUND", pins: ["C1.2", "U1.A0", "U1.GND"] },
-        { net: "SOURCE", pins: ["R1.1", "U1.IN+", "U1.VBUS"] },
-        { net: "SENSED", pins: ["R1.2", "U1.IN-"] },
-        { net: "CLOCK", pins: ["R2.2", "U1.SCL"] },
-        { net: "DATA", pins: ["R3.2", "U1.SDA"] },
-        { net: "FAULT", pins: ["R4.2", "U1.ALERT"] },
+        { net: "SOURCE", pins: ["R1.2", "U1.IN_POS", "U1.VBUS"] },
+        { net: "SENSED", pins: ["R1.1", "U1.IN_NEG"] },
+        { net: "CLOCK", pins: ["R2.1", "U1.SCL"] },
+        { net: "DATA", pins: ["R3.1", "U1.SDA"] },
+        { net: "FAULT", pins: ["R4.1", "U1.ALERT"] },
       ],
     },
     "INA237",
@@ -389,6 +389,21 @@ test("application agreement ignores arbitrary passive reference designators", ()
       target_part_number: "INA237",
     }),
   ).toEqual([])
+
+  const independent_with_a1_grounded = {
+    ...independent,
+    connections: independent.connections.map((connection) =>
+      connection.net === "GROUND" ? { ...connection, pins: [...connection.pins, "U1.A1"] } : connection,
+    ),
+  }
+  const true_connectivity_errors = getTypicalApplicationPlanAgreementErrors({
+    primary,
+    independent: independent_with_a1_grounded,
+    target_part_number: "INA237",
+  })
+  expect(true_connectivity_errors).toHaveLength(2)
+  expect(true_connectivity_errors.join("\n")).toContain("u1.a1")
+  expect(true_connectivity_errors.join("\n")).not.toContain("component")
 })
 
 test("schematic-only application agreement ignores packaging and optional sourcing detail", () => {
@@ -564,9 +579,10 @@ finishAgent()
   await runJob({ job_id: "job_legacy_plan" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_legacy_plan")
-  expect(job?.display_status).toBe("complete")
-  expect(job?.error_message).toBeUndefined()
-  expect(job?.warnings?.join("\n")).toContain("must use typical-application plan schema version 4")
+  expect(job?.display_status).toBe("unsupported")
+  expect(job?.has_errors).toBe(false)
+  expect(job?.validation?.evidence).toBe("unresolved")
+  expect(job?.error_message).toContain("must use typical-application plan schema version 4")
   expect(await Bun.file(join(job_dir, "unexpected-phase")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })
@@ -770,7 +786,8 @@ if (prompt.includes("Independently extract")) {
   if (await Bun.file(dir + "/visual-reference/land-pattern.png").exists()) throw new Error("component evidence image leaked into application generation")
   if (!(await Bun.file(dir + "/dist/index/circuit.json").exists())) throw new Error("component was not built before application phase")
   if (!(await Bun.file(dir + "/component.circuit.tsx").exists())) throw new Error("component snapshot was not published")
-  await Bun.write(dir + "/typical-application.circuit.tsx", 'import Part from "./index.circuit"\\nexport default function TypicalApplication() { return <board><Part name="U1" /><capacitor name="C1" capacitance="1uF" manufacturerPartNumber="TEST-C1" footprint="0402" /></board> }\\n')
+  const compactMarker = prompt.includes("failed schematic layout validation") ? "// compact-layout-retry\\n" : ""
+  await Bun.write(dir + "/typical-application.circuit.tsx", compactMarker + 'import Part from "./index.circuit"\\nexport default function TypicalApplication() { return <board><Part name="U1" /><capacitor name="C1" capacitance="1uF" manufacturerPartNumber="TEST-C1" footprint="0402" /></board> }\\n')
   await recordVisualInspection("application")
   emitText("application phase complete")
 }
@@ -788,6 +805,7 @@ await mkdir(process.cwd() + "/dist/" + stem, { recursive: true })
 const renderPng = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="), (character) => character.charCodeAt(0))
 await Bun.write(process.cwd() + "/dist/" + stem + "/pcb.png", renderPng)
 await Bun.write(process.cwd() + "/dist/" + stem + "/schematic.png", renderPng)
+const applicationSource = await Bun.file(process.cwd() + "/typical-application.circuit.tsx").text().catch(() => "")
 const circuit = target === "index.circuit.tsx" || target === "component-validation.circuit.tsx"
   ? [{ type: "source_component", source_component_id: "part", name: "U1", manufacturer_part_number: "SENSOR-1" }, { type: "source_port", source_port_id: "u1_vcc", source_component_id: "part", name: "VCC", pin_number: 1, port_hints: ["1", "VCC"], requires_power: true }, { type: "schematic_component", schematic_component_id: "sch1", source_component_id: "part", center: { x: 0, y: 0 } }, { type: "schematic_port", schematic_port_id: "sp1", schematic_component_id: "sch1", source_port_id: "u1_vcc", side_of_component: "top", center: { x: 0, y: 1 } }, { type: "pcb_smtpad", pcb_smtpad_id: "pad1", pcb_component_id: "pcb1", pcb_port_id: "port1", port_hints: ["1"], x: 0, y: 0, width: 0.6, height: 0.25 }]
   : [
@@ -799,7 +817,7 @@ const circuit = target === "index.circuit.tsx" || target === "component-validati
       { type: "source_port", source_port_id: "c1_1", source_component_id: "cap", name: "pin1", pin_number: 1, subcircuit_connectivity_map_key: "vcc" },
       { type: "source_port", source_port_id: "c1_2", source_component_id: "cap", name: "pin2", pin_number: 2, subcircuit_connectivity_map_key: "gnd" },
       ...Array.from({ length: 7 }, (_, index) => ({ type: "schematic_component", schematic_component_id: "application-sch-" + index, center: { x: index, y: 0 } })),
-      { type: "schematic_trace", schematic_trace_id: "long-but-valid", edges: [{ from: { x: 0, y: 0 }, to: { x: 7.13, y: 0 } }] },
+      { type: "schematic_trace", schematic_trace_id: "layout-check", edges: [{ from: { x: 0, y: 0 }, to: { x: applicationSource.includes("compact-layout-retry") ? 5 : 7.13, y: 0 } }] },
     ]
 if (target === "component-validation.circuit.tsx") {
   circuit.push({ type: "source_pin_must_be_connected_error", message: "Port VCC on U1 must be connected but is floating" })
@@ -858,15 +876,17 @@ await Bun.write(process.cwd() + "/dist/" + stem + "/circuit.json", JSON.stringif
   expect(agent_log).toContain("[tool] read")
   expect(agent_log).toContain("Agent phase completed with")
   expect(agent_log).toContain("Checking component geometry before the final build.")
-  expect(agent_log).toContain("Schematic layout advisory")
+  expect(agent_log).toContain("Typical application failed schematic layout validation")
+  expect(agent_log).toContain("compact-layout target")
   const persisted_job = JSON.parse(await Bun.file(join(job_dir, "job.json")).text())
   expect(persisted_job.version).toBe(2)
   expect(persisted_job.provenance.source_commit).toHaveLength(40)
   expect(persisted_job.provenance.datasheet_sha256).toHaveLength(64)
   expect(persisted_job.provenance.prompt_sha256.component_generation).toHaveLength(64)
-  expect(await Bun.file(join(job_dir, "build-targets.log")).text()).toBe(
-    "netlist\nindex.circuit.tsx\ncomponent-validation.circuit.tsx\nnetlist\ntypical-application.circuit.tsx\n",
-  )
+  const build_targets = await Bun.file(join(job_dir, "build-targets.log")).text()
+  expect(build_targets).toContain("placement\n")
+  expect(build_targets).toContain("routing-difficulty\n")
+  expect(build_targets.match(/typical-application\.circuit\.tsx/g)).toHaveLength(2)
   expect(await Bun.file(join(job_dir, "photon_rs_bg.wasm")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })
@@ -1160,12 +1180,11 @@ await Bun.write(process.cwd() + "/dist/" + stem + "/circuit.json", JSON.stringif
   await runJob({ job_id: "job_footprint_gate" }, { job_store, agent_bin: agent_path, tsci_bin: tsci_path })
 
   const job = job_store.getJob("job_footprint_gate")
-  expect(job?.display_status).toBe("complete")
+  expect(job?.display_status).toBe("failed")
   expect(job?.component_ready).not.toBe(true)
-  expect(job?.validation?.component_drc).toBe("warning")
-  expect(job?.error_message).toBeUndefined()
-  expect(job?.warnings?.join("\n")).toContain("failed board-level tsci validation")
-  expect(job?.warnings?.join("\n")).toContain("pcb_pad_pad_clearance_error")
+  expect(job?.validation?.component_drc).toBe("failed")
+  expect(job?.error_message).toContain("failed board-level tsci validation")
+  expect(job?.error_message).toContain("pcb_pad_pad_clearance_error")
   const logs = await Bun.file(join(job_dir, "agent.log")).text()
   expect(logs).toContain("Component generation attempt 1 did not pass server validation")
   expect(logs).toContain("Component generation attempt 2 did not pass server validation")
@@ -1207,7 +1226,7 @@ finishAgent()
   await runJob({ job_id: "job_disagreement" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_disagreement")
-  expect(job?.display_status).toBe("complete")
+  expect(job?.display_status).toBe("failed")
   expect(job?.validation?.evidence).toBe("passed")
   expect(job?.logs.map((log) => log.message).join("\n")).toContain(
     "Independent evidence consensus overrode the primary extraction",
@@ -1328,7 +1347,7 @@ finishAgent()
   await rm(job_dir, { recursive: true, force: true })
 })
 
-test("a fourth targeted adjudication resolves exact evidence facts instead of failing wholesale", async () => {
+test("targeted adjudication survives an earlier invalid raw attempt", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-runner-targeted-adjudication-"))
   await Bun.write(join(job_dir, "datasheet.pdf"), "fake datasheet")
   const agent_path = join(job_dir, "targeted-adjudication-agent")
@@ -1342,14 +1361,18 @@ ${fakeVisualInspectionHelpers}
 const common = { version: 2, title: "Documented application", description: "Datasheet circuit", source_references: [{ page: 8 }], components: [{ reference: "U1", kind: "device", value: "SENSOR-1" }, { reference: "C1", kind: "capacitor", value: "1uF" }] }
 const makePlan = (mode) => ({ ...common, connections: [{ net: "VCC", pins: ["U1.VCC", "C1.pin1", "U1." + mode] }] })
 if (prompt.includes("Independently extract")) {
-  const plan = prompt.includes("final targeted adjudication") && prompt.includes("Exact unresolved differences")
-    ? makePlan("MODE_B")
+  const mode = prompt.includes("final targeted adjudication") && prompt.includes("Exact unresolved differences")
+    ? "MODE_B"
     : prompt.includes("recovery tie-breaker")
-      ? makePlan("MODE_C")
+      ? "MODE_C"
       : prompt.includes("prior independent extraction")
-        ? makePlan("MODE_B")
-        : makePlan("MODE_A")
-  await recordEvidence(plan, { padWidth: 0.9 })
+        ? "MODE_B"
+        : "MODE_A"
+  await recordEvidence(makePlan(mode), {
+    padWidth: 0.9,
+    skipLandReferenceRead: !prompt.includes("Server validation feedback"),
+    distinctEvidenceImages: true,
+  })
 } else if (prompt.includes("evidence-extraction phase")) {
   await recordEvidence(makePlan("MODE_PRIMARY"), { padWidth: 0.6 })
 } else {
@@ -1370,13 +1393,14 @@ finishAgent()
   const job = job_store.getJob("job_targeted_adjudication")
   const logs = job?.logs.map((log) => log.message).join("\n") ?? ""
   expect(job?.validation?.evidence).toBe("passed")
+  expect(logs).toContain("without consuming a consensus vote")
   expect(logs).toContain("Running one final targeted adjudication")
-  expect(logs).toContain("Recovery matched independent attempts 2 and 4")
+  expect(logs).toContain("Recovery matched independent attempts 3 and 5")
   expect(
     JSON.parse(await Bun.file(join(job_dir, "typical-application-plan.json")).text()).connections[0].pins,
   ).toContain("U1.MODE_B")
   expect(
-    await Bun.file(join(job_dir, "evidence-attempts/independent-4/component-evidence.json")).exists(),
+    await Bun.file(join(job_dir, "evidence-attempts/independent-5/component-evidence.json")).exists(),
   ).toBe(true)
 
   await rm(job_dir, { recursive: true, force: true })
@@ -1583,7 +1607,62 @@ finishAgent()
   await rm(job_dir, { recursive: true, force: true })
 })
 
-test("unresolved geometry disagreement retains primary evidence and publishes a concise warning", async () => {
+test("final adjudication can retain a coherent candidate with fact-level component support", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-runner-fact-consensus-"))
+  await Bun.write(join(job_dir, "datasheet.pdf"), "fake datasheet")
+  const agent_path = join(job_dir, "fact-consensus-agent")
+  await Bun.write(
+    agent_path,
+    `#!/usr/bin/env bun
+const args = process.argv.slice(2)
+const dir = args[args.indexOf("--dir") + 1]
+const prompt = args[args.indexOf("--prompt") + 1]
+${fakeVisualInspectionHelpers}
+const plan = { version: 2, title: "Typical application", description: "Datasheet circuit", source_references: [{ page: 8 }], components: [{ reference: "U1", kind: "device" }, { reference: "C1", kind: "capacitor", value: "1uF" }], connections: [{ net: "VCC", pins: ["U1.VCC", "C1.pin1"] }] }
+if (prompt.includes("Independently extract")) {
+  const geometry = prompt.includes("final targeted adjudication")
+    ? { padWidth: 0.9, padX: 0.1 }
+    : prompt.includes("recovery tie-breaker")
+      ? { padWidth: 0.9, padX: 0.2 }
+      : prompt.includes("prior independent extraction")
+        ? { padWidth: 0.8, padX: 0.1 }
+        : { padWidth: 0.9, padX: 0 }
+  await recordEvidence(plan, geometry)
+} else if (prompt.includes("evidence-extraction phase")) {
+  await recordEvidence(plan, { padWidth: 0.6, padX: 0 })
+} else {
+  await Bun.write(dir + "/tsx-generation-reached", "expected after recovered evidence")
+}
+finishAgent()
+`,
+  )
+  await chmod(agent_path, 0o755)
+
+  const job_store = new JobStore()
+  job_store.createJob({ job_id: "job_fact_consensus", job_dir, file_name: "device.pdf" })
+  await runJob(
+    { job_id: "job_fact_consensus" },
+    { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" },
+  )
+
+  const job = job_store.getJob("job_fact_consensus")
+  const logs = job?.logs.map((log) => log.message).join("\n") ?? ""
+  const retained_pad = JSON.parse(await Bun.file(join(job_dir, "component-evidence.json")).text()).footprint
+    .pads[0]
+  expect(job?.validation?.evidence).toBe("passed")
+  expect(logs).toContain("Running one final targeted adjudication")
+  expect(logs).toContain("Fact-level component evidence consensus recovered")
+  expect(retained_pad.width).toBe(0.9)
+  expect(retained_pad.x).toBe(0.1)
+  expect(
+    await Bun.file(join(job_dir, "evidence-attempts/independent-4/component-evidence.json")).exists(),
+  ).toBe(true)
+  expect(logs).toContain("Generating the component from approved evidence only")
+
+  await rm(job_dir, { recursive: true, force: true })
+})
+
+test("unresolved critical geometry disagreement stops before component generation", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-runner-no-consensus-"))
   await Bun.write(join(job_dir, "datasheet.pdf"), "fake datasheet")
   const agent_path = join(job_dir, "no-consensus-agent")
@@ -1612,13 +1691,12 @@ finishAgent()
   await runJob({ job_id: "job_no_consensus" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_no_consensus")
-  expect(job?.display_status).toBe("complete")
-  expect(job?.validation?.evidence).toBe("warning")
-  expect(job?.error_message).toBeUndefined()
-  expect(job?.warnings?.join("\n")).toContain("did not fully agree")
-  expect(job?.warnings?.join("\n")).toContain("primary extraction was retained")
-  expect(job?.warnings?.join("\n")).toContain("Disputed checks")
-  expect(job?.warnings?.join("\n").length).toBeLessThanOrEqual(1_500)
+  expect(job?.display_status).toBe("unsupported")
+  expect(job?.validation?.evidence).toBe("unresolved")
+  expect(job?.error_message).toContain("did not fully agree")
+  expect(job?.error_message).toContain("Component generation was stopped")
+  expect(job?.error_message).toContain("Disputed checks")
+  expect(job?.error_message?.length).toBeLessThanOrEqual(1_500)
   expect(
     JSON.parse(await Bun.file(join(job_dir, "component-evidence.json")).text()).footprint.pads[0].width,
   ).toBe(0.6)
@@ -1631,7 +1709,7 @@ finishAgent()
   expect(
     await Bun.file(join(job_dir, "evidence-attempts/independent-4/component-evidence.json")).exists(),
   ).toBe(true)
-  expect(job?.logs.map((log) => log.message).join("\n")).toContain(
+  expect(job?.logs.map((log) => log.message).join("\n")).not.toContain(
     "Generating the component from approved evidence only",
   )
 
@@ -1666,10 +1744,10 @@ finishAgent()
   )
 
   const job = job_store.getJob("job_invalid_independent")
-  expect(job?.display_status).toBe("complete")
-  expect(job?.error_message).toBeUndefined()
-  expect(job?.warnings?.join("\n")).toContain("references an unlisted component")
-  for (const attempt of [1, 2, 3, 4]) {
+  expect(job?.display_status).toBe("unsupported")
+  expect(job?.validation?.evidence).toBe("unresolved")
+  expect(job?.error_message).toContain("references an unlisted component")
+  for (const attempt of [1, 2, 3, 4, 5, 6]) {
     const attempt_dir = join(job_dir, `evidence-attempts/independent-${attempt}`)
     expect(await Bun.file(join(attempt_dir, "typical-application-plan.json")).exists()).toBe(true)
     expect(await Bun.file(join(attempt_dir, "error.json")).text()).toContain(
@@ -1713,14 +1791,13 @@ finishAgent()
   await runJob({ job_id: "job_unresolved" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_unresolved")
-  expect(job?.display_status).toBe("complete")
+  expect(job?.display_status).toBe("unsupported")
   expect(job?.has_errors).toBe(false)
-  expect(job?.validation?.evidence).toBe("warning")
+  expect(job?.validation?.evidence).toBe("unresolved")
   expect(job?.evidence_available).toBe(true)
-  expect(job?.error_message).toBeUndefined()
-  expect(job?.warnings?.join("\n")).toContain("Evidence extraction remained unresolved")
+  expect(job?.error_message).toContain("Evidence extraction remained unresolved")
   expect(job?.logs.map((log) => log.message).join("\n")).toContain("Retrying automatically")
-  expect(job?.logs.map((log) => log.message).join("\n")).toContain("Recovery completed with warnings")
+  expect(job?.logs.map((log) => log.message).join("\n")).toContain("Automatic conversion stopped safely")
   const retry_prompts = await Bun.file(join(job_dir, "retry-prompts.log")).text()
   expect(retry_prompts).toContain("Server validation feedback from the previous attempt")
   expect(retry_prompts).toContain("Pad dimensions could not be resolved automatically")
@@ -1784,6 +1861,61 @@ process.exit(1)
   await rm(job_dir, { recursive: true, force: true })
 })
 
+test("an exhausted component-agent transport outage cannot publish partial code as complete", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-component-agent-transport-outage-"))
+  const agent_path = join(job_dir, "component-transport-outage-agent")
+  const component_calls_path = join(job_dir, "component-transport-calls")
+  await Bun.write(join(job_dir, "datasheet.pdf"), "fake datasheet")
+  await Bun.write(
+    agent_path,
+    `#!/usr/bin/env bun
+const args = process.argv.slice(2)
+const dir = args[args.indexOf("--dir") + 1]
+const prompt = args[args.indexOf("--prompt") + 1]
+${fakeVisualInspectionHelpers}
+const plan = { version: 3, availability: "not_present", title: "No application", description: "No documented circuit", source_references: [{ page: 1 }], searched_sections: ["Applications"], components: [], connections: [] }
+if (prompt.includes("Independently extract") || prompt.includes("evidence-extraction phase")) {
+  await recordEvidence(plan)
+  finishAgent()
+} else {
+  const countPath = ${JSON.stringify(component_calls_path)}
+  const count = Number(await Bun.file(countPath).text().catch(() => "0")) + 1
+  await Bun.write(countPath, String(count))
+  console.error('error: {"detail":"{\\"error\\":\\"Too many concurrent requests\\"}"}')
+  process.exit(1)
+}
+`,
+  )
+  await chmod(agent_path, 0o755)
+
+  const job_store = new JobStore()
+  job_store.createJob({ job_id: "job_component_transport_outage", job_dir, file_name: "device.pdf" })
+  await runJob(
+    { job_id: "job_component_transport_outage" },
+    {
+      job_store,
+      agent_bin: agent_path,
+      tsci_bin: "unused-tsci",
+      agent_transport_retry_limit: 2,
+      agent_transport_retry_base_delay_ms: 0,
+    },
+  )
+
+  const job = job_store.getJob("job_component_transport_outage")
+  const logs = await Bun.file(join(job_dir, "agent.log")).text()
+  expect(job?.display_status).toBe("unsupported")
+  expect(job?.component_ready).not.toBe(true)
+  expect(job?.error_message).toContain("Agent transport remained unavailable after 3 connection attempt(s)")
+  expect(await Bun.file(component_calls_path).text()).toBe("3")
+  expect(logs).toContain("Agent transport was unavailable")
+  expect(logs).not.toContain("Component generation attempt 1 did not pass server validation")
+  expect(await Bun.file(join(job_dir, "generation-attempts", "component-2", "error.json")).exists()).toBe(
+    false,
+  )
+
+  await rm(job_dir, { recursive: true, force: true })
+})
+
 test("inconclusive component vision cannot pass the completion gate", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-runner-inconclusive-vision-"))
   await Bun.write(join(job_dir, "datasheet.pdf"), "fake datasheet")
@@ -1812,11 +1944,10 @@ finishAgent()
   await runJob({ job_id: "job_inconclusive" }, { job_store, agent_bin: agent_path, tsci_bin: "unused-tsci" })
 
   const job = job_store.getJob("job_inconclusive")
-  expect(job?.display_status).toBe("complete")
+  expect(job?.display_status).toBe("unsupported")
   expect(job?.component_ready).not.toBe(true)
-  expect(job?.validation?.component_visual).toBe("warning")
-  expect(job?.error_message).toBeUndefined()
-  expect(job?.warnings?.join("\n")).toContain("image inspection could not be completed automatically")
+  expect(job?.validation?.component_visual).toBe("inconclusive")
+  expect(job?.error_message).toContain("image inspection could not be completed automatically")
 
   await rm(job_dir, { recursive: true, force: true })
 })
@@ -1853,9 +1984,8 @@ finishAgent()
   )
 
   const job = job_store.getJob("job_reference_lock")
-  expect(job?.display_status).toBe("complete")
-  expect(job?.error_message).toBeUndefined()
-  expect(job?.warnings?.join("\n")).toContain("modified locked evidence")
+  expect(job?.display_status).toBe("failed")
+  expect(job?.error_message).toContain("modified locked evidence")
   expect(await Bun.file(join(job_dir, "visual-reference/pages/page-009.png")).exists()).toBe(false)
 
   await rm(job_dir, { recursive: true, force: true })

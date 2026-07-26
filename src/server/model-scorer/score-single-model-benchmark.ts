@@ -10,6 +10,8 @@ import {
   resolveWorkspaceFile,
   type ScoreBenchmarkOptions,
 } from "./parse-benchmark-manifest"
+import type { DocumentedStimulusRange } from "./documented-stimulus-range"
+import { findDocumentedStimulusRange } from "./documented-stimulus-range"
 
 export async function readCsvPoints(file_path: string): Promise<Point[]> {
   const text = await readFile(file_path, "utf8")
@@ -48,13 +50,37 @@ function boundaryTolerance(first: number, second: number): number {
   return Number.EPSILON * 64 * Math.max(1, Math.abs(first), Math.abs(second))
 }
 
+const MAX_NEGATIVE_REFERENCE_TIME_FRACTION = 0.01
+
+export function getReferenceTimeAxisError(points: Point[], label = "reference x"): string | undefined {
+  if (points.length === 0) return undefined
+  const minimum_x = Math.min(...points.map((point) => point.x))
+  if (minimum_x >= 0) return undefined
+  const maximum_x = Math.max(...points.map((point) => point.x))
+  const span = maximum_x - minimum_x
+  const tolerated_edge_noise =
+    span * MAX_NEGATIVE_REFERENCE_TIME_FRACTION + boundaryTolerance(minimum_x, maximum_x)
+  if (maximum_x >= 0 && span > 0 && -minimum_x <= tolerated_edge_noise) return undefined
+  return `${label} must be non-negative elapsed time in milliseconds; minimum x=${minimum_x} exceeds the 1% trace-span edge tolerance`
+}
+
+export function normalizeReferenceTimePoints(points: Point[]): Point[] {
+  return points.some((point) => point.x < 0)
+    ? points.map((point) => (point.x < 0 ? { ...point, x: 0 } : point))
+    : points
+}
+
 export function getBenchmarkRangeCoverageError(input: {
   reference_points: Point[]
   result_points: Point[]
   x_scale?: "linear" | "log"
 }): string | undefined {
-  const { reference_points, result_points } = input
+  const { result_points } = input
   const x_scale = input.x_scale ?? "linear"
+  const time_axis_error = getReferenceTimeAxisError(input.reference_points)
+  if (time_axis_error) return time_axis_error
+  const reference_points =
+    x_scale === "linear" ? normalizeReferenceTimePoints(input.reference_points) : input.reference_points
   if (reference_points.length < 2 || result_points.length < 2) {
     return "reference and simulated results must each contain at least two points"
   }
@@ -89,6 +115,27 @@ export function getBenchmarkRangeCoverageError(input: {
   return undefined
 }
 
+/**
+ * Removes only the convention-dependent sample immediately before a truly
+ * discontinuous stimulus edge. Multi-point measured rise/fall shapes remain
+ * intact and must be reproduced by the benchmark harness.
+ */
+export function removeAmbiguousStimulusEdgePoints(reference_points: Point[]): Point[] {
+  if (reference_points.length < 3) return reference_points
+  const x_values = reference_points.map((point) => point.x)
+  const y_values = reference_points.map((point) => point.y)
+  const x_span = Math.max(...x_values) - Math.min(...x_values)
+  const y_span = Math.max(...y_values) - Math.min(...y_values)
+  if (!(x_span > 0) || !(y_span > 0)) return reference_points
+  return reference_points.filter((point, index) => {
+    const next = reference_points[index + 1]
+    if (!next) return true
+    const is_ideal_discontinuity =
+      next.x - point.x <= x_span * 0.02 && Math.abs(next.y - point.y) >= y_span * 0.8
+    return !is_ideal_discontinuity
+  })
+}
+
 function interpolate(input: { points: Point[]; x: number; x_scale: "linear" | "log" }): number {
   const { points, x, x_scale } = input
   const transformed_x = transform({ value: x, scale: x_scale, label: "x" })
@@ -114,6 +161,240 @@ function interpolate(input: { points: Point[]; x: number; x_scale: "linear" | "l
   return points.at(-1)!.y
 }
 
+interface StimulusPhase {
+  state: "low" | "high"
+  start_x: number
+  end_x: number
+}
+
+function isStepLikeStimulus(points: Point[], levels: { low: number; high: number }): boolean {
+  const span = levels.high - levels.low
+  if (!(span > 0)) return false
+  const stable_points = points.filter(
+    (point) => Math.min(Math.abs(point.y - levels.low), Math.abs(point.y - levels.high)) <= span * 0.2,
+  )
+  return stable_points.length / points.length >= 0.65
+}
+
+function inferTwoLevels(points: Point[]): { low: number; high: number } | undefined {
+  const values = points.map((point) => point.y)
+  let low = Math.min(...values)
+  let high = Math.max(...values)
+  if (!(high > low)) return undefined
+  for (let iteration = 0; iteration < 16; iteration += 1) {
+    const midpoint = low + (high - low) / 2
+    const low_values = values.filter((value) => value < midpoint)
+    const high_values = values.filter((value) => value >= midpoint)
+    if (low_values.length === 0 || high_values.length === 0) return undefined
+    low = low_values.reduce((total, value) => total + value, 0) / low_values.length
+    high = high_values.reduce((total, value) => total + value, 0) / high_values.length
+  }
+  return high > low ? { low, high } : undefined
+}
+
+function medianPointSpacing(points: Point[]): number {
+  const spacings = points
+    .slice(1)
+    .map((point, index) => point.x - points[index]!.x)
+    .filter((spacing) => spacing > 0)
+    .sort((first, second) => first - second)
+  return spacings[Math.floor(spacings.length / 2)] ?? 0
+}
+
+function getStableStimulusPhases(
+  points: Point[],
+  levels: { low: number; high: number },
+  maximum_glitch_duration: number,
+): StimulusPhase[] {
+  const midpoint = levels.low + (levels.high - levels.low) / 2
+  const stateAt = (point: Point): StimulusPhase["state"] => (point.y >= midpoint ? "high" : "low")
+  const phases: StimulusPhase[] = []
+  let state = stateAt(points[0]!)
+  let start_x = points[0]!.x
+  for (let index = 1; index < points.length; index += 1) {
+    const next_state = stateAt(points[index]!)
+    if (next_state === state) continue
+    phases.push({ state, start_x, end_x: points[index]!.x })
+    state = next_state
+    start_x = points[index]!.x
+  }
+  phases.push({ state, start_x, end_x: points.at(-1)!.x })
+
+  let changed = true
+  while (changed && phases.length > 1) {
+    changed = false
+    const first = phases[0]!
+    if (first.end_x - first.start_x <= maximum_glitch_duration) {
+      phases[1]!.start_x = first.start_x
+      phases.shift()
+      changed = true
+      continue
+    }
+    const last = phases.at(-1)!
+    if (last.end_x - last.start_x <= maximum_glitch_duration) {
+      phases.at(-2)!.end_x = last.end_x
+      phases.pop()
+      changed = true
+      continue
+    }
+    for (let index = 1; index < phases.length - 1; index += 1) {
+      const phase = phases[index]!
+      const previous = phases[index - 1]!
+      const next = phases[index + 1]!
+      if (phase.end_x - phase.start_x <= maximum_glitch_duration && previous.state === next.state) {
+        previous.end_x = next.end_x
+        phases.splice(index, 2)
+        changed = true
+        break
+      }
+    }
+  }
+  return phases
+}
+
+function summarizeStableStimulusPhases(phases: StimulusPhase[]): string {
+  const first = phases[0]
+  if (!first) return "empty"
+  return [
+    `starts ${first.state}`,
+    ...phases
+      .slice(1)
+      .map((phase) => `${phase.state === "high" ? "low→high" : "high→low"} at x≈${phase.start_x}`),
+  ].join(", ")
+}
+
+function clipPointsToReferenceRange(input: {
+  points: Point[]
+  first_x: number
+  last_x: number
+  x_scale: "linear" | "log"
+}): Point[] {
+  return [
+    {
+      x: input.first_x,
+      y: interpolate({ points: input.points, x: input.first_x, x_scale: input.x_scale }),
+    },
+    ...input.points.filter((point) => point.x > input.first_x && point.x < input.last_x),
+    {
+      x: input.last_x,
+      y: interpolate({ points: input.points, x: input.last_x, x_scale: input.x_scale }),
+    },
+  ]
+}
+
+function scoreStepStimulus(input: {
+  series: Pick<
+    BenchmarkSeriesDefinition,
+    "id" | "title" | "role" | "unit" | "tolerance" | "max_error_tolerance"
+  >
+  reference_points: Point[]
+  result_points: Point[]
+  x_scale: "linear" | "log"
+  documented_range?: DocumentedStimulusRange
+}): ModelValidationSeries | undefined {
+  if (input.x_scale !== "linear") return undefined
+  const first_x = input.reference_points[0]!.x
+  const last_x = input.reference_points.at(-1)!.x
+  const x_span = last_x - first_x
+  if (!(x_span > 0)) return undefined
+  const result_points = clipPointsToReferenceRange({
+    points: input.result_points,
+    first_x,
+    last_x,
+    x_scale: input.x_scale,
+  })
+  const reference_levels = input.documented_range ?? inferTwoLevels(input.reference_points)
+  const result_levels = inferTwoLevels(result_points)
+  if (
+    !reference_levels ||
+    !result_levels ||
+    !(reference_levels.high > reference_levels.low) ||
+    !isStepLikeStimulus(input.reference_points, reference_levels)
+  ) {
+    return undefined
+  }
+  const y_span = reference_levels.high - reference_levels.low
+  const maximum_glitch_duration = Math.max(x_span * 0.05, medianPointSpacing(input.reference_points) * 1.5)
+  const reference_phases = getStableStimulusPhases(
+    input.reference_points,
+    reference_levels,
+    maximum_glitch_duration,
+  )
+  const result_phases = getStableStimulusPhases(result_points, reference_levels, maximum_glitch_duration)
+  const base = {
+    series_id: input.series.id,
+    title: input.series.title,
+    role: input.series.role,
+    unit: input.series.unit,
+    tolerance: input.series.tolerance,
+  }
+  const reference_sequence = reference_phases.map((phase) => phase.state).join("→")
+  const result_sequence = result_phases.map((phase) => phase.state).join("→")
+  if (reference_sequence !== result_sequence) {
+    return {
+      ...base,
+      normalized_rmse: 1,
+      normalized_max_error: 1,
+      passed: false,
+      error_message: `stable stimulus phase sequence is ${result_sequence || "empty"}, expected ${
+        reference_sequence || "empty"
+      }; expected stable transitions: ${summarizeStableStimulusPhases(
+        reference_phases,
+      )}; simulated stable transitions: ${summarizeStableStimulusPhases(result_phases)}`,
+    }
+  }
+
+  const level_errors = [
+    Math.abs(result_levels.low - reference_levels.low) / y_span,
+    Math.abs(result_levels.high - reference_levels.high) / y_span,
+  ]
+  const reference_transitions = reference_phases.slice(1)
+  const result_transitions = result_phases.slice(1)
+  const timing_errors = reference_transitions.map(
+    (transition, index) => Math.abs(result_transitions[index]!.start_x - transition.start_x) / x_span,
+  )
+  const normalized_errors = [...level_errors, ...timing_errors]
+  const normalized_rmse = Math.sqrt(
+    normalized_errors.reduce((total, error) => total + error * error, 0) / normalized_errors.length,
+  )
+  const normalized_max_error = Math.max(...normalized_errors)
+  const level_rmse = Math.sqrt(
+    level_errors.reduce((total, error) => total + error * error, 0) / level_errors.length,
+  )
+  const level_max_error = Math.max(...level_errors)
+  const level_tolerance = Math.max(input.series.tolerance, 0.05)
+  const level_max_tolerance = input.series.max_error_tolerance ?? Math.max(level_tolerance * 2, 0.1)
+  const timing_tolerance = Math.min(
+    0.05,
+    Math.max(0.01, (medianPointSpacing(input.reference_points) * 1.5) / x_span),
+  )
+  const timing_error = Math.max(0, ...timing_errors)
+  const passed =
+    level_rmse <= level_tolerance &&
+    level_max_error <= level_max_tolerance &&
+    timing_error <= timing_tolerance
+  return {
+    ...base,
+    normalized_rmse,
+    normalized_max_error,
+    passed,
+    ...(!passed
+      ? {
+          error_message:
+            level_rmse > level_tolerance || level_max_error > level_max_tolerance
+              ? `stable stimulus levels are ${result_levels.low}..${result_levels.high} ${input.series.unit}, expected ${reference_levels.low}..${reference_levels.high} ${input.series.unit}`
+              : `stimulus transition timing differs by ${(timing_error * 100).toFixed(
+                  2,
+                )}% of the plotted time span; allowed ${(timing_tolerance * 100).toFixed(
+                  2,
+                )}%; expected stable transitions: ${summarizeStableStimulusPhases(
+                  reference_phases,
+                )}; simulated stable transitions: ${summarizeStableStimulusPhases(result_phases)}`,
+        }
+      : {}),
+  }
+}
+
 export function scoreSeriesPoints(input: {
   series: Pick<
     BenchmarkSeriesDefinition,
@@ -122,6 +403,7 @@ export function scoreSeriesPoints(input: {
   reference_points: Point[]
   result_points: Point[]
   x_scale?: "linear" | "log"
+  documented_stimulus_range?: DocumentedStimulusRange
 }): ModelValidationSeries {
   const { series, reference_points, result_points } = input
   try {
@@ -129,14 +411,30 @@ export function scoreSeriesPoints(input: {
     const y_scale = series.y_scale ?? "linear"
     const range_coverage_error = getBenchmarkRangeCoverageError({ reference_points, result_points, x_scale })
     if (range_coverage_error) throw new Error(range_coverage_error)
-    const target_values = reference_points.map((point) =>
+    const elapsed_reference_points =
+      x_scale === "linear" ? normalizeReferenceTimePoints(reference_points) : reference_points
+    if (series.role === "stimulus") {
+      const stimulus_score = scoreStepStimulus({
+        series,
+        reference_points: elapsed_reference_points,
+        result_points,
+        x_scale,
+        documented_range: input.documented_stimulus_range,
+      })
+      if (stimulus_score) return stimulus_score
+    }
+    const scoring_reference_points =
+      series.role === "stimulus"
+        ? removeAmbiguousStimulusEdgePoints(elapsed_reference_points)
+        : elapsed_reference_points
+    const target_values = scoring_reference_points.map((point) =>
       transform({ value: point.y, scale: y_scale, label: "reference y" }),
     )
     const target_min = Math.min(...target_values)
     const target_max = Math.max(...target_values)
     const target_abs_max = Math.max(...target_values.map(Math.abs))
     const normalization_span = Math.max(target_max - target_min, target_abs_max * 0.05, 1e-12)
-    const normalized_errors = reference_points.map((reference_point) => {
+    const normalized_errors = scoring_reference_points.map((reference_point) => {
       const simulated_y = interpolate({ points: result_points, x: reference_point.x, x_scale })
       const transformed_simulated_y = transform({ value: simulated_y, scale: y_scale, label: "simulated y" })
       const transformed_reference_y = transform({
@@ -208,7 +506,21 @@ export async function scoreBenchmark(input: {
           readCsvPoints(resolveWorkspaceFile(model_dir, series.reference_file)),
           readCsvPoints(resolveSeriesResultFile({ model_dir, benchmark, series, options: input.options })),
         ])
-        return scoreSeriesPoints({ series, reference_points, result_points, x_scale: benchmark.x_scale })
+        return scoreSeriesPoints({
+          series,
+          reference_points,
+          result_points,
+          x_scale: benchmark.x_scale,
+          documented_stimulus_range:
+            series.role === "stimulus" && benchmark.conditions
+              ? findDocumentedStimulusRange({
+                  conditions: benchmark.conditions,
+                  title: series.title,
+                  series_id: series.id,
+                  series_unit: series.unit,
+                })
+              : undefined,
+        })
       } catch (error) {
         return {
           series_id: series.id,

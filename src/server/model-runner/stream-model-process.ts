@@ -1,6 +1,6 @@
-import { readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, readlinkSync } from "node:fs"
 import { stat } from "node:fs/promises"
-import { delimiter, dirname } from "node:path"
+import { delimiter, dirname, parse, resolve, sep } from "node:path"
 import type { JobLogStream } from "@/shared/job-types"
 import type { JobStore } from "../job-store"
 import type { ModelRunStore } from "../model-run-store"
@@ -20,6 +20,7 @@ export interface StreamModelProcessInput {
   on_chunk: (stream: JobLogStream, message: string) => Promise<void>
   activity_paths?: string[]
   workspace_root?: string
+  cleanup_workspace_processes?: boolean
 }
 
 export class ModelProcessStaleError extends Error {
@@ -36,6 +37,13 @@ export class ModelInfrastructureError extends Error {
   }
 }
 
+export class ModelPreparationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ModelPreparationError"
+  }
+}
+
 export class ModelWorkspaceIsolationError extends Error {
   constructor(message: string) {
     super(message)
@@ -44,6 +52,10 @@ export class ModelWorkspaceIsolationError extends Error {
 }
 
 const DEFAULT_MODEL_STALE_TIMEOUT_MS = 10 * 60_000
+const DESCENDANT_INITIAL_SAMPLE_WINDOW_MS = 1_000
+const DESCENDANT_INITIAL_SAMPLE_INTERVAL_MS = 10
+const DESCENDANT_STEADY_SAMPLE_INTERVAL_MS = 500
+const DESCENDANT_OUTPUT_SAMPLE_INTERVAL_MS = 100
 
 function listDescendantPids(root_pid: number): number[] {
   if (process.platform === "win32") return []
@@ -112,12 +124,45 @@ function killPid(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+function listWorkspacePids(workspace_directory: string): number[] {
+  if (process.platform !== "linux") return []
+  const workspace_path = resolve(workspace_directory)
+  if (workspace_path === parse(workspace_path).root) return []
+  const pids: number[] = []
+  const entries = (() => {
+    try {
+      return readdirSync("/proc", { withFileTypes: true, encoding: "utf8" })
+    } catch {
+      return []
+    }
+  })()
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
+    const pid = Number(entry.name)
+    if (pid === process.pid) continue
+    try {
+      const cwd = resolve(readlinkSync(`/proc/${entry.name}/cwd`).replace(/ \(deleted\)$/, ""))
+      if (cwd === workspace_path || cwd.startsWith(`${workspace_path}${sep}`)) pids.push(pid)
+    } catch {
+      // Processes can exit or change working directory while /proc is scanned.
+    }
+  }
+  return pids
+}
+
 function killProcessTree(
   child_process: Bun.Subprocess,
   signal: NodeJS.Signals,
   known_descendants: Set<number>,
+  workspace_directory?: string,
 ): void {
   for (const pid of listDescendantPids(child_process.pid)) known_descendants.add(pid)
+  // A detached helper is reparented as soon as the CLI exits and then disappears
+  // from the root PID's process tree. Every model command runs in an isolated
+  // workspace, so its cwd provides a stable way to find those surviving helpers.
+  if (workspace_directory) {
+    for (const pid of listWorkspacePids(workspace_directory)) known_descendants.add(pid)
+  }
   for (const pid of [...known_descendants].reverse()) killPid(pid, signal)
   try {
     if (process.platform === "win32") child_process.kill(signal)
@@ -174,12 +219,21 @@ async function readProcessStream(input: {
   readable: ReadableStream<Uint8Array>
   stream: "stdout" | "stderr"
   on_chunk: StreamModelProcessInput["on_chunk"]
+  stop_after_exit: Promise<void>
 }): Promise<void> {
   const reader = input.readable.getReader()
   const decoder = new TextDecoder()
   try {
     while (true) {
-      const chunk = await reader.read()
+      const next = await Promise.race([
+        reader.read().then((chunk) => ({ kind: "chunk" as const, chunk })),
+        input.stop_after_exit.then(() => ({ kind: "stop" as const })),
+      ])
+      if (next.kind === "stop") {
+        await reader.cancel().catch(() => undefined)
+        break
+      }
+      const { chunk } = next
       if (chunk.done) break
       const message = decoder.decode(chunk.value, { stream: true })
       if (message) await input.on_chunk(input.stream, message)
@@ -211,6 +265,10 @@ export async function streamModelProcess(input: StreamModelProcessInput): Promis
     stdout: "pipe",
     stderr: "pipe",
   })
+  // Capture Bun's exit promise once. Re-reading the `exited` getter from
+  // concurrent drain, retry, and cleanup paths can register multiple native
+  // waiters for the same short-lived process under load.
+  const process_exited = child_process.exited
 
   const configured_stale_timeout = Number(
     process.env.MODEL_STALE_TIMEOUT_MS ?? DEFAULT_MODEL_STALE_TIMEOUT_MS,
@@ -223,12 +281,45 @@ export async function streamModelProcess(input: StreamModelProcessInput): Promis
   let completed = false
   let stale_timer: ReturnType<typeof setTimeout> | undefined
   let force_kill_timer: ReturnType<typeof setTimeout> | undefined
+  let descendant_sample_timer: ReturnType<typeof setTimeout> | undefined
+  let stream_drain_timer: ReturnType<typeof setTimeout> | undefined
+  let stop_stream_readers: (() => void) | undefined
+  const stop_after_exit = new Promise<void>((resolve) => {
+    stop_stream_readers = resolve
+  })
   const known_descendants = new Set<number>()
+  const descendant_sampling_started_at = Date.now()
+  let last_descendant_sample_at = 0
+  const captureDescendants = (): void => {
+    last_descendant_sample_at = Date.now()
+    const descendants = listDescendantPids(child_process.pid)
+    if (descendants.length > 0) {
+      known_descendants.clear()
+      for (const pid of descendants) known_descendants.add(pid)
+    }
+  }
+  const sampleDescendants = () => {
+    descendant_sample_timer = undefined
+    captureDescendants()
+    if (!completed && input.cleanup_workspace_processes) {
+      const elapsed_ms = Date.now() - descendant_sampling_started_at
+      descendant_sample_timer = setTimeout(
+        sampleDescendants,
+        input.cleanup_workspace_processes && elapsed_ms < DESCENDANT_INITIAL_SAMPLE_WINDOW_MS
+          ? DESCENDANT_INITIAL_SAMPLE_INTERVAL_MS
+          : DESCENDANT_STEADY_SAMPLE_INTERVAL_MS,
+      )
+    }
+  }
   const stop_process = () => {
     if (stopping) return
     stopping = true
-    killProcessTree(child_process, "SIGTERM", known_descendants)
-    force_kill_timer = setTimeout(() => killProcessTree(child_process, "SIGKILL", known_descendants), 2_000)
+    const cleanup_workspace = input.cleanup_workspace_processes ? input.cwd : undefined
+    killProcessTree(child_process, "SIGTERM", known_descendants, cleanup_workspace)
+    force_kill_timer = setTimeout(
+      () => killProcessTree(child_process, "SIGKILL", known_descendants, cleanup_workspace),
+      2_000,
+    )
   }
   const arm_stale_timer = () => {
     if (stale_timer) clearTimeout(stale_timer)
@@ -258,29 +349,67 @@ export async function streamModelProcess(input: StreamModelProcessInput): Promis
   const auditWorkspace = createWorkspaceAudit(input.workspace_root)
   const on_chunk: StreamModelProcessInput["on_chunk"] = async (stream, message) => {
     arm_stale_timer()
+    // Keep a live snapshot of descendants while the root PID still exists.
+    // Detached helpers are reparented as soon as the CLI exits, at which point
+    // they can no longer be discovered from the root process tree.
+    if (Date.now() - last_descendant_sample_at >= DESCENDANT_OUTPUT_SAMPLE_INTERVAL_MS) {
+      captureDescendants()
+    }
     if (stream === "stdout" || stream === "stderr") auditWorkspace.push(stream, message)
     await input.on_chunk(stream, message)
   }
   arm_stale_timer()
+  if (input.cleanup_workspace_processes) {
+    descendant_sample_timer = setTimeout(sampleDescendants, DESCENDANT_INITIAL_SAMPLE_INTERVAL_MS)
+  }
   input.signal.addEventListener("abort", stop_process, { once: true })
+  void process_exited.then(() => {
+    // Bun can occasionally leave a detached child's pipe readable open after
+    // reporting process exit, especially when several short builds finish
+    // together. Give buffered output a bounded drain window, then release the
+    // readers so a completed validation worker cannot hang the whole pool.
+    stream_drain_timer = setTimeout(() => stop_stream_readers?.(), 250)
+  })
 
   try {
     const [exit_code] = await Promise.all([
-      child_process.exited,
-      readProcessStream({ readable: child_process.stdout, stream: "stdout", on_chunk }),
-      readProcessStream({ readable: child_process.stderr, stream: "stderr", on_chunk }),
+      process_exited,
+      readProcessStream({
+        readable: child_process.stdout,
+        stream: "stdout",
+        on_chunk,
+        stop_after_exit,
+      }),
+      readProcessStream({
+        readable: child_process.stderr,
+        stream: "stderr",
+        on_chunk,
+        stop_after_exit,
+      }),
     ])
     auditWorkspace.flush()
     if (stale) throw new ModelProcessStaleError()
     return exit_code
   } catch (error) {
     stop_process()
-    await child_process.exited.catch(() => undefined)
+    await process_exited.catch(() => undefined)
     throw error
   } finally {
     completed = true
+    stop_stream_readers?.()
     input.signal.removeEventListener("abort", stop_process)
-    if (stopping) killProcessTree(child_process, "SIGKILL", known_descendants)
+    // A successful CLI parent exit is not proof that every tool process it
+    // launched has exited. Kill the now-orphaned process group before another
+    // model phase can lock or consume the workspace. This prevents a late setup
+    // writer from regenerating evidence after the server snapshot is created.
+    killProcessTree(
+      child_process,
+      "SIGKILL",
+      known_descendants,
+      input.cleanup_workspace_processes ? input.cwd : undefined,
+    )
+    if (descendant_sample_timer) clearTimeout(descendant_sample_timer)
+    if (stream_drain_timer) clearTimeout(stream_drain_timer)
     if (force_kill_timer) clearTimeout(force_kill_timer)
     if (stale_timer) clearTimeout(stale_timer)
   }
