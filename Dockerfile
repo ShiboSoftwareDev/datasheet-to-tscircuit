@@ -10,6 +10,13 @@ FROM dependencies AS build
 COPY . .
 RUN bun run build:web
 
+FROM oven/bun:1.3.9 AS production-dependencies
+
+WORKDIR /app
+
+COPY package.json bun.lock ./
+RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile --production
+
 FROM oven/bun:1.3.9 AS runtime
 
 WORKDIR /app
@@ -27,7 +34,7 @@ ENV HOST=0.0.0.0 \
 
 COPY --from=build --chown=bun:bun /app/package.json ./package.json
 COPY --from=build --chown=bun:bun /app/tsconfig.json ./tsconfig.json
-COPY --from=build --chown=bun:bun /app/node_modules ./node_modules
+COPY --from=production-dependencies --chown=bun:bun /app/node_modules ./node_modules
 COPY --from=build --chown=bun:bun /app/dist ./dist
 COPY --from=build --chown=bun:bun /app/src ./src
 COPY --chmod=755 scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
