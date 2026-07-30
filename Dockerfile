@@ -1,21 +1,38 @@
-FROM oven/bun:1.3.9 AS dependencies
-
-WORKDIR /app
-
-COPY package.json bun.lock ./
-RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile
-
-FROM dependencies AS build
-
-COPY . .
-RUN bun run build:web
-
 FROM oven/bun:1.3.9 AS production-dependencies
 
 WORKDIR /app
 
 COPY package.json bun.lock ./
-RUN --mount=type=cache,target=/root/.bun/install/cache bun install --frozen-lockfile --production
+RUN --mount=type=cache,id=datasheet-to-tscircuit-bun,target=/root/.bun/install/cache,sharing=locked \
+    for attempt in 1 2 3; do \
+      if bun install --frozen-lockfile --production; then \
+        break; \
+      fi; \
+      if [ "$attempt" -eq 3 ]; then \
+        exit 1; \
+      fi; \
+      rm -rf node_modules; \
+      bun pm cache rm; \
+    done
+
+FROM production-dependencies AS build-dependencies
+
+RUN --mount=type=cache,id=datasheet-to-tscircuit-bun,target=/root/.bun/install/cache,sharing=locked \
+    for attempt in 1 2 3; do \
+      if bun install --frozen-lockfile; then \
+        break; \
+      fi; \
+      if [ "$attempt" -eq 3 ]; then \
+        exit 1; \
+      fi; \
+      rm -rf node_modules; \
+      bun pm cache rm; \
+    done
+
+FROM build-dependencies AS build
+
+COPY . .
+RUN bun run build:web
 
 FROM oven/bun:1.3.9 AS runtime
 
