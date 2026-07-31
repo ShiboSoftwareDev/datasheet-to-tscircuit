@@ -1,6 +1,5 @@
-import { runModel, type ModelRunnerContext } from "../model-runner"
+import { runModel, type ModelRunnerContext } from "../model-workflow"
 
 export interface ModelRunApiContext extends ModelRunnerContext {
   run_model?: typeof runModel
-  model_base_effort_ms?: number
 }

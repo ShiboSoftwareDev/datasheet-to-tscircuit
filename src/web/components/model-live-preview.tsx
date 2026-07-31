@@ -64,7 +64,7 @@ function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) 
       : preview?.build_status === "failed"
         ? "Circuit build failed"
         : preview
-          ? "Waiting for a saved circuit run"
+          ? "Benchmark TSX is source-ready"
           : "Waiting for benchmark TSX"
   return (
     <div className="model-preview-placeholder">
@@ -79,7 +79,7 @@ function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) 
           (preview?.build_status === "building"
             ? "tsci is building this benchmark. The viewer will use the first persisted Circuit JSON output."
             : preview
-              ? "The source is ready. The server automatically runs one preview point per benchmark when a model checkpoint enters validation; the viewer appears from the first persisted result."
+              ? "No Circuit JSON snapshot is stored for this benchmark, so the source is shown here. Validation graphs come from persisted ngspice results."
               : "This appears as soon as the agent writes its first benchmark circuit.")}
       </p>
       {preview?.code && (
@@ -355,6 +355,7 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
                 y_axis_unit: series.unit,
                 y_scale: series.y_scale,
                 reference_points: series.reference_points,
+                reference_bounds: series.reference_bounds,
                 result_points: series.result_points,
                 series: undefined,
               }}
@@ -365,7 +366,11 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
     )
   }
 
-  const all_points = [...preview.reference_points, ...(preview.result_points ?? [])]
+  const bound_points: ModelCurvePoint[] = [
+    ...(preview.reference_bounds?.min === undefined ? [] : [{ x: 0, y: preview.reference_bounds.min }]),
+    ...(preview.reference_bounds?.max === undefined ? [] : [{ x: 0, y: preview.reference_bounds.max }]),
+  ]
+  const all_points = [...preview.reference_points, ...bound_points, ...(preview.result_points ?? [])]
   const x_axis = getGraphAxisLayout(
     all_points.map((point) => point.x),
     preview.x_scale,
@@ -374,6 +379,18 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
     all_points.map((point) => point.y),
     preview.y_scale,
   )
+  const reference_bound_lines = (["min", "max"] as const).flatMap((kind) => {
+    const value = preview.reference_bounds?.[kind]
+    if (value === undefined) return []
+    const scaled_value = scaledValue(value, preview.y_scale)
+    if (scaled_value === undefined) return []
+    return [
+      {
+        kind,
+        y: graphCoordinate(scaled_value, y_axis.min, y_axis.max, GRAPH_BOTTOM, GRAPH_TOP),
+      },
+    ]
+  })
   const reference_path = curvePath({
     points: preview.reference_points,
     x_scale: preview.x_scale,
@@ -396,6 +413,8 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
     : undefined
   const comparison_is_deprecated = preview.result_status === "deprecated" || preview.is_stale
   const comparison_is_unverified = preview.result_status === "unverified"
+  const comparison_is_failed = preview.result_status === "failed"
+  const comparison_is_cancelled = preview.result_status === "cancelled"
   const scale_disparity = getComparisonScaleDisparity(preview.reference_points, preview.result_points)
   const primary_series = preview.series?.find((series) => series.role === "response") ?? preview.series?.[0]
   const resolved_y_axis_label =
@@ -406,13 +425,17 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
   const y_axis_unit = resolved_y_axis_unit?.trim() ? ` ${resolved_y_axis_unit.trim()}` : ""
   const result_label = comparison_is_deprecated
     ? "Previous model result · deprecated"
-    : comparison_is_unverified
-      ? preview.result_origin === "workspace"
-        ? "Agent run · unverified"
-        : "Simulation run · unverified"
-      : preview.result_status === "partial"
-        ? "Server validation · in progress"
-        : "Server-verified model"
+    : comparison_is_failed
+      ? "Server validation · failed"
+      : comparison_is_cancelled
+        ? "Server validation · cancelled"
+        : comparison_is_unverified
+          ? preview.result_origin === "workspace"
+            ? "Agent run · unverified"
+            : "Simulation run · unverified"
+          : preview.result_status === "partial"
+            ? "Server validation · in progress"
+            : "Server-verified model"
 
   return (
     <div className="model-reference-plot">
@@ -460,10 +483,20 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
             <line x1={GRAPH_LEFT} x2={GRAPH_LEFT} y1={GRAPH_TOP} y2={GRAPH_BOTTOM} />
             <line x1={GRAPH_LEFT} x2={GRAPH_RIGHT} y1={GRAPH_BOTTOM} y2={GRAPH_BOTTOM} />
           </g>
-          <polyline className="reference-line" points={reference_path} />
+          {reference_path && <polyline className="reference-line" points={reference_path} />}
+          {reference_bound_lines.map(({ kind, y }) => (
+            <line
+              className={`reference-bound reference-bound-${kind}`}
+              key={kind}
+              x1={GRAPH_LEFT}
+              x2={GRAPH_RIGHT}
+              y1={y}
+              y2={y}
+            />
+          ))}
           {result_path && (
             <polyline
-              className={`result-line${comparison_is_unverified ? " result-line-unverified" : ""}${preview.result_status === "partial" ? " result-line-partial" : ""}${comparison_is_deprecated ? " result-line-deprecated" : ""}`}
+              className={`result-line${comparison_is_unverified ? " result-line-unverified" : ""}${comparison_is_failed || comparison_is_cancelled ? " result-line-failed" : ""}${preview.result_status === "partial" ? " result-line-partial" : ""}${comparison_is_deprecated ? " result-line-deprecated" : ""}`}
               points={result_path}
             />
           )}
@@ -507,18 +540,24 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
         </svg>
         <div className="reference-legend">
           <span className="reference-series">
-            <i /> Datasheet reference
+            <i /> {preview.reference_bounds ? "Datasheet bounds" : "Datasheet reference"}
           </span>
           {preview.result_points && (
             <span
-              className={`result-series${comparison_is_unverified ? " unverified" : ""}${comparison_is_deprecated ? " deprecated" : ""}`}
+              className={`result-series${comparison_is_unverified ? " unverified" : ""}${comparison_is_failed || comparison_is_cancelled ? " failed" : ""}${comparison_is_deprecated ? " deprecated" : ""}`}
             >
               <i />
               {result_label}
             </span>
           )}
           {!preview.result_points && (
-            <span className="model-result-pending">Model result pending verification</span>
+            <span className="model-result-pending">
+              {comparison_is_failed
+                ? "No waveform: server validation failed"
+                : comparison_is_cancelled
+                  ? "No waveform: server validation cancelled"
+                  : "Model result pending verification"}
+            </span>
           )}
         </div>
       </div>
@@ -534,11 +573,13 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
     preview.normalized_rmse !== undefined ||
     preview.normalized_max_error !== undefined ||
     comparison_is_deprecated ||
+    preview.result_status === "failed" ||
+    preview.result_status === "cancelled" ||
     preview.matches_reference !== undefined
   if (!has_summary) return null
 
   return (
-    <div className="model-comparison-summary" aria-label="Comparison statistics">
+    <section className="model-comparison-summary" aria-label="Comparison statistics">
       {preview.normalized_rmse !== undefined && (
         <span className="model-comparison-metric">
           <span>NRMSE</span>
@@ -560,6 +601,16 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
           <AlertTriangle size={12} />
           Circuit JSON graph deprecated
         </span>
+      ) : preview.result_status === "cancelled" ? (
+        <span className="model-comparison-state is-mismatch" role="status">
+          <AlertTriangle size={12} />
+          Validation cancelled
+        </span>
+      ) : preview.result_status === "failed" ? (
+        <span className="model-comparison-state is-mismatch" role="status">
+          <AlertTriangle size={12} />
+          Validation failed
+        </span>
       ) : preview.matches_reference === false ? (
         <span className="model-comparison-state is-mismatch" role="status">
           <AlertTriangle size={12} />
@@ -571,7 +622,7 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
           Matches reference
         </span>
       ) : null}
-    </div>
+    </section>
   )
 }
 

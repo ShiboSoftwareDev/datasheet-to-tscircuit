@@ -1,6 +1,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
 import { Boxes, ChevronRight, CircuitBoard, Download, FlaskConical } from "lucide-react"
 import type { Job, JobDisplayStatus, ModelRun, ModelRunStatus } from "@/shared/job-types"
+import { hasRetainedAcceptedModel } from "@/shared/model-warnings"
 import { getJobFileUrl, getModelRunFileUrl } from "../api"
 import { ArtifactWarningsDialog } from "./artifact-warnings"
 
@@ -74,6 +75,10 @@ export function WorkspaceStatusBar({
       ? "Output with warnings"
       : COMPONENT_STATUS_COPY[job.display_status]
   const model_status = getModelStatus(model_run, is_model_loading)
+  const has_retained_accepted_model = model_run ? hasRetainedAcceptedModel(model_run) : false
+  const compact_model_status = `${getCompactStatus(model_status)}${
+    has_retained_accepted_model ? " · Retained" : ""
+  }`
   const has_downloads = Boolean(job.component_code || job.typical_application_code || model_run?.model_source)
 
   return (
@@ -98,14 +103,18 @@ export function WorkspaceStatusBar({
         <span
           className={`workspace-artifact-status status-${getStatusTone(model_status)}`}
           role="status"
-          aria-label={`SPICE model status: ${model_status}`}
-          title={`SPICE model: ${model_status}`}
+          aria-label={`SPICE model status: ${model_status}${
+            has_retained_accepted_model ? "; accepted model retained" : ""
+          }`}
+          title={`SPICE model: ${model_status}${
+            has_retained_accepted_model ? "; accepted model retained" : ""
+          }`}
         >
           <FlaskConical size={12} />
           <span className="workspace-status-name">SPICE</span>
           <strong>
             <i />
-            <span>{getCompactStatus(model_status)}</span>
+            <span>{compact_model_status}</span>
           </strong>
         </span>
         <ArtifactWarningsDialog warnings={model_run?.warnings ?? []} artifact_label="SPICE model" />

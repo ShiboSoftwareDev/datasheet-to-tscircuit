@@ -16,17 +16,19 @@ import {
 } from "lucide-react"
 import { useEffect, useState } from "react"
 import type { Job, ModelProgressPhase, ModelRun, ModelRunStatus } from "@/shared/job-types"
+import { isRetainedAcceptedWarning } from "@/shared/model-warnings"
 import { getModelRunFileUrl } from "../api"
 import type { useModelRun } from "../use-model-run"
 import { AgentLogViewer } from "./agent-log-viewer"
 import { ModelLivePreview } from "./model-live-preview"
+import { PipelineTrace } from "./pipeline-trace"
 
 const STATUS_COPY: Record<ModelRunStatus, string> = {
   queued: "Queued",
-  setting_up: "Preparing references",
+  setting_up: "Preparing model",
   waiting_for_component: "Waiting for component",
-  running: "Refining model",
-  validating: "Validating champion",
+  running: "Building model",
+  validating: "Validating model",
   cancelling: "Stopping",
   cancelled: "Stopped",
   complete: "Validated",
@@ -56,6 +58,12 @@ function getProgressPhaseCopy(model_run: ModelRun): string {
 
 const PROGRESS_PHASE_COPY: Record<ModelProgressPhase, string> = {
   queued: "Queued",
+  preparing_workspace: "Preparing workspace",
+  characterizing: "Characterizing device",
+  designing_validation: "Designing validation",
+  generating_model: "Generating model",
+  repairing: "Repairing model",
+  publishing: "Publishing model",
   extracting_datasheet: "Reading datasheet",
   digitizing_graphs: "Digitizing graphs",
   preparing_benchmarks: "Preparing references",
@@ -99,8 +107,8 @@ export function getModelMatchMetrics(model_run: ModelRun): {
   match_score?: number
   normalized_rmse?: number
 } {
-  const completed_with_warnings = model_run.is_complete && (model_run.warnings?.length ?? 0) > 0
-  const normalized_rmse = completed_with_warnings
+  const has_retained_accepted_metrics = (model_run.warnings ?? []).some(isRetainedAcceptedWarning)
+  const normalized_rmse = has_retained_accepted_metrics
     ? undefined
     : model_run.validation?.score !== undefined
       ? model_run.validation.score
@@ -316,9 +324,9 @@ export function ModelPanel({
         </span>
         <h2>Build and validate a simulation model.</h2>
         <p>
-          Reference extraction starts immediately and runs alongside component generation. When the component
-          is ready, a separate untimed pass finalizes the benchmark suite; the server locks it before starting
-          the time-budgeted refinement loop.
+          A typed pipeline characterizes the datasheet, designs a declarative fixture plan, generates the
+          model, and validates it with server-compiled ngspice circuits. The component interface, test plan,
+          scoring, and publication stay server-owned.
         </p>
         <fieldset className="effort-picker" aria-label="Modeling effort">
           {[1, 2, 4, 8].map((value) => (
@@ -329,7 +337,7 @@ export function ModelPanel({
               onClick={() => setEffort(value)}
             >
               <strong>{value}×</strong>
-              <small>{value === 1 ? "Baseline time" : `${value}× iteration time`}</small>
+              <small>{value === 1 ? "1 repair attempt" : `Up to ${value} repair attempts`}</small>
             </button>
           ))}
         </fieldset>
@@ -358,14 +366,15 @@ export function ModelPanel({
     )
   }
 
-  const elapsed_time = Math.min(getElapsedTime(model_run, now), model_run.allocated_time_ms)
-  const progress =
-    model_run.allocated_time_ms > 0 ? Math.min(100, (elapsed_time / model_run.allocated_time_ms) * 100) : 0
+  const elapsed_time = getElapsedTime(model_run, now)
+  const stage_results = Object.values(model_run.pipeline?.stage_results ?? {})
+  const completed_stages = stage_results.filter(
+    ({ status }) =>
+      status === "completed" || status === "skipped" || status === "failed" || status === "cancelled",
+  ).length
+  const progress = stage_results.length > 0 ? (completed_stages / stage_results.length) * 100 : 0
   const is_running = !model_run.is_complete
-  const is_untimed =
-    model_run.status === "queued" ||
-    model_run.status === "setting_up" ||
-    model_run.status === "waiting_for_component"
+  const is_waiting = model_run.status === "queued" || model_run.status === "waiting_for_component"
   const current_task = model_run.error_message ?? model_run.progress?.message ?? getStatusCopy(model_run)
   const match_metrics = getModelMatchMetrics(model_run)
 
@@ -405,15 +414,24 @@ export function ModelPanel({
 
         <div className="model-header-actions">
           <ModelSourceDialog model_run={model_run} />
-          {model_run.status === "failed" && (
+          {(model_run.status === "failed" || model_run.status === "cancelled") && (
             <button type="button" disabled={is_retrying} onClick={retry}>
               {is_retrying ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}
-              {is_retrying ? "Retrying…" : "Retry failed run"}
+              {is_retrying
+                ? "Retrying…"
+                : model_run.status === "cancelled"
+                  ? "Resume stopped run"
+                  : "Retry failed run"}
             </button>
           )}
           <button
             type="button"
-            disabled={is_extending || model_run.status === "validating" || model_run.status === "cancelling"}
+            disabled={
+              is_extending ||
+              model_run.effort_multiplier >= 8 ||
+              model_run.status === "validating" ||
+              model_run.status === "cancelling"
+            }
             onClick={() => extend(1)}
           >
             {is_extending ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />} Add 1× effort
@@ -429,13 +447,12 @@ export function ModelPanel({
           <div className="model-progress-copy">
             <span>
               <Clock3 size={14} />
-              {is_untimed
-                ? "Refinement timer not started"
-                : `${formatDuration(elapsed_time)} / ${formatDuration(model_run.allocated_time_ms)}`}
+              {is_waiting ? "Waiting to start" : `${formatDuration(elapsed_time)} elapsed`}
             </span>
             <span>
-              {model_run.effort_multiplier}× effort
-              {!is_untimed && ` · iteration ${model_run.iteration}`}
+              {completed_stages}/{stage_results.length || 8} stages · {model_run.effort_multiplier}× repair
+              budget
+              {model_run.iteration > 0 && ` · repair ${model_run.iteration}`}
             </span>
           </div>
           <div className="model-progress-track">
@@ -449,6 +466,8 @@ export function ModelPanel({
           {error_message}
         </p>
       )}
+
+      <PipelineTrace pipeline={model_run.pipeline} title="Model execution trace" />
 
       <ModelLivePreview
         job_id={job.job_id}

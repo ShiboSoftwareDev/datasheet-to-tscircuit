@@ -1,39 +1,13 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { AnyCircuitElement } from "circuit-json"
 import { createJobApiHandler } from "@/server/job-api"
 import { restorePersistedJobs } from "@/server/job-restorer"
+import { readRestoredCircuitJson } from "@/server/job-restorer/read-restored-circuit-json"
 import { JobStore } from "@/server/job-store"
-import { loadModelSelectedPreview } from "@/server/model-artifact-monitor"
 import { ModelRunStore } from "@/server/model-run-store"
-import {
-  verifySimulationBenchmark,
-  writeSimulationValidationReport,
-} from "@/server/model-simulation-validator"
-
-const verifiedModelSource = ".subckt RESTORED IN OUT\nR1 IN OUT 1k\n.ends RESTORED\n"
-
-function verifiedCircuit(probe_name: string) {
-  return [
-    { type: "source_component", source_component_id: "dut", name: "DUT" },
-    { type: "source_port", source_port_id: "dut_in", source_component_id: "dut", name: "IN" },
-    { type: "source_port", source_port_id: "dut_out", source_component_id: "dut", name: "OUT" },
-    {
-      type: "simulation_spice_subcircuit",
-      source_component_id: "dut",
-      subcircuit_source: verifiedModelSource,
-      spice_pin_to_source_port_map: { IN: "dut_in", OUT: "dut_out" },
-    },
-    { type: "simulation_voltage_probe", name: probe_name, signal_input_source_port_id: "dut_out" },
-    {
-      type: "simulation_transient_voltage_graph",
-      name: probe_name,
-      timestamps_ms: [0, 1],
-      voltage_levels: [0, 1],
-    },
-  ]
-}
 
 test("persisted component and model jobs survive a server restart and deletion removes both", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-restore-"))
@@ -95,7 +69,6 @@ test("persisted component and model jobs survive a server restart and deletion r
     model_dir,
     use_openai: true,
     effort_multiplier: 2,
-    base_effort_ms: 1_000,
   })
   await Bun.write(join(model_dir, "model.lib"), ".SUBCKT RESTORED IN OUT\n.ENDS RESTORED\n")
   await original_models.appendLog("model_restore", {
@@ -103,6 +76,7 @@ test("persisted component and model jobs survive a server restart and deletion r
     message: "Original model log\n",
   })
   original_models.startSegment("model_restore")
+  await Bun.sleep(5)
 
   const restored_jobs = new JobStore()
   const restored_models = new ModelRunStore()
@@ -115,23 +89,23 @@ test("persisted component and model jobs survive a server restart and deletion r
   expect(restored).toEqual({ jobs_restored: 1, model_runs_restored: 1 })
   expect(restored_jobs.getJob("job_restore")?.file_name).toBe("original-sensor.pdf")
   expect(restored_jobs.getJob("job_restore")?.use_openai).toBe(true)
-  expect(restored_jobs.getJob("job_restore")?.display_status).toBe("complete")
-  expect(restored_jobs.getJob("job_restore")?.component_ready).toBe(true)
-  expect(restored_jobs.getJob("job_restore")?.typical_application_title).toBe("Restored sensor application")
+  expect(restored_jobs.getJob("job_restore")?.display_status).toBe("failed")
+  expect(restored_jobs.getJob("job_restore")?.component_ready).toBe(false)
+  expect(restored_jobs.getJob("job_restore")?.typical_application_title).toBeUndefined()
+  expect(restored_jobs.getJob("job_restore")?.evidence_available).toBe(false)
   expect(restored_jobs.getJob("job_restore")?.logs[0]?.message).toBe("Original component log\n")
   expect(restored_jobs.getJob("job_restore")?.circuit_json?.[0]?.type).toBe("source_component")
   expect(
     restored_jobs.getJob("job_restore")?.circuit_json?.some((element) => element.type === "pcb_component"),
   ).toBe(true)
-  expect(restored_jobs.getJob("job_restore")?.typical_application_circuit_json?.[0]?.type).toBe(
-    "source_component",
-  )
+  expect(restored_jobs.getJob("job_restore")?.typical_application_circuit_json).toBeUndefined()
 
   const restored_model = restored_models.getModelRunForJob("job_restore")
   expect(restored_model?.model_run_id).toBe("model_restore")
   expect(restored_model?.use_openai).toBe(true)
   expect(restored_model?.status).toBe("failed")
   expect(restored_model?.error_message).toContain("server restarted")
+  expect(restored_model?.elapsed_time_ms).toBeGreaterThan(0)
   expect(restored_model?.model_source).toContain(".SUBCKT RESTORED")
   expect(restored_model?.logs[0]?.message).toBe("Original model log\n")
 
@@ -212,7 +186,63 @@ test("failed component validation is not restored as ready", async () => {
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("obsolete compact-layout failures recover automatically after saved-artifact validation", async () => {
+test("an empty Circuit JSON checkpoint is never restored as a ready component", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-empty-circuit-restore-"))
+  const job_dir = join(jobs_root, "empty_component")
+  await mkdir(job_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nempty circuit fixture"),
+    Bun.write(join(job_dir, "index.circuit.tsx"), "export default () => <chip />\n"),
+    Bun.write(join(job_dir, "component.circuit.json"), "[]\n"),
+  ])
+
+  const original_jobs = new JobStore()
+  original_jobs.createJob({
+    job_id: "empty_component",
+    job_dir,
+    file_name: "empty-component.pdf",
+  })
+  original_jobs.updateJob("empty_component", {
+    display_status: "complete",
+    is_complete: true,
+    has_errors: false,
+    component_ready: true,
+    validation: {
+      evidence: "passed",
+      component_build: "passed",
+      component_drc: "passed",
+      footprint: "passed",
+      pinout: "passed",
+      component_schematic: "passed",
+      component_visual: "passed",
+      application_build: "pending",
+      application_connectivity: "pending",
+      application_schematic: "pending",
+      application_visual: "pending",
+    },
+  })
+
+  const restored_jobs = new JobStore()
+  await restorePersistedJobs({
+    jobs_root,
+    job_store: restored_jobs,
+    model_run_store: new ModelRunStore(),
+  })
+
+  expect(restored_jobs.getJob("empty_component")).toMatchObject({
+    display_status: "failed",
+    is_complete: true,
+    has_errors: true,
+    component_ready: false,
+  })
+  expect(restored_jobs.getJob("empty_component")?.error_message).toContain(
+    "validated component artifacts are missing or inconsistent",
+  )
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("saved failures are never silently reclassified by a restart", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-layout-recovery-"))
   const job_dir = join(jobs_root, "layout_failure")
   await Promise.all([
@@ -312,18 +342,126 @@ test("obsolete compact-layout failures recover automatically after saved-artifac
   })
 
   const recovered = restored_jobs.getJob("layout_failure")
-  expect(recovered?.display_status).toBe("complete")
-  expect(recovered?.has_errors).toBe(false)
-  expect(recovered?.error_message).toBeUndefined()
-  expect(recovered?.validation?.application_schematic).toBe("passed")
-  expect(recovered?.validation?.application_connectivity).toBe("passed")
-  expect(recovered?.logs.at(-1)?.message).toContain("Recovered the generated typical application")
-  expect(JSON.parse(await Bun.file(join(job_dir, "job.json")).text()).display_status).toBe("complete")
+  expect(recovered?.display_status).toBe("failed")
+  expect(recovered?.has_errors).toBe(true)
+  expect(recovered?.error_message).toContain("Typical application failed schematic layout")
+  expect(recovered?.validation?.application_schematic).toBe("failed")
+  expect(recovered?.validation?.application_connectivity).toBe("pending")
+  expect(recovered?.logs.some(({ message }) => message.includes("Recovered"))).toBe(false)
+  expect(JSON.parse(await Bun.file(join(job_dir, "job.json")).text()).display_status).toBe("failed")
 
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("legacy completed model runs are reopened because their agent-written CSVs were not verified", async () => {
+test("restart recovers a component whose publish stage crossed the commit barrier", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-published-component-restore-"))
+  const job_dir = join(jobs_root, "published_component")
+  await mkdir(job_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\npublished component fixture"),
+    Bun.write(join(job_dir, "index.circuit.tsx"), "export default () => <chip />\n"),
+    Bun.write(
+      join(job_dir, "component.circuit.json"),
+      JSON.stringify([{ type: "source_component", source_component_id: "published" }]),
+    ),
+  ])
+  const timestamp = new Date().toISOString()
+  const original_jobs = new JobStore()
+  original_jobs.createJob({
+    job_id: "published_component",
+    job_dir,
+    file_name: "published.pdf",
+  })
+  original_jobs.updateJob("published_component", {
+    display_status: "building",
+    component_ready: true,
+    validation: {
+      evidence: "passed",
+      component_build: "passed",
+      component_drc: "passed",
+      footprint: "passed",
+      pinout: "passed",
+      component_schematic: "passed",
+      component_visual: "inconclusive",
+      application_build: "not_applicable",
+      application_connectivity: "not_applicable",
+      application_schematic: "not_applicable",
+      application_visual: "not_applicable",
+    },
+    pipeline: {
+      pipeline_id: "datasheet_component",
+      status: "completed",
+      sequence: 20,
+      started_at: timestamp,
+      updated_at: timestamp,
+      stage_results: {
+        publish: {
+          stage_id: "publish",
+          status: "completed",
+          debug_ref: "runs/invocation/.pipeline/stages/09-publish",
+          started_at: timestamp,
+          completed_at: timestamp,
+          duration_ms: 1,
+        },
+      },
+    },
+  })
+
+  const restored_jobs = new JobStore()
+  const result = await restorePersistedJobs({
+    jobs_root,
+    job_store: restored_jobs,
+    model_run_store: new ModelRunStore(),
+  })
+  expect(result.jobs_restored).toBe(1)
+  expect(restored_jobs.getJob("published_component")).toMatchObject({
+    display_status: "complete",
+    is_complete: true,
+    has_errors: false,
+    component_ready: true,
+  })
+  expect(restored_jobs.getJob("published_component")?.error_message).toBeUndefined()
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("restart rejects a completed checkpoint whose component artifacts are missing", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-invalid-completion-restore-"))
+  const job_dir = join(jobs_root, "invalid_completion")
+  await mkdir(job_dir, { recursive: true })
+  await Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\ninvalid completion fixture")
+  const original_jobs = new JobStore()
+  original_jobs.createJob({
+    job_id: "invalid_completion",
+    job_dir,
+    file_name: "invalid.pdf",
+  })
+  original_jobs.updateJob("invalid_completion", {
+    display_status: "complete",
+    is_complete: true,
+    component_ready: true,
+  })
+
+  const restored_jobs = new JobStore()
+  await restorePersistedJobs({
+    jobs_root,
+    job_store: restored_jobs,
+    model_run_store: new ModelRunStore(),
+  })
+  expect(restored_jobs.getJob("invalid_completion")).toMatchObject({
+    display_status: "failed",
+    is_complete: true,
+    has_errors: true,
+    component_ready: false,
+  })
+  expect(restored_jobs.getJob("invalid_completion")?.error_message).toContain(
+    "validated component artifacts are missing",
+  )
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("legacy completed model runs fail closed without a server validation result", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-legacy-model-restore-"))
   const job_dir = join(jobs_root, "legacy_job")
   const model_dir = join(job_dir, "spice")
@@ -339,7 +477,6 @@ test("legacy completed model runs are reopened because their agent-written CSVs 
     job_id: "legacy_job",
     model_dir,
     effort_multiplier: 1,
-    base_effort_ms: 1_000,
   })
   original_models.updateModelRun("legacy_model", {
     status: "complete",
@@ -352,88 +489,195 @@ test("legacy completed model runs are reopened because their agent-written CSVs 
   const restored_models = new ModelRunStore()
   await restorePersistedJobs({ jobs_root, job_store: restored_jobs, model_run_store: restored_models })
 
-  expect(restored_models.getModelRunForJob("legacy_job")?.status).toBe("timed_out")
+  expect(restored_models.getModelRunForJob("legacy_job")?.status).toBe("failed")
   expect(restored_models.getModelRunForJob("legacy_job")?.error_message).toContain(
-    "predates simulator-owned validation",
+    "no passing server-owned validation result",
   )
 
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("verified simulation artifacts and dropdown previews survive a server restart", async () => {
-  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-verified-model-restore-"))
-  const job_dir = join(jobs_root, "verified_job")
-  const model_dir = join(job_dir, "spice")
-  const circuit_dir = join(job_dir, "dist", "spice", "benchmarks", "transfer")
+test("restart prefers the current integrated model Circuit JSON over the bare component", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-integrated-circuit-restore-"))
+  const integrated = [
+    { type: "source_component", source_component_id: "integrated", name: "MODELED" },
+    { type: "pcb_component", pcb_component_id: "integrated_pcb", source_component_id: "integrated" },
+    {
+      type: "simulation_spice_subcircuit",
+      simulation_spice_subcircuit_id: "integrated_model",
+      source_component_id: "integrated",
+      subcircuit_source: ".SUBCKT TEST IN OUT\n.ENDS TEST",
+      spice_pin_to_source_port_map: {},
+    },
+  ] as AnyCircuitElement[]
+  const bare = [
+    { type: "source_component", source_component_id: "bare", name: "UNMODELED" },
+    { type: "pcb_component", pcb_component_id: "bare_pcb", source_component_id: "bare" },
+  ] as AnyCircuitElement[]
+  await mkdir(join(job_dir, "spice"), { recursive: true })
   await Promise.all([
-    mkdir(join(model_dir, "benchmarks"), { recursive: true }),
-    mkdir(join(model_dir, "evidence", "curves"), { recursive: true }),
-    mkdir(circuit_dir, { recursive: true }),
+    Bun.write(join(job_dir, "spice", "component-with-model.circuit.json"), JSON.stringify(integrated)),
+    Bun.write(join(job_dir, "component.circuit.json"), JSON.stringify(bare)),
+  ])
+
+  expect(await readRestoredCircuitJson(job_dir, "component")).toEqual(integrated)
+
+  await rm(job_dir, { recursive: true, force: true })
+})
+
+test("restart cleans transactions, ignores ordinary staging residue, and diagnoses invalid job markers", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-private-workspaces-"))
+  const tombstone = join(jobs_root, ".deleting-old-job-fixture")
+  const staging_dir = join(jobs_root, ".creating-new-job-fixture")
+  const partial_dir = join(jobs_root, "partial-job")
+  const mismatched_dir = join(jobs_root, "mismatched-job")
+  const malformed_dir = join(jobs_root, "malformed-job")
+  const oversized_dir = join(jobs_root, "oversized-job")
+  const symlinked_dir = join(jobs_root, "symlinked-job")
+  const symlink_target = join(jobs_root, "symlink-marker-target.json")
+  const markerless_publication_dir = join(jobs_root, "markerless-publication")
+  await Promise.all([
+    mkdir(tombstone, { recursive: true }),
+    mkdir(staging_dir, { recursive: true }),
+    mkdir(partial_dir, { recursive: true }),
+    mkdir(mismatched_dir, { recursive: true }),
+    mkdir(malformed_dir, { recursive: true }),
+    mkdir(oversized_dir, { recursive: true }),
+    mkdir(symlinked_dir, { recursive: true }),
+    mkdir(markerless_publication_dir, { recursive: true }),
   ])
   await Promise.all([
-    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nverified fixture"),
-    Bun.write(join(model_dir, "benchmarks", "transfer.circuit.tsx"), "export default () => <board />\n"),
-    Bun.write(join(model_dir, "evidence", "curves", "transfer.csv"), "x,y\n0,0\n1,1\n"),
-    Bun.write(join(model_dir, "model.lib"), verifiedModelSource),
+    Bun.write(join(tombstone, "datasheet.pdf"), "%PDF-1.7\ndeleted fixture"),
+    Bun.write(join(staging_dir, "datasheet.pdf"), "%PDF-1.7\nstaged fixture"),
+    Bun.write(join(partial_dir, "datasheet.pdf"), "%PDF-1.7\npartial fixture"),
+    Bun.write(join(mismatched_dir, "datasheet.pdf"), "%PDF-1.7\nmismatched fixture"),
+    Bun.write(join(malformed_dir, "datasheet.pdf"), "%PDF-1.7\nmalformed fixture"),
+    Bun.write(join(malformed_dir, "job.json"), "{not json"),
+    Bun.write(join(oversized_dir, "datasheet.pdf"), "%PDF-1.7\noversized fixture"),
     Bun.write(
-      join(model_dir, "benchmarks.json"),
-      JSON.stringify({
-        version: 1,
-        locked_at: new Date().toISOString(),
-        benchmarks: [
-          {
-            id: "transfer",
-            title: "Transfer",
-            source: { page: 1 },
-            critical: true,
-            weight: 1,
-            tolerance: 0.1,
-            reference_file: "evidence/curves/transfer.csv",
-            result_file: "results/champion/transfer.csv",
-            simulation: {
-              kind: "transient_voltage",
-              x_axis: "time_ms",
-              probe_name: "VOUT",
-              dut_spice_node: "OUT",
-            },
-          },
-        ],
-      }),
+      join(oversized_dir, "job.json"),
+      `{"job_id":"oversized-job","padding":"${"x".repeat(2 * 1024 * 1024)}"}`,
     ),
-    Bun.write(join(circuit_dir, "circuit.json"), JSON.stringify(verifiedCircuit("VOUT"))),
+    Bun.write(join(symlinked_dir, "datasheet.pdf"), "%PDF-1.7\nsymlink fixture"),
+    Bun.write(symlink_target, '{"job_id":"symlinked-job","display_status":"queued"}\n'),
+    Bun.write(join(markerless_publication_dir, "datasheet.pdf"), "%PDF-1.7\npublication fixture"),
+    Bun.write(join(markerless_publication_dir, "published-model.json"), "{}\n"),
+    Bun.write(
+      join(mismatched_dir, "job.json"),
+      JSON.stringify({ job_id: "some-other-job", display_status: "queued" }),
+    ),
   ])
+  await symlink(symlink_target, join(symlinked_dir, "job.json"))
 
+  try {
+    const job_store = new JobStore()
+    const failures: Array<{ job_id: string; error_code: string; cause: string }> = []
+    const result = await restorePersistedJobs({
+      jobs_root,
+      job_store,
+      model_run_store: new ModelRunStore(),
+      on_restore_error: (failure) => {
+        failures.push(failure)
+      },
+    })
+    expect(result.jobs_restored).toBe(0)
+    expect(job_store.listJobs()).toHaveLength(0)
+    expect(failures).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          job_id: "mismatched-job",
+          error_code: "job_marker_identity_mismatch",
+        }),
+        expect.objectContaining({ job_id: "malformed-job", error_code: "job_marker_invalid" }),
+        expect.objectContaining({ job_id: "oversized-job", error_code: "job_marker_invalid" }),
+        expect.objectContaining({ job_id: "symlinked-job", error_code: "job_marker_invalid" }),
+        expect.objectContaining({
+          job_id: "markerless-publication",
+          error_code: "job_marker_missing_with_publication",
+        }),
+      ]),
+    )
+    expect(failures).toHaveLength(5)
+    const directoryExists = (path: string) =>
+      stat(path)
+        .then(() => true)
+        .catch(() => false)
+    expect(await directoryExists(tombstone)).toBe(false)
+    expect(await directoryExists(staging_dir)).toBe(false)
+    expect(await directoryExists(partial_dir)).toBe(true)
+    expect(await directoryExists(mismatched_dir)).toBe(true)
+    expect(await directoryExists(malformed_dir)).toBe(true)
+    expect(await directoryExists(oversized_dir)).toBe(true)
+    expect(await directoryExists(symlinked_dir)).toBe(true)
+    expect(await directoryExists(markerless_publication_dir)).toBe(true)
+  } finally {
+    await rm(jobs_root, { recursive: true, force: true })
+  }
+})
+
+test("restore fails loudly when the jobs root cannot be read", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "datasheet-missing-jobs-root-"))
+  try {
+    await expect(
+      restorePersistedJobs({
+        jobs_root: join(parent, "missing"),
+        job_store: new JobStore(),
+        model_run_store: new ModelRunStore(),
+      }),
+    ).rejects.toMatchObject({ code: "ENOENT" })
+  } finally {
+    await rm(parent, { recursive: true, force: true })
+  }
+})
+
+test("one corrupt persisted job cannot prevent a healthy sibling from restoring", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-isolated-restore-"))
+  const healthy_dir = join(jobs_root, "healthy-job")
+  const corrupt_dir = join(jobs_root, "corrupt-job")
+  await Promise.all([mkdir(healthy_dir, { recursive: true }), mkdir(corrupt_dir, { recursive: true })])
+  await Promise.all([
+    Bun.write(join(healthy_dir, "datasheet.pdf"), "%PDF-1.7\nhealthy fixture"),
+    Bun.write(join(corrupt_dir, "datasheet.pdf"), "%PDF-1.7\ncorrupt fixture"),
+  ])
   const original_jobs = new JobStore()
-  original_jobs.createJob({ job_id: "verified_job", job_dir, file_name: "verified.pdf" })
-  original_jobs.updateJob("verified_job", { display_status: "complete", is_complete: true })
-  const original_models = new ModelRunStore()
-  original_models.createModelRun({
-    model_run_id: "verified_model",
-    job_id: "verified_job",
-    model_dir,
-    effort_multiplier: 1,
-    base_effort_ms: 1_000,
+  original_jobs.createJob({
+    job_id: "healthy-job",
+    job_dir: healthy_dir,
+    file_name: "healthy.pdf",
   })
-  const verification = await verifySimulationBenchmark({ model_dir, benchmark_id: "transfer" })
-  await writeSimulationValidationReport(model_dir, [verification])
-  original_models.updateModelRun("verified_model", {
-    status: "complete",
+  original_jobs.updateJob("healthy-job", {
+    display_status: "failed",
     is_complete: true,
-    has_errors: false,
-    completed_at: new Date().toISOString(),
+    has_errors: true,
+    error_message: "healthy saved failure",
   })
+  original_jobs.createJob({
+    job_id: "corrupt-job",
+    job_dir: corrupt_dir,
+    file_name: "corrupt.pdf",
+  })
+  await Bun.write(join(corrupt_dir, "published-model.json"), '{"version":1}\n')
 
-  const restored_jobs = new JobStore()
-  const restored_models = new ModelRunStore()
-  await restorePersistedJobs({ jobs_root, job_store: restored_jobs, model_run_store: restored_models })
-  expect(restored_models.getModelRunForJob("verified_job")?.status).toBe("complete")
+  try {
+    const failures: Array<{ job_id: string; cause: string }> = []
+    const restored_jobs = new JobStore()
+    const result = await restorePersistedJobs({
+      jobs_root,
+      job_store: restored_jobs,
+      model_run_store: new ModelRunStore(),
+      on_restore_error: (failure) => {
+        failures.push(failure)
+      },
+    })
 
-  const preview = await loadModelSelectedPreview({ model_dir, benchmark_id: "transfer" })
-  expect(preview?.circuit_preview?.snapshot_origin).toBe("server_validation")
-  expect(preview?.reference_preview?.result_points).toEqual([
-    { x: 0, y: 0 },
-    { x: 1, y: 1 },
-  ])
-
-  await rm(jobs_root, { recursive: true, force: true })
+    expect(result).toEqual({ jobs_restored: 1, model_runs_restored: 0 })
+    expect(restored_jobs.getJob("healthy-job")?.error_message).toBe("healthy saved failure")
+    expect(restored_jobs.getJob("corrupt-job")).toBeUndefined()
+    expect(failures).toHaveLength(1)
+    expect(failures[0]?.job_id).toBe("corrupt-job")
+    expect(failures[0]?.cause).toContain("published-model.json")
+    expect(await Bun.file(join(corrupt_dir, "published-model.json")).exists()).toBe(true)
+  } finally {
+    await rm(jobs_root, { recursive: true, force: true })
+  }
 })

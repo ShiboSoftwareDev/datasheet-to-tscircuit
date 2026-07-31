@@ -1,5 +1,6 @@
 import { extname } from "node:path"
-import { resolveBenchmarkReferenceImage } from "../model-artifact-monitor/resolve-benchmark-reference-image"
+import { resolveBenchmarkReferenceImage } from "../modeling/reference-image"
+import { acceptedPublicationErrorResponse } from "./accepted-publication-error"
 import type { ModelRunApiContext } from "./model-run-api-context"
 import { errorResponse, getJobId } from "./model-run-api-responses"
 
@@ -39,7 +40,16 @@ export async function getBenchmarkReferenceImage(
     })
   }
 
-  const image = await resolveBenchmarkReferenceImage({ model_dir, benchmark_id })
+  let image: Awaited<ReturnType<typeof resolveBenchmarkReferenceImage>>
+  try {
+    image = await resolveBenchmarkReferenceImage({ job_id, model_dir, benchmark_id })
+  } catch (error) {
+    return acceptedPublicationErrorResponse({
+      job_id,
+      operation: "load_reference_image",
+      error,
+    })
+  }
   if (!image) {
     return errorResponse({
       error_code: "reference_image_not_found",
@@ -48,10 +58,11 @@ export async function getBenchmarkReferenceImage(
     })
   }
 
-  return new Response(Bun.file(image.file_path), {
+  const body = "bytes" in image ? image.bytes : Bun.file(image.file_path)
+  return new Response(body, {
     headers: {
       "Cache-Control": "no-store",
-      "Content-Disposition": `inline; filename="${benchmark_id}-datasheet-reference${extname(image.file_path).toLowerCase()}"`,
+      "Content-Disposition": `inline; filename="${benchmark_id}-datasheet-reference${extname(image.file_name).toLowerCase()}"`,
       "Content-Type": image.content_type,
     },
   })

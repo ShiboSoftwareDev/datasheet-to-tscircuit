@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createJobApiHandler } from "@/server/job-api"
-import { runJob } from "@/server/job-runner"
-import { runStructuredAgentPhase } from "@/server/job-runner/run-structured-agent-phase"
+import { runJob } from "@/server/component-workflow"
+import type { ProcessRunRequest, ProcessRunner } from "@/server/infrastructure/process"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
+import type { Job } from "@/shared/job-types"
 
 test("job create accepts a PDF and starts the injected background runner", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-"))
@@ -40,11 +41,105 @@ test("job create accepts a PDF and starts the injected background runner", async
   expect(started_use_openai).toBe(false)
   expect(await Bun.file(join(jobs_root, body.job.job_id, "datasheet.pdf")).exists()).toBe(true)
   expect((await Bun.file(join(jobs_root, body.job.job_id, "job.json")).json()).use_openai).toBe(false)
-  expect(await Bun.file(join(jobs_root, body.job.job_id, "AGENTS.md")).text()).toContain(
-    "typical-application-plan.json",
-  )
+  expect(await Bun.file(join(jobs_root, body.job.job_id, "AGENTS.md")).exists()).toBe(false)
 
   await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("component download reports a corrupt accepted publication", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-file-corrupt-publication-"))
+  const job_id = "job_corrupt_publication"
+  const job_dir = join(jobs_root, job_id)
+  await mkdir(job_dir, { recursive: true })
+  await Bun.write(join(job_dir, "published-model.json"), '{"version":1}\n')
+  const job_store = new JobStore()
+  job_store.createJob({ job_id, job_dir, file_name: "sensor.pdf" })
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+  })
+
+  const response = await handle(new Request(`http://localhost/api/job/file?job_id=${job_id}&file=component`))
+  expect(response?.status).toBe(500)
+  expect(await response?.json()).toMatchObject({
+    error: {
+      error_code: "accepted_publication_invalid",
+      message:
+        "The accepted component publication failed its integrity checks. Inspect the server diagnostic for this job.",
+    },
+  })
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("job creation removes a published workspace when durable registration fails", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-create-rollback-"))
+  const job_store = new JobStore({
+    checkpoint_writer() {
+      throw new Error("checkpoint fixture failed")
+    },
+  })
+  let started = false
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_job: async () => {
+      started = true
+    },
+  })
+  const form = new FormData()
+  form.set("datasheet", new File(["%PDF-1.7\nfixture"], "sensor.pdf", { type: "application/pdf" }))
+
+  const response = await handle(
+    new Request("http://localhost/api/job/create", { method: "POST", body: form }),
+  )
+  const body = (await response?.json()) as { error: { error_code: string; message: string } }
+
+  expect(response?.status).toBe(500)
+  expect(body.error.error_code).toBe("job_create_failed")
+  expect(body.error.message).toContain("checkpoint fixture failed")
+  expect(job_store.listJobs()).toHaveLength(0)
+  expect(await readdir(jobs_root)).toEqual([])
+  expect(started).toBe(false)
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("job creation reports private-workspace setup failures without exposing a task", async () => {
+  const fixture_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-create-filesystem-"))
+  const jobs_root = join(fixture_root, "jobs-root-is-a-file")
+  await Bun.write(jobs_root, "fixture")
+  const job_store = new JobStore()
+  let started = false
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_job: async () => {
+      started = true
+    },
+  })
+  const form = new FormData()
+  form.set("datasheet", new File(["%PDF-1.7\nfixture"], "sensor.pdf", { type: "application/pdf" }))
+
+  const response = await handle(
+    new Request("http://localhost/api/job/create", { method: "POST", body: form }),
+  )
+  const body = (await response?.json()) as { error: { error_code: string; message: string } }
+
+  expect(response?.status).toBe(500)
+  expect(body.error.error_code).toBe("job_create_failed")
+  expect(body.error.message).toContain("creating the private workspace")
+  expect(job_store.listJobs()).toHaveLength(0)
+  expect(started).toBe(false)
+  expect(await Bun.file(jobs_root).text()).toBe("fixture")
+
+  await rm(fixture_root, { recursive: true, force: true })
 })
 
 test("an unauthenticated OpenAI request returns the login instruction without creating a job", async () => {
@@ -78,82 +173,39 @@ test("an unauthenticated OpenAI request returns the login instruction without cr
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("structured agent commands add --use-openai only when selected", async () => {
-  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-agent-command-"))
-  const agent_bin = join(job_dir, "capture-agent")
-  await Bun.write(
-    agent_bin,
-    `#!/usr/bin/env bun
-const args = process.argv.slice(2)
-const dir = args[args.indexOf("--dir") + 1]
-await Bun.write(dir + "/args-" + (args.includes("--use-openai") ? "openai" : "default") + ".json", JSON.stringify(args))
-console.log(JSON.stringify({ protocol: "tsci-agent-event-v1", sequence: 1, type: "agent_end", failed: false }))
-`,
-  )
-  await chmod(agent_bin, 0o755)
+test("OpenAI authentication uses the supervised command runner with tight output and time limits", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-openai-auth-runner-"))
   const job_store = new JobStore()
-  const run = (use_openai: boolean) =>
-    runStructuredAgentPhase({
-      context: { job_store, agent_bin, tsci_bin: "unused-tsci", use_openai },
-      prompt: "fixture",
-      cwd: job_dir,
-      signal: new AbortController().signal,
-      append: async () => undefined,
-    })
-
-  await run(false)
-  await run(true)
-
-  const default_args = await Bun.file(join(job_dir, "args-default.json")).json()
-  const openai_args = await Bun.file(join(job_dir, "args-openai.json")).json()
-  expect(default_args).not.toContain("--use-openai")
-  expect(openai_args).toContain("--use-openai")
-
-  await rm(job_dir, { recursive: true, force: true })
-})
-
-test("structured agent phases recover transient transport failures without consuming the phase", async () => {
-  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-agent-transport-recovery-"))
-  const agent_bin = join(job_dir, "flaky-transport-agent")
-  await Bun.write(
-    agent_bin,
-    `#!/usr/bin/env bun
-const args = process.argv.slice(2)
-const dir = args[args.indexOf("--dir") + 1]
-const attemptPath = dir + "/transport-attempts"
-const attempt = Number(await Bun.file(attemptPath).text().catch(() => "0")) + 1
-await Bun.write(attemptPath, String(attempt))
-if (attempt < 3) {
-  console.error("error: Was there a typo in the url or port?")
-  process.exit(1)
-}
-console.log(JSON.stringify({ protocol: "tsci-agent-event-v1", sequence: 1, type: "agent_end", failed: false }))
-`,
-  )
-  await chmod(agent_bin, 0o755)
-  const messages: string[] = []
-  const events = await runStructuredAgentPhase({
-    context: {
-      job_store: new JobStore(),
-      agent_bin,
-      tsci_bin: "unused-tsci",
-      agent_transport_retry_limit: 3,
-      agent_transport_retry_base_delay_ms: 1,
+  let auth_request: ProcessRunRequest | undefined
+  const process_runner: ProcessRunner = {
+    async run(request) {
+      auth_request = request
+      await request.on_output?.("stdout", "OpenAI credentials are stored.\n")
+      return { exit_code: 0, duration_ms: 1, output_tail: "OpenAI credentials are stored.\n" }
     },
-    prompt: "fixture",
-    cwd: job_dir,
-    signal: new AbortController().signal,
-    append: async (_stream, message) => {
-      messages.push(message)
-    },
+  }
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "fixture-agent",
+    tsci_bin: "unused-tsci",
+    process_runner,
+    run_job: async () => undefined,
   })
+  const form = new FormData()
+  form.set("datasheet", new File(["%PDF-1.7\nfixture"], "sensor.pdf", { type: "application/pdf" }))
+  form.set("use_openai", "true")
 
-  expect(events.at(-1)).toMatchObject({ type: "agent_end", failed: false })
-  expect(await Bun.file(join(job_dir, "transport-attempts")).text()).toBe("3")
-  expect(messages.filter((message) => message.includes("Agent transport was unavailable"))).toHaveLength(2)
-  expect(messages.join("\n")).toContain("retrying the same phase")
+  const response = await handle(
+    new Request("http://localhost/api/job/create", { method: "POST", body: form }),
+  )
 
-  await rm(job_dir, { recursive: true, force: true })
+  expect(response?.status).toBe(202)
+  expect(auth_request?.command).toEqual(["fixture-agent", "auth", "status", "--openai"])
+  expect(auth_request?.idle_timeout_ms).toBe(2_000)
+  expect(auth_request?.wall_timeout_ms).toBe(5_000)
+  expect(auth_request?.max_output_chars).toBe(16_000)
+  await rm(jobs_root, { recursive: true, force: true })
 })
 
 test("an unexpected background runner rejection is contained as a failed job", async () => {
@@ -187,10 +239,82 @@ test("an unexpected background runner rejection is contained as a failed job", a
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("job create can launch component and untimed SPICE setup together", async () => {
+test("an unexpected runner failure never promotes evidence or an intermediate preview", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-runner-intermediate-"))
+  const job_store = new JobStore()
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_job: async ({ job_id }, context) => {
+      context.job_store.updateJob(job_id, {
+        evidence_available: true,
+        component_code: "export default () => <chip />",
+        circuit_json: [{ type: "source_component", source_component_id: "candidate" }] as Job["circuit_json"],
+      })
+      throw new Error("runner failed before the component commit")
+    },
+  })
+  const form = new FormData()
+  form.set("datasheet", new File(["%PDF-1.7\nfixture"], "sensor.pdf", { type: "application/pdf" }))
+
+  const response = await handle(
+    new Request("http://localhost/api/job/create", { method: "POST", body: form }),
+  )
+  const body = (await response?.json()) as { job: { job_id: string } }
+  await Bun.sleep(10)
+  const job = job_store.getJob(body.job.job_id)
+
+  expect(job?.display_status).toBe("failed")
+  expect(job?.has_errors).toBe(true)
+  expect(job?.error_message).toBe("runner failed before the component commit")
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("an unexpected runner failure preserves only an explicitly committed component milestone", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-runner-committed-"))
+  const job_store = new JobStore()
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_job: async ({ job_id }, context) => {
+      context.job_store.updateJob(job_id, {
+        component_ready: true,
+        component_code: "export default () => <chip />",
+        circuit_json: [{ type: "source_component", source_component_id: "accepted" }] as Job["circuit_json"],
+      })
+      throw new Error("runner failed after the component commit")
+    },
+  })
+  const form = new FormData()
+  form.set("datasheet", new File(["%PDF-1.7\nfixture"], "sensor.pdf", { type: "application/pdf" }))
+
+  const response = await handle(
+    new Request("http://localhost/api/job/create", { method: "POST", body: form }),
+  )
+  const body = (await response?.json()) as { job: { job_id: string } }
+  await Bun.sleep(10)
+  const job = job_store.getJob(body.job.job_id)
+
+  expect(job?.display_status).toBe("complete")
+  expect(job?.has_errors).toBe(false)
+  expect(job?.warnings?.some((warning) => warning.includes("runner failed after"))).toBe(true)
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("job create launches component and SPICE work even when model lifecycle logging fails", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-model-"))
   const job_store = new JobStore()
-  const model_run_store = new ModelRunStore()
+  const model_run_store = new ModelRunStore({
+    log_writer: async () => {
+      throw new Error("fixture model log observer failed")
+    },
+  })
   let component_job_id: string | undefined
   let model_run_id: string | undefined
   const handle = createJobApiHandler({
@@ -199,7 +323,6 @@ test("job create can launch component and untimed SPICE setup together", async (
     model_run_store,
     agent_bin: "unused-agent",
     tsci_bin: "unused-tsci",
-    model_base_effort_ms: 2_000,
     run_job: async (input) => {
       component_job_id = input.job_id
     },
@@ -217,15 +340,83 @@ test("job create can launch component and untimed SPICE setup together", async (
   )
   const body = (await response?.json()) as {
     job: { job_id: string }
-    model_run: { model_run_id: string; allocated_time_ms: number; elapsed_time_ms: number }
+    model_run: { model_run_id: string; effort_multiplier: number; elapsed_time_ms: number }
   }
 
   expect(response?.status).toBe(202)
   expect(component_job_id).toBe(body.job.job_id)
   expect(model_run_id).toBe(body.model_run.model_run_id)
-  expect(body.model_run.allocated_time_ms).toBe(8_000)
+  expect(body.model_run.effort_multiplier).toBe(4)
   expect(body.model_run.elapsed_time_ms).toBe(0)
 
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("job list responses and events include component and compact model-run state", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-summaries-"))
+  const job_dir = join(jobs_root, "job_summary")
+  const model_dir = join(job_dir, "spice")
+  await mkdir(model_dir, { recursive: true })
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  job_store.createJob({ job_id: "job_summary", job_dir, file_name: "sensor.pdf" })
+  job_store.updateJob("job_summary", { component_ready: true })
+  model_run_store.createModelRun({
+    model_run_id: "model_summary",
+    job_id: "job_summary",
+    model_dir,
+    effort_multiplier: 1,
+  })
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    model_run_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+  })
+
+  const list_response = await handle(new Request("http://localhost/api/jobs"))
+  const list_body = (await list_response?.json()) as {
+    jobs: Array<{
+      component_ready?: boolean
+      model_run?: { status: string; has_model: boolean; model_source?: string }
+    }>
+  }
+  expect(list_body.jobs[0]).toMatchObject({
+    component_ready: true,
+    model_run: { status: "queued", has_model: false },
+  })
+  expect(list_body.jobs[0]?.model_run).not.toHaveProperty("model_source")
+
+  const events_response = await handle(new Request("http://localhost/api/jobs/events"))
+  const reader = events_response?.body?.getReader()
+  if (!reader) throw new Error("Expected a job-list event stream")
+  const initial_chunk = await reader.read()
+  const initial_event = JSON.parse(new TextDecoder().decode(initial_chunk.value).replace(/^data: /, "")) as {
+    event_type: string
+    jobs: Array<{ model_run?: { status: string } }>
+  }
+  expect(initial_event).toMatchObject({
+    event_type: "jobs_snapshot",
+    jobs: [{ component_ready: true, model_run: { status: "queued", has_model: false } }],
+  })
+
+  model_run_store.updateModelRun("model_summary", {
+    status: "complete",
+    is_complete: true,
+    has_errors: false,
+    model_source: ".SUBCKT SUMMARY IN OUT\n.ENDS SUMMARY\n",
+  })
+  const updated_chunk = await reader.read()
+  const updated_event = JSON.parse(new TextDecoder().decode(updated_chunk.value).replace(/^data: /, "")) as {
+    event_type: string
+    job: { model_run?: { status: string; has_model: boolean } }
+  }
+  expect(updated_event).toMatchObject({
+    event_type: "job_updated",
+    job: { component_ready: true, model_run: { status: "complete", has_model: true } },
+  })
+  await reader.cancel()
   await rm(jobs_root, { recursive: true, force: true })
 })
 
@@ -287,7 +478,7 @@ test("multiple uploads start independently and appear in the jobs list", async (
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("retained evidence and structured diagnostics are downloadable", async () => {
+test("retained evidence is downloadable", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-evidence-files-"))
   const job_dir = join(jobs_root, "evidence_job")
   await mkdir(join(job_dir, "visual-reference", "pages"), { recursive: true })
@@ -312,7 +503,6 @@ test("retained evidence and structured diagnostics are downloadable", async () =
     Bun.write(join(job_dir, "visual-reference", "typical-application.png"), "application fixture"),
     Bun.write(join(job_dir, "visual-reference", "pages", "page-004.png"), "pinout fixture"),
     Bun.write(join(job_dir, "visual-reference", "pages", "page-007.png"), "other fixture"),
-    Bun.write(join(job_dir, "agent-events.jsonl"), '{"event":{"type":"agent_end"}}\n'),
   ])
   const job_store = new JobStore()
   job_store.createJob({ job_id: "evidence_job", job_dir, file_name: "device.pdf" })
@@ -336,7 +526,6 @@ test("retained evidence and structured diagnostics are downloadable", async () =
     ["land_pattern", "png fixture"],
     ["component_schematic_reference", "pinout fixture"],
     ["application_reference", "application fixture"],
-    ["events", "agent_end"],
   ] as const) {
     const response = await handle(
       new Request(`http://localhost/api/job/file?job_id=evidence_job&file=${file}`),
@@ -412,6 +601,101 @@ test("a stopped task can be retried with its original PDF and instructions, then
   expect(delete_response?.status).toBe(204)
   expect(job_store.getJob(retry_body.job.job_id)).toBeUndefined()
   expect(await Bun.file(retried_pdf).exists()).toBe(false)
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("a source that starts deleting during retry setup cannot publish or launch the retry", async () => {
+  class DeletingDuringRetryStore extends JobStore {
+    private retry_source_reads = 0
+
+    override getJobRetrySource(job_id: string) {
+      const source = super.getJobRetrySource(job_id)
+      this.retry_source_reads += 1
+      if (this.retry_source_reads === 2) this.acquireJobDeletionLease(job_id)
+      return source
+    }
+  }
+
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-retry-delete-race-"))
+  const source_dir = join(jobs_root, "failed_source")
+  await mkdir(source_dir, { recursive: true })
+  await Bun.write(join(source_dir, "datasheet.pdf"), "%PDF-1.7\nfailed fixture")
+  const job_store = new DeletingDuringRetryStore()
+  job_store.createJob({
+    job_id: "failed_source",
+    job_dir: source_dir,
+    file_name: "sensor.pdf",
+    use_openai: false,
+  })
+  job_store.updateJob("failed_source", {
+    display_status: "failed",
+    is_complete: true,
+    has_errors: true,
+  })
+  let started = false
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_job: async () => {
+      started = true
+    },
+  })
+
+  const response = await handle(
+    new Request("http://localhost/api/job/retry?job_id=failed_source", { method: "POST" }),
+  )
+  const body = (await response?.json()) as { error: { error_code: string } }
+
+  expect(response?.status).toBe(409)
+  expect(body.error.error_code).toBe("job_deleting")
+  expect(job_store.listJobs()).toHaveLength(1)
+  expect(await readdir(jobs_root)).toEqual(["failed_source"])
+  expect(started).toBe(false)
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("retry setup failures remove their private workspace and never register a task", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-retry-rollback-"))
+  const source_dir = join(jobs_root, "failed_source")
+  await mkdir(source_dir, { recursive: true })
+  const job_store = new JobStore()
+  job_store.createJob({
+    job_id: "failed_source",
+    job_dir: source_dir,
+    file_name: "sensor.pdf",
+    use_openai: false,
+  })
+  job_store.updateJob("failed_source", {
+    display_status: "failed",
+    is_complete: true,
+    has_errors: true,
+  })
+  let started = false
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_job: async () => {
+      started = true
+    },
+  })
+
+  const response = await handle(
+    new Request("http://localhost/api/job/retry?job_id=failed_source", { method: "POST" }),
+  )
+  const body = (await response?.json()) as { error: { error_code: string; message: string } }
+
+  expect(response?.status).toBe(500)
+  expect(body.error.error_code).toBe("job_retry_failed")
+  expect(body.error.message).toContain("datasheet.pdf")
+  expect(job_store.listJobs()).toHaveLength(1)
+  expect(await readdir(jobs_root)).toEqual(["failed_source"])
+  expect(started).toBe(false)
 
   await rm(jobs_root, { recursive: true, force: true })
 })
@@ -561,5 +845,41 @@ await Bun.sleep(30_000)
   expect(job_store.getJob("job_active")).toBeUndefined()
   expect(await Bun.file(agent_path).exists()).toBe(false)
 
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("a failed pre-tombstone delete releases its private deletion lease", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-delete-lease-failure-"))
+  const job_dir = join(jobs_root, "job_delete_failure")
+  const job_store = new JobStore()
+  job_store.createJob({
+    job_id: "job_delete_failure",
+    job_dir,
+    file_name: "sensor.pdf",
+  })
+  job_store.updateJob("job_delete_failure", {
+    display_status: "complete",
+    is_complete: true,
+  })
+  await rm(job_dir, { recursive: true, force: true })
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+  })
+
+  const response = await handle(
+    new Request("http://localhost/api/job/delete?job_id=job_delete_failure", { method: "DELETE" }),
+  )
+
+  expect(response?.status).toBe(500)
+  expect(job_store.getJob("job_delete_failure")).toBeDefined()
+  expect(job_store.isJobDeleting("job_delete_failure")).toBe(false)
+  const reacquired = job_store.acquireJobDeletionLease("job_delete_failure")
+  expect(reacquired.status).toBe("acquired")
+  if (reacquired.status === "acquired") {
+    expect(job_store.releaseJobDeletionLease(reacquired.lease)).toBe(true)
+  }
   await rm(jobs_root, { recursive: true, force: true })
 })

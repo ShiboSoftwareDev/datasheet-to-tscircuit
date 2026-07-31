@@ -1,7 +1,7 @@
 import type { AnyCircuitElement } from "circuit-json"
 import { normalizeElectricalPinLabel } from "../pin-label-normalization"
-import { CircuitRecord, asRecord, asStringArray } from "./footprint-plan-validation"
-import { ApplicationConnectivityPlan } from "./application-source-validation"
+import type { ApplicationConnectivityPlan } from "./application-source-validation"
+import { asRecord, asStringArray, type CircuitRecord } from "./footprint-plan-validation"
 
 interface ResolvedPort {
   id: string
@@ -30,7 +30,7 @@ function resolveExpectedPort(input: {
   const matches = (ports_by_component_id.get(component.source_component_id) ?? []).filter((port) => {
     const aliases = new Set<string>()
     if (typeof port.name === "string") aliases.add(port.name)
-    if (typeof port.pin_number === "number") {
+    if (typeof port.pin_number === "number" || typeof port.pin_number === "string") {
       aliases.add(String(port.pin_number))
       aliases.add(`pin${port.pin_number}`)
     }
@@ -81,11 +81,29 @@ export function getTypicalApplicationConnectivityErrors(
   const source_components = records.filter((element) => element.type === "source_component")
   const source_ports = records.filter((element) => element.type === "source_port")
   const components_by_name = new Map<string, CircuitRecord>()
+  const expected_component_names = new Set(
+    plan.components.map((component) => component.reference.trim().toLowerCase()),
+  )
   for (const component of source_components) {
-    if (typeof component.name === "string") components_by_name.set(component.name.toLowerCase(), component)
+    const name = typeof component.name === "string" ? component.name.trim().toLowerCase() : ""
+    if (!name) {
+      errors.push(
+        `Unexpected unnamed application component ${String(component.source_component_id ?? "without an id")}`,
+      )
+      continue
+    }
+    if (!expected_component_names.has(name)) {
+      errors.push(`Unexpected application component ${String(component.name)}`)
+      continue
+    }
+    if (components_by_name.has(name)) {
+      errors.push(`Application component ${String(component.name)} is instantiated more than once`)
+      continue
+    }
+    components_by_name.set(name, component)
   }
   for (const expected_component of plan.components) {
-    if (!components_by_name.has(expected_component.reference.toLowerCase())) {
+    if (!components_by_name.has(expected_component.reference.trim().toLowerCase())) {
       errors.push(`Expected application component ${expected_component.reference} is missing`)
     }
   }

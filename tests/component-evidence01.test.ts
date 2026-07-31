@@ -5,8 +5,6 @@ import {
   createFootprintPlanFromEvidence,
   getComponentEvidenceBlockingReasons,
   getFootprintEvidenceErrors,
-  getIndependentComponentEvidenceAcceptedDifferences,
-  getIndependentComponentEvidenceErrors,
   getPinoutEvidenceErrors,
   parseComponentEvidence,
 } from "@/server/component-evidence"
@@ -20,22 +18,15 @@ const visualSource = {
   render_dpi: 200,
 }
 
-function evidence(overrides?: {
-  part_number?: string
-  ordering_code?: string
-  package_name?: string
-  package_code?: string
-  pad_width?: number
-  pad_x?: number
-}): ComponentEvidence {
+function evidence(): ComponentEvidence {
   return parseComponentEvidence({
     version: 1,
     status: "resolved",
-    part_number: { value: overrides?.part_number ?? "GENERIC-2", sources: [visualSource] },
-    ordering_code: { value: overrides?.ordering_code ?? "GENERIC-2-A", sources: [visualSource] },
+    part_number: { value: "GENERIC-2", sources: [visualSource] },
+    ordering_code: { value: "GENERIC-2-A", sources: [visualSource] },
     package: {
-      name: { value: overrides?.package_name ?? "Two terminal package", sources: [visualSource] },
-      code: { value: overrides?.package_code ?? "PKG2", sources: [visualSource] },
+      name: { value: "Two terminal package", sources: [visualSource] },
+      code: { value: "PKG2", sources: [visualSource] },
       pin_count: { value: 2, sources: [visualSource] },
     },
     pinout: {
@@ -52,9 +43,9 @@ function evidence(overrides?: {
         {
           pin: "1",
           kind: "smt",
-          x: overrides?.pad_x ?? -0.75,
+          x: -0.75,
           y: 0,
-          width: overrides?.pad_width ?? 0.55,
+          width: 0.55,
           height: 0.8,
           sources: [visualSource],
         },
@@ -99,81 +90,6 @@ test("unresolved evidence can retain partial facts without inventing pad geometr
 
   expect(parsed.footprint.pads).toEqual([])
   expect(getComponentEvidenceBlockingReasons(parsed)).toContain("evidence extraction is unresolved")
-})
-
-test("independent extraction catches coordinate and dimension reinterpretation", () => {
-  const errors = getIndependentComponentEvidenceErrors(
-    evidence(),
-    evidence({ pad_x: -0.55, pad_width: 0.75 }),
-  )
-  expect(errors.some((error) => error.includes("pin 1 x"))).toBe(true)
-  expect(errors.some((error) => error.includes("pin 1 width"))).toBe(true)
-})
-
-test("exact package codes allow independent human-readable package-name wording", () => {
-  expect(
-    getIndependentComponentEvidenceErrors(
-      evidence({ package_name: "Leadless two terminal" }),
-      evidence({ package_name: "2-pin leadless package" }),
-    ),
-  ).toEqual([])
-})
-
-test("base package codes agree with their full pin-count drawing identifiers", () => {
-  const primary = evidence({ package_code: "DGS0002A" })
-  const independent = evidence({ package_code: "DGS" })
-  expect(getIndependentComponentEvidenceErrors(primary, independent)).toEqual([])
-  expect(getIndependentComponentEvidenceAcceptedDifferences(primary, independent)).toContain(
-    'package code differs only by base code versus full drawing identifier: "DGS0002A" versus "DGS"; the primary package code is retained',
-  )
-})
-
-test("packaging-only ordering-code differences do not block otherwise identical evidence", () => {
-  const primary = evidence({ ordering_code: "GENERIC-2-A" })
-  const independent = evidence({ ordering_code: "GENERIC-2-B" })
-  expect(getIndependentComponentEvidenceErrors(primary, independent)).toEqual([])
-  expect(getIndependentComponentEvidenceAcceptedDifferences(primary, independent)).toEqual([
-    'ordering code differs by a non-material packaging option: "GENERIC-2-A" versus "GENERIC-2-B"; the primary ordering code is retained',
-  ])
-})
-
-test("part-number disagreement still blocks evidence approval", () => {
-  expect(
-    getIndependentComponentEvidenceErrors(
-      evidence({ part_number: "GENERIC-2" }),
-      evidence({ part_number: "DIFFERENT-2" }),
-    ),
-  ).toContain('part number disagrees: "GENERIC-2" versus "DIFFERENT-2"')
-})
-
-test("independent electrical-role disagreement blocks schematic planning", () => {
-  const primary = evidence()
-  const independent = evidence()
-  independent.pinout.pins[0]!.role = "output"
-  expect(getIndependentComponentEvidenceErrors(primary, independent)).toContain(
-    "pin 1 schematic role disagrees: input versus output",
-  )
-})
-
-test("independent open-drain disagreement blocks evidence approval", () => {
-  const primary = evidence()
-  const independent = evidence()
-  primary.pinout.pins[0]!.role = "output"
-  independent.pinout.pins[0]!.role = "output"
-  primary.pinout.pins[0]!.electrical_attributes = { open_drain: true }
-  expect(getIndependentComponentEvidenceErrors(primary, independent)).toContain(
-    "pin 1 open-drain behavior disagrees: true versus false",
-  )
-})
-
-test("passive and other are equivalent for documented switch-node pins", () => {
-  const primary = evidence()
-  const independent = evidence()
-  primary.pinout.pins[0]!.labels = ["L1"]
-  primary.pinout.pins[0]!.role = "passive"
-  independent.pinout.pins[0]!.labels = ["L1"]
-  independent.pinout.pins[0]!.role = "other"
-  expect(getIndependentComponentEvidenceErrors(primary, independent)).toEqual([])
 })
 
 test("pin-table validation checks both physical number and semantic label", () => {

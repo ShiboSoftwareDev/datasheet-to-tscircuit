@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Turn component datasheets into previewable tscircuit TSX with tsci-agent",
+  "description": "Turn component datasheets into validated tscircuit components and SPICE models",
   "scripts": {
     "dev": "concurrently -k -n api,web -c blue,green \"bun --watch src/server/index.ts\" \"vite\"",
     "dev:server": "bun --watch src/server/index.ts",
@@ -24,9 +24,7 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.10",
     "@resvg/resvg-js": "^2.6.2",
-    "@silvia-odwyer/photon-node": "0.3.4",
     "@tscircuit/ngspice-spice-engine": "^0.0.19",
-    "sharp": "0.32.6",
     "tsci-agent": "0.1.11",
     "tscircuit": "0.0.2110",
     "typescript": "^5.9.3"

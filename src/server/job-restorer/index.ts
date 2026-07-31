@@ -1,2 +1,2 @@
 export { readPersistedLogs } from "./read-persisted-logs"
-export { restorePersistedJobs } from "./restore-persisted-jobs"
+export { restorePersistedJobs, type PersistedJobRestoreFailure } from "./restore-persisted-jobs"

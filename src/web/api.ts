@@ -99,7 +99,6 @@ export type JobFileKind =
   | "land_pattern"
   | "component_schematic_reference"
   | "application_reference"
-  | "events"
 
 export function getJobFileUrl(job_id: string, file: JobFileKind, display?: "inline"): string {
   const inline_query = display === "inline" ? "&display=inline" : ""
@@ -171,7 +170,15 @@ export function getModelReferenceImageUrl(job_id: string, benchmark_id: string):
   return `/api/model-run/reference-image?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}`
 }
 
-export type ModelRunFileKind = "model" | "manifest" | "report" | "model_card" | "component" | "log"
+export type ModelRunFileKind =
+  | "model"
+  | "manifest"
+  | "report"
+  | "contract"
+  | "plan"
+  | "model_card"
+  | "component"
+  | "log"
 
 export function getModelRunFileUrl(job_id: string, file: ModelRunFileKind): string {
   return `/api/model-run/file?job_id=${encodeURIComponent(job_id)}&file=${file}`

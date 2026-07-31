@@ -1,4 +1,4 @@
-import { runJob } from "../job-runner"
+import { runJob } from "../component-workflow"
 import type { JobStore } from "../job-store"
 import { JobApiContext } from "./job-api-context"
 
@@ -15,12 +15,12 @@ async function recordUnexpectedRunnerFailure(
     const job = job_store.getJob(job_id)
     if (!job || job.is_complete) return
     const detail = error instanceof Error ? error.message : String(error)
+    // Evidence and intermediate build previews are intentionally exposed while
+    // the pipeline runs, but neither proves that a component passed its commit
+    // barrier. Only the explicit component milestone can be recovered as a
+    // usable result after an unexpected background-runner failure.
     const has_publishable_output = Boolean(
-      job.evidence_available ||
-        job.component_code ||
-        job.circuit_json ||
-        job.typical_application_code ||
-        job.typical_application_circuit_json,
+      job.component_ready && job.component_code?.trim() && job.circuit_json?.length,
     )
     await job_store
       .appendLog(job_id, {

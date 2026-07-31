@@ -1,6 +1,12 @@
 import { launchModelRun } from "./launch-model-run"
 import type { ModelRunApiContext } from "./model-run-api-context"
-import { errorResponse, getJobId, jsonResponse, readEffort } from "./model-run-api-responses"
+import {
+  errorResponse,
+  getJobId,
+  jobDeletingResponse,
+  jsonResponse,
+  readEffort,
+} from "./model-run-api-responses"
 
 export async function createModelRun(request: Request, context: ModelRunApiContext): Promise<Response> {
   const request_url = new URL(request.url)
@@ -8,6 +14,22 @@ export async function createModelRun(request: Request, context: ModelRunApiConte
   if (!job_id) {
     return errorResponse({ error_code: "job_id_required", message: "job_id is required.", status: 400 })
   }
+  if (!context.job_store.getJob(job_id) || !context.job_store.getJobDir(job_id)) {
+    return errorResponse({
+      error_code: "job_not_found",
+      message: `No job exists for ${job_id}.`,
+      status: 404,
+    })
+  }
+  if (context.job_store.isJobDeleting(job_id)) return jobDeletingResponse()
+  if (context.model_run_store.getModelRunForJob(job_id)) {
+    return errorResponse({
+      error_code: "model_run_exists",
+      message: "This job already has a SPICE model run.",
+      status: 409,
+    })
+  }
+  const effort_multiplier = await readEffort(request, "effort_multiplier")
   const job = context.job_store.getJob(job_id)
   const job_dir = context.job_store.getJobDir(job_id)
   if (!job || !job_dir) {
@@ -17,19 +39,19 @@ export async function createModelRun(request: Request, context: ModelRunApiConte
       status: 404,
     })
   }
-  if (context.model_run_store.getModelRunForJob(job_id)) {
-    return errorResponse({
-      error_code: "model_run_exists",
-      message: "This job already has a SPICE model run.",
-      status: 409,
-    })
-  }
-  const effort_multiplier = await readEffort(request, "effort_multiplier")
+  if (context.job_store.isJobDeleting(job_id)) return jobDeletingResponse()
   if (!effort_multiplier) {
     return errorResponse({
       error_code: "invalid_effort",
       message: "effort_multiplier must be an integer from 1 through 8.",
       status: 400,
+    })
+  }
+  if (context.model_run_store.getModelRunForJob(job_id)) {
+    return errorResponse({
+      error_code: "model_run_exists",
+      message: "This job already has a SPICE model run.",
+      status: 409,
     })
   }
   const requested_provider = request_url.searchParams.get("use_openai")
@@ -43,6 +65,21 @@ export async function createModelRun(request: Request, context: ModelRunApiConte
   if (job.use_openai === undefined) {
     context.job_store.updateJob(job_id, { use_openai })
   }
-  const model_run = await launchModelRun({ job_id, job_dir, effort_multiplier }, { ...context, use_openai })
-  return jsonResponse({ model_run }, 202)
+  const launch = await launchModelRun({ job_id, job_dir, effort_multiplier }, { ...context, use_openai })
+  if (launch.status === "job_deleting") return jobDeletingResponse()
+  if (launch.status === "job_not_found") {
+    return errorResponse({
+      error_code: "job_not_found",
+      message: `No job exists for ${job_id}.`,
+      status: 404,
+    })
+  }
+  if (launch.status === "already_exists") {
+    return errorResponse({
+      error_code: "model_run_exists",
+      message: "This job already has a SPICE model run.",
+      status: 409,
+    })
+  }
+  return jsonResponse({ model_run: launch.model_run }, 202)
 }

@@ -1,4 +1,5 @@
-import { loadModelSelectedPreview } from "../model-artifact-monitor"
+import { loadStoredModelPreview } from "../modeling"
+import { acceptedPublicationErrorResponse } from "./accepted-publication-error"
 import { ModelRunApiContext } from "./model-run-api-context"
 import { errorResponse, getJobId, jsonResponse } from "./model-run-api-responses"
 
@@ -24,10 +25,16 @@ export async function getSelectedPreview(request_url: URL, context: ModelRunApiC
       status: 404,
     })
   }
-  const preview = await loadModelSelectedPreview({
-    model_dir,
-    benchmark_id,
-  })
+  let preview: Awaited<ReturnType<typeof loadStoredModelPreview>>
+  try {
+    preview = await loadStoredModelPreview({ job_id, model_dir, case_id: benchmark_id })
+  } catch (error) {
+    return acceptedPublicationErrorResponse({
+      job_id,
+      operation: "load_preview",
+      error,
+    })
+  }
   return preview
     ? jsonResponse(preview)
     : errorResponse({

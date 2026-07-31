@@ -1,4 +1,33 @@
 import type { AnyCircuitElement } from "circuit-json"
+import type { PipelineRunStatus, PipelineStageStatus } from "./pipeline-types"
+
+export interface PublicPipelineError {
+  code: string
+  message: string
+  operation: string
+  hint?: string
+  retryable: boolean
+}
+
+export interface PublicPipelineStage {
+  stage_id: string
+  status: PipelineStageStatus
+  debug_ref: string
+  started_at?: string
+  completed_at?: string
+  duration_ms?: number
+  reason?: string
+  error?: PublicPipelineError
+}
+
+export interface PublicPipelineSnapshot {
+  pipeline_id: string
+  status: PipelineRunStatus
+  sequence: number
+  started_at: string
+  updated_at: string
+  stage_results: Record<string, PublicPipelineStage>
+}
 
 export type JobDisplayStatus =
   | "queued"
@@ -75,6 +104,19 @@ export interface Job {
   validation?: JobValidation
   provenance?: JobProvenance
   evidence_available?: boolean
+  /** Observable, typed execution state. Older persisted jobs may not have one. */
+  pipeline?: PublicPipelineSnapshot
+}
+
+export interface ModelRunSummary {
+  model_run_id: string
+  job_id: string
+  status: ModelRunStatus
+  is_complete: boolean
+  has_errors: boolean
+  error_message?: string
+  has_model: boolean
+  has_retained_accepted_model: boolean
 }
 
 export type JobSummary = Pick<
@@ -88,7 +130,10 @@ export type JobSummary = Pick<
   | "has_errors"
   | "error_message"
   | "warnings"
->
+  | "component_ready"
+> & {
+  model_run?: ModelRunSummary
+}
 
 export type JobEvent =
   | { event_type: "snapshot" | "job_updated"; job: Job }
@@ -171,6 +216,12 @@ export interface ModelManifest {
 
 export type ModelProgressPhase =
   | "queued"
+  | "preparing_workspace"
+  | "characterizing"
+  | "designing_validation"
+  | "generating_model"
+  | "repairing"
+  | "publishing"
   | "extracting_datasheet"
   | "digitizing_graphs"
   | "preparing_benchmarks"
@@ -240,6 +291,10 @@ export interface ModelReferenceSeriesPreview {
   result_file?: string
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]
+  reference_bounds?: {
+    min?: number
+    max?: number
+  }
   result_points?: ModelCurvePoint[]
   normalized_rmse?: number
   normalized_max_error?: number
@@ -269,9 +324,13 @@ export interface ModelReferencePreview {
   x_scale: "linear" | "log"
   y_scale: "linear" | "log"
   reference_points: ModelCurvePoint[]
+  reference_bounds?: {
+    min?: number
+    max?: number
+  }
   result_points?: ModelCurvePoint[]
   series?: ModelReferenceSeriesPreview[]
-  result_status?: "unverified" | "partial" | "verified" | "deprecated"
+  result_status?: "unverified" | "partial" | "verified" | "failed" | "cancelled" | "deprecated"
   result_origin?: "workspace" | "server_validation"
   normalized_rmse?: number
   normalized_max_error?: number
@@ -307,10 +366,10 @@ export interface ModelRun {
   error_message?: string
   warnings?: string[]
   effort_multiplier: number
-  base_effort_ms: number
-  allocated_time_ms: number
   elapsed_time_ms: number
   segment_started_at?: string
+  /** Identifies the pipeline invocation whose checkpoints are currently being written. */
+  current_invocation_id?: string
   iteration: number
   logs: JobLog[]
   model_source?: string
@@ -322,6 +381,8 @@ export interface ModelRun {
   circuit_preview?: ModelCircuitPreview
   reference_preview?: ModelReferencePreview
   preview_options: ModelPreviewOption[]
+  /** Observable, typed execution state. Older persisted runs may not have one. */
+  pipeline?: PublicPipelineSnapshot
 }
 
 export type ModelRunEvent =

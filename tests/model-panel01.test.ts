@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import type { ModelRun } from "@/shared/job-types"
+import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 import { getModelMatchMetrics } from "@/web/components/model-panel"
 
 test("model header derives match percentage from authoritative normalized RMSE", () => {
@@ -43,12 +44,10 @@ test("model header clamps derived match percentage at zero", () => {
   expect(metrics.match_score).toBe(0)
 })
 
-test("model header withholds match claims from completed output with warnings", () => {
+test("model header withholds stale metrics for a retained accepted model", () => {
   const metrics = getModelMatchMetrics({
     is_complete: true,
-    warnings: [
-      "Evidence quality: response references are duplicated, so the result is available but unverified.",
-    ],
+    warnings: [`${RETAINED_ACCEPTED_WARNING_PREFIX} r0001 because the replacement attempt failed.`],
     validation: {
       benchmark_count: 2,
       passing_count: 2,
@@ -64,4 +63,27 @@ test("model header withholds match claims from completed output with warnings", 
 
   expect(metrics.normalized_rmse).toBeUndefined()
   expect(metrics.match_score).toBeUndefined()
+})
+
+test("model header keeps accepted metrics visible through operational warnings", () => {
+  const metrics = getModelMatchMetrics({
+    is_complete: true,
+    warnings: [
+      "The accepted publication is durable, but its compatibility checkpoint could not be refreshed.",
+    ],
+    validation: {
+      benchmark_count: 2,
+      passing_count: 2,
+      critical_count: 1,
+      critical_passing_count: 1,
+      score: 0.01,
+      worst_normalized_error: 0.02,
+      all_critical_passed: true,
+      all_passed: true,
+      benchmarks: [],
+    },
+  } as unknown as ModelRun)
+
+  expect(metrics.normalized_rmse).toBe(0.01)
+  expect(metrics.match_score).toBe(0.99)
 })

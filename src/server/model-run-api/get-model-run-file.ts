@@ -1,8 +1,10 @@
 import { join } from "node:path"
+import { readVerifiedPublicationArtifact, resolveAcceptedModelPublication } from "../modeling"
+import { acceptedPublicationErrorResponse } from "./accepted-publication-error"
 import { ModelRunApiContext } from "./model-run-api-context"
 import { errorResponse, getJobId } from "./model-run-api-responses"
 
-export function getModelRunFile(request_url: URL, context: ModelRunApiContext): Response {
+export async function getModelRunFile(request_url: URL, context: ModelRunApiContext): Promise<Response> {
   const job_id = getJobId(request_url)
   if (!job_id) {
     return errorResponse({ error_code: "job_id_required", message: "job_id is required.", status: 400 })
@@ -17,28 +19,63 @@ export function getModelRunFile(request_url: URL, context: ModelRunApiContext): 
     })
   }
   const file_kind = request_url.searchParams.get("file")
-  const files: Record<string, { name: string; content_type: string }> = {
-    model: { name: "model.lib", content_type: "text/plain; charset=utf-8" },
-    manifest: { name: "model-manifest.json", content_type: "application/json" },
-    report: { name: "validation-report.json", content_type: "application/json" },
-    simulation_report: { name: "simulation-validation.json", content_type: "application/json" },
-    model_card: { name: "model-card.md", content_type: "text/markdown; charset=utf-8" },
-    component: { name: "component-with-model.circuit.tsx", content_type: "text/typescript; charset=utf-8" },
-    log: { name: "model-agent.log", content_type: "text/plain; charset=utf-8" },
+  const files: Record<string, { name: string; content_type: string; max_bytes: number }> = {
+    model: { name: "model.lib", content_type: "text/plain; charset=utf-8", max_bytes: 2 * 1024 * 1024 },
+    manifest: { name: "model-manifest.json", content_type: "application/json", max_bytes: 2 * 1024 * 1024 },
+    report: {
+      name: "validation-results.json",
+      content_type: "application/json",
+      max_bytes: 32 * 1024 * 1024,
+    },
+    contract: { name: "model-contract.json", content_type: "application/json", max_bytes: 4 * 1024 * 1024 },
+    plan: { name: "validation-plan.json", content_type: "application/json", max_bytes: 8 * 1024 * 1024 },
+    model_card: {
+      name: "model-card.md",
+      content_type: "text/markdown; charset=utf-8",
+      max_bytes: 2 * 1024 * 1024,
+    },
+    component: {
+      name: "component-with-model.circuit.tsx",
+      content_type: "text/typescript; charset=utf-8",
+      max_bytes: 2 * 1024 * 1024,
+    },
+    log: { name: "model-agent.log", content_type: "text/plain; charset=utf-8", max_bytes: 16 * 1024 * 1024 },
   }
   const selected = file_kind ? files[file_kind] : undefined
   if (!selected) {
     return errorResponse({ error_code: "invalid_file", message: "Unknown SPICE model file.", status: 400 })
   }
-  const file = Bun.file(join(model_dir, selected.name))
-  if (file.size === 0) {
+  let body: Bun.BunFile | Uint8Array<ArrayBuffer>
+  if (file_kind !== "log") {
+    try {
+      const publication = await resolveAcceptedModelPublication(model_dir, job_id)
+      body = publication
+        ? await readVerifiedPublicationArtifact({
+            publication,
+            bundle: "accepted_model",
+            relative_path: selected.name,
+            max_bytes: selected.max_bytes,
+          })
+        : Bun.file(join(model_dir, selected.name))
+    } catch (error) {
+      return acceptedPublicationErrorResponse({
+        job_id,
+        operation: `download_${file_kind}`,
+        error,
+      })
+    }
+  } else {
+    body = Bun.file(join(model_dir, selected.name))
+  }
+  const size = body instanceof Uint8Array ? body.byteLength : body.size
+  if (size === 0) {
     return errorResponse({
       error_code: "file_not_ready",
       message: `${selected.name} is not ready.`,
       status: 404,
     })
   }
-  return new Response(file, {
+  return new Response(body, {
     headers: {
       "Content-Disposition": `attachment; filename="${selected.name}"`,
       "Content-Type": selected.content_type,

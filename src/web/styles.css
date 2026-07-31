@@ -1654,68 +1654,13 @@ a {
   min-height: 0;
 }
 
-.component-spice-status {
-  display: flex;
-  min-height: 46px;
-  align-items: center;
+.component-page .preview-column.has-pipeline-trace {
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
-  padding: 0 14px;
-  border: 1px solid #e2e2de;
-  border-radius: 10px;
-  background: #fff;
-  color: #59616b;
-  font-size: 11px;
 }
 
-.component-spice-heading {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #30363d;
-  font-weight: 650;
-}
-
-.spice-available-tag,
-.spice-generating-tag,
-.spice-generate-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.spice-available-tag {
-  padding: 5px 8px;
-  color: #187443;
-  background: #e8f7ed;
-}
-
-.spice-generating-tag {
-  color: #82651a;
-}
-
-.spice-generate-button {
-  padding: 6px 9px;
-  border: 1px solid #c9d8ed;
-  color: #245b9f;
-  background: #f3f7fd;
-  cursor: pointer;
-}
-
-.spice-generate-button:hover:not(:disabled) {
-  background: #e8f0fb;
-}
-
-.spice-generate-button:disabled {
-  cursor: wait;
-  opacity: 0.65;
-}
-
-.component-spice-error {
-  margin-left: auto;
-  color: var(--red);
+.component-page .preview-column.has-pipeline-trace .preview-card {
+  height: auto;
 }
 
 .workspace-card {
@@ -2609,6 +2554,117 @@ a {
   transition: width 500ms linear;
 }
 
+.pipeline-trace {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 0.75rem 1rem;
+}
+
+.pipeline-trace summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pipeline-trace summary small {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 550;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.pipeline-trace summary code,
+.pipeline-stage-debug-ref code,
+.pipeline-stage-diagnostic code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.92em;
+}
+
+.pipeline-trace ol {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pipeline-trace li {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.65rem;
+  font-size: 0.8rem;
+}
+
+.pipeline-trace li > i {
+  width: 8px;
+  height: 8px;
+  margin-top: 0.3rem;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.pipeline-trace li.pipeline-stage-completed > i {
+  background: #16a34a;
+}
+
+.pipeline-trace li.pipeline-stage-running > i {
+  background: #2563eb;
+}
+
+.pipeline-trace li.pipeline-stage-failed > i {
+  background: #dc2626;
+}
+
+.pipeline-trace li.pipeline-stage-cancelled > i {
+  background: #d97706;
+}
+
+.pipeline-trace li span {
+  display: grid;
+  min-width: 0;
+}
+
+.pipeline-trace li strong {
+  text-transform: capitalize;
+}
+
+.pipeline-trace li small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.pipeline-trace li .pipeline-stage-diagnostic {
+  color: #a73227;
+}
+
+.pipeline-trace li .pipeline-stage-hint {
+  color: #7a5414;
+}
+
+.pipeline-trace li .pipeline-stage-debug-ref {
+  margin-top: 2px;
+  color: #66717f;
+}
+
+.pipeline-trace li time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.component-pipeline-trace[open] {
+  max-height: min(42vh, 390px);
+  overflow: auto;
+}
+
 .model-grid {
   display: grid;
   align-items: stretch;
@@ -3440,6 +3496,12 @@ a {
   stroke-dashoffset: 0;
 }
 
+.reference-bound {
+  stroke: #2563eb;
+  stroke-dasharray: 8 6;
+  stroke-width: 2;
+}
+
 .result-line {
   stroke: #d97706;
   stroke-dashoffset: 10;
@@ -3453,6 +3515,12 @@ a {
 .result-line-unverified {
   opacity: 0.82;
   stroke-dasharray: 5 7;
+}
+
+.result-line-failed {
+  opacity: 0.86;
+  stroke: #c2410c;
+  stroke-dasharray: 4 6;
 }
 
 .result-line-deprecated {
@@ -3514,6 +3582,15 @@ a {
 }
 
 .result-series.unverified i {
+  border-top-style: dashed;
+}
+
+.result-series.failed {
+  color: #9a3412;
+}
+
+.result-series.failed i {
+  border-color: #c2410c;
   border-top-style: dashed;
 }
 

@@ -55,6 +55,27 @@ test("the TSX area separates schematic/code from graph-only analog simulation", 
   expect(MODEL_ANALOG_ONLY_TABS).not.toContain("schematic")
 })
 
+test("a source-ready benchmark does not claim an automatic Circuit JSON simulation", () => {
+  const html = renderToStaticMarkup(
+    createElement(ModelLivePreview, {
+      job_id: "job_1",
+      is_complete: true,
+      preview_options: [],
+      circuit_preview: {
+        source_file: "validation/cases/transfer.circuit.tsx",
+        code: "export default () => <board />",
+        build_status: "source_ready",
+        updated_at: "2026-07-31T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html).toContain("Benchmark TSX is source-ready")
+  expect(html).toContain("No Circuit JSON snapshot is stored for this benchmark")
+  expect(html).toContain("Validation graphs come from persisted ngspice results")
+  expect(html).not.toContain("automatically runs one preview point")
+})
+
 test("comparison graphs identify independently auto-scaled waveforms", () => {
   expect(
     getComparisonScaleDisparity(
@@ -120,6 +141,88 @@ test("reference graphs label both axes with units and intermediate ticks", () =>
   expect(html).toContain('class="reference-axis-ticks"')
   expect(html.match(/reference-axis-tick-x/g)?.length).toBeGreaterThanOrEqual(4)
   expect(html.match(/reference-axis-tick-y/g)?.length).toBeGreaterThanOrEqual(4)
+})
+
+test("reference graphs render minimum and maximum bound geometry", () => {
+  const html = renderToStaticMarkup(
+    createElement(ReferenceGraph, {
+      preview: {
+        title: "Supply current limit",
+        source_file: "validation-plan.json",
+        x_axis_label: "Operating point",
+        y_axis_label: "Current",
+        y_axis_unit: "A",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [],
+        reference_bounds: { min: 0.0001, max: 0.001 },
+        result_points: [{ x: 0, y: 0.0005 }],
+        updated_at: "2026-07-31T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html).toContain('class="reference-bound reference-bound-min"')
+  expect(html).toContain('class="reference-bound reference-bound-max"')
+  expect(html).toContain("Datasheet bounds")
+})
+
+test("failed and cancelled server cases are never labelled as verified", () => {
+  const failed_html = renderToStaticMarkup(
+    createElement(ReferenceGraph, {
+      preview: {
+        title: "Failed transfer",
+        source_file: "validation-plan.json",
+        result_status: "failed",
+        result_origin: "server_validation",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [{ x: 0, y: 0 }],
+        result_points: [{ x: 0, y: 1 }],
+        updated_at: "2026-07-31T00:00:00.000Z",
+      },
+    }),
+  )
+  const cancelled_html = renderToStaticMarkup(
+    createElement(ModelLivePreview, {
+      job_id: "job_1",
+      is_complete: true,
+      preview_options: [],
+      reference_preview: {
+        title: "Cancelled transfer",
+        source_file: "validation-plan.json",
+        result_status: "cancelled",
+        result_origin: "server_validation",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [{ x: 0, y: 0 }],
+        result_points: [{ x: 0, y: 1 }],
+        updated_at: "2026-07-31T00:00:00.000Z",
+      },
+    }),
+  )
+  const cancelled_without_waveform = renderToStaticMarkup(
+    createElement(ReferenceGraph, {
+      preview: {
+        title: "Cancelled transfer",
+        source_file: "validation-plan.json",
+        result_status: "cancelled",
+        result_origin: "server_validation",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [{ x: 0, y: 0 }],
+        updated_at: "2026-07-31T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(failed_html).toContain("Server validation · failed")
+  expect(failed_html).not.toContain("Server-verified model")
+  expect(cancelled_html).toContain("Server validation · cancelled")
+  expect(cancelled_html).toContain("Validation cancelled")
+  expect(cancelled_html).not.toContain("Server-verified model")
+  expect(cancelled_without_waveform).toContain("No waveform: server validation cancelled")
+  expect(cancelled_without_waveform).not.toContain("pending verification")
 })
 
 test("multi-series reference graphs keep a complete plot and legend in each panel", () => {

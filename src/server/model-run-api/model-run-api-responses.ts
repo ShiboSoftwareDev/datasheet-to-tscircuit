@@ -11,6 +11,14 @@ export function errorResponse({ error_code, message, status }: ErrorResponseInpu
   return jsonResponse(api_error, status)
 }
 
+export function jobDeletingResponse(): Response {
+  return errorResponse({
+    error_code: "job_deleting",
+    message: "This task is being deleted; its SPICE model cannot be changed.",
+    status: 409,
+  })
+}
+
 export function getJobId(request_url: URL): string | undefined {
   return request_url.searchParams.get("job_id")?.trim() || undefined
 }

@@ -1,4 +1,6 @@
+import { lstat, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
 
 interface JobFileMetadata {
   download_name: string
@@ -12,12 +14,10 @@ interface StaticJobFile extends JobFileMetadata {
 type JobFileResolution =
   | { status: "invalid" }
   | { status: "missing"; download_name: string }
-  | {
-      status: "ready"
-      artifact_path: string
-      download_name: string
-      content_type: string
-    }
+  | ({ status: "ready"; download_name: string; content_type: string } & (
+      | { artifact_path: string; artifact_bytes?: never }
+      | { artifact_bytes: Uint8Array<ArrayBuffer>; artifact_path?: never }
+    ))
 
 const static_job_files = {
   component: {
@@ -59,11 +59,6 @@ const static_job_files = {
     relative_path: "visual-reference/typical-application.png",
     download_name: "typical-application.png",
     content_type: "image/png",
-  },
-  events: {
-    relative_path: "agent-events.jsonl",
-    download_name: "agent-events.jsonl",
-    content_type: "application/x-ndjson; charset=utf-8",
   },
 } as const satisfies Record<string, StaticJobFile>
 
@@ -117,13 +112,35 @@ async function findComponentSchematicReference(job_dir: string): Promise<string 
     .catch(() => undefined)
   for (const image_path of getPinoutImageCandidates(evidence)) {
     const artifact_path = resolveVisualReference(job_dir, image_path)
-    if (artifact_path && Bun.file(artifact_path).size > 0) return artifact_path
+    const metadata = artifact_path ? await lstat(artifact_path).catch(() => undefined) : undefined
+    if (metadata?.isFile() && !metadata.isSymbolicLink() && metadata.size > 0) return artifact_path
   }
   return undefined
 }
 
+async function resolveSafeRegularFile(job_dir: string, artifact_path: string): Promise<string | undefined> {
+  const metadata = await lstat(artifact_path).catch(() => undefined)
+  if (!metadata?.isFile() || metadata.isSymbolicLink() || metadata.size === 0) return undefined
+  const [job_real_path, artifact_real_path] = await Promise.all([
+    realpath(job_dir).catch(() => undefined),
+    realpath(artifact_path).catch(() => undefined),
+  ])
+  if (!job_real_path || !artifact_real_path) return undefined
+  const artifact_relative_path = relative(job_real_path, artifact_real_path)
+  if (
+    artifact_relative_path === "" ||
+    artifact_relative_path === ".." ||
+    artifact_relative_path.startsWith(`..${sep}`) ||
+    isAbsolute(artifact_relative_path)
+  ) {
+    return undefined
+  }
+  return artifact_real_path
+}
+
 export async function resolveJobFileArtifact(
   job_dir: string,
+  job_id: string,
   file_kind: string | null,
 ): Promise<JobFileResolution> {
   let descriptor: JobFileMetadata
@@ -135,18 +152,36 @@ export async function resolveJobFileArtifact(
   } else if (file_kind && file_kind in static_job_files) {
     const static_file = static_job_files[file_kind as keyof typeof static_job_files]
     descriptor = static_file
+    if (file_kind === "component") {
+      const publication = await readModelPublication(job_dir, job_id)
+      if (publication) {
+        const artifact_bytes = await readVerifiedPublicationArtifact({
+          publication,
+          bundle: "published_component",
+          relative_path: static_file.relative_path,
+          max_bytes: 2 * 1024 * 1024,
+        })
+        return {
+          status: "ready",
+          artifact_bytes,
+          download_name: descriptor.download_name,
+          content_type: descriptor.content_type,
+        }
+      }
+    }
     artifact_path = join(job_dir, static_file.relative_path)
   } else {
     return { status: "invalid" }
   }
 
-  if (!artifact_path || Bun.file(artifact_path).size === 0) {
+  const safe_artifact_path = artifact_path ? await resolveSafeRegularFile(job_dir, artifact_path) : undefined
+  if (!safe_artifact_path) {
     return { status: "missing", download_name: descriptor.download_name }
   }
 
   return {
     status: "ready",
-    artifact_path,
+    artifact_path: safe_artifact_path,
     download_name: descriptor.download_name,
     content_type: descriptor.content_type,
   }
