@@ -210,7 +210,11 @@ declared files atomically. Invalid attempts are not promoted: their declared
 files and validation error are retained under the stage's `rejected-attempts/`
 debug directory. A correction workspace is safely seeded from those bounded,
 no-symlink files and receives cumulative diagnostics plus the contract hash.
-The expensive PDF extraction therefore survives a serialization correction.
+The expensive PDF extraction therefore survives a serialization correction. A
+typed or process failure from a nested independent verifier still retains the
+enclosing evidence candidate and adds it to the stage diagnostic before
+terminating; cancellation remains cancellation and does not create a rejected
+candidate.
 
 The evidence contract is defined by shared version/enum constants and exact
 canonical examples. Safe boundary canonicalization is deliberately narrow:
@@ -221,26 +225,51 @@ connectivity are never invented. Agent-authored PNG pixels are discarded. The
 server renders every cited PDF page at 200 DPI and binds each trusted image,
 alias, source page, and the datasheet hash in `evidence-image-manifest.json`.
 
+Identity has two explicit levels. `component-evidence.json` records the base
+device family in `part_number` and the exact selected package/carrier variant
+in `ordering_code` when they differ. The application-visible U1 `value` remains
+the base family, while canonicalization binds U1 `manufacturer_part_number` to
+the authoritative selected orderable for downstream generation. An ordering
+code must be a distinct extension of its base identity after punctuation is
+removed. A supplied wrong, reversed, or truncated identity is rejected. Legacy
+exact-only evidence may infer a visible family only when the remaining suffix
+matches a datasheet package identifier; arbitrary prefixes are not accepted.
+
 For every application claim, including `not_present`, a second isolated agent
-receives the trusted full-page render and explicitly incomplete,
-non-authoritative page and target-pin hints—but not the first agent's component
-inventory or graph. It independently emits visible components and electrical
+receives only the immutable source PDF and its reviewer contract—never the
+extractor's page selection, crop, pin hints, component inventory, or graph. It
+independently searches the document and emits visible components and electrical
 endpoint partitions, or the sections it searched. The server compares the
 component inventory and kind (plus any independently visible value or MPN),
 canonicalizes physical U1 identities, external terminals, and unordered net
 membership, ignores net names and ordering, and requires exact multiset graph
 agreement. This catches omitted parts, kind/value disagreements, and misplaced
-endpoints without trusting extractor-owned topology.
+endpoints without trusting extractor-owned topology. Review parsing reports all
+malformed endpoints without cascading derivative errors and, once the review is
+valid, collects inventory, visible-fact, and graph differences into one
+cumulative correction diagnostic instead of revealing one issue per outer
+attempt.
 
 Footprint geometry has the same independent boundary. A separate isolated
 reviewer receives `datasheet.pdf`, the server-rendered full-page
-`visual-reference/land-pattern.png`, and non-authoritative pin-name hints. It
-never receives `component-evidence.json`, `footprint-plan.json`, or any
-extractor-authored dimensions. The server strictly parses the review, rejects
-low-confidence or duplicate-pad identities, and compares every pad center,
-copper dimension, kind, and hole dimension at 0.01 mm tolerance. A valid
-disagreement rejects the outer extraction candidate, so a plausible but copied
-special-pad dimension cannot publish merely because generated TSX repeats it.
+`visual-reference/land-pattern.png`, but no extractor pin names,
+`component-evidence.json`, `footprint-plan.json`, or extractor-authored
+dimensions. The server strictly parses the review, rejects low-confidence or
+duplicate-pad identities, and compares every pad center, copper dimension,
+kind, and hole dimension at 0.01 mm tolerance. A valid disagreement rejects the
+outer extraction candidate, so a plausible but copied special-pad dimension
+cannot publish merely because generated TSX repeats it.
+
+Independent reviews are observations, not mutable extractor artifacts. Each is
+fingerprinted from its reviewer contract and immutable inputs: the bound source
+PDF and, for footprint review, the trusted land-pattern page and content hash.
+The fingerprint contains the effective schema, instructions, and base-prompt
+digest rather than a manually synchronized version label. An unchanged
+fingerprint reuses the same observation across outer evidence repairs; a changed
+immutable input reruns the reviewer. Before comparison or publication, the
+server atomically reinstalls its cached review JSON over the retained workspace
+copy, preventing deletion, edits, or symlink substitution by a correction
+attempt.
 
 The version-3 evidence commit is the publication barrier. The server first
 semantically re-parses the canonical evidence, derived plans, independent

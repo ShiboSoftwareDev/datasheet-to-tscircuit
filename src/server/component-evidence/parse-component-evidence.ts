@@ -41,6 +41,13 @@ function requiredText(value: unknown, label: string): string {
   return value.trim()
 }
 
+function normalizedPartIdentity(value: string): string {
+  return value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "")
+}
+
 function requiredFiniteNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`${label} must be a finite number`)
@@ -275,23 +282,36 @@ export function parseComponentEvidence(value: unknown): ComponentEvidence {
   if (!Array.isArray(value.unresolved_ambiguities)) {
     throw new Error("component evidence unresolved_ambiguities must be an array")
   }
+  const part_number = parseField({
+    value: value.part_number,
+    label: "component evidence part_number",
+    parse_value: requiredText,
+  })
+  const ordering_code =
+    value.ordering_code === undefined
+      ? undefined
+      : parseField({
+          value: value.ordering_code,
+          label: "component evidence ordering_code",
+          parse_value: requiredText,
+        })
+  if (ordering_code) {
+    const normalized_part_number = normalizedPartIdentity(part_number.value)
+    const normalized_ordering_code = normalizedPartIdentity(ordering_code.value)
+    if (
+      normalized_ordering_code === normalized_part_number ||
+      !normalized_ordering_code.startsWith(normalized_part_number)
+    ) {
+      throw new Error(
+        "component evidence ordering_code must be a distinct exact orderable that extends part_number",
+      )
+    }
+  }
   return {
     version: 1,
     status: value.status as ComponentEvidence["status"],
-    part_number: parseField({
-      value: value.part_number,
-      label: "component evidence part_number",
-      parse_value: requiredText,
-    }),
-    ...(value.ordering_code === undefined
-      ? {}
-      : {
-          ordering_code: parseField({
-            value: value.ordering_code,
-            label: "component evidence ordering_code",
-            parse_value: requiredText,
-          }),
-        }),
+    part_number,
+    ...(ordering_code ? { ordering_code } : {}),
     package: {
       name: parseField({
         value: value.package.name,

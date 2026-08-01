@@ -16,8 +16,12 @@ const canonical_component_example = {
   version: COMPONENT_EVIDENCE_VERSION,
   status: "resolved",
   part_number: {
-    value: "EXACT-PART-NUMBER",
+    value: "BASE-PART-NUMBER",
     sources: [{ page: 1, method: "pdf_text", confidence: "high" }],
+  },
+  ordering_code: {
+    value: "BASE-PART-NUMBER-A",
+    sources: [{ page: 2, method: "pdf_text", confidence: "high" }],
   },
   package: {
     name: {
@@ -120,7 +124,12 @@ const canonical_application_example = {
     },
   ],
   components: [
-    { reference: "U1", kind: "integrated_circuit", value: "EXACT-PART-NUMBER" },
+    {
+      reference: "U1",
+      kind: "integrated_circuit",
+      value: "BASE-PART-NUMBER",
+      manufacturer_part_number: "BASE-PART-NUMBER-A",
+    },
     { reference: "C1", kind: "capacitor", value: "100 nF" },
   ],
   connections: [
@@ -163,7 +172,13 @@ existing PNG below visual-reference/ rendered at exactly 200 DPI. Calculated and
 package-standard sources require a note.
 
 Part number, ordering code, package name/code/pin count, and every physical pin
-must each cite medium- or high-confidence pdf_text or pdf_visual evidence.
+must each cite medium- or high-confidence pdf_text or pdf_visual evidence. Keep
+the identities distinct: part_number is the base device/family printed throughout
+the datasheet (for example TPS63802 or INA237), while ordering_code is the exact
+selected purchasable package/carrier variant (for example TPS63802DLAR or
+INA237AIDGSR). When present, ordering_code must be a distinct extension of the
+base part_number after punctuation is removed. Omit it when both identities are
+identical.
 Calculated and package-standard sources cannot establish those facts. They are
 allowed for pad geometry only when the same PDF page has a medium- or
 high-confidence pdf_visual footprint citation anchoring the derivation.
@@ -199,6 +214,9 @@ external terminal such as INPUT, OUTPUT, or GND. Do not turn it into a component
 or discard it as a net label. Preserve printed reference designators. When the
 figure omits them, assign conventional references by kind in deterministic visual
 order: top-to-bottom, then left-to-right; the datasheet target is always U1. Use
+the target's base part_number as U1 value. When manufacturer_part_number is
+included for U1, use the selected exact ordering_code, never the unsuffixed family
+name. The server binds canonical U1 to that authoritative selected identity. Use
 verified PCB mode only when every external part and footprint is precisely
 sourced (prefer a sourced scalar object for each manufacturer part number and
 footprint); otherwise use schematic_only. A not_present plan must omit

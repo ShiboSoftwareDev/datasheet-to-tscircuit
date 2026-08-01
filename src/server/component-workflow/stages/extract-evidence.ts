@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import {
   canonicalizeComponentEvidenceInput,
@@ -15,13 +16,30 @@ import {
   validatePngArtifact,
   validateStageDirectory,
 } from "../../infrastructure/artifacts"
-import { parseTypicalApplicationPlan } from "../application-plan"
-import { verifyApplicationConnectivity } from "../application-connectivity-verification"
+import { applicationTargetIdentityFromEvidence, parseTypicalApplicationPlan } from "../application-plan"
+import {
+  APPLICATION_CONNECTIVITY_OBSERVER_CONTRACT_SHA256,
+  applyApplicationConnectivityObservation,
+  type ApplicationConnectivityObservation,
+  installApplicationConnectivityObservation,
+  observeApplicationConnectivity,
+  verifyApplicationConnectivity,
+} from "../application-connectivity-verification"
 import { hasCommittedEvidence, writeEvidenceCommit } from "../evidence-commit"
-import { assertEvidenceImageManifest, materializeEvidenceImages } from "../evidence-image-materialization"
+import {
+  assertEvidenceImageManifest,
+  type EvidenceImageManifest,
+  materializeEvidenceImages,
+} from "../evidence-image-materialization"
 import { assertEvidenceImageProvenance } from "../evidence-image-provenance"
 import { COMPONENT_EVIDENCE_GUIDE, COMPONENT_EVIDENCE_GUIDE_SHA256 } from "../evidence-schema"
-import { verifyFootprintGeometry } from "../footprint-geometry-verification"
+import {
+  FOOTPRINT_GEOMETRY_OBSERVER_CONTRACT_SHA256,
+  applyFootprintGeometryObservation,
+  type FootprintGeometryObservation,
+  observeFootprintGeometry,
+  verifyFootprintGeometry,
+} from "../footprint-geometry-verification"
 import { evidencePrompt } from "../prompts"
 import { appendJobLog, componentArtifact, updateJobValidation } from "../stage-helpers"
 import { EVIDENCE_STAGE_INSTRUCTIONS } from "../stage-instructions"
@@ -36,6 +54,28 @@ type ExtractedEvidence = {
   canonicalization_count: number
 }
 
+function observationFingerprint(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex")
+}
+
+function footprintObservationFingerprint(input: { manifest: EvidenceImageManifest }): string {
+  return observationFingerprint({
+    reviewer_contract_sha256: FOOTPRINT_GEOMETRY_OBSERVER_CONTRACT_SHA256,
+    source_pdf_sha256: input.manifest.source_pdf_sha256,
+    land_pattern: input.manifest.aliases.land_pattern,
+  })
+}
+
+function applicationObservationFingerprint(input: { manifest: EvidenceImageManifest }): string {
+  // The application observer sees only the immutable PDF and its own contract.
+  // Extractor page, crop, pin, inventory, and topology claims are deliberately
+  // absent from both the reviewer workspace and this cache identity.
+  return observationFingerprint({
+    reviewer_contract_sha256: APPLICATION_CONNECTIVITY_OBSERVER_CONTRACT_SHA256,
+    source_pdf_sha256: input.manifest.source_pdf_sha256,
+  })
+}
+
 export const extractEvidenceStage = defineComponentStage({
   id: "extract_evidence",
   depends_on: ["prepare"],
@@ -43,6 +83,12 @@ export const extractEvidenceStage = defineComponentStage({
     const extension = join(import.meta.dir, "../../infrastructure/agent/image-read-extension.ts")
     let attempt: AgentArtifactAttempt<ExtractedEvidence>
     let committed_evidence_dir: string | undefined
+    let footprint_observation_cache:
+      | { fingerprint: string; observation: FootprintGeometryObservation }
+      | undefined
+    let application_observation_cache:
+      | { fingerprint: string; observation: ApplicationConnectivityObservation }
+      | undefined
     try {
       await Bun.write(join(context.job_dir, "EVIDENCE-SCHEMA.md"), COMPONENT_EVIDENCE_GUIDE)
       attempt = await runAgentArtifactStage<ExtractedEvidence>({
@@ -115,12 +161,7 @@ export const extractEvidenceStage = defineComponentStage({
           try {
             application_plan = parseTypicalApplicationPlan(
               raw_application_plan,
-              component_evidence
-                ? {
-                    part_number: component_evidence.part_number.value,
-                    ordering_code: component_evidence.ordering_code?.value,
-                  }
-                : undefined,
+              component_evidence ? applicationTargetIdentityFromEvidence(component_evidence) : undefined,
             )
           } catch (error) {
             contract_errors.push(
@@ -164,29 +205,98 @@ export const extractEvidenceStage = defineComponentStage({
             application_available: application_plan.availability === "documented",
           })
           await assertEvidenceImageProvenance({ workspace, component_evidence, application_plan })
-          const footprint_verification = await verifyFootprintGeometry({
-            workspace,
-            evidence: component_evidence,
-            outer_attempt,
-            debug_dir,
-            signal,
-            use_openai: context.use_openai,
-            agent_client: services.agent_client,
-            image_extension: extension,
-            on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
+          const footprint_fingerprint = footprintObservationFingerprint({
+            manifest: materialized.manifest,
           })
-          const connectivity_verification = await verifyApplicationConnectivity({
+          if (footprint_observation_cache?.fingerprint !== footprint_fingerprint) {
+            footprint_observation_cache = {
+              fingerprint: footprint_fingerprint,
+              observation: await observeFootprintGeometry({
+                workspace,
+                evidence: component_evidence,
+                outer_attempt,
+                debug_dir,
+                signal,
+                use_openai: context.use_openai,
+                agent_client: services.agent_client,
+                image_extension: extension,
+                on_output: (stream, message) =>
+                  appendJobLog(services.job_store, context.job_id, stream, message),
+              }),
+            }
+          } else {
+            await appendJobLog(
+              services.job_store,
+              context.job_id,
+              "system",
+              `Reusing immutable footprint observation ${footprint_fingerprint} for extractor attempt ${outer_attempt}.\n`,
+            ).catch(() => undefined)
+          }
+          const application_fingerprint = applicationObservationFingerprint({
+            manifest: materialized.manifest,
+          })
+          if (application_observation_cache?.fingerprint !== application_fingerprint) {
+            application_observation_cache = {
+              fingerprint: application_fingerprint,
+              observation: await observeApplicationConnectivity({
+                workspace,
+                plan: application_plan,
+                evidence: component_evidence,
+                outer_attempt,
+                debug_dir,
+                signal,
+                use_openai: context.use_openai,
+                agent_client: services.agent_client,
+                image_extension: extension,
+                on_output: (stream, message) =>
+                  appendJobLog(services.job_store, context.job_id, stream, message),
+              }),
+            }
+          } else {
+            await appendJobLog(
+              services.job_store,
+              context.job_id,
+              "system",
+              `Reusing immutable application observation ${application_fingerprint} for extractor attempt ${outer_attempt}.\n`,
+            ).catch(() => undefined)
+          }
+          signal.throwIfAborted()
+          const installed_application_observation = installApplicationConnectivityObservation({
             workspace,
             plan: application_plan,
-            evidence: component_evidence,
-            outer_attempt,
-            debug_dir,
-            signal,
-            use_openai: context.use_openai,
-            agent_client: services.agent_client,
-            image_extension: extension,
-            on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
+            observation: application_observation_cache.observation,
           })
+
+          let footprint_verification: Awaited<ReturnType<typeof verifyFootprintGeometry>> | undefined
+          let connectivity_verification: Awaited<ReturnType<typeof verifyApplicationConnectivity>> | undefined
+          const verification_errors: Error[] = []
+          try {
+            footprint_verification = applyFootprintGeometryObservation({
+              workspace,
+              evidence: component_evidence,
+              observation: footprint_observation_cache.observation,
+            })
+          } catch (error) {
+            verification_errors.push(error instanceof Error ? error : new Error(String(error)))
+          }
+          try {
+            connectivity_verification = applyApplicationConnectivityObservation({
+              plan: application_plan,
+              evidence: component_evidence,
+              observation: installed_application_observation,
+            })
+          } catch (error) {
+            verification_errors.push(error instanceof Error ? error : new Error(String(error)))
+          }
+          if (verification_errors.length > 0) {
+            throw new AggregateError(
+              verification_errors,
+              "Independent footprint/application verification failed",
+            )
+          }
+          if (!footprint_verification || !connectivity_verification) {
+            throw new Error("Independent verification returned no agreement records")
+          }
           if (canonicalization.changes.length > 0) {
             await appendJobLog(
               services.job_store,

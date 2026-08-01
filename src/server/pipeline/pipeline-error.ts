@@ -18,6 +18,41 @@ export interface PipelineDiagnosticInput {
   readonly retryable?: boolean
 }
 
+const supplementalArtifactReferences = new WeakMap<Error, readonly PipelineArtifactReference[]>()
+
+function mergeArtifactReferences(
+  ...groups: ReadonlyArray<readonly PipelineArtifactReference[] | undefined>
+): PipelineArtifactReference[] {
+  const merged: PipelineArtifactReference[] = []
+  const seen = new Set<string>()
+  for (const reference of groups.flatMap((group) => group ?? [])) {
+    const key = JSON.stringify([reference.artifact_id ?? null, reference.path ?? null])
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(reference)
+  }
+  return merged
+}
+
+/**
+ * Attach debug artifacts to a typed error without replacing its identity.
+ * The pipeline conversion boundary consumes these references if the error
+ * eventually becomes a PipelineError.
+ */
+export function addPipelineArtifactReferences(
+  error: Error,
+  references: readonly PipelineArtifactReference[],
+): void {
+  supplementalArtifactReferences.set(
+    error,
+    Object.freeze(
+      mergeArtifactReferences(supplementalArtifactReferences.get(error), references).map((reference) =>
+        Object.freeze({ ...reference }),
+      ),
+    ),
+  )
+}
+
 const freezeDiagnostic = (input: PipelineDiagnosticInput): PipelineDiagnostic =>
   Object.freeze({
     code: input.code,
@@ -105,6 +140,10 @@ export const toPipelineError = (
   return new PipelineError(
     {
       ...input,
+      artifact_refs: mergeArtifactReferences(
+        input.artifact_refs,
+        error instanceof Error ? supplementalArtifactReferences.get(error) : undefined,
+      ),
       ...(process_error_code
         ? {
             code: process_error_code,

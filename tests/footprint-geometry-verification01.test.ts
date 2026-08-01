@@ -1,10 +1,12 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseComponentEvidence } from "@/server/component-evidence"
 import {
+  applyFootprintGeometryObservation,
   compareFootprintGeometry,
+  observeFootprintGeometry,
   parseFootprintGeometryReview,
   verifyFootprintGeometry,
 } from "@/server/component-workflow/footprint-geometry-verification"
@@ -160,7 +162,7 @@ test("geometry review rejects duplicate physical pin identities before matching"
   )
 })
 
-test("verifier workspace exposes naming hints but no extractor geometry", async () => {
+test("verifier workspace exposes no extractor pin names or geometry", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "footprint-verification-outer-"))
   temporary_directories.push(workspace)
   await mkdir(join(workspace, "visual-reference"), { recursive: true })
@@ -174,21 +176,11 @@ test("verifier workspace exposes naming hints but no extractor geometry", async 
       expect(input.phase_label).toBe("Independent footprint geometry verification")
       const names = (await readdir(input.workspace)).sort()
       expect(names).toContain("datasheet.pdf")
-      expect(names).toContain("verification-request.json")
+      expect(names).not.toContain("verification-request.json")
       expect(names).not.toContain("component-evidence.json")
       expect(names).not.toContain("footprint-plan.json")
-      const request_text = await Bun.file(join(input.workspace, "verification-request.json")).text()
-      const request = JSON.parse(request_text) as Record<string, unknown>
-      expect(request).toEqual({
-        version: 1,
-        naming_hints_are_incomplete_and_non_authoritative: true,
-        pin_naming_hints: [
-          { number: "1", labels: ["IN"] },
-          { number: "2", labels: ["GND"] },
-          { number: "3", labels: ["SW"] },
-        ],
-      })
-      expect(request_text).not.toMatch(/"(?:x|y|width|height)"\s*:/)
+      expect(input.prompt).not.toContain("pin_naming_hints")
+      expect(input.prompt).not.toContain("verification-request.json")
       saw_isolated_contract = true
       await Bun.write(
         join(input.workspace, "footprint-geometry-review.json"),
@@ -223,4 +215,63 @@ test("verifier workspace exposes naming hints but no extractor geometry", async 
   expect(saw_isolated_contract).toBe(true)
   expect(agreement).toMatchObject({ status: "verified", verifier_attempts: 1 })
   expect(await Bun.file(join(workspace, "footprint-geometry-review.json")).exists()).toBe(true)
+})
+
+test("a cached footprint observation atomically replaces an untrusted outer copy", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "footprint-verification-cache-"))
+  temporary_directories.push(workspace)
+  await mkdir(join(workspace, "visual-reference"), { recursive: true })
+  await Promise.all([
+    Bun.write(join(workspace, "datasheet.pdf"), "%PDF-1.7\nfixture\n"),
+    Bun.write(join(workspace, "visual-reference", "land-pattern.png"), png_bytes),
+  ])
+  let verifier_calls = 0
+  const agent_client: AgentClient = {
+    async run(input) {
+      verifier_calls += 1
+      await Bun.write(
+        join(input.workspace, "footprint-geometry-review.json"),
+        `${JSON.stringify(
+          {
+            version: 1,
+            source: footprint_source,
+            view: "pcb_top",
+            units: "mm",
+            pads: reviewPads(),
+          },
+          null,
+          2,
+        )}\n`,
+      )
+      return { attempts: 1, duration_ms: 5, output_tail: "" }
+    },
+  }
+  const observation = await observeFootprintGeometry({
+    workspace,
+    evidence: evidence(),
+    outer_attempt: 1,
+    debug_dir: join(workspace, "debug"),
+    signal: new AbortController().signal,
+    use_openai: false,
+    agent_client,
+    image_extension: "unused-extension.ts",
+    on_output: () => undefined,
+  })
+
+  const protected_path = join(workspace, "protected.json")
+  const review_path = join(workspace, "footprint-geometry-review.json")
+  await Bun.write(protected_path, '{"protected":true}\n')
+  await rm(review_path)
+  await symlink(protected_path, review_path)
+
+  const agreement = applyFootprintGeometryObservation({
+    workspace,
+    evidence: evidence(),
+    observation,
+  })
+
+  expect(verifier_calls).toBe(1)
+  expect(agreement.status).toBe("verified")
+  expect(await Bun.file(protected_path).text()).toBe('{"protected":true}\n')
+  expect(await Bun.file(review_path).json()).toEqual(observation.review)
 })

@@ -1,5 +1,5 @@
 import type { JobLogStream } from "@/shared/job-types"
-import { PipelineError } from "../../pipeline"
+import { addPipelineArtifactReferences, PipelineError, type PipelineArtifactReference } from "../../pipeline"
 import { retainStageRejection, seedStageWorkspaceFromRejection, type StageWorkspace } from "../artifacts"
 import { ProcessError } from "../process"
 import type { AgentClient } from "./agent-client"
@@ -12,7 +12,9 @@ export interface AgentArtifactAttempt<Value> {
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof AggregateError) {
-    const details = error.errors.map((entry) => (entry instanceof Error ? entry.message : String(entry)))
+    const details = [...new Set(error.errors.map((entry) => getErrorMessage(entry)))].filter(
+      (detail) => detail && !error.message.includes(detail),
+    )
     return [error.message, ...details].join("\n")
   }
   return error instanceof Error ? error.message : String(error)
@@ -91,6 +93,89 @@ async function writeAttemptHistory(input: {
       2,
     )}\n`,
   )
+}
+
+async function retainAttemptFailure(input: {
+  workspace: string
+  attempt: number
+  error_message: string
+  failures: ArtifactAttemptFailure[]
+  stage_id: string
+  contract_id?: string
+  contract_sha256?: string
+  rejection_debug: {
+    debug_dir: string
+    files?: readonly string[]
+    directories?: readonly string[]
+  }
+  phase_label: string
+  on_output: (stream: JobLogStream, message: string) => void | Promise<void>
+}): Promise<ArtifactAttemptFailure> {
+  let retained = true
+  try {
+    await retainStageRejection({
+      workspace: input.workspace,
+      debug_dir: input.rejection_debug.debug_dir,
+      attempt: input.attempt,
+      error_message: input.error_message,
+      files: input.rejection_debug.files,
+      directories: input.rejection_debug.directories,
+    })
+  } catch (retention_error) {
+    retained = false
+    await emitOutputBestEffort(
+      input.on_output,
+      "system",
+      `Could not retain rejected attempt ${input.attempt}: ${getErrorMessage(retention_error)}\n`,
+    )
+  }
+
+  const failure: ArtifactAttemptFailure = {
+    attempt: input.attempt,
+    rejected_at: new Date().toISOString(),
+    error: input.error_message,
+    retained,
+    artifact_path: `${input.rejection_debug.debug_dir}/rejected-attempts/${input.attempt}`,
+  }
+  input.failures.push(failure)
+  await writeAttemptHistory({
+    debug_dir: input.rejection_debug.debug_dir,
+    stage_id: input.stage_id,
+    contract_id: input.contract_id,
+    contract_sha256: input.contract_sha256,
+    failures: input.failures,
+  }).catch(async (history_error) => {
+    await emitOutputBestEffort(
+      input.on_output,
+      "system",
+      `Could not write ${input.phase_label} attempt history: ${getErrorMessage(history_error)}\n`,
+    )
+  })
+  return failure
+}
+
+function appendPipelineArtifactReferences(
+  error: PipelineError,
+  references: readonly PipelineArtifactReference[],
+): PipelineError {
+  const artifact_refs: PipelineArtifactReference[] = []
+  const seen = new Set<string>()
+  for (const reference of [...error.diagnostic.artifact_refs, ...references]) {
+    const key = JSON.stringify([reference.artifact_id ?? null, reference.path ?? null])
+    if (seen.has(key)) continue
+    seen.add(key)
+    artifact_refs.push(reference)
+  }
+
+  const enriched = new PipelineError(
+    {
+      ...error.diagnostic,
+      artifact_refs,
+    },
+    error.cause === undefined ? undefined : { cause: error.cause },
+  )
+  enriched.stack = error.stack
+  return enriched
 }
 
 /** Promote only artifacts that parse and pass their server-owned contract. */
@@ -174,50 +259,36 @@ export async function runAgentArtifactStage<Value>(input: {
         value = await input.validate(workspace.path, attempt)
       } catch (error) {
         input.signal.throwIfAborted()
-        if (error instanceof ProcessError || error instanceof PipelineError) throw error
         const current_error = boundedDiagnostic(getErrorMessage(error), 6_000)
-        let retained = true
-        try {
-          await retainStageRejection({
-            workspace: workspace.path,
-            debug_dir: input.rejection_debug.debug_dir,
-            attempt,
-            error_message: current_error,
-            files: input.rejection_debug.files,
-            directories: input.rejection_debug.directories,
-          })
-        } catch (retention_error) {
-          retained = false
-          await emitOutputBestEffort(
-            input.on_output,
-            "system",
-            `Could not retain rejected attempt ${attempt}: ${getErrorMessage(retention_error)}\n`,
-          )
-        }
-        failures.push({
+        const failure = await retainAttemptFailure({
+          workspace: workspace.path,
           attempt,
-          rejected_at: new Date().toISOString(),
-          error: current_error,
-          retained,
-          artifact_path: `${input.rejection_debug.debug_dir}/rejected-attempts/${attempt}`,
-        })
-        await writeAttemptHistory({
-          debug_dir: input.rejection_debug.debug_dir,
+          error_message: current_error,
+          failures,
           stage_id: input.stage_id,
           contract_id: input.contract_id,
           contract_sha256: input.contract_sha256,
-          failures,
-        }).catch(async (history_error) => {
-          await emitOutputBestEffort(
-            input.on_output,
-            "system",
-            `Could not write ${input.phase_label} attempt history: ${getErrorMessage(history_error)}\n`,
-          )
+          rejection_debug: input.rejection_debug,
+          phase_label: input.phase_label,
+          on_output: input.on_output,
         })
         // Retention and trace persistence are asynchronous. Preserve a
         // cancellation that arrives after validation failed instead of
         // replacing it with an artifact-invalid terminal result.
         input.signal.throwIfAborted()
+        if (error instanceof PipelineError) {
+          throw appendPipelineArtifactReferences(error, [
+            { path: `${input.rejection_debug.debug_dir}/attempt-history.json` },
+            ...(failure.retained ? [{ path: failure.artifact_path }] : []),
+          ])
+        }
+        if (error instanceof ProcessError) {
+          addPipelineArtifactReferences(error, [
+            { path: `${input.rejection_debug.debug_dir}/attempt-history.json` },
+            ...(failure.retained ? [{ path: failure.artifact_path }] : []),
+          ])
+          throw error
+        }
         if (attempt >= max_attempts) {
           const history = cumulativeFeedback(failures) ?? current_error
           throw new PipelineError(

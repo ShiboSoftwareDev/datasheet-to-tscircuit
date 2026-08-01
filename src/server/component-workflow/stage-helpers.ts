@@ -10,7 +10,11 @@ import { type ComponentSchematicPlan, createComponentSchematicPlan } from "../co
 import type { FootprintPlan } from "../job-artifact-validator"
 import type { JobStore } from "../job-store"
 import { createPipelineArtifact, type PipelineArtifact } from "../pipeline"
-import { parseTypicalApplicationPlan, type TypicalApplicationPlan } from "./application-plan"
+import {
+  applicationTargetIdentityFromEvidence,
+  parseTypicalApplicationPlan,
+  type TypicalApplicationPlan,
+} from "./application-plan"
 import { type CommittedEvidenceSnapshot, readCommittedEvidenceSnapshot } from "./evidence-commit"
 
 export const INITIAL_JOB_VALIDATION: JobValidation = {
@@ -87,10 +91,7 @@ export function parseApprovedEvidenceSnapshot(
     schematic_plan: createComponentSchematicPlan(component_evidence),
     application_plan: parseTypicalApplicationPlan(
       parseCommittedJson(snapshot, "typical-application-plan.json"),
-      {
-        part_number: component_evidence.part_number.value,
-        ordering_code: component_evidence.ordering_code?.value,
-      },
+      applicationTargetIdentityFromEvidence(component_evidence),
     ),
   }
 }

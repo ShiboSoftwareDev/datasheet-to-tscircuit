@@ -251,7 +251,6 @@ test("target canonicalization accepts the evidence ordering code as the exact ap
     reference: "IC_MAIN",
     kind: "buck_boost_converter",
     value: "TPS63802",
-    manufacturer_part_number: "TPS63802DLAR",
   }
   plan.connections = [
     { net: "VCC", pins: ["IC_MAIN.VCC", "C1.1"] },
@@ -262,7 +261,33 @@ test("target canonicalization accepts the evidence ordering code as the exact ap
     part_number: "TPS63802",
     ordering_code: "TPS63802DLAR",
   })
-  expect(parsed.components[0]?.reference).toBe("U1")
+  expect(parsed.components[0]).toMatchObject({
+    reference: "U1",
+    value: "TPS63802",
+    manufacturer_part_number: "TPS63802DLAR",
+  })
+
+  requiredItem(plan.components, 0).manufacturer_part_number = "TPS63802DLAR"
+  expect(
+    parseTypicalApplicationPlan(plan, {
+      part_number: "TPS63802",
+      ordering_code: "TPS63802DLAR",
+    }).components[0],
+  ).toMatchObject({
+    value: "TPS63802",
+    manufacturer_part_number: "TPS63802DLAR",
+  })
+
+  requiredItem(plan.components, 0).value = "TPS63802DLAR"
+  expect(
+    parseTypicalApplicationPlan(plan, {
+      part_number: "TPS63802",
+      ordering_code: "TPS63802DLAR",
+    }).components[0],
+  ).toMatchObject({
+    value: "TPS63802",
+    manufacturer_part_number: "TPS63802DLAR",
+  })
 
   requiredItem(plan.components, 0).manufacturer_part_number = "TPS63802WRONG"
   expect(() =>
@@ -271,6 +296,121 @@ test("target canonicalization accepts the evidence ordering code as the exact ap
       ordering_code: "TPS63802DLAR",
     }),
   ).toThrow("must resolve exactly one target component to U1")
+})
+
+test("target canonicalization separates visible family identity from the selected orderable", () => {
+  const plan = documentedPlan()
+  plan.components[0] = {
+    reference: "U1",
+    kind: "current_monitor",
+    value: "INA237",
+  }
+  plan.connections = [
+    { net: "VCC", pins: ["U1.VCC", "C1.1"] },
+    { net: "GND", pins: ["U1.GND", "C1.2"] },
+  ]
+
+  const target = {
+    part_number: "INA237",
+    ordering_code: "INA237AIDGSR",
+  }
+  expect(parseTypicalApplicationPlan(plan, target).components[0]).toMatchObject({
+    reference: "U1",
+    value: "INA237",
+    manufacturer_part_number: "INA237AIDGSR",
+  })
+
+  requiredItem(plan.components, 0).manufacturer_part_number = "INA237AIDGSR"
+  expect(parseTypicalApplicationPlan(plan, target).components[0]).toMatchObject({
+    value: "INA237",
+    manufacturer_part_number: "INA237AIDGSR",
+  })
+})
+
+test("legacy exact-only evidence accepts a specific application-visible family prefix", () => {
+  const plan = documentedPlan()
+  plan.components[0] = {
+    reference: "U1",
+    kind: "buck_boost_converter",
+    value: "TPS63802",
+  }
+  plan.connections = [
+    { net: "VCC", pins: ["U1.VCC", "C1.1"] },
+    { net: "GND", pins: ["U1.GND", "C1.2"] },
+  ]
+
+  const legacy_target = {
+    part_number: "TPS63802DLAR",
+    legacy_package_identifiers: ["DLA"],
+  }
+  expect(parseTypicalApplicationPlan(plan, legacy_target).components[0]).toMatchObject({
+    reference: "U1",
+    value: "TPS63802",
+    manufacturer_part_number: "TPS63802DLAR",
+  })
+
+  requiredItem(plan.components, 0).manufacturer_part_number = "TPS63802"
+  expect(parseTypicalApplicationPlan(plan, legacy_target).components[0]).toMatchObject({
+    value: "TPS63802",
+    manufacturer_part_number: "TPS63802DLAR",
+  })
+
+  requiredItem(plan.components, 0).value = "TPS63803"
+  expect(() => parseTypicalApplicationPlan(plan, legacy_target)).toThrow(
+    "must resolve exactly one target component to U1",
+  )
+
+  requiredItem(plan.components, 0).value = "TPS63802DLA"
+  requiredItem(plan.components, 0).manufacturer_part_number = undefined
+  expect(() => parseTypicalApplicationPlan(plan, legacy_target)).toThrow(
+    "must resolve exactly one target component to U1",
+  )
+})
+
+test("target canonicalization rejects a wrong visible family and a wrong selected orderable", () => {
+  const target = {
+    part_number: "INA237",
+    ordering_code: "INA237AIDGSR",
+  }
+  const wrong_family = documentedPlan()
+  wrong_family.components[0] = {
+    reference: "U1",
+    kind: "current_monitor",
+    value: "INA238",
+    manufacturer_part_number: "INA237AIDGSR",
+  }
+  expect(() => parseTypicalApplicationPlan(wrong_family, target)).toThrow(
+    'application value must identify family "INA237"',
+  )
+
+  const wrong_orderable = documentedPlan()
+  wrong_orderable.components[0] = {
+    reference: "U1",
+    kind: "current_monitor",
+    value: "INA237",
+    manufacturer_part_number: "INA237AIDGST",
+  }
+  expect(() => parseTypicalApplicationPlan(wrong_orderable, target)).toThrow(
+    'manufacturer_part_number, when present, must equal selected ordering identity "INA237AIDGSR"',
+  )
+
+  const family_as_orderable = documentedPlan()
+  family_as_orderable.components[0] = {
+    reference: "U1",
+    kind: "current_monitor",
+    value: "INA237",
+    manufacturer_part_number: "INA237",
+  }
+  expect(() => parseTypicalApplicationPlan(family_as_orderable, target)).toThrow(
+    'manufacturer_part_number, when present, must equal selected ordering identity "INA237AIDGSR"',
+  )
+
+  expect(() =>
+    parseTypicalApplicationPlan(family_as_orderable, {
+      part_number: "INA237AIDGSR",
+      ordering_code: "INA237",
+    }),
+  ).toThrow('ordering identity "INA237" must extend base part number "INA237AIDGSR"')
 })
 
 test("application nets require a real component endpoint before and after canonicalization", () => {

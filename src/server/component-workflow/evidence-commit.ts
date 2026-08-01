@@ -18,6 +18,7 @@ import {
   parseApplicationConnectivityReview,
 } from "./application-connectivity-verification"
 import {
+  applicationTargetIdentityFromEvidence,
   parseTypicalApplicationPlan,
   type ApplicationSourceReference,
   type TypicalApplicationPlan,
@@ -428,10 +429,10 @@ async function validateV2Evidence(
   }
 
   const raw_application = parseJsonBytes(files, "typical-application-plan.json")
-  const application_plan = parseTypicalApplicationPlan(raw_application, {
-    part_number: component_evidence.part_number.value,
-    ordering_code: component_evidence.ordering_code?.value,
-  })
+  const application_plan = parseTypicalApplicationPlan(
+    raw_application,
+    applicationTargetIdentityFromEvidence(component_evidence),
+  )
   if (!isDeepStrictEqual(raw_application, application_plan)) {
     throw new Error("typical-application-plan.json is not in canonical version-4 form")
   }

@@ -68,6 +68,21 @@ test("resolved evidence is source-backed without assuming a package family", () 
   expect(getFootprintEvidenceErrors(parsed, derived_plan)).toEqual([])
 })
 
+test("ordering identities must be distinct extensions of their base part number", () => {
+  const reversed = JSON.parse(JSON.stringify(evidence()))
+  reversed.part_number.value = "TPS63802DLAR"
+  reversed.ordering_code.value = "TPS63802"
+  expect(() => parseComponentEvidence(reversed)).toThrow(
+    "ordering_code must be a distinct exact orderable that extends part_number",
+  )
+
+  const identical = JSON.parse(JSON.stringify(evidence()))
+  identical.ordering_code.value = identical.part_number.value
+  expect(() => parseComponentEvidence(identical)).toThrow(
+    "ordering_code must be a distinct exact orderable that extends part_number",
+  )
+})
+
 test("resolved evidence can retain a non-blocking datasheet discrepancy", () => {
   const resolved = evidence()
   resolved.unresolved_ambiguities = [
@@ -426,4 +441,7 @@ test("agent-facing evidence guide is generated with the exact parser representat
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"kind": "smt"')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"value": "pcb_top"')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"version": 4')
+  expect(COMPONENT_EVIDENCE_GUIDE).toContain('"value": "BASE-PART-NUMBER"')
+  expect(COMPONENT_EVIDENCE_GUIDE).toContain('"value": "BASE-PART-NUMBER-A"')
+  expect(COMPONENT_EVIDENCE_GUIDE).toContain("part_number is the base device/family printed throughout")
 })

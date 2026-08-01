@@ -1,11 +1,15 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseComponentEvidence } from "@/server/component-evidence"
 import {
+  APPLICATION_CONNECTIVITY_REVIEW_SCHEMA_ID,
+  applyApplicationConnectivityObservation,
   canonicalizeApplicationGraph,
   compareApplicationGraphs,
+  installApplicationConnectivityObservation,
+  observeApplicationConnectivity,
   parseApplicationConnectivityReview,
   verifyApplicationConnectivity,
 } from "@/server/component-workflow/application-connectivity-verification"
@@ -138,6 +142,47 @@ test("independent graph agreement rejects the agent-71 misplaced resistor endpoi
   ).toThrow("Independent application connectivity does not match")
 })
 
+test("independent graph agreement rejects the agent-72 R3 pull-up moved from VIN to VOUT", () => {
+  const pullup_plan = parseTypicalApplicationPlan(
+    {
+      version: 4,
+      availability: "documented",
+      pcb_implementation: "schematic_only",
+      title: "Status pull-up",
+      description: "R3 is pulled up to VIN, not VOUT.",
+      source_references: [{ page: 17, figure: "Typical application" }],
+      components: [
+        { reference: "U1", kind: "integrated_circuit", value: "REGULATOR" },
+        { reference: "R3", kind: "resistor", value: "100k" },
+        { reference: "C1", kind: "capacitor", value: "10uF" },
+      ],
+      connections: [
+        { net: "VIN", pins: ["VIN", "C1.1", "R3.1"] },
+        { net: "STATUS", pins: ["U1.FB", "R3.2"] },
+        { net: "VOUT", pins: ["VOUT", "U1.VOUT"] },
+        { net: "GND", pins: ["GND", "U1.GND", "C1.2"] },
+      ],
+    },
+    "REGULATOR",
+  )
+
+  expect(() =>
+    compareApplicationGraphs({
+      plan: pullup_plan,
+      evidence,
+      review: review(
+        [
+          { pins: ["VIN", "C1.1"] },
+          { pins: ["U1.2", "R3.2"] },
+          { pins: ["VOUT", "U1.1", "R3.1"] },
+          { pins: ["GND", "U1.3", "C1.2"] },
+        ],
+        pullup_plan,
+      ),
+    }),
+  ).toThrow("Independent application connectivity does not match")
+})
+
 test("documented reviews distinguish extractor-owned images from independently discovered pages", () => {
   expect(() =>
     parseApplicationConnectivityReview(
@@ -175,6 +220,85 @@ test("documented reviews distinguish extractor-owned images from independently d
   expect(() => compareApplicationGraphs({ plan, evidence, review: independently_discovered })).toThrow(
     "reviewer found the documented application on PDF page 18",
   )
+})
+
+test("cached reviews are rebound when the extractor adopts a reviewer-discovered page", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "application-connectivity-rebind-"))
+  try {
+    const discovered_review = parseApplicationConnectivityReview(
+      {
+        version: 1,
+        availability: "documented",
+        source: {
+          page: 18,
+          figure: "Correct application",
+          method: "pdf_visual",
+          confidence: "high",
+        },
+        components: visibleComponents(plan),
+        connections: plan.connections.map(({ pins }) => ({ pins })),
+      },
+      plan,
+    )
+    const corrected_plan = parseTypicalApplicationPlan(
+      {
+        ...plan,
+        source_references: [{ page: 18, figure: "Correct application" }],
+      },
+      "REGULATOR",
+    )
+    const installed = installApplicationConnectivityObservation({
+      workspace,
+      plan: corrected_plan,
+      observation: {
+        version: 1,
+        schema_id: APPLICATION_CONNECTIVITY_REVIEW_SCHEMA_ID,
+        review: discovered_review,
+        verifier_attempts: 1,
+        verifier_agent_duration_ms: 13,
+      },
+    })
+
+    expect(installed.review).toMatchObject({
+      source: {
+        page: 18,
+        image: "visual-reference/typical-application.png",
+        render_dpi: 200,
+      },
+    })
+    const installed_review = await Bun.file(join(workspace, "application-connectivity-review.json")).json()
+    expect(parseApplicationConnectivityReview(installed_review, corrected_plan)).toEqual(installed.review)
+    if (installed.review.availability !== "documented") {
+      throw new Error("Expected a documented cached observation")
+    }
+    expect(
+      applyApplicationConnectivityObservation({
+        plan: corrected_plan,
+        evidence,
+        observation: installed,
+      }),
+    ).toMatchObject({ status: "verified", source: installed.review.source })
+
+    const absent_plan = parseTypicalApplicationPlan({
+      version: 4,
+      availability: "not_present",
+      title: "No application",
+      description: "No documented application was found.",
+      source_references: [{ page: 18 }],
+      searched_sections: ["application information"],
+      components: [],
+      connections: [],
+    })
+    const unmaterialized = installApplicationConnectivityObservation({
+      workspace,
+      plan: absent_plan,
+      observation: installed,
+    })
+    expect(unmaterialized.review).not.toHaveProperty("source.image")
+    expect(unmaterialized.review).not.toHaveProperty("source.render_dpi")
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
 })
 
 test("documented review envelopes and nested records reject unknown fields", () => {
@@ -322,6 +446,208 @@ test("component fact comparison is canonical, optional when unseen, and strict w
       review: review(alias_connections, plan, wrong_value),
     }),
   ).toThrow("R1.value")
+})
+
+test("visible U1 families match authoritative orderable identities while external MPNs stay exact", () => {
+  const exact_evidence = {
+    ...evidence,
+    part_number: { ...evidence.part_number, value: "TPS63802DLAR" },
+  }
+  const exact_plan = parseTypicalApplicationPlan(
+    {
+      ...plan,
+      components: plan.components.map((component) =>
+        component.reference === "U1"
+          ? {
+              ...component,
+              value: "TPS63802",
+              manufacturer_part_number: "TPS63802DLAR",
+            }
+          : component.reference === "R1"
+            ? { ...component, manufacturer_part_number: "RC0603FR-0710KL" }
+            : component,
+      ),
+    },
+    { part_number: "TPS63802DLAR", legacy_package_identifiers: ["DLA"] },
+  )
+  const family_components = visibleComponents(exact_plan).map((component) =>
+    component.reference === "U1"
+      ? {
+          reference: "U1",
+          kind: component.kind,
+          manufacturer_part_number: "TPS63802",
+        }
+      : component,
+  )
+  const exact_review = review(
+    exact_plan.connections.map(({ pins }) => ({ pins })),
+    exact_plan,
+    family_components,
+  )
+
+  expect(
+    compareApplicationGraphs({ plan: exact_plan, evidence: exact_evidence, review: exact_review }).status,
+  ).toBe("verified")
+
+  const ina_evidence = {
+    ...evidence,
+    part_number: { ...evidence.part_number, value: "INA237" },
+    ordering_code: { ...evidence.part_number, value: "INA237AIDGSR" },
+  }
+  const ina_plan = parseTypicalApplicationPlan(
+    {
+      ...plan,
+      components: plan.components.map((component) =>
+        component.reference === "U1"
+          ? {
+              ...component,
+              value: "INA237",
+              manufacturer_part_number: "INA237AIDGSR",
+            }
+          : component,
+      ),
+    },
+    { part_number: "INA237", ordering_code: "INA237AIDGSR" },
+  )
+  const ina_components = visibleComponents(ina_plan).map((component) =>
+    component.reference === "U1"
+      ? { reference: "U1", kind: component.kind, manufacturer_part_number: "INA237" }
+      : component,
+  )
+  expect(
+    compareApplicationGraphs({
+      plan: ina_plan,
+      evidence: ina_evidence,
+      review: review(
+        ina_plan.connections.map(({ pins }) => ({ pins })),
+        ina_plan,
+        ina_components,
+      ),
+    }).status,
+  ).toBe("verified")
+
+  const wrong_family = family_components.map((component) =>
+    component.reference === "U1" ? { ...component, manufacturer_part_number: "TPS63803" } : component,
+  )
+  expect(() =>
+    compareApplicationGraphs({
+      plan: exact_plan,
+      evidence: exact_evidence,
+      review: review(
+        exact_plan.connections.map(({ pins }) => ({ pins })),
+        exact_plan,
+        wrong_family,
+      ),
+    }),
+  ).toThrow("U1.manufacturer_part_number")
+
+  const truncated_variant = family_components.map((component) =>
+    component.reference === "U1" ? { ...component, manufacturer_part_number: "TPS63802D" } : component,
+  )
+  expect(() =>
+    compareApplicationGraphs({
+      plan: exact_plan,
+      evidence: exact_evidence,
+      review: review(
+        exact_plan.connections.map(({ pins }) => ({ pins })),
+        exact_plan,
+        truncated_variant,
+      ),
+    }),
+  ).toThrow("U1.manufacturer_part_number")
+
+  const longer_unverified_variant = family_components.map((component) =>
+    component.reference === "U1"
+      ? { ...component, manufacturer_part_number: "TPS63802DLARWRONG" }
+      : component,
+  )
+  expect(() =>
+    compareApplicationGraphs({
+      plan: exact_plan,
+      evidence: exact_evidence,
+      review: review(
+        exact_plan.connections.map(({ pins }) => ({ pins })),
+        exact_plan,
+        longer_unverified_variant,
+      ),
+    }),
+  ).toThrow("U1.manufacturer_part_number")
+
+  const shortened_external_mpn = family_components.map((component) =>
+    component.reference === "R1" ? { ...component, manufacturer_part_number: "RC0603" } : component,
+  )
+  expect(() =>
+    compareApplicationGraphs({
+      plan: exact_plan,
+      evidence: exact_evidence,
+      review: review(
+        exact_plan.connections.map(({ pins }) => ({ pins })),
+        exact_plan,
+        shortened_external_mpn,
+      ),
+    }),
+  ).toThrow("R1.manufacturer_part_number")
+})
+
+test("semantic comparison reports inventory, fact, and graph disagreements together", () => {
+  const mismatched = review(
+    [{ pins: ["U1.1", "R1.1", "C99.1"] }, { pins: ["U1.2", "R1.2"] }, { pins: ["U1.3", "C99.2"] }],
+    plan,
+    [
+      { reference: "U1", kind: "integrated_circuit" },
+      { reference: "R1", kind: "diode", value: "22k" },
+      { reference: "C99", kind: "capacitor", value: "1 nF" },
+    ],
+  )
+
+  let failure: unknown
+  try {
+    compareApplicationGraphs({ plan, evidence, review: mismatched })
+  } catch (error) {
+    failure = error
+  }
+  expect(failure).toBeInstanceOf(AggregateError)
+  const message = failure instanceof Error ? failure.message : ""
+  expect(message).toContain("Independent application component inventory does not match")
+  expect(message).toContain("R1.kind")
+  expect(message).toContain("R1.value")
+  expect(message).toContain("Independent application connectivity does not match")
+})
+
+test("application review reports every malformed endpoint in one schema failure", () => {
+  let failure: unknown
+  try {
+    parseApplicationConnectivityReview(
+      {
+        version: 1,
+        availability: "documented",
+        source: {
+          page: 17,
+          figure: "Typical application",
+          method: "pdf_visual",
+          confidence: "high",
+          image: "visual-reference/typical-application.png",
+          render_dpi: 200,
+        },
+        components: visibleComponents(plan),
+        connections: [
+          { pins: ["V_S = 2.7V–5.5V", "U1.1", "R1.1"] },
+          { pins: ["48V BATT", "U1.2", "R1.2", "R2.1"] },
+          { pins: ["To MCU", "U1.3", "R2.2"] },
+        ],
+      },
+      plan,
+    )
+  } catch (error) {
+    failure = error
+  }
+  expect(failure).toBeInstanceOf(AggregateError)
+  const message = failure instanceof Error ? failure.message : ""
+  expect(message).toContain("V_S = 2.7V–5.5V")
+  expect(message).toContain("48V BATT")
+  expect(message).toContain("To MCU")
+  expect(message).not.toContain("references a component absent")
+  expect(message).not.toContain("is isolated")
 })
 
 test("clearly symmetric passive terminals may be permuted without changing connectivity", () => {
@@ -592,7 +918,91 @@ test("not_present claims require an independent review and disagree with discove
   ).toThrow("extractor=not_present, verifier=documented")
 })
 
-test("verifier requests expose only non-authoritative hints and retain raw mismatches", async () => {
+test("one typed independent observation can be applied to multiple repaired outer plans", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "application-connectivity-observation-"))
+  try {
+    await mkdir(join(workspace, "visual-reference"), { recursive: true })
+    await Promise.all([
+      Bun.write(join(workspace, "datasheet.pdf"), "datasheet fixture"),
+      Bun.write(join(workspace, "visual-reference", "typical-application.png"), "png fixture"),
+    ])
+    let agent_calls = 0
+    const agent_client: AgentClient = {
+      async run(input) {
+        agent_calls += 1
+        await Bun.write(
+          join(input.workspace, "application-connectivity-review.json"),
+          `${JSON.stringify({
+            version: 1,
+            availability: "documented",
+            source: {
+              page: 17,
+              figure: "Typical application",
+              method: "pdf_visual",
+              confidence: "high",
+            },
+            components: visibleComponents(plan),
+            connections: [
+              { pins: ["R2.2", "U1.3"] },
+              { pins: ["R2.1", "R1.2", "U1.2"] },
+              { pins: ["R1.1", "U1.1"] },
+            ],
+          })}\n`,
+        )
+        return { attempts: 1, duration_ms: 13, output_tail: "" }
+      },
+    }
+    const observation = await observeApplicationConnectivity({
+      workspace,
+      plan,
+      evidence,
+      outer_attempt: 1,
+      debug_dir: join(workspace, "debug"),
+      signal: new AbortController().signal,
+      use_openai: false,
+      agent_client,
+      image_extension: "test-image-extension.ts",
+      on_output: () => undefined,
+    })
+    const protected_path = join(workspace, "protected-review.json")
+    const review_path = join(workspace, "application-connectivity-review.json")
+    await Bun.write(protected_path, '{"protected":true}\n')
+    await rm(review_path)
+    await symlink(protected_path, review_path)
+    const installed_observation = installApplicationConnectivityObservation({
+      workspace,
+      plan,
+      observation,
+    })
+    expect(await Bun.file(protected_path).text()).toBe('{"protected":true}\n')
+    expect(await Bun.file(review_path).json()).toEqual(installed_observation.review)
+    const rejected_plan = parseTypicalApplicationPlan(
+      {
+        ...plan,
+        connections: [
+          { net: "OUTPUT", pins: ["U1.VOUT", "R1.1"] },
+          { net: "FEEDBACK", pins: ["U1.FB", "R2.1"] },
+          { net: "GROUND", pins: ["U1.GND", "R1.2", "R2.2"] },
+        ],
+      },
+      "REGULATOR",
+    )
+
+    expect(() =>
+      applyApplicationConnectivityObservation({ plan: rejected_plan, evidence, observation }),
+    ).toThrow("Independent application connectivity does not match")
+    expect(applyApplicationConnectivityObservation({ plan, evidence, observation })).toMatchObject({
+      status: "verified",
+      verifier_attempts: 1,
+      verifier_agent_duration_ms: 13,
+    })
+    expect(agent_calls).toBe(1)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("verifier workspace exposes no extractor hints, crop, inventory, or graph", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "application-connectivity-mismatch-"))
   try {
     await mkdir(join(workspace, "visual-reference"), { recursive: true })
@@ -608,8 +1018,6 @@ test("verifier requests expose only non-authoritative hints and retain raw misma
         figure: "Typical application",
         method: "pdf_visual",
         confidence: "high",
-        image: "visual-reference/typical-application.png",
-        render_dpi: 200,
       },
       components: visibleComponents(plan),
       connections: [
@@ -620,12 +1028,12 @@ test("verifier requests expose only non-authoritative hints and retain raw misma
     }
     const agent_client: AgentClient = {
       async run(input) {
-        const request = await Bun.file(join(input.workspace, "verification-request.json")).json()
-        expect(request.naming_hints_are_incomplete_and_non_authoritative).toBe(true)
-        expect(request).not.toHaveProperty("component_naming_hints")
-        expect(request.target_pin_naming_hints).toEqual(
-          evidence.pinout.pins.map(({ number, labels }) => ({ number, labels })),
-        )
+        expect(await Bun.file(join(input.workspace, "verification-request.json")).exists()).toBe(false)
+        expect(
+          await Bun.file(join(input.workspace, "visual-reference", "typical-application.png")).exists(),
+        ).toBe(false)
+        expect(input.prompt).not.toContain("target_pin_naming_hints")
+        expect(input.prompt).not.toContain("verification-request.json")
         await Bun.write(
           join(input.workspace, "application-connectivity-review.json"),
           `${JSON.stringify(raw_review)}\n`,
@@ -648,7 +1056,14 @@ test("verifier requests expose only non-authoritative hints and retain raw misma
         on_output: () => undefined,
       }),
     ).rejects.toThrow("Independent application connectivity does not match")
-    expect(await Bun.file(join(workspace, "application-connectivity-review.json")).json()).toEqual(raw_review)
+    expect(await Bun.file(join(workspace, "application-connectivity-review.json")).json()).toEqual({
+      ...raw_review,
+      source: {
+        ...raw_review.source,
+        image: "visual-reference/typical-application.png",
+        render_dpi: 200,
+      },
+    })
   } finally {
     await rm(workspace, { recursive: true, force: true })
   }
@@ -672,8 +1087,7 @@ test("verifier independently checks not_present without requiring an application
     const agent_client: AgentClient = {
       async run(input) {
         calls += 1
-        const request = await Bun.file(join(input.workspace, "verification-request.json")).json()
-        expect(request.application_image_supplied).toBe(false)
+        expect(await Bun.file(join(input.workspace, "verification-request.json")).exists()).toBe(false)
         expect(
           await Bun.file(join(input.workspace, "visual-reference", "typical-application.png")).exists(),
         ).toBe(false)

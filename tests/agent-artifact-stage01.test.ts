@@ -14,7 +14,7 @@ import {
 } from "@/server/infrastructure/artifacts"
 import { ProcessError } from "@/server/infrastructure/process"
 import { buildCharacterizationPrompt } from "@/server/modeling/prompts"
-import { PipelineError } from "@/server/pipeline"
+import { PipelineError, toPipelineError } from "@/server/pipeline"
 
 function createWorkspaceFactory(root: string, on_create: () => void) {
   return async (attempt: number): Promise<StageWorkspace> => {
@@ -149,6 +149,49 @@ test("artifact correction carries cumulative diagnostics without regressing prio
       { attempt: 1, error: "version must equal 1" },
       { attempt: 2, error: "pin identifiers must be strings" },
     ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("aggregate diagnostics are presented once per actionable detail", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-artifact-aggregate-diagnostic-"))
+  let attempt = 0
+  let correction_feedback = ""
+  try {
+    await runAgentArtifactStage({
+      stage_id: "extract_evidence",
+      phase_label: "Extract evidence",
+      max_artifact_attempts: 2,
+      signal: new AbortController().signal,
+      use_openai: false,
+      agent_client: {
+        async run() {
+          attempt += 1
+          return { attempts: 1, duration_ms: 1, output_tail: "" }
+        },
+      },
+      create_workspace: createWorkspaceFactory(root, () => undefined),
+      build_prompt: (feedback) => {
+        correction_feedback = feedback ?? ""
+        return "write candidate"
+      },
+      async validate() {
+        if (attempt === 1) {
+          throw new AggregateError(
+            [new Error("first actionable detail"), new Error("second actionable detail")],
+            "Combined validation failed\nfirst actionable detail\nsecond actionable detail",
+          )
+        }
+        return "valid"
+      },
+      async promote() {},
+      rejection_debug: { debug_dir: join(root, "debug") },
+      on_output() {},
+    })
+
+    expect(correction_feedback.split("first actionable detail")).toHaveLength(2)
+    expect(correction_feedback.split("second actionable detail")).toHaveLength(2)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -593,53 +636,200 @@ test("artifact log observers cannot abort agent output or correction retries", a
   }
 })
 
-test("validation infrastructure errors preserve their type and do not consume artifact retries", async () => {
-  const root = await mkdtemp(join(tmpdir(), "agent-artifact-validation-infrastructure-"))
-  const errors = [
-    new ProcessError({
-      code: "process_exit_failed",
-      command_label: "independent verifier",
-      message: "verifier process exited",
-      exit_code: 2,
-      output_tail: "fatal verifier failure",
-    }),
-    new PipelineError({
-      code: "nested_verifier_failed",
-      message: "independent verifier exhausted its own attempts",
-      stage_id: "verify_application_connectivity",
-      operation: "validate_agent_artifact",
-    }),
-  ]
+test("validation process errors retain the enclosing candidate without consuming artifact retries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-artifact-validation-process-"))
+  const debug_dir = join(root, "debug")
+  const process_error = new ProcessError({
+    code: "process_exit_failed",
+    command_label: "independent verifier",
+    message: "verifier process exited",
+    exit_code: 2,
+    output_tail: "fatal verifier failure",
+  })
+  let agent_attempts = 0
 
   try {
-    for (const expected_error of errors) {
-      let agent_attempts = 0
-      const caught = await runAgentArtifactStage({
-        stage_id: "extract_evidence",
-        phase_label: "Extract evidence",
-        max_artifact_attempts: 4,
-        signal: new AbortController().signal,
-        use_openai: false,
-        agent_client: {
-          async run() {
-            agent_attempts += 1
-            return { attempts: 1, duration_ms: 1, output_tail: "" }
-          },
+    const caught = await runAgentArtifactStage({
+      stage_id: "extract_evidence",
+      phase_label: "Extract evidence",
+      max_artifact_attempts: 4,
+      signal: new AbortController().signal,
+      use_openai: false,
+      agent_client: {
+        async run(input) {
+          agent_attempts += 1
+          await Bun.write(join(input.workspace, "candidate.txt"), "corrected outer candidate")
+          return { attempts: 1, duration_ms: 1, output_tail: "" }
         },
-        create_workspace: createWorkspaceFactory(root, () => undefined),
-        build_prompt: () => "extract",
-        async validate() {
-          throw expected_error
-        },
-        async promote() {},
-        rejection_debug: { debug_dir: join(root, "debug") },
-        on_output() {},
-      }).catch((error) => error)
+      },
+      create_workspace: createWorkspaceFactory(root, () => undefined),
+      build_prompt: () => "extract",
+      async validate() {
+        throw process_error
+      },
+      async promote() {},
+      rejection_debug: { debug_dir, files: ["candidate.txt"] },
+      on_output() {},
+    }).catch((error) => error)
 
-      expect(caught).toBe(expected_error)
-      expect(agent_attempts).toBe(1)
-      expect(await Bun.file(join(root, "debug", "rejected-attempts", "1")).exists()).toBe(false)
-    }
+    expect(caught).toBe(process_error)
+    expect(agent_attempts).toBe(1)
+    expect(await readFile(join(debug_dir, "rejected-attempts", "1", "candidate.txt"), "utf8")).toBe(
+      "corrected outer candidate",
+    )
+    expect(await Bun.file(join(debug_dir, "attempt-history.json")).json()).toMatchObject({
+      stage_id: "extract_evidence",
+      failures: [{ attempt: 1, error: "verifier process exited", retained: true }],
+    })
+    const terminal_error = toPipelineError(caught, {
+      code: "stage_execution_failed",
+      fallback_message: "Extract evidence failed",
+      stage_id: "extract_evidence",
+      operation: "execute_stage",
+    })
+    expect(terminal_error.diagnostic.artifact_refs).toEqual([
+      { path: join(debug_dir, "attempt-history.json") },
+      { path: join(debug_dir, "rejected-attempts", "1") },
+    ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("nested verifier exhaustion retains agent-73's enclosing third evidence candidate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-artifact-nested-verifier-"))
+  const debug_dir = join(root, "debug")
+  const nested_history = join(root, "nested-connectivity", "attempt-history.json")
+  const nested_cause = new Error("connectivity review endpoint 48V BATT is invalid")
+  const nested_error = new PipelineError(
+    {
+      code: "verify_application_connectivity_artifact_invalid",
+      message: "Independent application connectivity verification exhausted two attempts",
+      stage_id: "verify_application_connectivity",
+      operation: "validate_agent_artifact",
+      artifact_refs: [{ path: nested_history }],
+      hint: "Inspect the nested connectivity attempts.",
+      retryable: false,
+    },
+    { cause: nested_cause },
+  )
+  let agent_attempts = 0
+  let promote_attempts = 0
+
+  try {
+    const caught = await runAgentArtifactStage({
+      stage_id: "extract_evidence",
+      phase_label: "Datasheet evidence extraction",
+      max_artifact_attempts: 4,
+      signal: new AbortController().signal,
+      use_openai: false,
+      agent_client: {
+        async run(input) {
+          agent_attempts += 1
+          await Bun.write(
+            join(input.workspace, "typical-application-plan.json"),
+            agent_attempts === 3
+              ? "outer attempt 3 with corrected inventory"
+              : `outer attempt ${agent_attempts}`,
+          )
+          return { attempts: 1, duration_ms: 1, output_tail: "" }
+        },
+      },
+      create_workspace: createWorkspaceFactory(root, () => undefined),
+      build_prompt: (feedback) => feedback ?? "extract",
+      async validate(_workspace, attempt) {
+        if (attempt === 1) throw new Error("unsupported footprint_source_references")
+        if (attempt === 2) throw new Error("independent inventory contains B1 and SW1")
+        throw nested_error
+      },
+      async promote() {
+        promote_attempts += 1
+      },
+      contract_id: "component-evidence/v1",
+      contract_sha256: "b".repeat(64),
+      rejection_debug: { debug_dir, files: ["typical-application-plan.json"] },
+      on_output() {},
+    }).catch((error) => error)
+
+    expect(caught).toBeInstanceOf(PipelineError)
+    expect(caught).not.toBe(nested_error)
+    const enriched = caught as PipelineError
+    expect(enriched.diagnostic).toMatchObject({
+      code: nested_error.diagnostic.code,
+      message: nested_error.diagnostic.message,
+      stage_id: nested_error.diagnostic.stage_id,
+      operation: nested_error.diagnostic.operation,
+      hint: nested_error.diagnostic.hint,
+      retryable: nested_error.diagnostic.retryable,
+    })
+    expect(enriched.cause).toBe(nested_cause)
+    expect(enriched.diagnostic.cause_chain).toEqual(nested_error.diagnostic.cause_chain)
+    expect(enriched.diagnostic.artifact_refs).toEqual([
+      { path: nested_history },
+      { path: join(debug_dir, "attempt-history.json") },
+      { path: join(debug_dir, "rejected-attempts", "3") },
+    ])
+    expect({ agent_attempts, promote_attempts }).toEqual({ agent_attempts: 3, promote_attempts: 0 })
+    expect(
+      await readFile(join(debug_dir, "rejected-attempts", "3", "typical-application-plan.json"), "utf8"),
+    ).toBe("outer attempt 3 with corrected inventory")
+    expect(await Bun.file(join(debug_dir, "attempt-history.json")).json()).toMatchObject({
+      stage_id: "extract_evidence",
+      contract_id: "component-evidence/v1",
+      failures: [
+        { attempt: 1, error: "unsupported footprint_source_references", retained: true },
+        { attempt: 2, error: "independent inventory contains B1 and SW1", retained: true },
+        {
+          attempt: 3,
+          error: "Independent application connectivity verification exhausted two attempts",
+          retained: true,
+        },
+      ],
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("cancellation bypasses enclosing retention for a nested typed validation failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-artifact-nested-cancellation-"))
+  const debug_dir = join(root, "debug")
+  const controller = new AbortController()
+  const cancellation = new Error("operator cancelled nested verification")
+  const nested_error = new PipelineError({
+    code: "nested_verifier_failed",
+    message: "nested verifier failed",
+    stage_id: "verify_application_connectivity",
+    operation: "validate_agent_artifact",
+  })
+
+  try {
+    const caught = await runAgentArtifactStage({
+      stage_id: "extract_evidence",
+      phase_label: "Extract evidence",
+      max_artifact_attempts: 4,
+      signal: controller.signal,
+      use_openai: false,
+      agent_client: {
+        async run(input) {
+          await Bun.write(join(input.workspace, "candidate.txt"), "must not be retained")
+          return { attempts: 1, duration_ms: 1, output_tail: "" }
+        },
+      },
+      create_workspace: createWorkspaceFactory(root, () => undefined),
+      build_prompt: () => "extract",
+      async validate() {
+        controller.abort(cancellation)
+        throw nested_error
+      },
+      async promote() {},
+      rejection_debug: { debug_dir, files: ["candidate.txt"] },
+      on_output() {},
+    }).catch((error) => error)
+
+    expect(caught).toBe(cancellation)
+    expect(await Bun.file(join(debug_dir, "attempt-history.json")).exists()).toBe(false)
+    expect(await Bun.file(join(debug_dir, "rejected-attempts", "1")).exists()).toBe(false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

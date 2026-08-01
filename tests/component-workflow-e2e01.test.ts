@@ -127,6 +127,16 @@ const application_connectivity_review = {
   connections: application_plan.connections.map(({ pins }) => ({ pins })),
 }
 
+const application_connectivity_observation_review = {
+  ...application_connectivity_review,
+  source: {
+    page: 3,
+    figure: "Typical application",
+    method: "pdf_visual",
+    confidence: "high",
+  },
+}
+
 const footprint_geometry_review = {
   version: 1,
   source: visual_source,
@@ -333,7 +343,7 @@ function deterministicAgent(calls: string[]): AgentClient {
       } else if (input.phase_label === "Independent application connectivity verification") {
         await Bun.write(
           join(input.workspace, "application-connectivity-review.json"),
-          `${JSON.stringify(application_connectivity_review, null, 2)}\n`,
+          `${JSON.stringify(application_connectivity_observation_review, null, 2)}\n`,
         )
       } else if (input.phase_label === "Component source generation") {
         await Bun.write(join(input.workspace, "index.circuit.tsx"), component_source)
@@ -618,6 +628,133 @@ test("evidence correction repairs a retained agent-71-shaped candidate without r
   expect(
     agent_calls.filter((phase) => phase === "Independent application connectivity verification"),
   ).toHaveLength(1)
+})
+
+test("evidence correction reuses immutable reviewer observations across semantic repairs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "datasheet-component-pipeline-reviewer-reuse-"))
+  temporary_directories.push(root)
+  const job_dir = join(root, "job")
+  await mkdir(job_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.4\n% deterministic fixture\n"),
+    Bun.write(join(job_dir, "package.json"), '{"private":true}\n'),
+    Bun.write(join(job_dir, "tsconfig.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.ts"), "export default {}\n"),
+  ])
+  const job_store = new JobStore()
+  job_store.createJob({
+    job_id: "component_reviewer_reuse",
+    job_dir,
+    file_name: "generic-2.pdf",
+  })
+  const agent_calls: string[] = []
+  const base_agent = deterministicAgent(agent_calls)
+  let extraction_attempt = 0
+  let retained_incomplete_plan: unknown
+  let retained_application_review: unknown
+  let deleted_seeded_review = false
+  const correction_agent: AgentClient = {
+    async run(input) {
+      if (input.phase_label !== "Datasheet evidence extraction") return base_agent.run(input)
+      extraction_attempt += 1
+
+      if (extraction_attempt === 1) {
+        const result = await base_agent.run(input)
+        const invalid_evidence = await Bun.file(join(input.workspace, "component-evidence.json")).json()
+        Reflect.deleteProperty(invalid_evidence, "version")
+        await Bun.write(
+          join(input.workspace, "component-evidence.json"),
+          `${JSON.stringify(invalid_evidence, null, 2)}\n`,
+        )
+        return result
+      }
+
+      if (extraction_attempt === 2) {
+        const result = await base_agent.run(input)
+        const incomplete_plan = {
+          ...application_plan,
+          components: application_plan.components.filter(({ reference }) => reference !== "C1"),
+          connections: application_plan.connections.map(({ net, pins }) => ({
+            net,
+            pins: pins.filter((endpoint) => !endpoint.startsWith("C1.")),
+          })),
+        }
+        await Bun.write(
+          join(input.workspace, "typical-application-plan.json"),
+          `${JSON.stringify(incomplete_plan, null, 2)}\n`,
+        )
+        return result
+      }
+
+      agent_calls.push(input.phase_label)
+      retained_incomplete_plan = await Bun.file(join(input.workspace, "typical-application-plan.json")).json()
+      retained_application_review = await Bun.file(
+        join(input.workspace, "application-connectivity-review.json"),
+      ).json()
+      await Bun.write(
+        join(input.workspace, "typical-application-plan.json"),
+        `${JSON.stringify(application_plan, null, 2)}\n`,
+      )
+      const seeded_review_path = join(input.workspace, "application-connectivity-review.json")
+      await rm(seeded_review_path, { force: true })
+      deleted_seeded_review = !(await Bun.file(seeded_review_path).exists())
+      await input.on_output("stdout", "fixture repaired the retained plan and deleted its copied review\n")
+      return { attempts: 1, duration_ms: 1, output_tail: "" }
+    },
+  }
+
+  await runJob(
+    { job_id: "component_reviewer_reuse" },
+    {
+      job_store,
+      agent_bin: "unused-agent",
+      tsci_bin: "fixture-tsci",
+      agent_client: correction_agent,
+      process_runner: new FakeTscircuitRunner(),
+    },
+  )
+
+  expect(retained_incomplete_plan).toMatchObject({
+    components: [{ reference: "U1" }],
+    connections: [{ pins: ["U1.INPUT", "INPUT"] }, { pins: ["U1.RETURN", "RETURN"] }],
+  })
+  expect(retained_application_review).toEqual(application_connectivity_review)
+  expect(deleted_seeded_review).toBe(true)
+
+  const job = job_store.getJob("component_reviewer_reuse")
+  expect(job).toMatchObject({
+    display_status: "complete",
+    is_complete: true,
+    has_errors: false,
+    validation: { evidence: "passed" },
+    pipeline: { pipeline_id: "datasheet_component", status: "completed" },
+  })
+  expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(3)
+  expect(agent_calls.filter((phase) => phase === "Independent footprint geometry verification")).toHaveLength(
+    1,
+  )
+  expect(
+    agent_calls.filter((phase) => phase === "Independent application connectivity verification"),
+  ).toHaveLength(1)
+
+  const system_logs = job?.logs
+    .filter(({ stream }) => stream === "system")
+    .map(({ message }) => message)
+    .join("")
+  expect(system_logs).toContain("Reusing immutable footprint observation")
+  expect(system_logs).toContain("Reusing immutable application observation")
+
+  const evidence_pointer = (await Bun.file(join(job_dir, "evidence-commit.json")).json()) as {
+    evidence_directory: string
+  }
+  const evidence_dir = join(job_dir, evidence_pointer.evidence_directory)
+  expect(await Bun.file(join(evidence_dir, "application-connectivity-review.json")).json()).toEqual(
+    application_connectivity_review,
+  )
+  expect(await Bun.file(join(evidence_dir, "footprint-geometry-review.json")).json()).toEqual(
+    footprint_geometry_review,
+  )
 })
 
 test("component workflow preserves missing-tsci failures and never invokes source repair", async () => {

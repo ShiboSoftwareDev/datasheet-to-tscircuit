@@ -103,18 +103,30 @@ their typed execution traces. The durable files under
   artifacts under `artifacts/`.
 - Agent-backed stages also retain `attempt-history.json` plus every rejected
   candidate. Correction attempts receive those exact files and cumulative
-  diagnostics, so fixing one field cannot silently regress an earlier fix.
+  diagnostics, so fixing one field cannot silently regress an earlier fix. A
+  typed or process failure inside a nested independent verifier also retains
+  the enclosing outer candidate before the stage terminates.
 - `component-validation.json` and `application-validation.json` contain the
   deterministic component validation outcomes.
 - `footprint-geometry-review.json` and
   `footprint-geometry-verification.json` preserve a second agent's independent
   PCB-top pad transcription and the server-computed 0.01 mm agreement record.
-  The reviewer receives pin-name hints, but never the extractor's pad geometry.
+  The reviewer receives the datasheet and trusted land-pattern render, but no
+  extractor pin names or pad geometry.
 - `application-connectivity-review.json` and
   `application-connectivity-verification.json` record an independently
   transcribed visible-component inventory and image-to-netlist graph plus their
-  agreement hashes. Net names and ordering are ignored; component facts and
-  endpoint connectivity must match.
+  agreement hashes. Schema errors are accumulated; once the review is valid,
+  inventory, visible-fact, and graph disagreements are reported together. Net
+  names and ordering are ignored; component facts and endpoint connectivity
+  must match. Independent observations are immutable and input-fingerprinted,
+  so unchanged observations are reused across outer evidence repairs and
+  atomically reinstalled over any retained workspace copy.
+- Component identity keeps the visible base family separate from the selected
+  orderable: for example, U1 `value` is `TPS63802` while its authoritative
+  `manufacturer_part_number` is `TPS63802DLAR`. The server binds canonical U1
+  from accepted evidence, requires an ordering code to extend its base family,
+  and rejects a wrong, reversed, or truncated ordering identity.
 - `evidence-image-manifest.json` binds server-rendered 200-DPI reference pages
   and UI aliases to the exact datasheet hash; agent-authored image pixels are
   never trusted.

@@ -64,9 +64,41 @@ export interface TypicalApplicationPlan {
 export interface ApplicationTargetIdentity {
   part_number: string
   ordering_code?: string
+  legacy_package_identifiers?: string[]
 }
 
 type ApplicationTargetIdentityInput = string | ApplicationTargetIdentity
+
+interface NormalizedApplicationTargetIdentity {
+  part_number: string
+  normalized_part_number: string
+  selected_part_number: string
+  normalized_selected_part_number: string
+  has_distinct_ordering_code: boolean
+  normalized_legacy_package_identifiers: string[]
+}
+
+export function applicationTargetIdentityFromEvidence(evidence: {
+  part_number: { value: string }
+  ordering_code?: { value: string }
+  package: { name: { value: string }; code?: { value: string } }
+}): ApplicationTargetIdentity {
+  const package_text = [evidence.package.code?.value, evidence.package.name.value]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+  const legacy_package_identifiers = [
+    ...new Set(
+      (package_text.match(/[A-Za-z0-9]+/g) ?? [])
+        .map(normalizedIdentifier)
+        .filter((identifier) => identifier.length >= 3),
+    ),
+  ]
+  return {
+    part_number: evidence.part_number.value,
+    ...(evidence.ordering_code ? { ordering_code: evidence.ordering_code.value } : {}),
+    ...(legacy_package_identifiers.length > 0 ? { legacy_package_identifiers } : {}),
+  }
+}
 
 function isInterfaceOnlyComponent(component: TypicalApplicationPlan["components"][number]): boolean {
   const kind = component.kind
@@ -76,32 +108,120 @@ function isInterfaceOnlyComponent(component: TypicalApplicationPlan["components"
   return /^(?:external|power|input|output|supply|net).*(?:port|terminal)$/.test(kind)
 }
 
-function targetIdentifiers(target: ApplicationTargetIdentityInput | undefined): Set<string> {
-  const values = typeof target === "string" ? [target] : [target?.part_number, target?.ordering_code]
-  return new Set(values.map(normalizedIdentifier).filter(Boolean))
+function normalizeTargetIdentity(
+  target: ApplicationTargetIdentityInput | undefined,
+): NormalizedApplicationTargetIdentity | undefined {
+  if (target === undefined) return undefined
+  const part_number = (typeof target === "string" ? target : target.part_number).trim()
+  const ordering_code = (typeof target === "string" ? undefined : target.ordering_code)?.trim()
+  const legacy_package_identifiers =
+    typeof target === "string" ? [] : (target.legacy_package_identifiers ?? [])
+  const normalized_part_number = normalizedIdentifier(part_number)
+  const normalized_ordering_code = normalizedIdentifier(ordering_code)
+  if (!normalized_part_number) return undefined
+  if (
+    normalized_ordering_code &&
+    normalized_ordering_code !== normalized_part_number &&
+    !normalized_ordering_code.startsWith(normalized_part_number)
+  ) {
+    throw new Error(
+      `ordering identity ${JSON.stringify(ordering_code)} must extend base part number ${JSON.stringify(part_number)}`,
+    )
+  }
+  return {
+    part_number,
+    normalized_part_number,
+    selected_part_number: ordering_code || part_number,
+    normalized_selected_part_number: normalized_ordering_code || normalized_part_number,
+    has_distinct_ordering_code:
+      Boolean(normalized_ordering_code) && normalized_ordering_code !== normalized_part_number,
+    normalized_legacy_package_identifiers: [
+      ...new Set(legacy_package_identifiers.map(normalizedIdentifier).filter(Boolean)),
+    ],
+  }
+}
+
+function isSpecificVisibleFamilyOf(
+  value: string,
+  selected_part_number: string,
+  package_identifiers: readonly string[],
+): boolean {
+  if (value.length < 5 || value.length >= selected_part_number.length) return false
+  if (!selected_part_number.startsWith(value)) return false
+  const suffix = selected_part_number.slice(value.length)
+  return package_identifiers.some(
+    (identifier) => suffix.startsWith(identifier) && suffix.length - identifier.length <= 4,
+  )
 }
 
 function isTargetApplicationComponent(
   component: TypicalApplicationPlan["components"][number],
-  targets: ReadonlySet<string>,
+  target: NormalizedApplicationTargetIdentity | undefined,
 ): boolean {
-  if (targets.size === 0) return false
+  if (!target) return false
   const manufacturer_part_number = normalizedIdentifier(component.manufacturer_part_number)
-  // An explicit MPN is the strongest component identity. Do not let a matching
-  // reference or generic value hide a contradictory orderable part number.
-  if (manufacturer_part_number) return targets.has(manufacturer_part_number)
   const reference = normalizedIdentifier(component.reference)
   const value = normalizedIdentifier(component.value)
-  return targets.has(reference) || targets.has(value)
+
+  // An application figure normally prints the device family while the selected
+  // purchasable variant includes package/carrier suffixes. Keep those identities
+  // separate: value identifies the visible family and manufacturer_part_number,
+  // when supplied, must identify the authoritative selected ordering code.
+  const legacy_visible_family = (identity: string) =>
+    !target.has_distinct_ordering_code &&
+    isSpecificVisibleFamilyOf(
+      identity,
+      target.normalized_selected_part_number,
+      target.normalized_legacy_package_identifiers,
+    )
+  if (target.has_distinct_ordering_code) {
+    if (manufacturer_part_number && manufacturer_part_number !== target.normalized_selected_part_number) {
+      return false
+    }
+    if (
+      value &&
+      value !== target.normalized_part_number &&
+      value !== target.normalized_selected_part_number
+    ) {
+      return false
+    }
+    if (value) return true
+    if (manufacturer_part_number) return true
+    return reference === target.normalized_part_number || reference === target.normalized_selected_part_number
+  }
+
+  if (
+    manufacturer_part_number &&
+    manufacturer_part_number !== target.normalized_selected_part_number &&
+    manufacturer_part_number !== target.normalized_part_number &&
+    !legacy_visible_family(manufacturer_part_number)
+  ) {
+    return false
+  }
+
+  // Preserve compatibility with plans that predate the explicit family/orderable
+  // split. Older evidence sometimes stored an exact orderable in part_number
+  // while the application correctly printed only its sufficiently specific
+  // family prefix (TPS63802 versus TPS63802DLAR). The canonical output remains
+  // bound to the exact authoritative identity.
+  if (manufacturer_part_number === target.normalized_selected_part_number) return true
+  if (manufacturer_part_number) {
+    return !value || value === manufacturer_part_number || legacy_visible_family(value)
+  }
+  return (
+    reference === target.normalized_part_number ||
+    value === target.normalized_part_number ||
+    legacy_visible_family(value)
+  )
 }
 
 function canonicalizeTypicalApplicationPlan(
   plan: TypicalApplicationPlan,
   target_identity?: ApplicationTargetIdentityInput,
 ): TypicalApplicationPlan {
-  const targets = targetIdentifiers(target_identity)
+  const target = normalizeTargetIdentity(target_identity)
   const matched_targets = plan.components.filter((component) =>
-    isTargetApplicationComponent(component, targets),
+    isTargetApplicationComponent(component, target),
   )
   if (matched_targets.length > 1) {
     throw new Error(
@@ -111,7 +231,7 @@ function canonicalizeTypicalApplicationPlan(
   const explicit_u1 = plan.components.filter(
     (component) => normalizedIdentifier(component.reference) === "u1",
   )
-  const target_component = targets.size > 0 ? matched_targets[0] : explicit_u1[0]
+  const target_component = target ? matched_targets[0] : explicit_u1[0]
   const target_reference = target_component ? normalizedIdentifier(target_component.reference) : undefined
 
   const interface_references = new Map<string, string>()
@@ -126,11 +246,26 @@ function canonicalizeTypicalApplicationPlan(
   }
   const canonical_components = plan.components
     .filter((component) => !isInterfaceOnlyComponent(component))
-    .map((component) =>
-      normalizedIdentifier(component.reference) === target_reference
-        ? { ...component, reference: "U1" }
-        : component,
-    )
+    .map((component) => {
+      if (normalizedIdentifier(component.reference) !== target_reference) return component
+      return {
+        ...component,
+        reference: "U1",
+        // Bind U1 to server-validated evidence. This makes downstream generation
+        // use the selected orderable even when the application figure only shows
+        // the unsuffixed family name.
+        ...(target
+          ? {
+              ...(target.has_distinct_ordering_code
+                ? { value: target.part_number }
+                : component.value === undefined
+                  ? {}
+                  : { value: component.value }),
+              manufacturer_part_number: target.selected_part_number,
+            }
+          : {}),
+      }
+    })
   const seen_components = new Set<string>()
   for (const component of canonical_components) {
     const key = componentReferenceKey(component.reference)
@@ -146,7 +281,13 @@ function canonicalizeTypicalApplicationPlan(
       (component) => normalizedIdentifier(component.reference) === "u1",
     ).length
     if (target_count !== 1 || !target_component) {
-      throw new Error("documented typical application must resolve exactly one target component to U1")
+      const identity_hint = target
+        ? `; application value must identify family ${JSON.stringify(target.part_number)}` +
+          ` and manufacturer_part_number, when present, must equal selected ordering identity ${JSON.stringify(target.selected_part_number)}`
+        : ""
+      throw new Error(
+        `documented typical application must resolve exactly one target component to U1${identity_hint}`,
+      )
     }
   }
 
