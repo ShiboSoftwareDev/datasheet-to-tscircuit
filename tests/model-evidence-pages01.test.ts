@@ -2,7 +2,12 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { ProcessRunRequest, ProcessRunResult, ProcessRunner } from "@/server/infrastructure/process"
+import {
+  BunProcessRunner,
+  type ProcessRunner,
+  type ProcessRunRequest,
+  type ProcessRunResult,
+} from "@/server/infrastructure/process"
 import { materializeModelEvidencePages } from "@/server/model-workflow/model-evidence-pages"
 import type { ModelCharacterization } from "@/server/modeling"
 
@@ -144,4 +149,43 @@ test("server evidence rendering rejects an agent-owned evidence-directory symlin
     }),
   ).rejects.toThrow(/real directory, not a symlink/)
   expect(await Bun.file(join(outside, "source-page-1.png")).exists()).toBe(false)
+})
+
+const pdftoppm_path = Bun.which("pdftoppm")
+const testWithPdftoppm = pdftoppm_path ? test : test.skip
+testWithPdftoppm("renders canonical evidence with the real production PDF tool", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "model-evidence-real-pdftoppm-"))
+  temporary_directories.push(workspace)
+  const characterization: ModelCharacterization = {
+    version: 1,
+    family: "sensor",
+    strategy: "behavioral",
+    requirements: [
+      {
+        requirement_id: "real_pdf_page",
+        title: "Real PDF page",
+        behavior: "Retain the cited page",
+        analysis: "operating_point",
+        support: { status: "modeled" },
+        conditions: {},
+        expected: { unit: "V", target: 1 },
+        sources: [{ page: 1, locator: "Fixture page", statement: "Rendered by pdftoppm" }],
+      },
+    ],
+    assumptions: [],
+    limitations: [],
+  }
+
+  const materialized = await materializeModelEvidencePages({
+    workspace,
+    datasheet_path: join(import.meta.dir, "fixtures", "sample-datasheet.pdf"),
+    characterization,
+    process_runner: new BunProcessRunner(),
+    signal: new AbortController().signal,
+  })
+
+  const rendered_path = join(workspace, "evidence", "source-page-1.png")
+  expect(materialized.requirements[0]?.sources[0]?.image).toBe("evidence/source-page-1.png")
+  expect(await Bun.file(rendered_path).exists()).toBe(true)
+  expect(Bun.file(rendered_path).size).toBeGreaterThan(1_000)
 })

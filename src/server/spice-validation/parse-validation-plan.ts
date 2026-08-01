@@ -311,3 +311,45 @@ export function parseValidationPlan(value: unknown, context: ValidationContext):
   if (collector.errors.length > 0) throw new ValidationPlanError(collector.errors)
   return { version: 1, model, cases }
 }
+
+/**
+ * Parses an untrusted agent proposal into the canonical persisted plan.
+ *
+ * `reference` and `evidence` are server-owned observation fields. Historical
+ * prompts and real agent outputs sometimes include guesses for them, so this
+ * proposal boundary removes those fields before strict parsing. The strict
+ * `parseValidationPlan` function remains unchanged for persisted-plan integrity
+ * checks and rejects any canonical field that has been altered.
+ */
+export function parseAgentValidationPlan(value: unknown, context: ValidationContext): ValidationPlan {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return parseValidationPlan(value, context)
+  }
+
+  const proposal = { ...(value as Record<string, unknown>) }
+  if (Array.isArray(proposal.cases)) {
+    proposal.cases = proposal.cases.map((case_value) => {
+      if (typeof case_value !== "object" || case_value === null || Array.isArray(case_value)) {
+        return case_value
+      }
+      const validation_case = { ...(case_value as Record<string, unknown>) }
+      if (Array.isArray(validation_case.observations)) {
+        validation_case.observations = validation_case.observations.map((observation_value) => {
+          if (
+            typeof observation_value !== "object" ||
+            observation_value === null ||
+            Array.isArray(observation_value)
+          ) {
+            return observation_value
+          }
+          const observation = { ...(observation_value as Record<string, unknown>) }
+          delete observation.reference
+          delete observation.evidence
+          return observation
+        })
+      }
+      return validation_case
+    })
+  }
+  return parseValidationPlan(proposal, context)
+}

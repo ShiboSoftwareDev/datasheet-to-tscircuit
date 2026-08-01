@@ -19,7 +19,7 @@
     "test:docker": "sh scripts/docker-smoke-test.sh",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "check": "bun run typecheck && bun test && bun run build:web"
+    "check": "bun run format:check && bun run typecheck && bun test && bun run build:web"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.10",

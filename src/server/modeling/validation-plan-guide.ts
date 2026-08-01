@@ -51,16 +51,18 @@ Analysis shapes:
 
 Observation shapes:
 
-- voltage: \`{id,requirement_id,type:"voltage",positive,negative,unit:"V",scale,evidence?}\`
-- current: \`{id,requirement_id,type:"current",element_id,unit:"A",scale,evidence?}\`
+- voltage: \`{id,requirement_id,type:"voltage",positive,negative,unit:"V",scale}\`
+- current: \`{id,requirement_id,type:"current",element_id,unit:"A",scale}\`
 
 Fixture current is positive from its first terminal (positive/anode) toward its
 second terminal (negative/cathode). To measure positive current entering a DUT
 pin, orient a series resistor or zero-volt sense source from the supply net to
 the DUT pin and observe that element.
 
-\`scale\` is \`linear\` or \`log\`. Do not write \`reference\`. The server binds
-each observation to its named modeled requirement and materializes one of:
+\`scale\` is \`linear\` or \`log\`. Do not write \`reference\` or \`evidence\`.
+Both are server-owned output fields. The server binds each observation to its
+named modeled requirement, attaches its canonical datasheet page, and
+materializes one of:
 
 - \`{ "type": "target", "target": number, "tolerance": positive_number }\`
 - \`{ "type": "bounds", "min"?: number, "max"?: number }\`

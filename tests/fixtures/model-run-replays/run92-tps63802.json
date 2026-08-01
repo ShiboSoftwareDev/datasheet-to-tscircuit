@@ -1,0 +1,683 @@
+{
+  "version": 1,
+  "source": "model-agent(92)",
+  "contract": {
+    "version": 1,
+    "interface": {
+      "version": 1,
+      "part_number": "TPS63802",
+      "entry_name": "TPS63802",
+      "pins": [
+        {
+          "physical_pin": "1",
+          "component_pin": "pin1",
+          "source_port_id": "source_port_0",
+          "spice_node": "EN",
+          "labels": ["EN"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "2",
+          "component_pin": "pin2",
+          "source_port_id": "source_port_1",
+          "spice_node": "MODE",
+          "labels": ["MODE"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "3",
+          "component_pin": "pin3",
+          "source_port_id": "source_port_2",
+          "spice_node": "AGND",
+          "labels": ["AGND"],
+          "role": "ground"
+        },
+        {
+          "physical_pin": "4",
+          "component_pin": "pin4",
+          "source_port_id": "source_port_3",
+          "spice_node": "FB",
+          "labels": ["FB"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "5",
+          "component_pin": "pin5",
+          "source_port_id": "source_port_4",
+          "spice_node": "PG",
+          "labels": ["PG"],
+          "role": "output"
+        },
+        {
+          "physical_pin": "6",
+          "component_pin": "pin6",
+          "source_port_id": "source_port_5",
+          "spice_node": "VOUT",
+          "labels": ["VOUT"],
+          "role": "power_output"
+        },
+        {
+          "physical_pin": "7",
+          "component_pin": "pin7",
+          "source_port_id": "source_port_6",
+          "spice_node": "L2",
+          "labels": ["L2"],
+          "role": "passive"
+        },
+        {
+          "physical_pin": "8",
+          "component_pin": "pin8",
+          "source_port_id": "source_port_7",
+          "spice_node": "GND",
+          "labels": ["GND"],
+          "role": "ground"
+        },
+        {
+          "physical_pin": "9",
+          "component_pin": "pin9",
+          "source_port_id": "source_port_8",
+          "spice_node": "L1",
+          "labels": ["L1"],
+          "role": "passive"
+        },
+        {
+          "physical_pin": "10",
+          "component_pin": "pin10",
+          "source_port_id": "source_port_9",
+          "spice_node": "VIN",
+          "labels": ["VIN"],
+          "role": "power_input"
+        }
+      ]
+    },
+    "characterization": {
+      "version": 1,
+      "family": "power_converter",
+      "strategy": "behavioral",
+      "requirements": [
+        {
+          "requirement_id": "regulated_3v3_output_nominal_load",
+          "title": "Regulate the documented 3.3-V application output",
+          "behavior": "With the documented 511-kOhm/91-kOhm feedback divider, an enabled forced-PWM converter regulates VOUT to the programmed 3.3-V output at nominal input and load.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "vin_v": 3.6,
+            "en_v": 3.6,
+            "mode_v": 3.6,
+            "output_load_a": 1,
+            "feedback_high_resistor_ohm": 511000,
+            "feedback_low_resistor_ohm": 91000,
+            "inductor_h": 4.7e-7,
+            "output_capacitor_f": 0.000022
+          },
+          "expected": {
+            "unit": "V",
+            "target": 3.3,
+            "min": 3.267,
+            "max": 3.333,
+            "tolerance": 0.033
+          },
+          "sources": [
+            {
+              "page": 6,
+              "locator": "Table 8-5, VFB Feedback Voltage accuracy",
+              "statement": "The feedback regulation voltage is 500 mV nominal with PWM-mode accuracy of -1% to +1%.",
+              "image": "evidence/source-page-6.png"
+            },
+            {
+              "page": 17,
+              "locator": "Figure 10-1, 3.3 VOUT Typical Application",
+              "statement": "The documented application uses a 0.47-uH inductor, 22-uF output capacitor, and 511-kOhm/91-kOhm feedback divider for a 3.3-V output.",
+              "image": "evidence/source-page-17.png"
+            },
+            {
+              "page": 20,
+              "locator": "Table 10-5, Resistor Selection for Typ. Voltages",
+              "statement": "For VO = 3.3 V, the table specifies R1 = 511 kOhm and R2 = 91 kOhm.",
+              "image": "evidence/source-page-20.png"
+            }
+          ]
+        },
+        {
+          "requirement_id": "full_load_3v3_output_at_minimum_load_input",
+          "title": "Supply the specified 3.3-V full-load operating point",
+          "behavior": "With the documented 3.3-V feedback network and the converter enabled in forced PWM, VOUT remains regulated while delivering the specified 2-A output current at the stated minimum input voltage for full load.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "vin_v": 2.3,
+            "en_v": 2.3,
+            "mode_v": 2.3,
+            "output_load_a": 2,
+            "feedback_high_resistor_ohm": 511000,
+            "feedback_low_resistor_ohm": 91000,
+            "inductor_h": 4.7e-7,
+            "output_capacitor_f": 0.000022
+          },
+          "expected": {
+            "unit": "V",
+            "target": 3.3,
+            "min": 3.267,
+            "max": 3.333,
+            "tolerance": 0.033
+          },
+          "sources": [
+            {
+              "page": 1,
+              "locator": "Features",
+              "statement": "The device specifies 2-A output current for VI greater than or equal to 2.3 V with VO = 3.3 V.",
+              "image": "evidence/source-page-1.png"
+            },
+            {
+              "page": 6,
+              "locator": "Table 8-5, VIN;LOAD",
+              "statement": "The minimum input voltage for full load, once started, is 2.3 V at IOUT = 2 A and VOUT = 3.3 V.",
+              "image": "evidence/source-page-6.png"
+            },
+            {
+              "page": 20,
+              "locator": "Table 10-5, Resistor Selection for Typ. Voltages",
+              "statement": "For VO = 3.3 V, the table specifies R1 = 511 kOhm and R2 = 91 kOhm.",
+              "image": "evidence/source-page-20.png"
+            }
+          ]
+        },
+        {
+          "requirement_id": "power_good_low_sink_state",
+          "title": "Assert the open-drain power-good low state",
+          "behavior": "When EN is low and VIN is above the falling UVLO condition, PG is an asserted low open-drain output able to sink the specified test current.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "vin_v": 3.6,
+            "en_v": 0,
+            "pg_sink_current_a": 0.001,
+            "ambient_temperature_c": 25
+          },
+          "expected": {
+            "unit": "V",
+            "max": 0.4
+          },
+          "sources": [
+            {
+              "page": 6,
+              "locator": "Table 8-5, VPG;Low",
+              "statement": "PG low-level output voltage is 0.4 V maximum at ISINK = 1 mA.",
+              "image": "evidence/source-page-6.png"
+            },
+            {
+              "page": 13,
+              "locator": "Table 9-1, Power-Good Indicator Truth Table",
+              "statement": "For EN LOW with VI above UVLO_F, PG logic status is LOW.",
+              "image": "evidence/source-page-13.png"
+            }
+          ]
+        },
+        {
+          "requirement_id": "shutdown_vin_current",
+          "title": "Limit VIN current in shutdown",
+          "behavior": "With EN low, the VIN pin draws no more than the documented shutdown current under the stated test condition.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "vin_v": 3.6,
+            "en_v": 0,
+            "vout_v": 0,
+            "ambient_temperature_min_c": -40,
+            "ambient_temperature_max_c": 85
+          },
+          "expected": {
+            "unit": "A",
+            "max": 6e-7
+          },
+          "sources": [
+            {
+              "page": 6,
+              "locator": "Table 8-5, ISD Shutdown current into VIN",
+              "statement": "At EN low, VIN = 3.6 V, and VOUT = 0 V over -40 C to 85 C, shutdown current into VIN is 600 nA maximum.",
+              "image": "evidence/source-page-6.png"
+            }
+          ]
+        }
+      ],
+      "assumptions": [
+        "The external circuit follows the documented Figure 10-1 topology: an inductor is connected between L1 and L2, the feedback divider is connected from VOUT through FB to GND, and AGND and GND share the circuit reference.",
+        "The modeled regulation requirements use forced PWM (MODE high) and an already-started device; they do not characterize startup from the 1.3-V recommended-input lower limit.",
+        "A behavioral averaged-power-stage representation is sufficient for DC output regulation, shutdown input current, and the PG low-state requirement."
+      ],
+      "limitations": [
+        "This characterization does not model switching ripple, switching frequency, PFM burst behavior, efficiency, inductor-current waveform, switch current limit, reverse-current operation, or buck/buck-boost/boost transition thresholds.",
+        "Soft-start timing and load/line transient waveforms are not modeled; the datasheet shows these only as typical plots and their shape was not digitized here.",
+        "UVLO hysteresis, EN threshold accuracy, thermal shutdown, OVP/IVP, output disconnect details, PG high-impedance leakage, and protection behavior outside the listed operating points are not characterized.",
+        "The 3.3-V output bounds derive from feedback-voltage accuracy and the documented resistor selection; resistor tolerance, capacitor DC-bias derating, layout parasitics, and temperature effects of the external components are outside this characterization.",
+        "No vendor SPICE model is assumed available because vendor-model ingestion is disabled."
+      ]
+    }
+  },
+  "proposal": {
+    "version": 1,
+    "model": {
+      "entry_name": "TPS63802",
+      "pins": ["EN", "MODE", "AGND", "FB", "PG", "VOUT", "L2", "GND", "L1", "VIN"]
+    },
+    "cases": [
+      {
+        "id": "nominal-3v3-line-sweep",
+        "title": "3.3 V regulation over a nominal-input line range",
+        "requirement_ids": ["regulated_3v3_output_nominal_load"],
+        "nets": ["VIN_SUPPLY"],
+        "fixtures": [
+          {
+            "id": "VVin",
+            "type": "voltage_source",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "gnd",
+            "dc_volts": 3.6
+          },
+          {
+            "id": "RVin",
+            "type": "resistor",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "dut.VIN",
+            "resistance_ohms": 0.01
+          },
+          {
+            "id": "VEn",
+            "type": "voltage_source",
+            "positive": "dut.EN",
+            "negative": "gnd",
+            "dc_volts": 3.6
+          },
+          {
+            "id": "VMode",
+            "type": "voltage_source",
+            "positive": "dut.MODE",
+            "negative": "gnd",
+            "dc_volts": 3.6
+          },
+          {
+            "id": "RAgnd",
+            "type": "resistor",
+            "positive": "dut.AGND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "RGnd",
+            "type": "resistor",
+            "positive": "dut.GND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "LPower",
+            "type": "inductor",
+            "positive": "dut.L1",
+            "negative": "dut.L2",
+            "inductance_henries": 4.7e-7
+          },
+          {
+            "id": "RTop",
+            "type": "resistor",
+            "positive": "dut.VOUT",
+            "negative": "dut.FB",
+            "resistance_ohms": 511000
+          },
+          {
+            "id": "RBottom",
+            "type": "resistor",
+            "positive": "dut.FB",
+            "negative": "gnd",
+            "resistance_ohms": 91000
+          },
+          {
+            "id": "COut",
+            "type": "capacitor",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "capacitance_farads": 0.000022
+          },
+          {
+            "id": "ILoad",
+            "type": "current_source",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "dc_amps": 1
+          },
+          {
+            "id": "RPgPullup",
+            "type": "resistor",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "dut.PG",
+            "resistance_ohms": 100000
+          }
+        ],
+        "analysis": {
+          "type": "dc_sweep",
+          "source_id": "VVin",
+          "start": 3,
+          "stop": 4.2,
+          "step": 0.1
+        },
+        "observations": [
+          {
+            "id": "VoutRegulation",
+            "requirement_id": "regulated_3v3_output_nominal_load",
+            "type": "voltage",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "unit": "V",
+            "scale": "linear",
+            "evidence": {
+              "page": 6,
+              "image": "evidence/source-page-6.png"
+            }
+          }
+        ]
+      },
+      {
+        "id": "full-load-minimum-input",
+        "title": "3.3 V output at 2 A and 2.3 V input",
+        "requirement_ids": ["full_load_3v3_output_at_minimum_load_input"],
+        "nets": ["VIN_SUPPLY"],
+        "fixtures": [
+          {
+            "id": "VVin",
+            "type": "voltage_source",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "gnd",
+            "dc_volts": 2.3
+          },
+          {
+            "id": "RVin",
+            "type": "resistor",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "dut.VIN",
+            "resistance_ohms": 0.01
+          },
+          {
+            "id": "VEn",
+            "type": "voltage_source",
+            "positive": "dut.EN",
+            "negative": "gnd",
+            "dc_volts": 2.3
+          },
+          {
+            "id": "VMode",
+            "type": "voltage_source",
+            "positive": "dut.MODE",
+            "negative": "gnd",
+            "dc_volts": 2.3
+          },
+          {
+            "id": "RAgnd",
+            "type": "resistor",
+            "positive": "dut.AGND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "RGnd",
+            "type": "resistor",
+            "positive": "dut.GND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "LPower",
+            "type": "inductor",
+            "positive": "dut.L1",
+            "negative": "dut.L2",
+            "inductance_henries": 4.7e-7
+          },
+          {
+            "id": "RTop",
+            "type": "resistor",
+            "positive": "dut.VOUT",
+            "negative": "dut.FB",
+            "resistance_ohms": 511000
+          },
+          {
+            "id": "RBottom",
+            "type": "resistor",
+            "positive": "dut.FB",
+            "negative": "gnd",
+            "resistance_ohms": 91000
+          },
+          {
+            "id": "COut",
+            "type": "capacitor",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "capacitance_farads": 0.000022
+          },
+          {
+            "id": "ILoad",
+            "type": "current_source",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "dc_amps": 2
+          },
+          {
+            "id": "RPgPullup",
+            "type": "resistor",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "dut.PG",
+            "resistance_ohms": 100000
+          }
+        ],
+        "analysis": {
+          "type": "operating_point"
+        },
+        "observations": [
+          {
+            "id": "VoutFullLoad",
+            "requirement_id": "full_load_3v3_output_at_minimum_load_input",
+            "type": "voltage",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "unit": "V",
+            "scale": "linear",
+            "evidence": {
+              "page": 6,
+              "image": "evidence/source-page-6.png"
+            }
+          }
+        ]
+      },
+      {
+        "id": "power-good-low-sink",
+        "title": "Power-good low output with EN disabled",
+        "requirement_ids": ["power_good_low_sink_state"],
+        "nets": [],
+        "fixtures": [
+          {
+            "id": "VVin",
+            "type": "voltage_source",
+            "positive": "dut.VIN",
+            "negative": "gnd",
+            "dc_volts": 3.6
+          },
+          {
+            "id": "VEn",
+            "type": "voltage_source",
+            "positive": "dut.EN",
+            "negative": "gnd",
+            "dc_volts": 0
+          },
+          {
+            "id": "VMode",
+            "type": "voltage_source",
+            "positive": "dut.MODE",
+            "negative": "gnd",
+            "dc_volts": 0
+          },
+          {
+            "id": "RAgnd",
+            "type": "resistor",
+            "positive": "dut.AGND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "RGnd",
+            "type": "resistor",
+            "positive": "dut.GND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "RFeedback",
+            "type": "resistor",
+            "positive": "dut.FB",
+            "negative": "gnd",
+            "resistance_ohms": 91000
+          },
+          {
+            "id": "LPower",
+            "type": "inductor",
+            "positive": "dut.L1",
+            "negative": "dut.L2",
+            "inductance_henries": 4.7e-7
+          },
+          {
+            "id": "COut",
+            "type": "capacitor",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "capacitance_farads": 0.000022
+          },
+          {
+            "id": "IPgSink",
+            "type": "current_source",
+            "positive": "dut.PG",
+            "negative": "gnd",
+            "dc_amps": 0.001
+          }
+        ],
+        "analysis": {
+          "type": "operating_point"
+        },
+        "observations": [
+          {
+            "id": "VPgLow",
+            "requirement_id": "power_good_low_sink_state",
+            "type": "voltage",
+            "positive": "dut.PG",
+            "negative": "gnd",
+            "unit": "V",
+            "scale": "linear",
+            "evidence": {
+              "page": 6,
+              "image": "evidence/source-page-6.png"
+            }
+          }
+        ]
+      },
+      {
+        "id": "shutdown-vin-current",
+        "title": "Shutdown input current",
+        "requirement_ids": ["shutdown_vin_current"],
+        "nets": ["VIN_SUPPLY"],
+        "fixtures": [
+          {
+            "id": "VVin",
+            "type": "voltage_source",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "gnd",
+            "dc_volts": 3.6
+          },
+          {
+            "id": "RVinSense",
+            "type": "resistor",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "dut.VIN",
+            "resistance_ohms": 1
+          },
+          {
+            "id": "VEn",
+            "type": "voltage_source",
+            "positive": "dut.EN",
+            "negative": "gnd",
+            "dc_volts": 0
+          },
+          {
+            "id": "VMode",
+            "type": "voltage_source",
+            "positive": "dut.MODE",
+            "negative": "gnd",
+            "dc_volts": 0
+          },
+          {
+            "id": "RAgnd",
+            "type": "resistor",
+            "positive": "dut.AGND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "RGnd",
+            "type": "resistor",
+            "positive": "dut.GND",
+            "negative": "gnd",
+            "resistance_ohms": 0.001
+          },
+          {
+            "id": "VOutClamp",
+            "type": "voltage_source",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "dc_volts": 0
+          },
+          {
+            "id": "RFeedback",
+            "type": "resistor",
+            "positive": "dut.FB",
+            "negative": "gnd",
+            "resistance_ohms": 91000
+          },
+          {
+            "id": "LPower",
+            "type": "inductor",
+            "positive": "dut.L1",
+            "negative": "dut.L2",
+            "inductance_henries": 4.7e-7
+          },
+          {
+            "id": "RPgPullup",
+            "type": "resistor",
+            "positive": "net.VIN_SUPPLY",
+            "negative": "dut.PG",
+            "resistance_ohms": 100000
+          }
+        ],
+        "analysis": {
+          "type": "operating_point"
+        },
+        "observations": [
+          {
+            "id": "IVinShutdown",
+            "requirement_id": "shutdown_vin_current",
+            "type": "current",
+            "element_id": "RVinSense",
+            "unit": "A",
+            "scale": "linear",
+            "evidence": {
+              "page": 6,
+              "image": "evidence/source-page-6.png"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

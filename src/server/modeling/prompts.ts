@@ -97,8 +97,9 @@ scripts, or model.lib; the server compiles the plan.
 Use exactly model.entry_name and model.pins from model-interface.json. Cases use
 stable ids, requirement_ids, named fixture nets/elements, one analysis, and one
 or more observations. Every observation names exactly one requirement_id from
-its case. Do not write observation.reference: the server derives targets, bounds,
-and curves from the immutable model contract. Endpoints are only gnd,
+its case. Do not write observation.reference or observation.evidence: both are
+server-owned output fields. The server derives targets, bounds, curves, and the
+canonical datasheet page from the immutable model contract. Endpoints are only gnd,
 dut.<spice_node>, or
 net.<identifier>. Fixture types are resistor, capacitor, inductor,
 voltage_source, current_source, and diode. Sources may use a compact physical
@@ -108,10 +109,10 @@ curve after the server binds it to the linked requirement.
 
 Cover each modeled requirement at least once: ${modeled_ids.join(", ")}.
 ${requires_range_case ? "This device family requires at least one meaningful DC sweep or transient case; isolated operating points will be rejected.\n" : ""}
-Do not create cases for documented_only requirements. All observations grouped
-into one case must cite the
-same canonical datasheet page/image; split requirements with different evidence
-into separate cases. Use operating-point and DC sweeps for static limits,
+Do not create cases for documented_only requirements. Group requirements into
+one case only when their canonical sources in model-contract.json use the same
+datasheet page/image; split differently sourced requirements into separate
+cases. Use operating-point and DC sweeps for static limits,
 transient only for actual dynamics, and sufficiently
 broad ranges to expose interpolation or operating-region errors. A DC sweep may
 strengthen an operating-point check when the same scalar target/bounds apply at

@@ -114,6 +114,17 @@ const validation_plan = {
           negative: "gnd",
           unit: "V",
           scale: "linear",
+          // Production runs 91/92 emitted agent-authored evidence even though
+          // evidence is server-owned. The workflow must replace this shape,
+          // including its extra fields, instead of spending retries asking the
+          // agent to reproduce a private canonical object exactly.
+          evidence: {
+            page: 999,
+            image: "evidence/source-page-999.png",
+            locator: "agent-authored production locator",
+            statement: "agent-authored production statement",
+          },
+          reference: { type: "target", target: 999, tolerance: 999 },
         },
       ],
     },
@@ -429,6 +440,22 @@ testWithNgspice(
     expect(await readFile(join(candidate_dir, "model.lib"), "utf8")).toBe(model_source)
     expect(await Bun.file(join(candidate_dir, "model-manifest.json")).exists()).toBe(true)
     expect(await Bun.file(join(candidate_dir, "validation", "dc_gain", "result.raw")).exists()).toBe(true)
+
+    const canonical_plan = JSON.parse(
+      await readFile(join(model_dir, "validation-plan.json"), "utf8"),
+    ) as typeof validation_plan
+    expect(canonical_plan.cases[0]?.observations[0]).toMatchObject({
+      evidence: {
+        page: 1,
+        image: "evidence/source-page-1.png",
+        metadata: { figure: "Electrical characteristics, voltage gain" },
+      },
+      reference: {
+        type: "curve",
+        tolerance: 1e-6,
+        points: characterization.requirements[0]?.reference_curve?.points,
+      },
+    })
 
     const published_index = await readFile(join(job_dir, "index.circuit.tsx"), "utf8")
     expect(published_index).toContain("<spicemodel")

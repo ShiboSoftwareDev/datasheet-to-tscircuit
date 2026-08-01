@@ -14,7 +14,11 @@ export {
   type NgspiceExecutionResult,
   type NgspiceExecutor,
 } from "./ngspice-executor"
-export { parseValidationPlan, ValidationPlanError } from "./parse-validation-plan"
+export {
+  parseAgentValidationPlan,
+  parseValidationPlan,
+  ValidationPlanError,
+} from "./parse-validation-plan"
 export {
   parseNgspiceAsciiRaw,
   RawParseError,

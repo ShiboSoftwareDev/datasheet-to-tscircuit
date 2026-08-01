@@ -327,9 +327,12 @@ markers:
 - `model-contract.json` combines the interface fixed for the current invocation
   with accepted characterization requirements.
 - `validation-plan.json` is a declarative circuit contract. An agent proposes
-  fixture elements, analyses, and observations; the server binds numeric
-  references from the immutable model contract and canonicalizes the plan
-  before any model is generated.
+  fixture elements, analyses, and observations. Numeric references and
+  datasheet evidence are server-owned output fields: the proposal parser
+  replaces any legacy agent-authored copies with values derived from the
+  immutable model contract before any model is generated. Persisted canonical
+  plans use a separate strict parser so altered references or evidence fail
+  restart and publication integrity checks.
 - `model.lib` must expose exactly one public `.SUBCKT` with the server-owned
   entry and pin order. Self-contained private helper subcircuits and `.MODEL`
   definitions are allowed; external includes, control blocks, and shell commands

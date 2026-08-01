@@ -5,8 +5,8 @@ import {
   assertCircuitEmbedsModel,
   buildCharacterizationPrompt,
   buildModelGenerationPrompt,
-  buildValidationPlanPrompt,
   buildValidationPlanGuide,
+  buildValidationPlanPrompt,
   createModelInterface,
   createModelManifest,
   ModelStrategyRegistry,
@@ -215,9 +215,14 @@ describe("model characterization contract", () => {
         strategy: "equation",
       }),
     }
-    expect(buildValidationPlanPrompt({ contract })).toContain("typical-application-plan.json")
-    expect(buildValidationPlanPrompt({ contract })).toContain("same scalar target/bounds apply")
-    expect(buildValidationPlanGuide(contract)).toContain("[A-Za-z][A-Za-z0-9_]{0,63}")
+    const validation_prompt = buildValidationPlanPrompt({ contract })
+    const validation_guide = buildValidationPlanGuide(contract)
+    expect(validation_prompt).toContain("typical-application-plan.json")
+    expect(validation_prompt).toContain("same scalar target/bounds apply")
+    expect(validation_prompt).toContain("Do not write observation.reference or observation.evidence")
+    expect(validation_guide).toContain("[A-Za-z][A-Za-z0-9_]{0,63}")
+    expect(validation_guide).toContain("Do not write `reference` or `evidence`")
+    expect(validation_guide).not.toContain("scale,evidence?")
     expect(buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })).toContain(
       "typical-application-plan.json",
     )

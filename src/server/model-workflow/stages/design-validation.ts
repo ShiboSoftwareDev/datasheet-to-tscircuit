@@ -3,7 +3,7 @@ import { dirname, join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
 import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
 import { buildValidationPlanGuide, buildValidationPlanPrompt, parseModelContract } from "../../modeling"
-import { parseValidationPlan, type ValidationPlan } from "../../spice-validation"
+import { parseAgentValidationPlan, type ValidationPlan } from "../../spice-validation"
 import {
   appendModelLog,
   modelArtifact,
@@ -85,7 +85,7 @@ export const designValidationStage = defineModelStage({
           max_depth: 64,
           max_nodes: 100_000,
         })
-        const plan = parseValidationPlan(raw, {
+        const plan = parseAgentValidationPlan(raw, {
           model_interface: contract.interface,
           model_requirements: contract.characterization.requirements,
           model_family: contract.characterization.family,

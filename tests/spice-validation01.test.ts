@@ -14,6 +14,7 @@ import {
   extractObservationSeries,
   hashValidationInputs,
   MissingRawVectorError,
+  parseAgentValidationPlan,
   parseNgspiceAsciiRaw,
   parseValidationPlan,
   runSpiceValidation,
@@ -266,7 +267,7 @@ describe("ValidationPlan contract", () => {
     ).not.toThrow()
   })
 
-  test("materializes references from the model contract and rejects agent-authored changes", () => {
+  test("materializes references from the model contract and strictly rejects persisted changes", () => {
     const raw_plan = structuredClone(validPlan())
     const observation = raw_plan.cases[0]?.observations[0]
     if (!observation) throw new Error("Expected a DC observation")
@@ -377,24 +378,45 @@ describe("ValidationPlan contract", () => {
       }).cases[0]?.observations[0]?.evidence,
     ).toEqual(parsed.cases[0]?.observations[0]?.evidence)
 
-    const tampered_plan = structuredClone(exactly_bound_plan)
-    const tampered_observation = tampered_plan.cases[0]?.observations[0]
-    if (!tampered_observation?.evidence) throw new Error("Expected bound evidence")
-    tampered_observation.evidence.page = 99
-    try {
-      parseValidationPlan(tampered_plan, {
+    const tampered_persisted_plan = structuredClone(exactly_bound_plan)
+    const tampered_persisted_observation = tampered_persisted_plan.cases[0]?.observations[0]
+    if (!tampered_persisted_observation?.evidence) throw new Error("Expected bound evidence")
+    tampered_persisted_observation.evidence.page = 99
+    expect(() =>
+      parseValidationPlan(tampered_persisted_plan, {
         model_interface,
         model_source,
         model_requirements: requirements,
-      })
-      throw new Error("Expected ValidationPlanError")
-    } catch (error) {
-      expect((error as ValidationPlanError).errors).toContainEqual({
-        path: "cases[0].observations[0].evidence",
-        code: "requirement_evidence_mismatch",
-        message: 'must exactly match the server-owned evidence for requirement "dc_gain"',
-      })
+      }),
+    ).toThrow(/requirement_evidence_mismatch/)
+
+    const agent_guessed_plan = structuredClone(exactly_bound_plan) as unknown as {
+      cases: Array<{ observations: Array<Record<string, unknown>> }>
     }
+    const agent_guessed_observation = agent_guessed_plan.cases[0]?.observations[0]
+    if (!agent_guessed_observation) throw new Error("Expected bound evidence")
+    agent_guessed_observation.evidence = {
+      page: 99,
+      image: "evidence/source-page-99.png",
+      locator: "Agent-authored locator from production run 92",
+      statement: "Agent-authored statement from production run 92",
+    }
+    expect(
+      parseAgentValidationPlan(agent_guessed_plan, {
+        model_interface,
+        model_source,
+        model_requirements: requirements,
+      }).cases[0]?.observations[0]?.evidence,
+    ).toEqual(parsed.cases[0]?.observations[0]?.evidence)
+
+    agent_guessed_observation.evidence = [{ page: 8, image: "evidence/source-page-8.png" }]
+    expect(
+      parseAgentValidationPlan(agent_guessed_plan, {
+        model_interface,
+        model_source,
+        model_requirements: requirements,
+      }).cases[0]?.observations[0]?.evidence,
+    ).toEqual(parsed.cases[0]?.observations[0]?.evidence)
   })
 
   test("requires each case to use one canonical datasheet evidence page", () => {
