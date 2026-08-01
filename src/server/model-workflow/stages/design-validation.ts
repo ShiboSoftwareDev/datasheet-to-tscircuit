@@ -2,11 +2,7 @@ import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
 import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
-import {
-  buildValidationPlanGuide,
-  buildValidationPlanPrompt,
-  parseFreshModelContract,
-} from "../../modeling"
+import { buildValidationPlanGuide, buildValidationPlanPrompt, parseFreshModelContract } from "../../modeling"
 import { parseAgentValidationPlan, type ValidationPlan } from "../../spice-validation"
 import {
   appendModelLog,

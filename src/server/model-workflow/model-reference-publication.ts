@@ -177,33 +177,34 @@ export async function revalidateModelReferencePublication(input: {
   if (!modelContractRequiresReferencePublicationProof(input.contract)) return { required: false }
   input.signal?.throwIfAborted()
   const trace_dir = dirname(input.evidence_dir)
-  const [source_pdf_sha256, discovery_value, observation_value, source_proof_value, stored_verification] = await Promise.all([
-    hashCanonicalDatasheet(input.datasheet_path),
-    readBoundedJsonArtifact({
-      path: join(trace_dir, "time-graph-hints.json"),
-      max_bytes: MAX_DISCOVERY_BYTES,
-      max_depth: 16,
-      max_nodes: 20_000,
-    }),
-    readBoundedJsonArtifact({
-      path: join(trace_dir, "model-reference-observation.json"),
-      max_bytes: MAX_OBSERVATION_BYTES,
-      max_depth: 32,
-      max_nodes: 100_000,
-    }),
-    readBoundedJsonArtifact({
-      path: join(trace_dir, "model-reference-source-proof.json"),
-      max_bytes: MAX_SOURCE_PROOF_BYTES,
-      max_depth: 48,
-      max_nodes: 200_000,
-    }),
-    readBoundedJsonArtifact({
-      path: join(trace_dir, "model-reference-verification.json"),
-      max_bytes: MAX_VERIFICATION_BYTES,
-      max_depth: 32,
-      max_nodes: 100_000,
-    }),
-  ])
+  const [source_pdf_sha256, discovery_value, observation_value, source_proof_value, stored_verification] =
+    await Promise.all([
+      hashCanonicalDatasheet(input.datasheet_path),
+      readBoundedJsonArtifact({
+        path: join(trace_dir, "time-graph-hints.json"),
+        max_bytes: MAX_DISCOVERY_BYTES,
+        max_depth: 16,
+        max_nodes: 20_000,
+      }),
+      readBoundedJsonArtifact({
+        path: join(trace_dir, "model-reference-observation.json"),
+        max_bytes: MAX_OBSERVATION_BYTES,
+        max_depth: 32,
+        max_nodes: 100_000,
+      }),
+      readBoundedJsonArtifact({
+        path: join(trace_dir, "model-reference-source-proof.json"),
+        max_bytes: MAX_SOURCE_PROOF_BYTES,
+        max_depth: 48,
+        max_nodes: 200_000,
+      }),
+      readBoundedJsonArtifact({
+        path: join(trace_dir, "model-reference-verification.json"),
+        max_bytes: MAX_VERIFICATION_BYTES,
+        max_depth: 32,
+        max_nodes: 100_000,
+      }),
+    ])
   input.signal?.throwIfAborted()
   const discovery = parseTimeGraphDiscovery(discovery_value, source_pdf_sha256)
   const observation = parseReferenceGraphObservation(
@@ -212,10 +213,7 @@ export async function revalidateModelReferencePublication(input: {
     input.contract.interface,
     input.contract.application_fixture,
   )
-  const stored_source_proof = parseReferenceGraphSourceProof(
-    source_proof_value,
-    source_pdf_sha256,
-  )
+  const stored_source_proof = parseReferenceGraphSourceProof(source_proof_value, source_pdf_sha256)
   const process_runner = input.process_runner ?? new BunProcessRunner()
   const recomputed_source_proof = await buildReferenceGraphSourceProof({
     observation,

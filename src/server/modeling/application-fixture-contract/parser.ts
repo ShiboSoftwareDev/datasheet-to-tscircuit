@@ -123,9 +123,7 @@ function componentEndpoint(value: string): { reference: string; terminal: string
 function fixtureEndpoints(
   fixture: ApplicationPassiveFixture,
 ): [ApplicationFixtureNodeEndpoint, ApplicationFixtureNodeEndpoint] {
-  return fixture.type === "diode"
-    ? [fixture.anode, fixture.cathode]
-    : [fixture.positive, fixture.negative]
+  return fixture.type === "diode" ? [fixture.anode, fixture.cathode] : [fixture.positive, fixture.negative]
 }
 
 function assertParsedContractTopology(contract: ApplicationFixtureContract, path: string): void {
@@ -234,7 +232,10 @@ function assertParsedContractTopology(contract: ApplicationFixtureContract, path
 }
 
 function stableLowercase(values: readonly string[]): string {
-  return [...values].map((value) => value.toLowerCase()).sort().join("\0")
+  return [...values]
+    .map((value) => value.toLowerCase())
+    .sort()
+    .join("\0")
 }
 
 export function parseApplicationFixtureContract(

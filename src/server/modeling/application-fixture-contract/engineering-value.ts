@@ -2,7 +2,7 @@ const SI_PREFIX_EXPONENTS: Readonly<Record<string, number>> = {
   p: -12,
   n: -9,
   u: -6,
-  "µ": -6,
+  µ: -6,
   m: -3,
   "": 0,
   k: 3,
@@ -19,9 +19,7 @@ export function parseApplicationEngineeringValue(value: unknown): number | undef
     .trim()
     .replace(/\s+/g, "")
     .replace(/ohms?|Ω/gi, "")
-  const match = normalized.match(
-    /^([+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([pnuµmkKMG]?)(?:[FfHh])?$/,
-  )
+  const match = normalized.match(/^([+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([pnuµmkKMG]?)(?:[FfHh])?$/)
   if (!match) return undefined
   const exponent = SI_PREFIX_EXPONENTS[match[2] ?? ""]
   // Parsing one decimal scientific-notation string avoids multiplication noise

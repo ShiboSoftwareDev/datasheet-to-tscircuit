@@ -93,10 +93,7 @@ export interface ParseModelContractOptions {
   reject_unknown_characterization_fields?: boolean
 }
 
-export function parseModelContract(
-  value: unknown,
-  options: ParseModelContractOptions = {},
-): ModelContract {
+export function parseModelContract(value: unknown, options: ParseModelContractOptions = {}): ModelContract {
   const path = "model-contract.json"
   const contract = record(value, path)
   exactKeys(contract, ["version", "interface", "characterization", "application_fixture"], path)

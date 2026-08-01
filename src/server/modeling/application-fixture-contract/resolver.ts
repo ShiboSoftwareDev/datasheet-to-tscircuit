@@ -134,7 +134,10 @@ export function assertResolvedApplicationFixtureMatches(input: {
   const path = input.path ?? "resolved_application_fixture"
   const actual = record(input.value, path)
   const topology_sha256 = requiredSha256(actual.topology_sha256, `${path}.topology_sha256`)
-  if (topology_sha256 !== expected.topology_sha256 || stableStringify(input.value) !== stableStringify(expected)) {
+  if (
+    topology_sha256 !== expected.topology_sha256 ||
+    stableStringify(input.value) !== stableStringify(expected)
+  ) {
     throw new ApplicationFixtureContractError(
       `${path} must exactly match server-resolved application topology ${expected.topology_sha256}`,
     )

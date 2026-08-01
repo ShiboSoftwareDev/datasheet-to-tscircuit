@@ -58,6 +58,67 @@ const interface10Pin: ModelInterface = {
   })),
 }
 
+test("server-owned application fixture contract derives ground from an authoritative DUT ground pin", () => {
+  const model_interface: ModelInterface = {
+    version: 1,
+    part_number: "SOLID-2",
+    entry_name: "SOLID_2",
+    pins: [
+      {
+        physical_pin: "1",
+        component_pin: "pin1",
+        source_port_id: "source_port_1",
+        spice_node: "INPUT",
+        labels: ["INPUT"],
+        role: "input",
+      },
+      {
+        physical_pin: "2",
+        component_pin: "pin2",
+        source_port_id: "source_port_2",
+        spice_node: "RETURN",
+        labels: ["RETURN"],
+        role: "ground",
+      },
+    ],
+  }
+  const plan = parseTypicalApplicationPlan(
+    {
+      version: 4,
+      availability: "documented",
+      pcb_implementation: "schematic_only",
+      title: "Two-pin bypass application",
+      description: "The return pin establishes the reference node.",
+      source_references: [
+        {
+          page: 1,
+          figure: "Typical application",
+          method: "pdf_visual",
+          confidence: "high",
+          image: "visual-reference/typical-application.png",
+          render_dpi: 200,
+        },
+      ],
+      components: [
+        { reference: "U1", kind: "integrated_circuit", value: "SOLID-2" },
+        { reference: "C1", kind: "capacitor", value: "100nF" },
+      ],
+      connections: [
+        { net: "INPUT", pins: ["U1.INPUT", "C1.1"] },
+        { net: "RETURN", pins: ["U1.RETURN", "C1.2"] },
+      ],
+    },
+    { part_number: "SOLID-2" },
+  )
+  const contract = compileApplicationFixtureContract({
+    plan,
+    model_interface,
+    source_plan_sha256: PLAN_SHA256,
+    source_pdf_sha256: PDF_SHA256,
+  })
+  expect(contract.node_groups.find(({ is_ground }) => is_ground)?.source_net).toBe("RETURN")
+})
+
 function run93Plan() {
   return parseTypicalApplicationPlan(
     {

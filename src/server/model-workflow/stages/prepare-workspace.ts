@@ -24,10 +24,7 @@ export const prepareWorkspaceStage = defineModelStage({
       model_dir: context.model_dir,
     })
     const interface_path = join(context.model_dir, "model-interface.json")
-    const workspace_application_fixture_path = join(
-      context.model_dir,
-      "application-fixture-contract.json",
-    )
+    const workspace_application_fixture_path = join(context.model_dir, "application-fixture-contract.json")
     const application_fixture = parseApplicationFixtureContract(
       await readJson(workspace_application_fixture_path),
     )

@@ -1,6 +1,6 @@
 import type { TypicalApplicationPlan } from "../../component-workflow/application-plan"
 import { normalizeElectricalPinLabel } from "../../pin-label-normalization"
-import type { ModelInterface, ModelPublicElectricalEndpoint } from "../types"
+import type { ModelInterface, ModelInterfacePin, ModelPublicElectricalEndpoint } from "../types"
 import { parseApplicationEngineeringValue } from "./engineering-value"
 import { hashApplicationFixtureContract } from "./hashing"
 import { requiredSha256 } from "./schema-helpers"
@@ -76,10 +76,7 @@ function fixtureId(reference: string): string {
   return `app_${suffix}`
 }
 
-function interfaceEndpointForLabel(
-  label: string,
-  model_interface: ModelInterface,
-): ModelPublicElectricalEndpoint {
+function interfacePinForLabel(label: string, model_interface: ModelInterface): ModelInterfacePin {
   const normalized = normalizeElectricalPinLabel(label)
   const matches = model_interface.pins.filter((pin) =>
     [pin.component_pin, pin.spice_node, ...pin.labels].some(
@@ -91,7 +88,14 @@ function interfaceEndpointForLabel(
       `typical application endpoint U1.${label} resolves to ${matches.length} public model-interface pins; expected exactly one`,
     )
   }
-  return `dut.${matches[0]!.spice_node}`
+  return matches[0]!
+}
+
+function interfaceEndpointForLabel(
+  label: string,
+  model_interface: ModelInterface,
+): ModelPublicElectricalEndpoint {
+  return `dut.${interfacePinForLabel(label, model_interface).spice_node}`
 }
 
 function isGroundIdentity(value: string): boolean {
@@ -123,7 +127,7 @@ function compilePassiveFixture(input: {
   }
   const ordered = [...input.endpoints].sort((left, right) =>
     naturalTerminalCompare(left.terminal, right.terminal),
-  ) as [typeof input.endpoints[number], typeof input.endpoints[number]]
+  ) as [(typeof input.endpoints)[number], (typeof input.endpoints)[number]]
   const source_terminals: [string, string] = [ordered[0].source_endpoint, ordered[1].source_endpoint]
   const first = applicationNodeEndpoint(ordered[0].node_group)
   const second = applicationNodeEndpoint(ordered[1].node_group)
@@ -140,9 +144,7 @@ function compilePassiveFixture(input: {
   if (type === "diode") {
     const normalized_terminals = ordered.map(({ terminal }) => normalizeElectricalPinLabel(terminal))
     const first_is_anode = ["1", "a", "anode", "pos", "positive"].includes(normalized_terminals[0]!)
-    const second_is_cathode = ["2", "c", "cathode", "k", "neg", "negative"].includes(
-      normalized_terminals[1]!,
-    )
+    const second_is_cathode = ["2", "c", "cathode", "k", "neg", "negative"].includes(normalized_terminals[1]!)
     if (!first_is_anode || !second_is_cathode) {
       throw new ApplicationFixtureContractError(
         `typical application diode ${input.component.reference} terminals must identify anode/1 and cathode/2; found ${source_terminals.join(", ")}`,
@@ -172,19 +174,18 @@ interface UnclassifiedNodeGroup extends Omit<ApplicationFixtureNodeGroup, "is_gr
 
 function classifyGroundNodeGroups(groups: UnclassifiedNodeGroup[]): ApplicationFixtureNodeGroup[] {
   const explicit = groups.filter(({ has_explicit_ground_terminal }) => has_explicit_ground_terminal)
-  const candidates = explicit.length > 0 ? explicit : groups.filter(({ has_ground_net_name }) => has_ground_net_name)
+  const candidates =
+    explicit.length > 0 ? explicit : groups.filter(({ has_ground_net_name }) => has_ground_net_name)
   if (candidates.length !== 1) {
     throw new ApplicationFixtureContractError(
       `documented typical application must identify exactly one external ground node group; found ${candidates.length}`,
     )
   }
   const ground_id = candidates[0]!.id
-  return groups.map(
-    ({ has_explicit_ground_terminal: _explicit, has_ground_net_name: _named, ...group }) => ({
-      ...group,
-      is_ground: group.id === ground_id,
-    }),
-  )
+  return groups.map(({ has_explicit_ground_terminal: _explicit, has_ground_net_name: _named, ...group }) => ({
+    ...group,
+    is_ground: group.id === ground_id,
+  }))
 }
 
 /**
@@ -216,31 +217,38 @@ export function compileApplicationFixtureContract(input: {
     return { ...payload, contract_sha256: hashApplicationFixtureContract(payload) }
   }
 
-  const unclassified_groups: UnclassifiedNodeGroup[] = input.plan.connections.map(
-    (connection, index) => {
-      const source_endpoints = [...connection.pins]
-      const external_terminals = source_endpoints.filter((endpoint) => !endpointParts(endpoint))
-      const dut_endpoints = source_endpoints.flatMap((source_endpoint) => {
-        const parsed = endpointParts(source_endpoint)
-        if (!parsed || componentKey(parsed.reference) !== "u1") return []
-        return [interfaceEndpointForLabel(parsed.terminal, input.model_interface)]
-      })
-      if (new Set(dut_endpoints).size !== dut_endpoints.length) {
-        throw new ApplicationFixtureContractError(
-          `typical application net ${connection.net} maps more than one U1 endpoint to the same public model pin`,
-        )
-      }
-      return {
-        id: nodeGroupId(index),
-        source_net: connection.net,
-        source_endpoints,
-        dut_endpoints,
-        external_terminals,
-        has_explicit_ground_terminal: external_terminals.some(isGroundIdentity),
-        has_ground_net_name: isGroundIdentity(connection.net),
-      }
-    },
-  )
+  const unclassified_groups: UnclassifiedNodeGroup[] = input.plan.connections.map((connection, index) => {
+    const source_endpoints = [...connection.pins]
+    const external_terminals = source_endpoints.filter((endpoint) => !endpointParts(endpoint))
+    const dut_pins = source_endpoints.flatMap((source_endpoint) => {
+      const parsed = endpointParts(source_endpoint)
+      if (!parsed || componentKey(parsed.reference) !== "u1") return []
+      return [interfacePinForLabel(parsed.terminal, input.model_interface)]
+    })
+    const dut_endpoints = dut_pins.map(
+      ({ spice_node }) => `dut.${spice_node}` as ModelPublicElectricalEndpoint,
+    )
+    if (new Set(dut_endpoints).size !== dut_endpoints.length) {
+      throw new ApplicationFixtureContractError(
+        `typical application net ${connection.net} maps more than one U1 endpoint to the same public model pin`,
+      )
+    }
+    return {
+      id: nodeGroupId(index),
+      source_net: connection.net,
+      source_endpoints,
+      dut_endpoints,
+      external_terminals,
+      has_explicit_ground_terminal:
+        external_terminals.some(isGroundIdentity) ||
+        dut_pins.some(
+          (pin) =>
+            isGroundIdentity(pin.role) ||
+            [pin.component_pin, pin.spice_node, ...pin.labels].some(isGroundIdentity),
+        ),
+      has_ground_net_name: isGroundIdentity(connection.net),
+    }
+  })
   const node_groups = classifyGroundNodeGroups(unclassified_groups)
   const ground_group = node_groups.find(({ is_ground }) => is_ground)!
   const all_dut_endpoints = node_groups.flatMap(({ dut_endpoints }) => dut_endpoints)

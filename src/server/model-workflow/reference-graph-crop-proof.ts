@@ -1,14 +1,7 @@
 import { createHash } from "node:crypto"
-import type {
-  ModelCharacterization,
-  ModelReferenceCropRegion,
-  ModelRequirement,
-} from "../modeling/types"
+import type { ModelCharacterization, ModelReferenceCropRegion, ModelRequirement } from "../modeling/types"
 import { modelReferenceElectricalBindingsEqual } from "../modeling/reference-electrical-binding"
-import type {
-  ObservedReferenceGraph,
-  ReferenceGraphObservation,
-} from "./reference-graph-observation"
+import type { ObservedReferenceGraph, ReferenceGraphObservation } from "./reference-graph-observation"
 import { normalizeFigureLabel } from "./time-graph-hints"
 
 export interface CanonicalReferenceCropProof {
@@ -39,16 +32,12 @@ function graphIdentityMatches(graph: ObservedReferenceGraph, requirement: ModelR
   return cited_on_page.some(({ locator }) => normalizeFigureLabel(locator) === graph_figure)
 }
 
-export function canonicalReferenceCropProof(
-  crop: ModelReferenceCropRegion,
-): CanonicalReferenceCropProof {
+export function canonicalReferenceCropProof(crop: ModelReferenceCropRegion): CanonicalReferenceCropProof {
   const canonical_crop = { ...crop }
   return {
     algorithm: "exact_observer_crop_v1",
     canonical_crop,
-    canonical_crop_sha256: createHash("sha256")
-      .update(JSON.stringify(canonical_crop))
-      .digest("hex"),
+    canonical_crop_sha256: createHash("sha256").update(JSON.stringify(canonical_crop)).digest("hex"),
   }
 }
 
