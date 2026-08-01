@@ -80,6 +80,10 @@ graphs may omit digitized_curve; current/other graphs must omit it. digitized_cu
 - method manual_pixel_trace or image_color_trace
 - x_quantity:"time", x_unit:"s", y_quantity:"voltage", y_unit:"V"
 - x_range and y_range as {min,max} in base seconds and volts
+- tscircuit simulation time is elapsed time beginning at zero. If a scope plot
+  shows negative pre-trigger labels, translate the complete x calibration so the
+  crop's leftmost calibrated time is 0 s while preserving the displayed span and
+  edge offsets. Never emit a negative x range, x anchor, traced x value, or PULSE delay.
 - x_axis and y_axis as {scale:"linear",first:{pixel,value},second:{pixel,value}}.
   Pixel coordinates are relative to the exact graph crop, not the full PDF page.
   Put the minimum-value anchor first and maximum-value anchor second. Use two visible,
@@ -93,5 +97,48 @@ at least min(48,max(8,ceil(horizontal_axis_pixel_span/12))) and at most 48 point
 strictly progressing across time, covering at least 90% of the calibrated axis, with
 no gap over 20%. Do not trace labels, axes, stimulus channels, or an invented smooth
 curve. The server independently recomputes every numeric value from the pixel-axis
-calibration and privately compares this trace with the characterization agent's points.`
+calibration and privately compares this trace with the characterization agent's points.
+
+The property names are exact. Do not invent aliases such as pdf_page, figure,
+figure_locator, or fixture_reproducible_reason. Use this canonical shape:
+
+{
+  "version": 1,
+  "source_pdf_sha256": "COPY_FROM_TIME_GRAPH_HINTS",
+  "reviewed_hints": [
+    {
+      "hint_id": "time_graph_001",
+      "disposition": "graph",
+      "graph_id": "figure_10_21",
+      "reason": "Visually confirmed the hinted elapsed-time graph."
+    }
+  ],
+  "graphs": [
+    {
+      "graph_id": "figure_10_21",
+      "page": 25,
+      "locator": "Figure 10-21. Load Transient",
+      "x_axis": "time",
+      "time_axis_evidence": "100 us/div",
+      "response_quantity": "voltage",
+      "public_pin_observable": true,
+      "fixture_reproducible": false,
+      "reason": "State the source-backed eligibility decision.",
+      "crop": {
+        "page": 25,
+        "render_dpi": 200,
+        "x_px": 100,
+        "y_px": 100,
+        "width_px": 600,
+        "height_px": 500
+      }
+    }
+  ]
+}
+
+Every reviewed_hints[] entry requires reason. A graph disposition requires graph_id;
+a not_time_graph disposition must omit graph_id. Add electrical_binding and
+digitized_curve to an eligible graph using the exact nested property names described
+above. On a correction attempt, delete every field named as unsupported in the server
+feedback; do not replace it with a guessed synonym.`
 }

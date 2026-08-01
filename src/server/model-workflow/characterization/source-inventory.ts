@@ -13,6 +13,7 @@ import {
 } from "../reference-graph-axis-proof"
 import {
   buildReferenceGraphObserverPrompt,
+  eligibleObservedGraphs,
   parseReferenceGraphObservation,
   type ReferenceGraphObservation,
   verifyReferenceGraphObservationPixels,
@@ -25,6 +26,51 @@ export interface ReferenceGraphInventory {
   readonly observation: ReferenceGraphObservation
   readonly source_proof: ReferenceGraphSourceProof
   readonly observer_attempts: number
+}
+
+export function sourceProofRejectionDiagnostics(
+  observation: ReferenceGraphObservation,
+  proof: ReferenceGraphSourceProof,
+): string[] {
+  const proof_by_graph = new Map(proof.results.map((result) => [result.graph_id, result]))
+  return eligibleObservedGraphs(observation).flatMap((graph) => {
+    const result = proof_by_graph.get(graph.graph_id)
+    if (result?.status === "verified") return []
+    if (result?.status === "ineligible") {
+      const missing = result.diagnostic.missing_proofs.join(", ")
+      return [`${graph.graph_id}: ${result.reason}${missing ? ` Missing source proofs: ${missing}` : ""}`]
+    }
+    return [`${graph.graph_id}: no canonical PDF axis-calibration result was produced`]
+  })
+}
+
+async function buildSourceProof(input: {
+  observation: ReferenceGraphObservation
+  datasheet_path: string
+  services: ModelPipelineServices
+  signal: AbortSignal
+}): Promise<ReferenceGraphSourceProof> {
+  try {
+    return await buildReferenceGraphSourceProof({
+      observation: input.observation,
+      datasheet_path: input.datasheet_path,
+      process_runner: input.services.process_runner,
+      signal: input.signal,
+    })
+  } catch (error) {
+    input.signal.throwIfAborted()
+    throw new PipelineError(
+      {
+        code: "reference_axis_infrastructure_failed",
+        message: `Canonical PDF reference-axis verification could not run: ${error instanceof Error ? error.message : String(error)}`,
+        stage_id: "characterize",
+        operation: "verify_reference_axis",
+        hint: "Install and verify pdftoppm, pdftotext, and tesseract with English OCR data in the server runtime. This is an infrastructure failure, not an agent artifact rejection.",
+        retryable: false,
+      },
+      { cause: error },
+    )
+  }
 }
 
 export async function inventoryReferenceGraphs(input: {
@@ -51,10 +97,13 @@ export async function inventoryReferenceGraphs(input: {
   const time_graph_hints_path = join(attempt_dir, "time-graph-hints.json")
   await writeJson(time_graph_hints_path, time_graph_discovery)
 
-  const observer = await runAgentArtifactStage<ReferenceGraphObservation>({
+  const observer = await runAgentArtifactStage<{
+    observation: ReferenceGraphObservation
+    source_proof: ReferenceGraphSourceProof
+  }>({
     stage_id: "verify_model_reference_graphs",
     phase_label: "Independent datasheet graph inventory",
-    max_artifact_attempts: 2,
+    max_artifact_attempts: 3,
     signal,
     use_openai: context.use_openai,
     agent_client: services.agent_client,
@@ -96,45 +145,33 @@ export async function inventoryReferenceGraphs(input: {
         signal,
         on_output: logOutput,
       })
-      return observation
+      const source_proof = await buildSourceProof({
+        observation,
+        datasheet_path,
+        services,
+        signal,
+      })
+      const source_rejections = sourceProofRejectionDiagnostics(observation, source_proof)
+      if (source_rejections.length > 0) {
+        throw new Error(
+          `Canonical PDF source verification rejected agent-claimed eligible graphs:\n${source_rejections.join("\n")}`,
+        )
+      }
+      return {
+        observation: applyReferenceGraphSourceEligibility({ observation, proof: source_proof }),
+        source_proof,
+      }
     },
-    promote: async (_workspace, observation) => {
-      await writeJson(join(attempt_dir, "model-reference-observation.json"), observation)
+    promote: async (_workspace, value) => {
+      await writeJson(join(attempt_dir, "model-reference-observation.json"), value.observation)
+      await writeJson(join(attempt_dir, "model-reference-source-proof.json"), value.source_proof)
     },
   })
-
-  let source_proof: ReferenceGraphSourceProof
-  try {
-    source_proof = await buildReferenceGraphSourceProof({
-      observation: observer.value,
-      datasheet_path,
-      process_runner: services.process_runner,
-      signal,
-    })
-  } catch (error) {
-    signal.throwIfAborted()
-    throw new PipelineError(
-      {
-        code: "reference_axis_infrastructure_failed",
-        message: `Canonical PDF reference-axis verification could not run: ${error instanceof Error ? error.message : String(error)}`,
-        stage_id: "characterize",
-        operation: "verify_reference_axis",
-        hint: "Install and verify pdftoppm, pdftotext, and tesseract with English OCR data in the server runtime. This is an infrastructure failure, not an agent artifact rejection.",
-        retryable: false,
-      },
-      { cause: error },
-    )
-  }
-  await writeJson(join(attempt_dir, "model-reference-source-proof.json"), source_proof)
-  const observation = applyReferenceGraphSourceEligibility({
-    observation: observer.value,
-    proof: source_proof,
-  })
-  assertObserverFoundEligibleTimeDomainGraph(observation)
+  assertObserverFoundEligibleTimeDomainGraph(observer.value.observation)
   return {
     time_graph_hints_path,
-    observation,
-    source_proof,
+    observation: observer.value.observation,
+    source_proof: observer.value.source_proof,
     observer_attempts: observer.attempts,
   }
 }

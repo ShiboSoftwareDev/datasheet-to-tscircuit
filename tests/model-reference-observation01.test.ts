@@ -23,6 +23,7 @@ import type {
   ModelReferenceElectricalBinding,
 } from "../src/server/modeling/types"
 import {
+  buildReferenceGraphObserverPrompt,
   eligibleObservedGraphs,
   parseReferenceGraphObservation,
   projectReferenceGraphObservationForCharacterizer,
@@ -30,6 +31,7 @@ import {
   verifyCharacterizationGraphEvidence,
   verifyReferenceGraphObservationPixels,
 } from "../src/server/model-workflow/reference-graph-observation"
+import { sourceProofRejectionDiagnostics } from "../src/server/model-workflow/characterization/source-inventory"
 import { canonicalizeCharacterizationReferenceCrops } from "../src/server/model-workflow/reference-graph-crop-proof"
 import {
   assertObserverFoundEligibleTimeDomainGraph,
@@ -367,6 +369,82 @@ function validObservationValue() {
     ],
   }
 }
+
+test("reference observer contract publishes exact graph keys and actionable unknown-field errors", () => {
+  const prompt = buildReferenceGraphObserverPrompt()
+  expect(prompt).toContain('"page": 25')
+  expect(prompt).toContain('"locator": "Figure 10-21. Load Transient"')
+  expect(prompt).toContain("Do not invent aliases such as pdf_page, figure")
+  expect(prompt).toContain("Every reviewed_hints[] entry requires reason")
+
+  const invalid = validObservationValue()
+  const graph = invalid.graphs[0] as Record<string, unknown>
+  graph.pdf_page = graph.page
+  Reflect.deleteProperty(graph, "page")
+  expect(() => parseReferenceGraphObservation(invalid, discovery, model_interface)).toThrow(
+    /unsupported fields: pdf_page\. Allowed fields: graph_id, page, locator/,
+  )
+})
+
+test("source-proof failures identify every agent-claimed eligible graph before characterization", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  expect(
+    sourceProofRejectionDiagnostics(observation, {
+      version: 1,
+      source_pdf_sha256,
+      results: [
+        {
+          status: "ineligible",
+          graph_id: "load_transient",
+          code: "axis_calibration_unproven",
+          reason: "The crop does not prove its printed time scale.",
+          diagnostic: {
+            recognized_measurements: [],
+            missing_proofs: ["time division scale", "figure-local caption"],
+          },
+        },
+      ],
+    }),
+  ).toEqual([
+    "load_transient: The crop does not prove its printed time scale. Missing source proofs: time division scale, figure-local caption",
+  ])
+})
+
+test("reference observer feedback aggregates electrical errors across every claimed graph", () => {
+  const multi_discovery = structuredClone(discovery)
+  multi_discovery.hints[1] = {
+    ...structuredClone(multi_discovery.hints[0]!),
+    hint_id: "time_graph_002",
+    page: 8,
+    figure: "Figure 8-19",
+  }
+  const invalid = validObservationValue()
+  invalid.reviewed_hints[1] = {
+    hint_id: "time_graph_002",
+    disposition: "graph",
+    graph_id: "second_load_transient",
+    reason: "The second figure is also an elapsed-time voltage graph.",
+  }
+  invalid.graphs[0]!.electrical_binding.stimulus.pulse.delay = 0.002
+  invalid.graphs.push({
+    ...structuredClone(invalid.graphs[0]!),
+    graph_id: "second_load_transient",
+    page: 8,
+    locator: "Figure 8-19",
+    crop: { ...observer_crop, page: 8 },
+  })
+
+  let failure: unknown
+  try {
+    parseReferenceGraphObservation(invalid, multi_discovery, model_interface)
+  } catch (error) {
+    failure = error
+  }
+  expect(failure).toBeInstanceOf(Error)
+  const message = failure instanceof Error ? failure.message : ""
+  expect(message).toContain("load_transient: Eligible graph load_transient PULSE timing")
+  expect(message).toContain("second_load_transient: Eligible graph second_load_transient PULSE timing")
+})
 
 async function createPixelProofDatasheet(): Promise<string> {
   const workspace = await mkdtemp(join(tmpdir(), "model-reference-pixel-proof-test-"))

@@ -350,6 +350,41 @@ test("documented review envelopes and nested records reject unknown fields", () 
   ).toThrow("connectivity review connections[0] contains unsupported fields: net")
 })
 
+test("extractor and independent review share canonical external terminal labels", () => {
+  const spaced_plan = parseTypicalApplicationPlan(
+    {
+      ...plan,
+      connections: plan.connections.map((connection, index) =>
+        index === 0 ? { ...connection, pins: [...connection.pins, "48V BATT"] } : connection,
+      ),
+    },
+    "REGULATOR",
+  )
+  const review = parseApplicationConnectivityReview(
+    {
+      version: 1,
+      availability: "documented",
+      source: {
+        page: 17,
+        figure: "Typical application",
+        method: "pdf_visual",
+        confidence: "high",
+        image: "visual-reference/typical-application.png",
+        render_dpi: 200,
+      },
+      components: visibleComponents(spaced_plan),
+      connections: spaced_plan.connections.map(({ pins }, index) => ({
+        pins: index === 0 ? pins.map((pin) => (pin === "48V_BATT" ? "48V BATT" : pin)) : pins,
+      })),
+    },
+    spaced_plan,
+  )
+  expect(review.availability).toBe("documented")
+  if (review.availability !== "documented") throw new Error("expected documented review")
+  expect(review.connections[0]?.pins).toContain("48V_BATT")
+  expect(compareApplicationGraphs({ plan: spaced_plan, review, evidence }).status).toBe("verified")
+})
+
 test("documented reviews reject low-confidence sources and isolated inventory entries", () => {
   expect(() =>
     parseApplicationConnectivityReview(
@@ -632,7 +667,7 @@ test("application review reports every malformed endpoint in one schema failure"
         components: visibleComponents(plan),
         connections: [
           { pins: ["V_S = 2.7V–5.5V", "U1.1", "R1.1"] },
-          { pins: ["48V BATT", "U1.2", "R1.2", "R2.1"] },
+          { pins: ["48V battery rail", "U1.2", "R1.2", "R2.1"] },
           { pins: ["To MCU", "U1.3", "R2.2"] },
         ],
       },
@@ -644,7 +679,7 @@ test("application review reports every malformed endpoint in one schema failure"
   expect(failure).toBeInstanceOf(AggregateError)
   const message = failure instanceof Error ? failure.message : ""
   expect(message).toContain("V_S = 2.7V–5.5V")
-  expect(message).toContain("48V BATT")
+  expect(message).toContain("48V battery rail")
   expect(message).toContain("To MCU")
   expect(message).not.toContain("references a component absent")
   expect(message).not.toContain("is isolated")

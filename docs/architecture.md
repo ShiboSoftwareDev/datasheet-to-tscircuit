@@ -407,7 +407,11 @@ characterizer's rectangle with the observer-owned crop before materialization;
 publication accepts no shifted, clipped, containing, or merely overlapping
 variant. The crop must be at least 96×64 pixels, fit the canonical page, contain
 visible nonuniform pixels, retain a source-local matching caption, and carry a
-source-grounded axis-calibration receipt. A graph is eligible only when its
+source-grounded axis-calibration receipt. PDF/OCR source proof runs inside the
+independent observer's correction boundary: an invalid crop, missing local
+caption, or unproven axis returns graph-specific feedback before the artifact is
+promoted. Only a valid observation with no source-eligible graph reaches the
+terminal `no_eligible_time_domain_graph` result. A graph is eligible only when its
 printed numeric conditions identify a stimulus that can be
 expressed by the supported passive and pulsed/DC fixture language without
 hidden register, protocol, or internal configuration setup. The server binds

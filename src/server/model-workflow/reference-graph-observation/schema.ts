@@ -38,7 +38,11 @@ export function rejectUnknownKeys(
   path: string,
 ): void {
   const unknown = Object.keys(value).filter((key) => !allowed.includes(key))
-  if (unknown.length > 0) throw new Error(`${path} contains unsupported fields: ${unknown.join(", ")}`)
+  if (unknown.length > 0) {
+    throw new Error(
+      `${path} contains unsupported fields: ${unknown.join(", ")}. Allowed fields: ${allowed.join(", ")}`,
+    )
+  }
 }
 
 export function nonEmptyString(value: unknown, path: string): string {

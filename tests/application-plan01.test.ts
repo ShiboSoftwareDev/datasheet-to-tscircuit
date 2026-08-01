@@ -147,6 +147,16 @@ test("application nets reject duplicate endpoints and references to undeclared p
   )
 })
 
+test("printed external terminal whitespace canonicalizes without changing component ports", () => {
+  const input = documentedPlan()
+  input.connections[0] = {
+    net: "48V_BATT",
+    pins: ["LM393P.VCC", "C1.1", "48V BATT"],
+  }
+  const parsed = parseTypicalApplicationPlan(input, "LM393P")
+  expect(parsed.connections[0]?.pins).toEqual(["U1.VCC", "C1.1", "48V_BATT"])
+})
+
 test("application parser preserves sourced scalar objects and omits null optionals", () => {
   const plan = documentedPlan()
   plan.components[0] = {

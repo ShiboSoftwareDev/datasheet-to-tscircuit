@@ -1,5 +1,6 @@
 import { EVIDENCE_CONFIDENCES, EVIDENCE_METHODS } from "../component-evidence/contract"
 import type { ExpectedApplicationConnection } from "../job-artifact-validator"
+import { canonicalizeApplicationEndpoint } from "./application-endpoint"
 
 export const TYPICAL_APPLICATION_PLAN_VERSION = 4 as const
 export const TYPICAL_APPLICATION_AVAILABILITIES = ["documented", "not_present"] as const
@@ -618,16 +619,12 @@ export function parseTypicalApplicationPlan(
       throw new Error(`typical application connections[${index}].pins must list at least two pins`)
     }
     const pins = connection.pins.map((pin, pin_index) => {
-      const endpoint = requiredText(pin, `connections[${index}].pins[${pin_index}]`)
+      const endpoint_path = `connections[${index}].pins[${pin_index}]`
+      const endpoint = canonicalizeApplicationEndpoint(requiredText(pin, endpoint_path), endpoint_path)
       // Bare tokens are explicit external rail/terminal identities. They are
       // retained in the canonical plan so an independent reviewer can detect a
       // VIN/VOUT/GND mix-up instead of comparing only the internal component
       // endpoints.
-      if (!/^[^.\s]+$/.test(endpoint) && !/^[^.\s]+\.[^.\s]+$/.test(endpoint)) {
-        throw new Error(
-          `connections[${index}].pins[${pin_index}] must use a rail token or component.port syntax`,
-        )
-      }
       const endpoint_key = endpoint.toLowerCase()
       const earlier_net = seen_endpoints.get(endpoint_key)
       if (earlier_net) {

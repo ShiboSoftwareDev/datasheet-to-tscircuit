@@ -13,6 +13,7 @@ import {
   parseApplicationSourceReferences,
   type TypicalApplicationPlan,
 } from "./application-plan"
+import { canonicalizeApplicationEndpoint } from "./application-endpoint"
 
 export const APPLICATION_CONNECTIVITY_REVIEW_SCHEMA_ID = "application-connectivity-review/v1" as const
 
@@ -733,14 +734,17 @@ export function parseApplicationConnectivityReview(
         connection_errors.push(error instanceof Error ? error.message : String(error))
         continue
       }
-      pins.push(endpoint)
-      if (!/^[^.\s]+$/.test(endpoint) && !/^[^.\s]+\.[^.\s]+$/.test(endpoint)) {
-        has_endpoint_structure_errors = true
-        connection_errors.push(
-          `connectivity review endpoint ${endpoint} must use a rail token or component.port syntax`,
+      try {
+        endpoint = canonicalizeApplicationEndpoint(
+          endpoint,
+          `connectivity review connections[${index}].pins[${pin_index}]`,
         )
+      } catch (error) {
+        has_endpoint_structure_errors = true
+        connection_errors.push(error instanceof Error ? error.message : String(error))
         continue
       }
+      pins.push(endpoint)
       const separator = endpoint.indexOf(".")
       if (separator > 0) {
         const reference = normalizedReference(endpoint.slice(0, separator))
@@ -820,7 +824,8 @@ endpoint must name an inventoried component.
 
 Each connections entry is one electrically joined node. Bare tokens such as
 VIN, VOUT, ENABLE, and GND are explicit external rail/terminal identities and
-must be retained. Net ordering does not matter. Prefer U1 physical pin numbers
+must be retained. Represent whitespace in a printed external label with underscores
+(for example "48V BATT" becomes "48V_BATT"). Net ordering does not matter. Prefer U1 physical pin numbers
 when the image labels them. Inspect every junction dot and keep wire crossings
 without a junction in separate nodes.
 

@@ -199,7 +199,10 @@ guessing.
   boundary, any of these may instead be {"value": string, "sources":
   evidenceSource[]} and the server moves those citations into the canonical
   source arrays
-- source_references and footprint_source_references: arrays of source objects
+- top-level source_references: the documented application figure sources
+- components[].source_references and components[].footprint_source_references:
+  component-scoped arrays of source objects. Never write footprint_source_references
+  at the plan root.
 - connections: {"net": string, "pins": ["component.port" | "EXTERNAL_TERMINAL", ...]}
 
 Canonical example:
@@ -211,7 +214,9 @@ ${JSON.stringify(canonical_application_example, null, 2)}
 A documented plan must include target U1 and every net must contain at least one
 component.port endpoint. A bare endpoint is the semantic identity of a real
 external terminal such as INPUT, OUTPUT, or GND. Do not turn it into a component
-or discard it as a net label. Preserve printed reference designators. When the
+or discard it as a net label. External terminal labels are one JSON token: replace
+printed whitespace with underscores (for example "48V BATT" becomes "48V_BATT").
+Preserve printed reference designators. When the
 figure omits them, assign conventional references by kind in deterministic visual
 order: top-to-bottom, then left-to-right; the datasheet target is always U1. Use
 the target's base part_number as U1 value. When manufacturer_part_number is
