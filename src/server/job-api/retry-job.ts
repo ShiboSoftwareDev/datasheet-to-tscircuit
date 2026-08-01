@@ -1,6 +1,8 @@
-import { copyFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import { copyFile, open } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job } from "@/shared/job-types"
+import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import type { JobRetrySource } from "../job-store"
 import type { JobApiContext } from "./job-api-context"
 import { errorResponse, getJobId, jsonResponse } from "./job-api-responses"
@@ -18,6 +20,56 @@ class RetrySourceUnavailableError extends Error {
   constructor(readonly reason: RetrySourceUnavailableReason) {
     super(reason)
     this.name = "RetrySourceUnavailableError"
+  }
+}
+
+const LEGACY_EVIDENCE_COMMIT_BYTE_LIMIT = 2 * 1024 * 1024
+
+async function hasLegacyEvidenceCommitMarker(job_dir: string): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof open>>
+  try {
+    handle = await open(
+      join(job_dir, "evidence-commit.json"),
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    )
+  } catch {
+    return false
+  }
+
+  try {
+    const metadata = await handle.stat()
+    if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > LEGACY_EVIDENCE_COMMIT_BYTE_LIMIT) {
+      return false
+    }
+    const bytes = new Uint8Array(metadata.size)
+    let offset = 0
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset)
+      if (bytesRead === 0) return false
+      offset += bytesRead
+    }
+    const trailing = await handle.read(new Uint8Array(1), 0, 1, offset)
+    if (trailing.bytesRead !== 0) return false
+    const marker = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown
+    return typeof marker === "object" && marker !== null && "version" in marker && marker.version === 1
+  } catch {
+    return false
+  } finally {
+    await handle.close().catch(() => undefined)
+  }
+}
+
+async function readCommittedRetrySourcePdf(job_dir: string): Promise<Uint8Array | undefined> {
+  try {
+    const evidence_snapshot = await readCommittedEvidenceSnapshot(job_dir)
+    return evidence_snapshot?.version === 2 || evidence_snapshot?.version === 3
+      ? evidence_snapshot.source_pdf
+      : undefined
+  } catch (error) {
+    // Version 1 never bound the PDF, so retained legacy jobs preserve their
+    // historical root-file retry behavior. Newer commits fail closed.
+    if (await hasLegacyEvidenceCommitMarker(job_dir)) return undefined
+    throw error
   }
 }
 
@@ -111,11 +163,15 @@ export async function retryJob(
       const existing_retry = context.job_store.getActiveRetryForSource(source_job_id)
       if (existing_retry) return existing_retry
 
+      const committed_source_pdf = await readCommittedRetrySourcePdf(source.job_dir)
       const job_id = crypto.randomUUID()
       const workspace = await prepareJobWorkspace({
         jobs_root: context.jobs_root,
         job_id,
-        write_datasheet: (datasheet_path) => copyFile(join(source.job_dir, "datasheet.pdf"), datasheet_path),
+        write_datasheet: (datasheet_path) =>
+          committed_source_pdf
+            ? Bun.write(datasheet_path, committed_source_pdf)
+            : copyFile(join(source.job_dir, "datasheet.pdf"), datasheet_path),
       })
 
       // Workspace preparation awaits filesystem work. The source may have

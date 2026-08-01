@@ -191,9 +191,11 @@ test("server runtime commands are centralized in the supervised process runner",
 
 class FakeProcessRunner implements ProcessRunner {
   calls = 0
+  requests: ProcessRunRequest[] = []
 
   async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
     this.calls += 1
+    this.requests.push(request)
     if (this.calls === 1) {
       throw new ProcessError({
         code: "process_exit_failed",
@@ -237,4 +239,54 @@ test("TsciAgentClient retries only classified transport failures", async () => {
     "attempt_started",
     "attempt_completed",
   ])
+})
+
+test("TsciAgentClient confines model candidates to scoped read/write tools", async () => {
+  const process_runner = new FakeProcessRunner()
+  const client = new TsciAgentClient({
+    process_runner,
+    agent_bin: "unused-agent",
+    max_attempts: 2,
+    retry_base_delay_ms: 0,
+  })
+  await client.run({
+    workspace: process.cwd(),
+    prompt: "generate the model",
+    use_openai: false,
+    signal: new AbortController().signal,
+    phase_label: "model generation",
+    tool_profile: "model_candidate_files",
+    on_output: () => undefined,
+  })
+
+  for (const request of process_runner.requests) {
+    expect(request.command).toContain("--no-builtin-tools")
+    expect(request.command).toContain("--no-extensions")
+    expect(request.command).toContain("--no-skills")
+    expect(request.command).toContain("--no-prompt-templates")
+    expect(request.command).toContain("--no-context-files")
+    expect(request.command).toContain("--system-prompt")
+    expect(request.command).toContain("--append-system-prompt")
+    expect(request.command).toContain("workspace_read,model_output_write")
+    const extension_index = request.command.indexOf("--extension")
+    expect(request.command[extension_index + 1]).toEndWith("model-candidate-tools-extension.ts")
+  }
+})
+
+test("TsciAgentClient rejects extra extensions in the confined model profile", async () => {
+  const process_runner = new FakeProcessRunner()
+  const client = new TsciAgentClient({ process_runner, agent_bin: "unused-agent" })
+  await expect(
+    client.run({
+      workspace: process.cwd(),
+      prompt: "generate the model",
+      use_openai: false,
+      signal: new AbortController().signal,
+      phase_label: "model generation",
+      tool_profile: "model_candidate_files",
+      extensions: ["untrusted-extension.ts"],
+      on_output: () => undefined,
+    }),
+  ).rejects.toThrow("does not permit additional extensions")
+  expect(process_runner.calls).toBe(0)
 })

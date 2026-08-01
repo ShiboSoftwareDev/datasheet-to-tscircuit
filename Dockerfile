@@ -50,6 +50,7 @@ ENV HOST=0.0.0.0 \
     SOURCE_COMMIT=${SOURCE_COMMIT}
 
 COPY --from=build --chown=bun:bun /app/package.json ./package.json
+COPY --from=build --chown=bun:bun /app/bun.lock ./bun.lock
 COPY --from=build --chown=bun:bun /app/tsconfig.json ./tsconfig.json
 COPY --from=production-dependencies --chown=bun:bun /app/node_modules ./node_modules
 COPY --from=build --chown=bun:bun /app/dist ./dist

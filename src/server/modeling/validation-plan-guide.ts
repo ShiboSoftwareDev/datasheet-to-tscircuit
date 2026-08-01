@@ -55,7 +55,7 @@ each observation to its named modeled requirement and materializes one of:
 
 - \`{ "type": "target", "target": number, "tolerance": positive_number }\`
 - \`{ "type": "bounds", "min"?: number, "max"?: number }\`
-- \`{ "type": "curve", "tolerance": positive_fraction, "points": [{"x":number,"y":number}, ...] }\`
+- \`{ "type": "curve", "tolerance": fraction_in_(0,0.5], "points": [{"x":number,"y":number}, ...] }\`
 
 Every named net must join at least two fixture terminals. Every DUT pin must be
 connected by at least one fixture across the plan. Every case must contain a

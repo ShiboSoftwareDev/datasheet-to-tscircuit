@@ -9,13 +9,6 @@ export interface ModelStrategy {
 
 const DEFAULT_STRATEGIES: readonly ModelStrategy[] = [
   {
-    id: "vendor",
-    version: "1",
-    supported_families: "all",
-    guidance:
-      "Prefer an official redistributable manufacturer macro-model when the datasheet or supplied files contain one. Preserve its equations and document its origin.",
-  },
-  {
     id: "equation",
     version: "1",
     supported_families: ["passive", "diode", "bjt", "mosfet", "opamp", "comparator", "sensor"],

@@ -25,7 +25,9 @@ export const prepareStage = defineComponentStage({
       services.job_store,
       context.job_id,
       "system",
-      `Starting typed component pipeline from workflow source ${provenance.source_commit}.\n`,
+      `Starting typed component pipeline for job ${context.job_id}, invocation ${context.invocation_id}, ` +
+        `source ${provenance.source_commit}, workflow ${provenance.workflow_source_sha256}, ` +
+        `evidence contract ${provenance.evidence_contract_sha256}.\n`,
     )
     const datasheet_path = join(context.job_dir, "datasheet.pdf")
     return {

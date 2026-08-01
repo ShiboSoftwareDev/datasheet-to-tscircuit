@@ -5,6 +5,7 @@ import { basename, join } from "node:path"
 import { validateApplication, validateComponent } from "@/server/component-workflow/component-validation"
 import type { ProcessRunner } from "@/server/infrastructure/process"
 import { JobStore } from "@/server/job-store"
+import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const visual_source = {
   page: 12,
@@ -12,6 +13,15 @@ const visual_source = {
   method: "pdf_visual",
   confidence: "high",
   image: "visual-reference/land-pattern.png",
+  render_dpi: 200,
+}
+
+const application_source = {
+  page: 8,
+  figure: "Typical application",
+  method: "pdf_visual",
+  confidence: "high",
+  image: "visual-reference/typical-application.png",
   render_dpi: 200,
 }
 
@@ -66,7 +76,7 @@ function documentedApplicationPlan() {
     pcb_implementation: "schematic_only",
     title: "Input bypass",
     description: "Documented input bypass circuit.",
-    source_references: [{ page: 8, figure: "Typical application" }],
+    source_references: [application_source],
     components: [
       { reference: "U1", kind: "integrated_circuit", value: "GENERIC-2" },
       { reference: "C1", kind: "capacitor", value: "100nF" },
@@ -107,9 +117,12 @@ test("component and application validators reject empty Circuit JSON", async () 
   const signal = new AbortController().signal
 
   try {
+    await publishCommittedEvidenceFixture({
+      job_dir,
+      component_evidence: componentEvidence(),
+      application_plan: documentedApplicationPlan(),
+    })
     await Promise.all([
-      Bun.write(join(job_dir, "component-evidence.json"), JSON.stringify(componentEvidence())),
-      Bun.write(join(job_dir, "typical-application-plan.json"), JSON.stringify(documentedApplicationPlan())),
       Bun.write(join(job_dir, "index.circuit.tsx"), 'export default () => <chip name="U1" />\n'),
       Bun.write(
         join(job_dir, "typical-application.circuit.tsx"),

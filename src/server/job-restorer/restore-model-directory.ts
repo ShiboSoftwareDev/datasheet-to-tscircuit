@@ -9,9 +9,13 @@ import type {
 } from "@/shared/job-types"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 import type { ModelRunStore } from "../model-run-store"
-import { readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
+import {
+  modelCheckpointRequiresPublicationPointer,
+  readModelPublication,
+  readVerifiedPublicationArtifact,
+  validateModelCompletionIntegrity,
+} from "../modeling"
 import { parsePublicPipelineSnapshot } from "../pipeline"
-import { validateModelCompletionIntegrity } from "./model-completion-integrity"
 import { isRecord, readJson, readPersistedLogs } from "./read-persisted-logs"
 import { ACTIVE_MODEL_STATUSES, MODEL_STATUSES } from "./restore-types"
 import {
@@ -28,6 +32,129 @@ function selectedPreview(value: unknown): ModelSelectedPreview | undefined {
   }
 }
 
+function restoredProgressHistory(value: unknown): ModelRun["progress_history"] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    const progress = parseRestoredModelProgress(entry)
+    if (!progress) return []
+    return [
+      {
+        sequence: progress.sequence,
+        phase: progress.phase,
+        message: progress.message,
+        updated_at: progress.updated_at,
+        iteration: progress.iteration,
+      },
+    ]
+  })
+}
+
+function publicationIntegrityMessage(error: unknown): string {
+  const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim()
+  return detail.length > 1_000 ? `${detail.slice(0, 997)}...` : detail
+}
+
+function restorePublicationIntegrityFailure(input: {
+  job_id: string
+  model_dir: string
+  model_run_store: ModelRunStore
+  directory_stat: { birthtime: Date; mtime: Date }
+  saved: Record<string, unknown> | undefined
+  logs: ModelRun["logs"]
+  error: unknown
+}): ModelRun {
+  const checkpoint = input.saved?.job_id === input.job_id ? input.saved : undefined
+  const detail = publicationIntegrityMessage(input.error)
+  const discarded_message =
+    "Accepted model publication failed integrity validation; unverified model artifacts and metrics were discarded"
+  const restored_progress = parseRestoredModelProgress(checkpoint?.progress)
+  const progress_history = restoredProgressHistory(checkpoint?.progress_history)
+  const latest_sequence = Math.max(
+    restored_progress?.sequence ?? -1,
+    ...progress_history.map(({ sequence }) => sequence),
+  )
+  const sequence =
+    Number.isSafeInteger(latest_sequence) && latest_sequence < Number.MAX_SAFE_INTEGER
+      ? latest_sequence + 1
+      : 0
+  const iteration =
+    typeof checkpoint?.iteration === "number" &&
+    Number.isSafeInteger(checkpoint.iteration) &&
+    checkpoint.iteration >= 0
+      ? checkpoint.iteration
+      : 0
+  const restored_at = new Date().toISOString()
+  const progress: NonNullable<ModelRun["progress"]> = {
+    sequence,
+    phase: "failed",
+    message: discarded_message,
+    updated_at: restored_at,
+    iteration,
+  }
+  const saved_warnings = Array.isArray(checkpoint?.warnings)
+    ? checkpoint.warnings.filter(
+        (warning): warning is string =>
+          typeof warning === "string" && !warning.startsWith(RETAINED_ACCEPTED_WARNING_PREFIX),
+      )
+    : []
+  const saved_elapsed_time_ms =
+    typeof checkpoint?.elapsed_time_ms === "number" && Number.isFinite(checkpoint.elapsed_time_ms)
+      ? Math.max(0, checkpoint.elapsed_time_ms)
+      : 0
+  const model_run_id =
+    typeof checkpoint?.model_run_id === "string" &&
+    checkpoint.model_run_id.trim().length > 0 &&
+    checkpoint.model_run_id.length <= 200
+      ? checkpoint.model_run_id
+      : `restored-${input.job_id}`
+  const model_run: ModelRun = {
+    model_run_id,
+    job_id: input.job_id,
+    use_openai: typeof checkpoint?.use_openai === "boolean" ? checkpoint.use_openai : undefined,
+    created_at:
+      typeof checkpoint?.created_at === "string"
+        ? checkpoint.created_at
+        : input.directory_stat.birthtime.toISOString(),
+    updated_at: restored_at,
+    completed_at: restored_at,
+    status: "failed",
+    is_complete: true,
+    has_errors: true,
+    error_message: `${discarded_message} during restart: ${detail}`,
+    warnings: [...saved_warnings, `${discarded_message}: ${detail}`],
+    effort_multiplier:
+      typeof checkpoint?.effort_multiplier === "number" && checkpoint.effort_multiplier > 0
+        ? checkpoint.effort_multiplier
+        : 1,
+    elapsed_time_ms: saved_elapsed_time_ms,
+    current_invocation_id:
+      typeof checkpoint?.current_invocation_id === "string" &&
+      /^[a-f0-9-]{16,80}$/.test(checkpoint.current_invocation_id)
+        ? checkpoint.current_invocation_id
+        : undefined,
+    iteration,
+    logs: input.logs,
+    progress,
+    progress_history: [
+      ...progress_history,
+      {
+        sequence: progress.sequence,
+        phase: progress.phase,
+        message: progress.message,
+        updated_at: progress.updated_at,
+        iteration: progress.iteration,
+      },
+    ],
+    preview_options: [],
+    pipeline: parsePublicPipelineSnapshot(checkpoint?.pipeline),
+  }
+  return input.model_run_store.restoreModelRun({
+    model_dir: input.model_dir,
+    model_run,
+    logs: input.logs,
+  })
+}
+
 export async function restoreModelDirectory(input: {
   job_id: string
   model_dir: string
@@ -35,7 +162,37 @@ export async function restoreModelDirectory(input: {
 }): Promise<ModelRun | undefined> {
   const directory_stat = await stat(input.model_dir).catch(() => undefined)
   if (!directory_stat?.isDirectory()) return undefined
-  const publication = await readModelPublication(dirname(input.model_dir), input.job_id)
+  const [snapshot, logs, checkpoint_stat] = await Promise.all([
+    readJson(join(input.model_dir, "model-run.json")),
+    readPersistedLogs(join(input.model_dir, "model-agent.log")),
+    stat(join(input.model_dir, "model-run.json")).catch(() => undefined),
+  ])
+  const saved = isRecord(snapshot) ? snapshot : undefined
+  const checkpoint_exists = Boolean(checkpoint_stat?.isFile())
+  let publication: Awaited<ReturnType<typeof readModelPublication>>
+  try {
+    publication = await readModelPublication(dirname(input.model_dir), input.job_id)
+  } catch (error) {
+    if (!checkpoint_exists) throw error
+    return restorePublicationIntegrityFailure({
+      ...input,
+      directory_stat,
+      saved,
+      logs,
+      error,
+    })
+  }
+  if (!publication && modelCheckpointRequiresPublicationPointer(saved)) {
+    return restorePublicationIntegrityFailure({
+      ...input,
+      directory_stat,
+      saved,
+      logs,
+      error: new Error(
+        "published-model.json is missing even though the completed datasheet_model pipeline recorded publish_model as committed",
+      ),
+    })
+  }
   const readAcceptedText = async (relative_path: string, max_bytes: number): Promise<string | undefined> =>
     publication
       ? new TextDecoder().decode(
@@ -51,10 +208,17 @@ export async function restoreModelDirectory(input: {
     if (!publication) return readJson(join(input.model_dir, relative_path))
     return JSON.parse((await readAcceptedText(relative_path, max_bytes))!)
   }
-  const [snapshot, logs, model_source, manifest, result, model_card, model_ui, contract, plan] =
-    await Promise.all([
-      readJson(join(input.model_dir, "model-run.json")),
-      readPersistedLogs(join(input.model_dir, "model-agent.log")),
+  let accepted_artifacts: [
+    string | undefined,
+    unknown,
+    unknown,
+    string | undefined,
+    unknown,
+    unknown,
+    unknown,
+  ]
+  try {
+    accepted_artifacts = await Promise.all([
       readAcceptedText("model.lib", 2 * 1024 * 1024),
       readAcceptedJson("model-manifest.json", 2 * 1024 * 1024),
       readAcceptedJson("validation-results.json", 32 * 1024 * 1024),
@@ -63,7 +227,17 @@ export async function restoreModelDirectory(input: {
       readAcceptedJson("model-contract.json", 4 * 1024 * 1024),
       readAcceptedJson("validation-plan.json", 8 * 1024 * 1024),
     ])
-  const saved = isRecord(snapshot) ? snapshot : undefined
+  } catch (error) {
+    if (!publication || !checkpoint_exists) throw error
+    return restorePublicationIntegrityFailure({
+      ...input,
+      directory_stat,
+      saved,
+      logs,
+      error,
+    })
+  }
+  const [model_source, manifest, result, model_card, model_ui, contract, plan] = accepted_artifacts
   const saved_model_run_id = typeof saved?.model_run_id === "string" ? saved.model_run_id : undefined
   const saved_job_id = typeof saved?.job_id === "string" ? saved.job_id : undefined
   const checkpoint_identity_conflict = Boolean(

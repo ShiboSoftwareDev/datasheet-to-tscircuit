@@ -1,6 +1,7 @@
 import type { AnyCircuitElement } from "circuit-json"
-import { ApplicationConnectivityPlan } from "./application-source-validation"
-import { CircuitRecord, asRecord } from "./footprint-plan-validation"
+import type { ApplicationConnectivityPlan } from "./application-source-validation"
+import { resolveTypicalApplicationCircuitScope } from "./application-circuit-scope"
+import type { CircuitRecord } from "./footprint-plan-validation"
 
 const SI_PREFIXES: Record<string, number> = {
   p: 1e-12,
@@ -41,9 +42,10 @@ export function getTypicalApplicationComponentValueErrors(
   plan: ApplicationConnectivityPlan,
   circuit_json: AnyCircuitElement[],
 ): string[] {
-  const records = circuit_json.map(asRecord)
+  const scope = resolveTypicalApplicationCircuitScope(plan, circuit_json)
+  const { records } = scope
   const components_by_name = new Map<string, CircuitRecord>()
-  for (const component of records.filter((element) => element.type === "source_component")) {
+  for (const component of scope.source_components) {
     if (typeof component.name === "string") components_by_name.set(component.name.toLowerCase(), component)
   }
   const errors: string[] = []

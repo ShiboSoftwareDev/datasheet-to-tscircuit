@@ -7,6 +7,7 @@ import type {
   ModelSourceReference,
   ModelStrategyId,
 } from "./types"
+import { MIN_FRESH_REFERENCE_CURVE_POINTS } from "./model-training-contract"
 
 const MODEL_FAMILIES = new Set<ModelFamily>([
   "passive",
@@ -21,9 +22,25 @@ const MODEL_FAMILIES = new Set<ModelFamily>([
   "digital_mixed_signal",
   "other",
 ])
+// `vendor` remains parseable for backward-compatible reads of immutable
+// publications. It is intentionally absent from ModelStrategyRegistry, which
+// rejects new characterization proposals before they can reach generation.
 const MODEL_STRATEGIES = new Set<ModelStrategyId>(["vendor", "equation", "behavioral", "hybrid"])
 const MODEL_ANALYSES = new Set<ModelAnalysis>(["operating_point", "dc_sweep", "transient"])
 const BASE_OBSERVATION_UNITS = new Set(["V", "A"])
+const MAX_NORMALIZED_CURVE_TOLERANCE = 0.5
+
+function maximumModeledExpectedTolerance(expected: ModelRequirement["expected"]): number | undefined {
+  const absolute_floor = expected.unit === "V" ? 1e-3 : expected.unit === "A" ? 1e-6 : undefined
+  if (absolute_floor === undefined) return undefined
+  const declared_magnitude = Math.max(
+    0,
+    ...[expected.target, expected.min, expected.max].flatMap((value) =>
+      value === undefined ? [] : [Math.abs(value)],
+    ),
+  )
+  return Math.max(declared_magnitude * 0.5, absolute_floor)
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -31,6 +48,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 class CharacterizationReader {
   readonly errors: string[] = []
+
+  onlyKeys(value: Record<string, unknown>, allowed: readonly string[], path: string, enabled: boolean): void {
+    if (!enabled) return
+    const allowed_keys = new Set(allowed)
+    const unexpected = Object.keys(value)
+      .filter((key) => !allowed_keys.has(key))
+      .sort()
+    if (unexpected.length > 0) {
+      this.errors.push(`${path} contains unsupported fields: ${unexpected.join(", ")}`)
+    }
+  }
 
   string(value: unknown, path: string): string {
     if (typeof value !== "string" || !value.trim()) {
@@ -58,11 +86,17 @@ class CharacterizationReader {
   }
 }
 
-function readSource(reader: CharacterizationReader, value: unknown, path: string): ModelSourceReference {
+function readSource(
+  reader: CharacterizationReader,
+  value: unknown,
+  path: string,
+  reject_unknown_fields: boolean,
+): ModelSourceReference {
   if (!isRecord(value)) {
     reader.errors.push(`${path} must be an object`)
     return { page: 0, locator: "", statement: "" }
   }
+  reader.onlyKeys(value, ["page", "locator", "statement", "image"], path, reject_unknown_fields)
   const page = reader.finite(value.page, `${path}.page`) ?? 0
   if (!Number.isInteger(page) || page < 1) reader.errors.push(`${path}.page must be a positive PDF page`)
   const image = value.image === undefined ? undefined : reader.string(value.image, `${path}.image`)
@@ -77,23 +111,51 @@ function readSource(reader: CharacterizationReader, value: unknown, path: string
   }
 }
 
-function readPoint(reader: CharacterizationReader, value: unknown, path: string): ModelReferencePoint {
+function readPoint(
+  reader: CharacterizationReader,
+  value: unknown,
+  path: string,
+  reject_unknown_fields: boolean,
+): ModelReferencePoint {
   if (!isRecord(value)) {
     reader.errors.push(`${path} must be an object`)
     return { x: 0, y: 0 }
   }
+  reader.onlyKeys(value, ["x", "y"], path, reject_unknown_fields)
   return {
     x: reader.finite(value.x, `${path}.x`) ?? 0,
     y: reader.finite(value.y, `${path}.y`) ?? 0,
   }
 }
 
-function readRequirement(reader: CharacterizationReader, value: unknown, index: number): ModelRequirement {
+function readRequirement(
+  reader: CharacterizationReader,
+  value: unknown,
+  index: number,
+  enforce_current_tolerance_limits: boolean,
+  reject_unknown_fields: boolean,
+): ModelRequirement {
   const path = `model-characterization.json.requirements[${index}]`
   const record = isRecord(value) ? value : {}
   if (!isRecord(value)) {
     reader.errors.push(`${path} must be an object`)
   }
+  reader.onlyKeys(
+    record,
+    [
+      "requirement_id",
+      "title",
+      "behavior",
+      "analysis",
+      "support",
+      "conditions",
+      "expected",
+      "reference_curve",
+      "sources",
+    ],
+    path,
+    reject_unknown_fields,
+  )
   const requirement_id = reader.string(record.requirement_id, `${path}.requirement_id`)
   if (requirement_id && !/^[a-z][a-z0-9_]*$/.test(requirement_id)) {
     reader.errors.push(`${path}.requirement_id must use snake_case`)
@@ -105,12 +167,16 @@ function readRequirement(reader: CharacterizationReader, value: unknown, index: 
   if (!isRecord(record.support)) {
     reader.errors.push(`${path}.support must be an object`)
   } else if (record.support.status === "documented_only") {
+    reader.onlyKeys(record.support, ["status", "reason"], `${path}.support`, reject_unknown_fields)
     support = {
       status: "documented_only",
       reason: reader.string(record.support.reason, `${path}.support.reason`),
     }
   } else if (record.support.status !== "modeled") {
+    reader.onlyKeys(record.support, ["status"], `${path}.support`, reject_unknown_fields)
     reader.errors.push(`${path}.support.status must be modeled or documented_only`)
+  } else {
+    reader.onlyKeys(record.support, ["status"], `${path}.support`, reject_unknown_fields)
   }
 
   const conditions: Record<string, string | number | boolean> = {}
@@ -132,6 +198,12 @@ function readRequirement(reader: CharacterizationReader, value: unknown, index: 
   if (!isRecord(record.expected)) {
     reader.errors.push(`${path}.expected must be an object`)
   } else {
+    reader.onlyKeys(
+      record.expected,
+      ["unit", "target", "min", "max", "tolerance"],
+      `${path}.expected`,
+      reject_unknown_fields,
+    )
     expected = {
       unit: reader.string(record.expected.unit, `${path}.expected.unit`),
       target: reader.finite(record.expected.target, `${path}.expected.target`),
@@ -141,6 +213,19 @@ function readRequirement(reader: CharacterizationReader, value: unknown, index: 
     }
     if (expected.tolerance !== undefined && expected.tolerance <= 0) {
       reader.errors.push(`${path}.expected.tolerance must be positive`)
+    }
+    if (
+      enforce_current_tolerance_limits &&
+      support.status === "modeled" &&
+      expected.tolerance !== undefined &&
+      expected.tolerance > 0
+    ) {
+      const maximum_tolerance = maximumModeledExpectedTolerance(expected)
+      if (maximum_tolerance !== undefined && expected.tolerance > maximum_tolerance) {
+        reader.errors.push(
+          `${path}.expected.tolerance must not exceed ${maximum_tolerance} ${expected.unit} for the declared expected scale`,
+        )
+      }
     }
     if (expected.target === undefined && expected.min === undefined && expected.max === undefined) {
       reader.errors.push(`${path}.expected must declare target, min, or max`)
@@ -155,12 +240,27 @@ function readRequirement(reader: CharacterizationReader, value: unknown, index: 
     if (!isRecord(record.reference_curve)) {
       reader.errors.push(`${path}.reference_curve must be an object`)
     } else {
+      reader.onlyKeys(
+        record.reference_curve,
+        ["x_quantity", "x_unit", "y_quantity", "y_unit", "points", "tolerance", "image"],
+        `${path}.reference_curve`,
+        reject_unknown_fields,
+      )
       const points = Array.isArray(record.reference_curve.points)
         ? record.reference_curve.points.map((point, point_index) =>
-            readPoint(reader, point, `${path}.reference_curve.points[${point_index}]`),
+            readPoint(reader, point, `${path}.reference_curve.points[${point_index}]`, reject_unknown_fields),
           )
         : []
       if (points.length < 2) reader.errors.push(`${path}.reference_curve.points needs at least two points`)
+      if (
+        enforce_current_tolerance_limits &&
+        support.status === "modeled" &&
+        points.length < MIN_FRESH_REFERENCE_CURVE_POINTS
+      ) {
+        reader.errors.push(
+          `${path}.reference_curve.points needs at least ${MIN_FRESH_REFERENCE_CURVE_POINTS} points so server validation can withhold interior samples from model generation`,
+        )
+      }
       for (let point_index = 1; point_index < points.length; point_index += 1) {
         const current = points[point_index]
         const previous = points[point_index - 1]
@@ -183,6 +283,15 @@ function readRequirement(reader: CharacterizationReader, value: unknown, index: 
       }
       if (reference_curve.tolerance !== undefined && reference_curve.tolerance <= 0) {
         reader.errors.push(`${path}.reference_curve.tolerance must be positive`)
+      }
+      if (
+        enforce_current_tolerance_limits &&
+        reference_curve.tolerance !== undefined &&
+        reference_curve.tolerance > MAX_NORMALIZED_CURVE_TOLERANCE
+      ) {
+        reader.errors.push(
+          `${path}.reference_curve.tolerance must not exceed ${MAX_NORMALIZED_CURVE_TOLERANCE}`,
+        )
       }
     }
   }
@@ -209,7 +318,7 @@ function readRequirement(reader: CharacterizationReader, value: unknown, index: 
 
   const sources = Array.isArray(record.sources)
     ? record.sources.map((source, source_index) =>
-        readSource(reader, source, `${path}.sources[${source_index}]`),
+        readSource(reader, source, `${path}.sources[${source_index}]`, reject_unknown_fields),
       )
     : []
   if (sources.length === 0) reader.errors.push(`${path}.sources must cite at least one datasheet source`)
@@ -227,11 +336,23 @@ function readRequirement(reader: CharacterizationReader, value: unknown, index: 
   }
 }
 
-export function parseModelCharacterization(value: unknown): ModelCharacterization {
+export function parseModelCharacterization(
+  value: unknown,
+  options: {
+    enforce_current_tolerance_limits?: boolean
+    reject_unknown_fields?: boolean
+  } = {},
+): ModelCharacterization {
   const reader = new CharacterizationReader()
   if (!isRecord(value) || value.version !== 1) {
     throw new Error("model-characterization.json must be a version 1 object")
   }
+  reader.onlyKeys(
+    value,
+    ["version", "family", "strategy", "requirements", "assumptions", "limitations"],
+    "model-characterization.json",
+    options.reject_unknown_fields === true,
+  )
   const family = reader.string(value.family, "model-characterization.json.family") as ModelFamily
   const strategy = reader.string(value.strategy, "model-characterization.json.strategy") as ModelStrategyId
   if (!MODEL_FAMILIES.has(family)) reader.errors.push("model-characterization.json.family is unsupported")
@@ -239,7 +360,15 @@ export function parseModelCharacterization(value: unknown): ModelCharacterizatio
     reader.errors.push("model-characterization.json.strategy is unsupported")
   }
   const requirements = Array.isArray(value.requirements)
-    ? value.requirements.map((requirement, index) => readRequirement(reader, requirement, index))
+    ? value.requirements.map((requirement, index) =>
+        readRequirement(
+          reader,
+          requirement,
+          index,
+          options.enforce_current_tolerance_limits === true,
+          options.reject_unknown_fields === true,
+        ),
+      )
     : []
   if (requirements.length === 0) {
     reader.errors.push("model-characterization.json.requirements must not be empty")

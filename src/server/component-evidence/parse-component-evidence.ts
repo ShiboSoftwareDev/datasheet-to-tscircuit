@@ -1,4 +1,14 @@
 import type { AnyCircuitElement } from "circuit-json"
+import { canonicalizeComponentEvidenceInput } from "./canonicalize-component-evidence"
+import {
+  COMPONENT_EVIDENCE_STATUSES,
+  COMPONENT_EVIDENCE_VERSION,
+  DRAWING_ORIENTATIONS,
+  EVIDENCE_CONFIDENCES,
+  EVIDENCE_METHODS,
+  EVIDENCE_PAD_KINDS,
+  SCHEMATIC_PIN_ROLES,
+} from "./contract"
 import { normalizePin } from "./get-pad-agreement-errors"
 import type {
   ComponentEvidence,
@@ -14,6 +24,16 @@ export type CircuitRecord = AnyCircuitElement & Record<string, unknown>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const allowed_keys = new Set(allowed)
+  const unexpected = Object.keys(value)
+    .filter((key) => !allowed_keys.has(key))
+    .sort()
+  if (unexpected.length > 0) {
+    throw new Error(`${label} contains unsupported fields: ${unexpected.join(", ")}`)
+  }
 }
 
 function requiredText(value: unknown, label: string): string {
@@ -37,21 +57,21 @@ function parseSources(value: unknown, label: string): EvidenceSource[] {
     if (!isRecord(source) || !Number.isInteger(source.page) || (source.page as number) < 1) {
       throw new Error(`${source_label}.page must be a positive PDF page number`)
     }
-    if (
-      source.method !== "pdf_text" &&
-      source.method !== "pdf_visual" &&
-      source.method !== "calculated" &&
-      source.method !== "package_standard"
-    ) {
+    assertOnlyKeys(
+      source,
+      ["page", "figure", "method", "confidence", "image", "render_dpi", "note"],
+      source_label,
+    )
+    if (!EVIDENCE_METHODS.includes(source.method as (typeof EVIDENCE_METHODS)[number])) {
       throw new Error(`${source_label}.method is invalid`)
     }
-    if (source.confidence !== "high" && source.confidence !== "medium" && source.confidence !== "low") {
+    if (!EVIDENCE_CONFIDENCES.includes(source.confidence as (typeof EVIDENCE_CONFIDENCES)[number])) {
       throw new Error(`${source_label}.confidence is invalid`)
     }
     const parsed: EvidenceSource = {
       page: source.page as number,
-      method: source.method,
-      confidence: source.confidence,
+      method: source.method as EvidenceSource["method"],
+      confidence: source.confidence as EvidenceSource["confidence"],
       ...(source.figure === undefined
         ? {}
         : { figure: requiredText(source.figure, `${source_label}.figure`) }),
@@ -84,6 +104,7 @@ function parseField<T>(input: {
 }): EvidenceField<T> {
   const { value, label, parse_value } = input
   if (!isRecord(value)) throw new Error(`${label} must contain value and sources`)
+  assertOnlyKeys(value, ["value", "sources"], label)
   return {
     value: parse_value(value.value, `${label}.value`),
     sources: parseSources(value.sources, `${label}.sources`),
@@ -92,12 +113,17 @@ function parseField<T>(input: {
 
 function parsePad(value: unknown, index: number): EvidencePad {
   const label = `component evidence footprint.pads[${index}]`
-  if (!isRecord(value) || (value.kind !== "smt" && value.kind !== "plated_hole")) {
+  if (!isRecord(value) || !EVIDENCE_PAD_KINDS.includes(value.kind as (typeof EVIDENCE_PAD_KINDS)[number])) {
     throw new Error(`${label}.kind must be smt or plated_hole`)
   }
+  assertOnlyKeys(
+    value,
+    ["pin", "kind", "x", "y", "width", "height", "hole_width", "hole_height", "sources"],
+    label,
+  )
   const pad: EvidencePad = {
     pin: value.pin === null ? null : requiredText(value.pin, `${label}.pin`),
-    kind: value.kind,
+    kind: value.kind as EvidencePad["kind"],
     x: requiredFiniteNumber(value.x, `${label}.x`),
     y: requiredFiniteNumber(value.y, `${label}.y`),
     width: requiredFiniteNumber(value.width, `${label}.width`),
@@ -121,10 +147,27 @@ function parsePad(value: unknown, index: number): EvidencePad {
 }
 
 export function parseComponentEvidence(value: unknown): ComponentEvidence {
+  value = canonicalizeComponentEvidenceInput(value).value
+  if (isRecord(value)) {
+    assertOnlyKeys(
+      value,
+      [
+        "version",
+        "status",
+        "part_number",
+        "ordering_code",
+        "package",
+        "pinout",
+        "footprint",
+        "unresolved_ambiguities",
+      ],
+      "component evidence",
+    )
+  }
   if (
     !isRecord(value) ||
-    value.version !== 1 ||
-    (value.status !== "resolved" && value.status !== "unresolved")
+    value.version !== COMPONENT_EVIDENCE_VERSION ||
+    !COMPONENT_EVIDENCE_STATUSES.includes(value.status as (typeof COMPONENT_EVIDENCE_STATUSES)[number])
   ) {
     throw new Error("component-evidence.json must have version 1 and a valid status")
   }
@@ -133,26 +176,28 @@ export function parseComponentEvidence(value: unknown): ComponentEvidence {
   if (!isRecord(value.footprint) || value.footprint.view !== "pcb_top" || value.footprint.units !== "mm") {
     throw new Error('component evidence footprint must use view "pcb_top" and units "mm"')
   }
+  assertOnlyKeys(value.package, ["name", "code", "pin_count"], "component evidence package")
+  assertOnlyKeys(value.pinout, ["pins"], "component evidence pinout")
+  assertOnlyKeys(
+    value.footprint,
+    ["view", "units", "drawing_orientation", "pads"],
+    "component evidence footprint",
+  )
   if (!Array.isArray(value.pinout.pins) || (value.status === "resolved" && value.pinout.pins.length === 0)) {
     throw new Error("component evidence must contain a complete pin table")
   }
   const seen_pins = new Set<string>()
-  const pin_roles = new Set<SchematicPinRole>([
-    "power_input",
-    "power_output",
-    "ground",
-    "input",
-    "output",
-    "bidirectional",
-    "passive",
-    "no_connect",
-    "other",
-  ])
+  const pin_roles = new Set<SchematicPinRole>(SCHEMATIC_PIN_ROLES)
   const pins = value.pinout.pins.map((pin, index): PinEvidence => {
     const label = `component evidence pinout.pins[${index}]`
     if (!isRecord(pin) || !Array.isArray(pin.labels) || pin.labels.length === 0) {
       throw new Error(`${label} must contain a number, labels, role, and sources`)
     }
+    assertOnlyKeys(
+      pin,
+      ["number", "labels", "role", "electrical_attributes", "description", "sources"],
+      label,
+    )
     const number = requiredText(pin.number, `${label}.number`)
     const normalized_number = normalizePin(number)
     if (seen_pins.has(normalized_number)) throw new Error(`component evidence pin ${number} is duplicated`)
@@ -164,14 +209,7 @@ export function parseComponentEvidence(value: unknown): ComponentEvidence {
       if (!isRecord(pin.electrical_attributes)) {
         throw new Error(`${label}.electrical_attributes must be an object`)
       }
-      const unexpected_attributes = Object.keys(pin.electrical_attributes).filter(
-        (attribute) => attribute !== "open_drain",
-      )
-      if (unexpected_attributes.length > 0) {
-        throw new Error(
-          `${label}.electrical_attributes contains unsupported fields: ${unexpected_attributes.join(", ")}`,
-        )
-      }
+      assertOnlyKeys(pin.electrical_attributes, ["open_drain"], `${label}.electrical_attributes`)
       if (
         pin.electrical_attributes.open_drain !== undefined &&
         typeof pin.electrical_attributes.open_drain !== "boolean"
@@ -213,13 +251,7 @@ export function parseComponentEvidence(value: unknown): ComponentEvidence {
   ) {
     throw new Error("component evidence must contain every copper pad")
   }
-  const orientation_values = new Set<DrawingOrientation>([
-    "pcb_top",
-    "package_top",
-    "package_bottom",
-    "side",
-    "unknown",
-  ])
+  const orientation_values = new Set<DrawingOrientation>(DRAWING_ORIENTATIONS)
   const pin_count = parseField({
     value: value.package.pin_count,
     label: "component evidence package.pin_count",
@@ -245,7 +277,7 @@ export function parseComponentEvidence(value: unknown): ComponentEvidence {
   }
   return {
     version: 1,
-    status: value.status,
+    status: value.status as ComponentEvidence["status"],
     part_number: parseField({
       value: value.part_number,
       label: "component evidence part_number",

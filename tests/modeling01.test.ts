@@ -3,8 +3,12 @@ import type { AnyCircuitElement } from "circuit-json"
 import type { ComponentEvidence } from "../src/server/component-evidence"
 import {
   assertCircuitEmbedsModel,
+  buildCharacterizationPrompt,
+  buildModelGenerationPrompt,
+  buildValidationPlanPrompt,
   createModelInterface,
   createModelManifest,
+  ModelStrategyRegistry,
   parseModelCharacterization,
   parseModelContract,
   validateModelSource,
@@ -165,6 +169,196 @@ describe("server-owned model interface", () => {
 })
 
 describe("model characterization contract", () => {
+  test("exposes only strategies backed by server-owned generation paths", () => {
+    expect(new ModelStrategyRegistry().strategies.map(({ id }) => id)).toEqual([
+      "equation",
+      "behavioral",
+      "hybrid",
+    ])
+    expect(buildCharacterizationPrompt()).toContain("typical-application-plan.json")
+    expect(buildCharacterizationPrompt()).not.toContain("strategy: vendor")
+    const vendor_characterization = {
+      version: 1,
+      family: "other",
+      strategy: "vendor",
+      requirements: [
+        {
+          requirement_id: "output_voltage",
+          title: "Output voltage",
+          behavior: "Produce the documented output voltage",
+          analysis: "operating_point",
+          support: { status: "modeled" },
+          conditions: {},
+          expected: { unit: "V", target: 1 },
+          sources: [{ page: 1, locator: "Table 1", statement: "Output is 1 V" }],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    }
+    const legacy_vendor_characterization = parseModelCharacterization(vendor_characterization)
+    expect(legacy_vendor_characterization.strategy).toBe("vendor")
+    expect(() =>
+      new ModelStrategyRegistry().require(
+        legacy_vendor_characterization.strategy,
+        legacy_vendor_characterization.family,
+      ),
+    ).toThrow(/Unknown model strategy vendor/)
+
+    const contract = {
+      version: 1 as const,
+      interface: createModelInterface(evidence, component_circuit),
+      characterization: parseModelCharacterization({
+        ...vendor_characterization,
+        strategy: "equation",
+      }),
+    }
+    expect(buildValidationPlanPrompt({ contract })).toContain("typical-application-plan.json")
+    expect(buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })).toContain(
+      "typical-application-plan.json",
+    )
+    expect(buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })).toContain(
+      "server has withheld",
+    )
+  })
+
+  test("rejects characterization tolerances that make validation meaningless", () => {
+    const base = {
+      version: 1,
+      family: "other",
+      strategy: "equation",
+      assumptions: [],
+      limitations: [],
+    }
+    const source = [{ page: 1, locator: "Electrical characteristics", statement: "Specified value" }]
+    const scalar_characterization = {
+      ...base,
+      requirements: [
+        {
+          requirement_id: "output_voltage",
+          title: "Output voltage",
+          behavior: "Produce the documented output voltage",
+          analysis: "operating_point",
+          support: { status: "modeled" },
+          conditions: {},
+          expected: { unit: "V", target: 1, tolerance: 1e99 },
+          sources: source,
+        },
+      ],
+    }
+    // Compatibility reads must not invalidate already-published version-1
+    // contracts; only fresh agent artifacts use the current policy.
+    expect(() => parseModelCharacterization(scalar_characterization)).not.toThrow()
+    expect(() =>
+      parseModelCharacterization(scalar_characterization, {
+        enforce_current_tolerance_limits: true,
+      }),
+    ).toThrow(/expected\.tolerance must not exceed/)
+    const curve_characterization = {
+      ...base,
+      requirements: [
+        {
+          requirement_id: "transfer_curve",
+          title: "Transfer curve",
+          behavior: "Follow the documented transfer curve",
+          analysis: "dc_sweep",
+          support: { status: "modeled" },
+          conditions: {},
+          expected: { unit: "V", min: 0, max: 1 },
+          reference_curve: {
+            x_quantity: "input voltage",
+            x_unit: "V",
+            y_quantity: "output voltage",
+            y_unit: "V",
+            tolerance: 1e99,
+            points: [
+              { x: 0, y: 0 },
+              { x: 1, y: 1 },
+            ],
+          },
+          sources: source,
+        },
+      ],
+    }
+    expect(() => parseModelCharacterization(curve_characterization)).not.toThrow()
+    expect(() =>
+      parseModelCharacterization(curve_characterization, {
+        enforce_current_tolerance_limits: true,
+      }),
+    ).toThrow(/reference_curve\.tolerance must not exceed 0\.5/)
+  })
+
+  test("requires holdout-capable fresh curves while preserving version-1 compatibility reads", () => {
+    const sparse_curve_characterization = {
+      version: 1,
+      family: "other",
+      strategy: "equation",
+      requirements: [
+        {
+          requirement_id: "transfer_curve",
+          title: "Transfer curve",
+          behavior: "Follow the documented transfer curve",
+          analysis: "dc_sweep",
+          support: { status: "modeled" },
+          conditions: {},
+          expected: { unit: "V", min: 0, max: 1 },
+          reference_curve: {
+            x_quantity: "input voltage",
+            x_unit: "V",
+            y_quantity: "output voltage",
+            y_unit: "V",
+            tolerance: 0.05,
+            points: [
+              { x: 0, y: 0 },
+              { x: 0.5, y: 0.4 },
+              { x: 1, y: 1 },
+            ],
+          },
+          sources: [{ page: 1, locator: "Figure 1", statement: "Transfer response" }],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    }
+
+    expect(() => parseModelCharacterization(sparse_curve_characterization)).not.toThrow()
+    expect(() =>
+      parseModelCharacterization(sparse_curve_characterization, {
+        enforce_current_tolerance_limits: true,
+      }),
+    ).toThrow(/needs at least 5 points so server validation can withhold interior samples/)
+    expect(buildCharacterizationPrompt()).toContain("must contain at least five points")
+  })
+
+  test("fresh characterization reports unsupported fields instead of dropping typos", () => {
+    const characterization = {
+      version: 1,
+      family: "other",
+      strategy: "equation",
+      requirements: [
+        {
+          requirement_id: "output_voltage",
+          title: "Output voltage",
+          behavior: "Produce the documented output voltage",
+          analysis: "operating_point",
+          support: { status: "modeled" },
+          conditions: {},
+          expected: { unit: "V", target: 1, tolerence: 0.1 },
+          sources: [{ page: 1, locator: "Electrical characteristics", statement: "Output is 1 V" }],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    }
+
+    // Compatibility reads stay lenient for published v1 contracts; fresh
+    // artifacts fail while the agent can still correct the misspelled field.
+    expect(() => parseModelCharacterization(characterization)).not.toThrow()
+    expect(() => parseModelCharacterization(characterization, { reject_unknown_fields: true })).toThrow(
+      "expected contains unsupported fields: tolerence",
+    )
+  })
+
   test("rejects unsupported AC sweep requirements", () => {
     expect(() =>
       parseModelCharacterization({

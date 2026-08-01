@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
-import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ModelManifest } from "@/shared/job-types"
+import { readBoundedTextArtifact } from "../infrastructure/artifacts"
 import type { GeneratedModel, ModelInterface } from "./types"
 
 type ModelSourceInterface = Pick<ModelInterface, "entry_name"> & {
@@ -127,8 +127,14 @@ export async function readGeneratedModel(input: {
   simulator?: string
 }): Promise<GeneratedModel> {
   const [source, card] = await Promise.all([
-    readFile(join(input.model_dir, "model.lib"), "utf8"),
-    readFile(join(input.model_dir, "model-card.md"), "utf8"),
+    readBoundedTextArtifact({
+      path: join(input.model_dir, "model.lib"),
+      max_bytes: 2 * 1024 * 1024,
+    }),
+    readBoundedTextArtifact({
+      path: join(input.model_dir, "model-card.md"),
+      max_bytes: 512 * 1024,
+    }),
   ])
   const manifest = createModelManifest({
     model_interface: input.model_interface,

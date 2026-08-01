@@ -3,10 +3,12 @@ import { ProcessError, type ProcessRunRequest, type ProcessRunner } from "@/serv
 import { getRuntimeSourceCommit } from "@/server/runtime-source-commit"
 
 test("Docker start rebuilds current source and injects its revision into the runtime", async () => {
-  const [package_json, compose, docker_helper] = await Promise.all([
+  const [package_json, compose, docker_helper, dockerfile, docker_smoke] = await Promise.all([
     Bun.file("package.json").json() as Promise<{ scripts: Record<string, string> }>,
     Bun.file("compose.yaml").text(),
     Bun.file("scripts/docker-compose-with-source.sh").text(),
+    Bun.file("Dockerfile").text(),
+    Bun.file("scripts/docker-smoke-test.sh").text(),
   ])
 
   expect(package_json.scripts.start).toContain("up --build")
@@ -16,6 +18,8 @@ test("Docker start rebuilds current source and injects its revision into the run
   expect(docker_helper).toContain("git rev-parse HEAD")
   expect(docker_helper).toContain("git status --porcelain")
   expect(docker_helper).toContain('export SOURCE_COMMIT="$source_commit"')
+  expect(dockerfile).toContain("/app/bun.lock ./bun.lock")
+  expect(docker_smoke).toContain("test -f /app/bun.lock")
 })
 
 test("an injected Docker source revision wins over repository fallback", async () => {

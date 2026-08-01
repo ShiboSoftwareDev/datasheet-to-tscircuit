@@ -8,6 +8,9 @@ import { restorePersistedJobs } from "@/server/job-restorer"
 import { readRestoredCircuitJson } from "@/server/job-restorer/read-restored-circuit-json"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
+import { getModelRunFile } from "@/server/model-run-api/get-model-run-file"
+import type { ModelRunApiContext } from "@/server/model-run-api/model-run-api-context"
+import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 
 test("persisted component and model jobs survive a server restart and deletion removes both", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-restore-"))
@@ -98,6 +101,11 @@ test("persisted component and model jobs survive a server restart and deletion r
   expect(
     restored_jobs.getJob("job_restore")?.circuit_json?.some((element) => element.type === "pcb_component"),
   ).toBe(true)
+  expect(
+    restored_jobs
+      .getJob("job_restore")
+      ?.circuit_json?.some((element) => element.type === "simulation_spice_subcircuit"),
+  ).toBe(false)
   expect(restored_jobs.getJob("job_restore")?.typical_application_circuit_json).toBeUndefined()
 
   const restored_model = restored_models.getModelRunForJob("job_restore")
@@ -108,6 +116,29 @@ test("persisted component and model jobs survive a server restart and deletion r
   expect(restored_model?.elapsed_time_ms).toBeGreaterThan(0)
   expect(restored_model?.model_source).toContain(".SUBCKT RESTORED")
   expect(restored_model?.logs[0]?.message).toBe("Original model log\n")
+
+  const legacy_model_response = await getModelRunFile(
+    new URL("http://localhost/api/model-run/file?job_id=job_restore&file=model"),
+    { model_run_store: restored_models } as unknown as ModelRunApiContext,
+  )
+  expect(legacy_model_response.status).toBe(200)
+  expect(await legacy_model_response.text()).toContain(".SUBCKT RESTORED")
+
+  const legacy_model_path = join(model_dir, "model.lib")
+  const symlink_target = join(model_dir, "model-symlink-target.lib")
+  await Promise.all([
+    rm(legacy_model_path),
+    Bun.write(symlink_target, ".SUBCKT SYMLINKED IN OUT\n.ENDS SYMLINKED\n"),
+  ])
+  await symlink(symlink_target, legacy_model_path)
+  const symlinked_model_response = await getModelRunFile(
+    new URL("http://localhost/api/model-run/file?job_id=job_restore&file=model"),
+    { model_run_store: restored_models } as unknown as ModelRunApiContext,
+  )
+  expect(symlinked_model_response.status).toBe(404)
+  expect(await symlinked_model_response.json()).toMatchObject({
+    error: { error_code: "file_not_ready" },
+  })
 
   const handle = createJobApiHandler({
     jobs_root,
@@ -129,6 +160,251 @@ test("persisted component and model jobs survive a server restart and deletion r
   ).toBe(false)
 
   await rm(jobs_root, { recursive: true, force: true })
+})
+
+for (const publication_case of [
+  {
+    label: "malformed",
+    pointer: JSON.stringify({ version: 1 }),
+    expected_detail: "unsupported version",
+  },
+  {
+    label: "wrong-owner",
+    pointer: JSON.stringify({
+      version: 2,
+      publication_id: "a".repeat(16),
+      job_id: "another_job",
+      model_run_id: "another_model",
+      invocation_id: "b".repeat(16),
+      revision: "c".repeat(16),
+      accepted_bundle_manifest_sha256: "d".repeat(64),
+      published_component_bundle_manifest_sha256: "e".repeat(64),
+      accepted_model_directory: `spice/accepted-revisions/${"c".repeat(16)}-${"a".repeat(16)}`,
+      published_component_directory: `published-models/${"c".repeat(16)}-${"a".repeat(16)}`,
+      published_at: "2026-01-01T00:00:00.000Z",
+    }),
+    expected_detail: "belongs to job",
+  },
+]) {
+  test(`${publication_case.label} model publication restores a failed shell without unverified artifacts`, async () => {
+    const jobs_root = await mkdtemp(join(tmpdir(), `datasheet-model-${publication_case.label}-restore-`))
+    const job_id = `job_${publication_case.label.replace("-", "_")}`
+    const job_dir = join(jobs_root, job_id)
+    const model_dir = join(job_dir, "spice")
+    const timestamp = "2026-01-02T03:04:05.000Z"
+    await mkdir(model_dir, { recursive: true })
+    await Promise.all([
+      Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\npublication integrity fixture"),
+      Bun.write(join(job_dir, "index.circuit.tsx"), "export default () => <chip />\n"),
+      Bun.write(join(job_dir, "component.circuit.tsx"), "export default () => <chip />\n"),
+      Bun.write(
+        join(job_dir, "component.circuit.json"),
+        JSON.stringify([{ type: "source_component", source_component_id: "base_component" }]),
+      ),
+      Bun.write(join(job_dir, "published-model.json"), `${publication_case.pointer}\n`),
+      Bun.write(join(model_dir, "model.lib"), ".SUBCKT UNVERIFIED IN OUT\n.ENDS UNVERIFIED\n"),
+      Bun.write(join(model_dir, "model-card.md"), "# Unverified model\n"),
+      Bun.write(join(model_dir, "model-agent.log"), `[${timestamp}] [system] Preserved model trace\n`),
+      Bun.write(
+        join(model_dir, "model-run.json"),
+        JSON.stringify({
+          model_run_id: `model_${publication_case.label.replace("-", "_")}`,
+          job_id,
+          created_at: timestamp,
+          updated_at: timestamp,
+          completed_at: timestamp,
+          status: "complete",
+          is_complete: true,
+          has_errors: false,
+          warnings: [
+            "Preserved checkpoint warning",
+            `${RETAINED_ACCEPTED_WARNING_PREFIX} unverified_revision because a replacement failed.`,
+          ],
+          effort_multiplier: 3,
+          elapsed_time_ms: 1234,
+          iteration: 2,
+          model_source: ".SUBCKT CHECKPOINT_UNVERIFIED IN OUT\n.ENDS CHECKPOINT_UNVERIFIED\n",
+          manifest: { part_number: "UNVERIFIED" },
+          validation: { score: 0 },
+          model_card: "# Unverified checkpoint card",
+          progress: {
+            sequence: 7,
+            phase: "complete",
+            message: "Unverified completion",
+            updated_at: timestamp,
+            champion: { score: 0, passing: 99, total: 99 },
+          },
+          progress_history: [
+            {
+              sequence: 6,
+              phase: "validating",
+              message: "Preserved execution history",
+              updated_at: timestamp,
+            },
+          ],
+          circuit_preview: { code: "unverified preview" },
+          reference_preview: { reference_points: [{ x: 0, y: 0 }] },
+          preview_options: [{ benchmark_id: "unverified" }],
+        }),
+      ),
+    ])
+    const original_jobs = new JobStore()
+    original_jobs.createJob({ job_id, job_dir, file_name: "integrity.pdf" })
+
+    try {
+      const failures: Array<{ job_id: string; cause: string }> = []
+      const restored_jobs = new JobStore()
+      const restored_models = new ModelRunStore()
+      const restored = await restorePersistedJobs({
+        jobs_root,
+        job_store: restored_jobs,
+        model_run_store: restored_models,
+        on_restore_error: (failure) => {
+          failures.push(failure)
+        },
+      })
+
+      expect(restored).toEqual({ jobs_restored: 1, model_runs_restored: 1 })
+      expect(failures).toEqual([])
+      expect(restored_jobs.getJob(job_id)?.component_code).toContain("export default")
+      const model_run = restored_models.getModelRunForJob(job_id)
+      expect(model_run).toMatchObject({
+        status: "failed",
+        is_complete: true,
+        has_errors: true,
+        effort_multiplier: 3,
+        elapsed_time_ms: 1234,
+        preview_options: [],
+      })
+      expect(model_run?.error_message).toContain(publication_case.expected_detail)
+      expect(model_run?.warnings).toContain("Preserved checkpoint warning")
+      expect(model_run?.warnings?.some((warning) => warning.includes("unverified model artifacts"))).toBe(
+        true,
+      )
+      expect(
+        model_run?.warnings?.some((warning) => warning.startsWith(RETAINED_ACCEPTED_WARNING_PREFIX)),
+      ).toBe(false)
+      expect(model_run?.model_source).toBeUndefined()
+      expect(model_run?.manifest).toBeUndefined()
+      expect(model_run?.validation).toBeUndefined()
+      expect(model_run?.model_card).toBeUndefined()
+      expect(model_run?.circuit_preview).toBeUndefined()
+      expect(model_run?.reference_preview).toBeUndefined()
+      expect(model_run?.progress).toMatchObject({ phase: "failed", sequence: 8 })
+      expect(model_run?.progress?.champion).toBeUndefined()
+      expect(model_run?.progress_history.map(({ message }) => message)).toEqual([
+        "Preserved execution history",
+        expect.stringContaining("unverified model artifacts"),
+      ])
+      expect(model_run?.logs[0]?.message).toContain("Preserved model trace")
+      expect(restored_models.getModelRunSummaryForJob(job_id)?.has_model).toBe(false)
+
+      const persisted_shell = await Bun.file(join(model_dir, "model-run.json")).json()
+      expect(persisted_shell.model_source).toBeUndefined()
+      expect(persisted_shell.manifest).toBeUndefined()
+      expect(persisted_shell.validation).toBeUndefined()
+      expect(persisted_shell.circuit_preview).toBeUndefined()
+      expect(persisted_shell.preview_options).toEqual([])
+      expect(persisted_shell.progress.champion).toBeUndefined()
+    } finally {
+      await rm(jobs_root, { recursive: true, force: true })
+    }
+  })
+}
+
+test("a completed publish-model checkpoint without its pointer restores no root mirrors or metrics", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-model-missing-pointer-restore-"))
+  const job_id = "job_missing_model_pointer"
+  const job_dir = join(jobs_root, job_id)
+  const model_dir = join(job_dir, "spice")
+  const timestamp = "2026-01-02T03:04:05.000Z"
+  await mkdir(model_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nmissing pointer fixture"),
+    Bun.write(join(job_dir, "index.circuit.tsx"), "export default () => <chip />\n"),
+    Bun.write(
+      join(job_dir, "component.circuit.json"),
+      JSON.stringify([{ type: "source_component", source_component_id: "base_component" }]),
+    ),
+    Bun.write(join(model_dir, "model.lib"), ".SUBCKT ROOT_MIRROR IN OUT\n.ENDS ROOT_MIRROR\n"),
+    Bun.write(join(model_dir, "model-card.md"), "# Root mirror\n"),
+    Bun.write(
+      join(model_dir, "model-run.json"),
+      JSON.stringify({
+        model_run_id: "model_missing_model_pointer",
+        job_id,
+        created_at: timestamp,
+        updated_at: timestamp,
+        completed_at: timestamp,
+        status: "complete",
+        is_complete: true,
+        has_errors: false,
+        effort_multiplier: 1,
+        elapsed_time_ms: 42,
+        iteration: 1,
+        model_source: ".SUBCKT CHECKPOINT_MIRROR IN OUT\n.ENDS CHECKPOINT_MIRROR\n",
+        manifest: { part_number: "ROOT_MIRROR" },
+        validation: { score: 0 },
+        progress: {
+          sequence: 20,
+          phase: "complete",
+          message: "Claimed publication completion",
+          updated_at: timestamp,
+          champion: { score: 0 },
+        },
+        pipeline: {
+          pipeline_id: "datasheet_model",
+          status: "completed",
+          sequence: 20,
+          started_at: timestamp,
+          updated_at: timestamp,
+          stage_results: {
+            publish_model: {
+              stage_id: "publish_model",
+              status: "completed",
+              debug_ref: "runs/invocation/.pipeline/stages/08-publish-model",
+              started_at: timestamp,
+              completed_at: timestamp,
+              duration_ms: 1,
+            },
+          },
+        },
+      }),
+    ),
+  ])
+  const original_jobs = new JobStore()
+  original_jobs.createJob({ job_id, job_dir, file_name: "missing-pointer.pdf" })
+
+  try {
+    const restored_jobs = new JobStore()
+    const restored_models = new ModelRunStore()
+    const restored = await restorePersistedJobs({
+      jobs_root,
+      job_store: restored_jobs,
+      model_run_store: restored_models,
+    })
+
+    expect(restored).toEqual({ jobs_restored: 1, model_runs_restored: 1 })
+    expect(restored_jobs.getJob(job_id)).toBeDefined()
+    const model_run = restored_models.getModelRunForJob(job_id)
+    expect(model_run).toMatchObject({ status: "failed", has_errors: true, preview_options: [] })
+    expect(model_run?.error_message).toContain("published-model.json is missing")
+    expect(model_run?.model_source).toBeUndefined()
+    expect(model_run?.manifest).toBeUndefined()
+    expect(model_run?.validation).toBeUndefined()
+    expect(model_run?.progress?.champion).toBeUndefined()
+    expect(restored_models.getModelRunSummaryForJob(job_id)?.has_model).toBe(false)
+    const download = await getModelRunFile(
+      new URL(`http://localhost/api/model-run/file?job_id=${job_id}&file=model`),
+      { model_run_store: restored_models } as unknown as ModelRunApiContext,
+    )
+    expect(download.status).toBe(500)
+    expect(await download.json()).toMatchObject({
+      error: { error_code: "accepted_publication_invalid" },
+    })
+  } finally {
+    await rm(jobs_root, { recursive: true, force: true })
+  }
 })
 
 test("failed component validation is not restored as ready", async () => {
@@ -635,9 +911,25 @@ test("one corrupt persisted job cannot prevent a healthy sibling from restoring"
   const healthy_dir = join(jobs_root, "healthy-job")
   const corrupt_dir = join(jobs_root, "corrupt-job")
   await Promise.all([mkdir(healthy_dir, { recursive: true }), mkdir(corrupt_dir, { recursive: true })])
+  await mkdir(join(corrupt_dir, "dist", "spice", "component-with-model"), { recursive: true })
   await Promise.all([
     Bun.write(join(healthy_dir, "datasheet.pdf"), "%PDF-1.7\nhealthy fixture"),
     Bun.write(join(corrupt_dir, "datasheet.pdf"), "%PDF-1.7\ncorrupt fixture"),
+    Bun.write(
+      join(corrupt_dir, "index.circuit.tsx"),
+      "export default () => <chip spicemodel={modelWrapper} />\n",
+    ),
+    Bun.write(
+      join(corrupt_dir, "component.circuit.json"),
+      JSON.stringify([{ type: "source_component", source_component_id: "base-component" }]),
+    ),
+    Bun.write(
+      join(corrupt_dir, "dist", "spice", "component-with-model", "circuit.json"),
+      JSON.stringify([
+        { type: "source_component", source_component_id: "stale-modeled-component" },
+        { type: "simulation_spice_subcircuit", source_component_id: "stale-modeled-component" },
+      ]),
+    ),
   ])
   const original_jobs = new JobStore()
   original_jobs.createJob({
@@ -670,12 +962,22 @@ test("one corrupt persisted job cannot prevent a healthy sibling from restoring"
       },
     })
 
-    expect(result).toEqual({ jobs_restored: 1, model_runs_restored: 0 })
+    expect(result).toEqual({ jobs_restored: 2, model_runs_restored: 0 })
     expect(restored_jobs.getJob("healthy-job")?.error_message).toBe("healthy saved failure")
-    expect(restored_jobs.getJob("corrupt-job")).toBeUndefined()
-    expect(failures).toHaveLength(1)
-    expect(failures[0]?.job_id).toBe("corrupt-job")
-    expect(failures[0]?.cause).toContain("published-model.json")
+    expect(restored_jobs.getJob("corrupt-job")).toMatchObject({
+      display_status: "failed",
+      has_errors: true,
+      component_code: undefined,
+      error_message: expect.stringContaining("published-model.json"),
+      warnings: [expect.stringContaining("Committed model publication failed integrity validation")],
+    })
+    const corrupt_circuit = restored_jobs.getJob("corrupt-job")?.circuit_json
+    expect(corrupt_circuit).toHaveLength(1)
+    expect(corrupt_circuit?.[0]?.type).toBe("source_component")
+    if (corrupt_circuit?.[0]?.type === "source_component") {
+      expect(corrupt_circuit[0].source_component_id).toBe("base-component")
+    }
+    expect(failures).toEqual([])
     expect(await Bun.file(join(corrupt_dir, "published-model.json")).exists()).toBe(true)
   } finally {
     await rm(jobs_root, { recursive: true, force: true })

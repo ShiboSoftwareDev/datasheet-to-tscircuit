@@ -1,5 +1,5 @@
 import { constants } from "node:fs"
-import { lstat, mkdir, mkdtemp, open, readdir, rename, rm } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, open, opendir, readdir, rename, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path"
 import { inflateSync } from "node:zlib"
@@ -19,11 +19,14 @@ export type StageDirectoryFileValidator = (file: StageDirectoryFile) => void | P
 
 const DEFAULT_DIRECTORY_FILE_LIMIT = 128
 const DEFAULT_DIRECTORY_BYTE_LIMIT = 64 * 1024 * 1024
+const DEFAULT_DIRECTORY_ENTRY_LIMIT = 512
+const DEFAULT_DIRECTORY_DEPTH_LIMIT = 16
 const MAX_PNG_FILE_BYTES = 32 * 1024 * 1024
 const MAX_PNG_DIMENSION = 16_384
 const MAX_PNG_PIXELS = 25_000_000
 const MAX_PNG_DECODED_BYTES = 100 * 1024 * 1024
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10] as const
+const RETAINED_ATTEMPT_MARKER = "retained-attempt.json"
 
 const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, value) => {
   let crc = value
@@ -101,9 +104,86 @@ async function readRegularFile(path: string, max_bytes: number): Promise<Uint8Ar
     if (metadata.size > max_bytes) {
       throw new Error(`Artifact is unexpectedly large (${metadata.size} bytes): ${path}`)
     }
-    return new Uint8Array(await handle.readFile())
+    const bytes = Buffer.allocUnsafe(metadata.size + 1)
+    let bytes_read = 0
+    while (bytes_read < bytes.byteLength) {
+      const result = await handle.read(bytes, bytes_read, bytes.byteLength - bytes_read, bytes_read)
+      if (result.bytesRead === 0) break
+      bytes_read += result.bytesRead
+    }
+    if (bytes_read !== metadata.size) {
+      throw new Error(`Artifact changed while being read: ${path}`)
+    }
+    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes_read)
   } finally {
     await handle.close()
+  }
+}
+
+function requiredPositiveLimit(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${label} must be a positive safe integer`)
+  }
+  return value
+}
+
+async function lstatIfPresent(path: string) {
+  try {
+    return await lstat(path)
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined
+    throw error
+  }
+}
+
+/** Read an agent-owned JSON file through a bounded, no-final-symlink boundary. */
+export async function readBoundedJsonArtifact(input: {
+  path: string
+  max_bytes: number
+  max_depth?: number
+  max_nodes?: number
+}): Promise<unknown> {
+  const max_bytes = requiredPositiveLimit(input.max_bytes, "JSON artifact max_bytes")
+  const max_depth = requiredPositiveLimit(input.max_depth ?? 64, "JSON artifact max_depth")
+  const max_nodes = requiredPositiveLimit(input.max_nodes ?? 100_000, "JSON artifact max_nodes")
+  const bytes = await readRegularFile(input.path, max_bytes)
+  let value: unknown
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+  } catch (error) {
+    throw new Error(`Artifact is not valid UTF-8 JSON: ${input.path}`, { cause: error })
+  }
+
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }]
+  let nodes = 0
+  while (pending.length > 0) {
+    const current = pending.pop()!
+    nodes += 1
+    if (nodes > max_nodes) {
+      throw new Error(`JSON artifact exceeds the ${max_nodes}-node limit: ${input.path}`)
+    }
+    if (current.depth > max_depth) {
+      throw new Error(`JSON artifact exceeds the ${max_depth}-level depth limit: ${input.path}`)
+    }
+    if (Array.isArray(current.value)) {
+      for (const child of current.value) pending.push({ value: child, depth: current.depth + 1 })
+    } else if (typeof current.value === "object" && current.value !== null) {
+      for (const child of Object.values(current.value)) {
+        pending.push({ value: child, depth: current.depth + 1 })
+      }
+    }
+  }
+  return value
+}
+
+/** Read an agent-owned text file through a bounded, no-final-symlink boundary. */
+export async function readBoundedTextArtifact(input: { path: string; max_bytes: number }): Promise<string> {
+  const max_bytes = requiredPositiveLimit(input.max_bytes, "Text artifact max_bytes")
+  const bytes = await readRegularFile(input.path, max_bytes)
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+  } catch (error) {
+    throw new Error(`Artifact is not valid UTF-8 text: ${input.path}`, { cause: error })
   }
 }
 
@@ -111,25 +191,53 @@ async function collectRegularDirectory(input: {
   root: string
   max_files?: number
   max_total_bytes?: number
+  max_entries?: number
+  max_depth?: number
   validate_file?: StageDirectoryFileValidator
 }): Promise<StageDirectoryFile[]> {
   const root_metadata = await lstat(input.root).catch(() => undefined)
   if (!root_metadata?.isDirectory() || root_metadata.isSymbolicLink()) {
     throw new Error(`Artifact directory must be a real directory: ${input.root}`)
   }
-  const max_files = input.max_files ?? DEFAULT_DIRECTORY_FILE_LIMIT
-  const max_total_bytes = input.max_total_bytes ?? DEFAULT_DIRECTORY_BYTE_LIMIT
+  const max_files = requiredPositiveLimit(
+    input.max_files ?? DEFAULT_DIRECTORY_FILE_LIMIT,
+    "Artifact directory max_files",
+  )
+  const max_total_bytes = requiredPositiveLimit(
+    input.max_total_bytes ?? DEFAULT_DIRECTORY_BYTE_LIMIT,
+    "Artifact directory max_total_bytes",
+  )
+  const max_entries = requiredPositiveLimit(
+    input.max_entries ?? DEFAULT_DIRECTORY_ENTRY_LIMIT,
+    "Artifact directory max_entries",
+  )
+  const max_depth = requiredPositiveLimit(
+    input.max_depth ?? DEFAULT_DIRECTORY_DEPTH_LIMIT,
+    "Artifact directory max_depth",
+  )
   const files: StageDirectoryFile[] = []
   let total_bytes = 0
+  let entries_seen = 0
 
-  const visit = async (directory: string): Promise<void> => {
-    const entries = await readdir(directory, { withFileTypes: true })
+  const visit = async (directory: string, depth: number): Promise<void> => {
+    if (depth > max_depth) {
+      throw new Error(`Artifact directory exceeds the ${max_depth}-level depth limit: ${input.root}`)
+    }
+    const entries = []
+    const handle = await opendir(directory)
+    for await (const entry of handle) {
+      entries_seen += 1
+      if (entries_seen > max_entries) {
+        throw new Error(`Artifact directory exceeds the ${max_entries}-entry limit: ${input.root}`)
+      }
+      entries.push(entry)
+    }
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       const path = join(directory, entry.name)
       const metadata = await lstat(path)
       if (metadata.isSymbolicLink()) throw new Error(`Artifact directory contains a symlink: ${path}`)
       if (metadata.isDirectory()) {
-        await visit(path)
+        await visit(path, depth + 1)
         continue
       }
       if (!metadata.isFile()) throw new Error(`Artifact directory contains a special file: ${path}`)
@@ -151,7 +259,7 @@ async function collectRegularDirectory(input: {
       files.push(file)
     }
   }
-  await visit(input.root)
+  await visit(input.root, 0)
   return files
 }
 
@@ -356,6 +464,8 @@ export async function validateStageDirectory(input: {
   root: string
   max_files?: number
   max_total_bytes?: number
+  max_entries?: number
+  max_depth?: number
   validate_file?: StageDirectoryFileValidator
 }): Promise<void> {
   await collectRegularDirectory(input)
@@ -419,12 +529,63 @@ export async function promoteStageFile(input: {
   const destination = resolveInside(input.destination_root, input.destination ?? input.source)
   await mkdir(dirname(destination), { recursive: true })
   const temporary = join(dirname(destination), `.${basename(destination)}.${crypto.randomUUID()}.tmp`)
+  const previous = `${temporary}.previous`
+  let previous_moved = false
+  let candidate_published = false
   try {
     await Bun.write(temporary, bytes)
     await syncRegularFile(temporary)
     input.signal?.throwIfAborted()
+    const destination_metadata = await lstatIfPresent(destination)
+    if (destination_metadata && (!destination_metadata.isFile() || destination_metadata.isSymbolicLink())) {
+      throw new Error(`Artifact file destination must be a regular file when it exists: ${destination}`)
+    }
+    if (destination_metadata) {
+      await rename(destination, previous)
+      previous_moved = true
+      await syncDirectoryChain(dirname(destination), input.destination_root)
+    }
+    input.signal?.throwIfAborted()
     await rename(temporary, destination)
+    candidate_published = true
     await syncDirectoryChain(dirname(destination), input.destination_root)
+
+    if (previous_moved) {
+      await rm(previous, { force: true }).catch(() => undefined)
+      previous_moved = false
+      await syncDirectoryChain(dirname(destination), input.destination_root).catch(() => undefined)
+    }
+  } catch (error) {
+    const rollback_errors: unknown[] = []
+    if (candidate_published) {
+      try {
+        await rename(destination, temporary)
+        candidate_published = false
+      } catch (rollback_error) {
+        rollback_errors.push(rollback_error)
+      }
+    }
+    if (previous_moved) {
+      try {
+        await rename(previous, destination)
+        previous_moved = false
+      } catch (rollback_error) {
+        rollback_errors.push(rollback_error)
+      }
+    }
+    try {
+      await syncDirectoryChain(dirname(destination), input.destination_root)
+    } catch (rollback_error) {
+      rollback_errors.push(rollback_error)
+    }
+    if (rollback_errors.length > 0) {
+      throw new AggregateError(
+        [error, ...rollback_errors],
+        `Artifact file publication failed and could not be rolled back completely: ${destination}`,
+        { cause: error },
+      )
+    }
+    throw error
   } finally {
     await rm(temporary, { force: true })
   }
@@ -438,6 +599,8 @@ export async function promoteStageDirectory(input: {
   required?: boolean
   max_files?: number
   max_total_bytes?: number
+  max_entries?: number
+  max_depth?: number
   validate_file?: StageDirectoryFileValidator
   signal?: AbortSignal
 }): Promise<void> {
@@ -452,33 +615,77 @@ export async function promoteStageDirectory(input: {
     root: source,
     max_files: input.max_files,
     max_total_bytes: input.max_total_bytes,
+    max_entries: input.max_entries,
+    max_depth: input.max_depth,
     validate_file: input.validate_file,
   })
   input.signal?.throwIfAborted()
   const destination = resolveInside(input.destination_root, input.destination ?? input.source)
   await mkdir(dirname(destination), { recursive: true })
   const temporary = join(dirname(destination), `.${basename(destination)}.${crypto.randomUUID()}.tmp`)
-  await writeRegularDirectory(temporary, files)
-  await syncDirectoryTree(temporary)
-  input.signal?.throwIfAborted()
   const previous = `${temporary}.previous`
-  const destination_exists = await lstat(destination)
-    .then(() => true)
-    .catch(() => false)
-  if (destination_exists) {
-    await rename(destination, previous)
-    await syncDirectoryChain(dirname(destination), input.destination_root)
-  }
+  let previous_moved = false
+  let candidate_published = false
   try {
+    await writeRegularDirectory(temporary, files)
+    await syncDirectoryTree(temporary)
+    input.signal?.throwIfAborted()
+    const destination_metadata = await lstatIfPresent(destination)
+    if (
+      destination_metadata &&
+      (!destination_metadata.isDirectory() || destination_metadata.isSymbolicLink())
+    ) {
+      throw new Error(
+        `Artifact directory destination must be a real directory when it exists: ${destination}`,
+      )
+    }
+    if (destination_metadata) {
+      await rename(destination, previous)
+      previous_moved = true
+      await syncDirectoryChain(dirname(destination), input.destination_root)
+    }
     input.signal?.throwIfAborted()
     await rename(temporary, destination)
+    candidate_published = true
     await syncDirectoryChain(dirname(destination), input.destination_root)
-    await rm(previous, { recursive: true, force: true })
-    if (destination_exists) await syncDirectoryChain(dirname(destination), input.destination_root)
-  } catch (error) {
-    if (destination_exists) {
-      await rename(previous, destination).catch(() => undefined)
+
+    // The candidate is authoritative once its rename is directory-synced.
+    // Removing the hidden prior value is cleanup and must not downgrade that
+    // committed publication if cleanup durability later fails.
+    if (previous_moved) {
+      await rm(previous, { recursive: true, force: true }).catch(() => undefined)
+      previous_moved = false
       await syncDirectoryChain(dirname(destination), input.destination_root).catch(() => undefined)
+    }
+  } catch (error) {
+    const rollback_errors: unknown[] = []
+    if (candidate_published) {
+      try {
+        await rename(destination, temporary)
+        candidate_published = false
+      } catch (rollback_error) {
+        rollback_errors.push(rollback_error)
+      }
+    }
+    if (previous_moved) {
+      try {
+        await rename(previous, destination)
+        previous_moved = false
+      } catch (rollback_error) {
+        rollback_errors.push(rollback_error)
+      }
+    }
+    try {
+      await syncDirectoryChain(dirname(destination), input.destination_root)
+    } catch (rollback_error) {
+      rollback_errors.push(rollback_error)
+    }
+    if (rollback_errors.length > 0) {
+      throw new AggregateError(
+        [error, ...rollback_errors],
+        `Artifact directory publication failed and could not be rolled back completely: ${destination}`,
+        { cause: error },
+      )
     }
     throw error
   } finally {
@@ -494,27 +701,112 @@ export async function retainStageRejection(input: {
   files?: readonly string[]
   directories?: readonly string[]
 }): Promise<void> {
+  if (!Number.isSafeInteger(input.attempt) || input.attempt < 1) {
+    throw new Error("Rejected artifact attempt must be a positive safe integer")
+  }
+  const rejected_attempts_dir = join(input.debug_dir, "rejected-attempts")
+  const attempt_dir = join(rejected_attempts_dir, String(input.attempt))
+  const temporary_dir = join(rejected_attempts_dir, `.${input.attempt}.${crypto.randomUUID()}.retaining`)
+  await mkdir(rejected_attempts_dir, { recursive: true })
+  await mkdir(temporary_dir)
+  try {
+    await Bun.write(join(temporary_dir, "validation-error.txt"), `${input.error_message}\n`)
+    for (const source of input.files ?? []) {
+      const source_path = resolveInside(input.workspace, source)
+      const metadata = await lstat(source_path).catch(() => undefined)
+      if (!metadata?.isFile() || metadata.isSymbolicLink()) continue
+      const bytes = await readRegularFile(source_path, 4 * 1024 * 1024)
+      const destination = resolveInside(temporary_dir, source)
+      await mkdir(dirname(destination), { recursive: true })
+      await Bun.write(destination, bytes)
+    }
+    for (const source of input.directories ?? []) {
+      const source_path = resolveInside(input.workspace, source)
+      const metadata = await lstat(source_path).catch(() => undefined)
+      if (!metadata?.isDirectory() || metadata.isSymbolicLink()) continue
+      const files = await collectRegularDirectory({
+        root: source_path,
+        max_files: 64,
+        max_total_bytes: 32 * 1024 * 1024,
+      })
+      await writeRegularDirectory(resolveInside(temporary_dir, source), files)
+    }
+    await Bun.write(
+      join(temporary_dir, RETAINED_ATTEMPT_MARKER),
+      `${JSON.stringify({ version: 1, attempt: input.attempt })}\n`,
+    )
+    await rename(temporary_dir, attempt_dir)
+  } finally {
+    await rm(temporary_dir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Seeds a new isolated correction workspace from a previously retained
+ * candidate. Every source is re-read through the same bounded, no-symlink
+ * artifact boundary used for publication.
+ */
+export async function seedStageWorkspaceFromRejection(input: {
+  workspace: string
+  debug_dir: string
+  attempt: number
+  files?: readonly string[]
+  directories?: readonly string[]
+}): Promise<boolean> {
+  if (!Number.isSafeInteger(input.attempt) || input.attempt < 1) return false
   const attempt_dir = join(input.debug_dir, "rejected-attempts", String(input.attempt))
-  await mkdir(attempt_dir, { recursive: true })
-  await Bun.write(join(attempt_dir, "validation-error.txt"), `${input.error_message}\n`)
+  const attempt_metadata = await lstat(attempt_dir).catch(() => undefined)
+  if (!attempt_metadata?.isDirectory() || attempt_metadata.isSymbolicLink()) return false
+  const marker_path = join(attempt_dir, RETAINED_ATTEMPT_MARKER)
+  const marker_metadata = await lstat(marker_path).catch(() => undefined)
+  if (!marker_metadata?.isFile() || marker_metadata.isSymbolicLink()) return false
+  const marker = await readBoundedJsonArtifact({
+    path: marker_path,
+    max_bytes: 4 * 1024,
+    max_depth: 2,
+    max_nodes: 4,
+  })
+  if (
+    typeof marker !== "object" ||
+    marker === null ||
+    Array.isArray(marker) ||
+    Reflect.get(marker, "version") !== 1 ||
+    Reflect.get(marker, "attempt") !== input.attempt
+  ) {
+    return false
+  }
+
+  const files: Array<{ destination: string; bytes: Uint8Array }> = []
+  const directories: Array<{ destination: string; files: StageDirectoryFile[] }> = []
+
   for (const source of input.files ?? []) {
-    const source_path = resolveInside(input.workspace, source)
+    const source_path = resolveInside(attempt_dir, source)
     const metadata = await lstat(source_path).catch(() => undefined)
     if (!metadata?.isFile() || metadata.isSymbolicLink()) continue
-    const bytes = await readRegularFile(source_path, 4 * 1024 * 1024)
-    const destination = resolveInside(attempt_dir, source)
-    await mkdir(dirname(destination), { recursive: true })
-    await Bun.write(destination, bytes)
+    files.push({ destination: source, bytes: await readRegularFile(source_path, 4 * 1024 * 1024) })
   }
   for (const source of input.directories ?? []) {
-    const source_path = resolveInside(input.workspace, source)
+    const source_path = resolveInside(attempt_dir, source)
     const metadata = await lstat(source_path).catch(() => undefined)
     if (!metadata?.isDirectory() || metadata.isSymbolicLink()) continue
-    const files = await collectRegularDirectory({
-      root: source_path,
-      max_files: 64,
-      max_total_bytes: 32 * 1024 * 1024,
+    directories.push({
+      destination: source,
+      files: await collectRegularDirectory({
+        root: source_path,
+        max_files: 64,
+        max_total_bytes: 32 * 1024 * 1024,
+      }),
     })
-    await writeRegularDirectory(resolveInside(attempt_dir, source), files)
   }
+
+  if (files.length === 0 && directories.length === 0) return false
+  for (const file of files) {
+    const destination = resolveInside(input.workspace, file.destination)
+    await mkdir(dirname(destination), { recursive: true })
+    await Bun.write(destination, file.bytes)
+  }
+  for (const directory of directories) {
+    await writeRegularDirectory(resolveInside(input.workspace, directory.destination), directory.files)
+  }
+  return true
 }

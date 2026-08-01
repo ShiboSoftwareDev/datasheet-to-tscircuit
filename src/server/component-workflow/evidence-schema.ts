@@ -1,44 +1,218 @@
-export const COMPONENT_EVIDENCE_GUIDE = `# Evidence artifacts
+import { createHash } from "node:crypto"
+import {
+  COMPONENT_EVIDENCE_SCHEMA_ID,
+  COMPONENT_EVIDENCE_VERSION,
+  DRAWING_ORIENTATIONS,
+  EVIDENCE_PAD_KINDS,
+  SCHEMATIC_PIN_ROLES,
+} from "../component-evidence"
+import {
+  PCB_IMPLEMENTATION_MODES,
+  TYPICAL_APPLICATION_AVAILABILITIES,
+  TYPICAL_APPLICATION_PLAN_VERSION,
+} from "./application-plan"
 
-Write component-evidence.json as a version-1 object:
+const canonical_component_example = {
+  version: COMPONENT_EVIDENCE_VERSION,
+  status: "resolved",
+  part_number: {
+    value: "EXACT-PART-NUMBER",
+    sources: [{ page: 1, method: "pdf_text", confidence: "high" }],
+  },
+  package: {
+    name: {
+      value: "PACKAGE-NAME",
+      sources: [{ page: 2, method: "pdf_text", confidence: "high" }],
+    },
+    pin_count: {
+      value: 2,
+      sources: [{ page: 2, method: "pdf_text", confidence: "high" }],
+    },
+  },
+  pinout: {
+    pins: [
+      {
+        number: "1",
+        labels: ["IN"],
+        role: "input",
+        sources: [{ page: 3, method: "pdf_text", confidence: "high" }],
+      },
+      {
+        number: "2",
+        labels: ["GND"],
+        role: "ground",
+        sources: [{ page: 3, method: "pdf_text", confidence: "high" }],
+      },
+    ],
+  },
+  footprint: {
+    view: "pcb_top",
+    units: "mm",
+    drawing_orientation: {
+      value: "pcb_top",
+      sources: [
+        {
+          page: 4,
+          figure: "Recommended land pattern",
+          method: "pdf_visual",
+          confidence: "high",
+          image: "visual-reference/land-pattern.png",
+          render_dpi: 200,
+        },
+      ],
+    },
+    pads: [
+      {
+        pin: "1",
+        kind: "smt",
+        x: -0.5,
+        y: 0,
+        width: 0.4,
+        height: 0.8,
+        sources: [
+          {
+            page: 4,
+            figure: "Recommended land pattern",
+            method: "pdf_visual",
+            confidence: "high",
+            image: "visual-reference/land-pattern.png",
+            render_dpi: 200,
+          },
+        ],
+      },
+      {
+        pin: "2",
+        kind: "smt",
+        x: 0.5,
+        y: 0,
+        width: 0.4,
+        height: 0.8,
+        sources: [
+          {
+            page: 4,
+            figure: "Recommended land pattern",
+            method: "pdf_visual",
+            confidence: "high",
+            image: "visual-reference/land-pattern.png",
+            render_dpi: 200,
+          },
+        ],
+      },
+    ],
+  },
+  unresolved_ambiguities: [],
+}
 
-- status: resolved or unresolved
-- part_number: evidenceField<string>; optional ordering_code uses the same shape
-- package: name, optional code, and pin_count as evidence fields
-- pinout.pins[]: number, labels[], role, optional electrical_attributes.open_drain,
-  optional description, and sources[]
-- footprint: view "pcb_top", units "mm", drawing_orientation evidence field,
-  and pads[] with pin|null, kind, x, y, width, height, optional hole dimensions,
-  and sources[]
-- unresolved_ambiguities[]
+const canonical_application_example = {
+  version: TYPICAL_APPLICATION_PLAN_VERSION,
+  availability: "documented",
+  pcb_implementation: "schematic_only",
+  title: "Documented typical application",
+  description: "Describe only the circuit shown in the cited figure.",
+  source_references: [
+    {
+      page: 5,
+      figure: "Typical application",
+      method: "pdf_visual",
+      confidence: "high",
+      image: "visual-reference/typical-application.png",
+      render_dpi: 200,
+    },
+  ],
+  components: [
+    { reference: "U1", kind: "integrated_circuit", value: "EXACT-PART-NUMBER" },
+    { reference: "C1", kind: "capacitor", value: "100 nF" },
+  ],
+  connections: [
+    { net: "INPUT", pins: ["U1.IN", "C1.1", "INPUT"] },
+    { net: "GND", pins: ["U1.GND", "C1.2", "GND"] },
+  ],
+}
 
-An evidenceField is {"value": value, "sources": evidenceSource[]}.
-An evidenceSource is {"page": positive integer, "figure"?: string,
+export const COMPONENT_EVIDENCE_GUIDE = `# Evidence artifact contract
+
+Schema id: ${COMPONENT_EVIDENCE_SCHEMA_ID}
+
+The JSON representations below are exact. Keep every required version field.
+Physical pin identifiers are JSON strings even when they contain only digits.
+Do not replace enum values with explanatory prose.
+
+## component-evidence.json
+
+- version: exactly ${COMPONENT_EVIDENCE_VERSION}
+- status: ${["resolved", "unresolved"].map((value) => `"${value}"`).join(" | ")}
+- pinout.pins[].number: non-empty JSON string
+- pinout.pins[].role: ${SCHEMATIC_PIN_ROLES.map((value) => `"${value}"`).join(" | ")}
+- footprint.view: exactly "pcb_top"; units: exactly "mm"
+- footprint.drawing_orientation.value: ${DRAWING_ORIENTATIONS.map((value) => `"${value}"`).join(" | ")}
+- footprint.pads[].pin: non-empty JSON string, or null only for a mechanical pad
+- footprint.pads[].kind: ${EVIDENCE_PAD_KINDS.map((value) => `"${value}"`).join(" | ")}
+
+Canonical example:
+
+\`\`\`json
+${JSON.stringify(canonical_component_example, null, 2)}
+\`\`\`
+
+An evidence field is {"value": value, "sources": evidenceSource[]}.
+An evidence source is {"page": positive integer, "figure"?: string,
 "method": "pdf_text"|"pdf_visual"|"calculated"|"package_standard",
 "confidence": "high"|"medium"|"low", "image"?: workspace-relative string,
-"render_dpi"?: number, "note"?: string}. pdf_visual sources must reference an
-inspected image rendered at exactly 200 DPI. Calculated and package-standard
-sources require a note.
+"render_dpi"?: number, "note"?: string}. A pdf_visual source must reference an
+existing PNG below visual-reference/ rendered at exactly 200 DPI. Calculated and
+package-standard sources require a note.
 
-Pin roles are power_input, power_output, ground, input, output, bidirectional,
-passive, no_connect, or other. Mark open_drain only when explicitly documented.
-Use one exact orderable part/package. Record every electrical pin and copper pad.
-Coordinates are millimeters in PCB-top view. Never substitute a package outline,
-bottom view, or stencil aperture for a copper land pattern. If a material fact is
-ambiguous, use status unresolved and explain it instead of guessing.
+Part number, ordering code, package name/code/pin count, and every physical pin
+must each cite medium- or high-confidence pdf_text or pdf_visual evidence.
+Calculated and package-standard sources cannot establish those facts. They are
+allowed for pad geometry only when the same PDF page has a medium- or
+high-confidence pdf_visual footprint citation anchoring the derivation.
 
-Write typical-application-plan.json version 4 with availability documented or
-not_present, title, description, source_references[], components[], and
-connections[]. A documented plan must set pcb_implementation to verified or
-schematic_only. A not_present plan must omit pcb_implementation, use empty
-components/connections, and include the non-empty searched_sections[] that were
-checked. Components have reference, kind, optional value/purpose,
-manufacturer_part_number/footprint and their source references. Connections are
-{"net": string, "pins": ["component.port", ...]}. Include target U1. Do not
-invent terminal pseudo-components. Use verified PCB mode only when every external
-part and footprint is precisely sourced; otherwise use schematic_only.
+Resolve one exact orderable part/package. Record every electrical pin and every
+copper pad. Coordinates are millimeters in PCB-top view. Never substitute a
+package outline, bottom view, or stencil aperture for a copper land pattern. If
+a material fact is ambiguous, use status "unresolved" and explain it instead of
+guessing.
 
-Save the inspected PCB land-pattern crop at visual-reference/land-pattern.png.
-For a documented application also save the inspected circuit crop at
-visual-reference/typical-application.png.
+## typical-application-plan.json
+
+- version: exactly ${TYPICAL_APPLICATION_PLAN_VERSION}
+- availability: ${TYPICAL_APPLICATION_AVAILABILITIES.map((value) => `"${value}"`).join(" | ")}
+- pcb_implementation for documented plans: ${PCB_IMPLEMENTATION_MODES.map((value) => `"${value}"`).join(" | ")}
+- canonical component value, purpose, manufacturer_part_number, and footprint:
+  strings; omit an unknown optional field instead of writing null. At the agent
+  boundary, any of these may instead be {"value": string, "sources":
+  evidenceSource[]} and the server moves those citations into the canonical
+  source arrays
+- source_references and footprint_source_references: arrays of source objects
+- connections: {"net": string, "pins": ["component.port" | "EXTERNAL_TERMINAL", ...]}
+
+Canonical example:
+
+\`\`\`json
+${JSON.stringify(canonical_application_example, null, 2)}
+\`\`\`
+
+A documented plan must include target U1 and every net must contain at least one
+component.port endpoint. A bare endpoint is the semantic identity of a real
+external terminal such as INPUT, OUTPUT, or GND. Do not turn it into a component
+or discard it as a net label. Preserve printed reference designators. When the
+figure omits them, assign conventional references by kind in deterministic visual
+order: top-to-bottom, then left-to-right; the datasheet target is always U1. Use
+verified PCB mode only when every external part and footprint is precisely
+sourced (prefer a sourced scalar object for each manufacturer part number and
+footprint); otherwise use schematic_only. A not_present plan must omit
+pcb_implementation, use empty components/connections, and include the non-empty
+searched_sections[] that were checked.
+
+Use the cited PDF pages while extracting the evidence. The server discards
+agent-authored PNG pixels, renders every cited page itself at 200 DPI, and
+publishes trusted full-page aliases at visual-reference/land-pattern.png and,
+for a documented application, visual-reference/typical-application.png. Trace
+every junction and crossing on the cited page before writing the connectivity
+graph.
 `
+
+export const COMPONENT_EVIDENCE_GUIDE_SHA256 = createHash("sha256")
+  .update(COMPONENT_EVIDENCE_GUIDE)
+  .digest("hex")

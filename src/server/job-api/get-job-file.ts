@@ -45,6 +45,14 @@ export async function getJobFile(request_url: URL, context: JobApiContext): Prom
       status: 404,
     })
   }
+  if (resolution.integrity_warning) {
+    console.error("[job-artifact] publication_fallback", {
+      job_id,
+      file_kind,
+      error_code: resolution.integrity_warning.code,
+      cause: resolution.integrity_warning.cause,
+    })
+  }
   const artifact =
     "artifact_bytes" in resolution ? resolution.artifact_bytes : Bun.file(resolution.artifact_path)
   return new Response(artifact, {
@@ -52,6 +60,9 @@ export async function getJobFile(request_url: URL, context: JobApiContext): Prom
       "Cache-Control": resolution.content_type.startsWith("image/") ? "no-store" : "private, no-cache",
       "Content-Disposition": `${request_url.searchParams.get("display") === "inline" ? "inline" : "attachment"}; filename="${resolution.download_name}"`,
       "Content-Type": resolution.content_type,
+      ...(resolution.integrity_warning
+        ? { "X-Tscircuit-Artifact-Warning": resolution.integrity_warning.code }
+        : {}),
     },
   })
 }

@@ -1,5 +1,7 @@
 import type { ModelManifest } from "@/shared/job-types"
-import { createModelManifest, type ModelContract, parseModelContract } from "../modeling"
+import { createModelManifest } from "./model-artifacts"
+import { parseModelContract } from "./parse-model-contract"
+import type { ModelContract } from "./types"
 import {
   hashValidationInputs,
   parseValidationPlan,
@@ -11,6 +13,14 @@ import {
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
 
 type UnknownRecord = Record<string, unknown>
+
+export interface ModelCompletionIntegrityInput {
+  model_source: string | undefined
+  manifest: unknown
+  contract: unknown
+  plan: unknown
+  result: unknown
+}
 
 export type ModelCompletionIntegrity =
   | {
@@ -32,6 +42,19 @@ function record(value: unknown, artifact: string): UnknownRecord {
 function nonEmptyString(value: unknown, path: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${path} must be a non-empty string`)
   return value
+}
+
+function finiteNumber(value: unknown, path: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${path} must be a finite number`)
+  }
+  return value
+}
+
+function nonNegativeFiniteNumber(value: unknown, path: string): number {
+  const parsed = finiteNumber(value, path)
+  if (parsed < 0) throw new Error(`${path} must be non-negative`)
+  return parsed
 }
 
 function exactKeys(value: UnknownRecord, keys: readonly string[], artifact: string): void {
@@ -144,6 +167,11 @@ function parsePassedResult(value: unknown, plan: ValidationPlan): ValidationRunR
   result.cases.forEach((case_value, case_index) => {
     const path = `validation-results.json.cases[${case_index}]`
     const validation_case = record(case_value, path)
+    exactKeys(
+      validation_case,
+      ["case_id", "status", "analysis", "series", "errors", "elapsed_ms", "netlist_sha256", "raw_sha256"],
+      path,
+    )
     const planned_case = plan.cases[case_index]
     if (!planned_case || validation_case.case_id !== planned_case.id) {
       throw new Error(`${path}.case_id does not match the current validation plan`)
@@ -153,6 +181,7 @@ function parsePassedResult(value: unknown, plan: ValidationPlan): ValidationRunR
       throw new Error(`${path}.analysis does not match the current validation plan`)
     }
     requireEmptyErrors(validation_case.errors, `${path}.errors`)
+    nonNegativeFiniteNumber(validation_case.elapsed_ms, `${path}.elapsed_ms`)
     if (!SHA256_PATTERN.test(nonEmptyString(validation_case.netlist_sha256, `${path}.netlist_sha256`))) {
       throw new Error(`${path}.netlist_sha256 is not SHA-256`)
     }
@@ -166,13 +195,55 @@ function parsePassedResult(value: unknown, plan: ValidationPlan): ValidationRunR
     validation_case.series.forEach((series_value, series_index) => {
       const series_path = `${path}.series[${series_index}]`
       const series = record(series_value, series_path)
-      if (series.observation_id !== planned_case.observations[series_index]?.id) {
+      exactKeys(
+        series,
+        ["observation_id", "type", "unit", "scale", "points", "passed", "metrics", "errors"],
+        series_path,
+      )
+      const planned_observation = planned_case.observations[series_index]
+      if (!planned_observation || series.observation_id !== planned_observation.id) {
         throw new Error(`${series_path}.observation_id does not match the current validation plan`)
       }
       if (series.passed !== true) throw new Error(`${series_path}.passed must be true`)
       requireEmptyErrors(series.errors, `${series_path}.errors`)
+      if (series.type !== planned_observation.type) {
+        throw new Error(`${series_path}.type does not match the current validation plan`)
+      }
+      if (series.unit !== planned_observation.unit) {
+        throw new Error(`${series_path}.unit does not match the current validation plan`)
+      }
+      if (series.scale !== planned_observation.scale) {
+        throw new Error(`${series_path}.scale does not match the current validation plan`)
+      }
       if (!Array.isArray(series.points) || series.points.length === 0) {
         throw new Error(`${series_path}.points must contain simulator output`)
+      }
+      series.points.forEach((point_value, point_index) => {
+        const point_path = `${series_path}.points[${point_index}]`
+        const point = record(point_value, point_path)
+        exactKeys(point, ["x", "y"], point_path)
+        finiteNumber(point.x, `${point_path}.x`)
+        finiteNumber(point.y, `${point_path}.y`)
+      })
+      const metrics_path = `${series_path}.metrics`
+      const metrics = record(series.metrics, metrics_path)
+      exactKeys(
+        metrics,
+        ["sample_count", "normalized_rmse", "normalized_max_error", "max_absolute_error"],
+        metrics_path,
+      )
+      const sample_count = finiteNumber(metrics.sample_count, `${metrics_path}.sample_count`)
+      const expected_sample_count =
+        planned_observation.reference.type === "curve"
+          ? planned_observation.reference.points.length
+          : series.points.length
+      if (!Number.isInteger(sample_count) || sample_count !== expected_sample_count) {
+        throw new Error(`${metrics_path}.sample_count does not match the server-owned comparison input`)
+      }
+      for (const metric of ["normalized_rmse", "normalized_max_error", "max_absolute_error"] as const) {
+        if (metrics[metric] !== undefined) {
+          nonNegativeFiniteNumber(metrics[metric], `${metrics_path}.${metric}`)
+        }
       }
     })
   })
@@ -189,13 +260,9 @@ function readableError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export function validateModelCompletionIntegrity(input: {
-  model_source: string | undefined
-  manifest: unknown
-  contract: unknown
-  plan: unknown
-  result: unknown
-}): ModelCompletionIntegrity {
+export function validateModelCompletionIntegrity(
+  input: ModelCompletionIntegrityInput,
+): ModelCompletionIntegrity {
   try {
     if (
       typeof input.result !== "object" ||
@@ -211,17 +278,23 @@ export function validateModelCompletionIntegrity(input: {
     }
     const contract = parseModelContract(input.contract)
     const manifest = parseManifest(input.manifest, contract, input.model_source)
+    // Bind the exact persisted input before semantic parsing. Parsers are free
+    // to return canonical objects with explicit undefined optionals; those are
+    // not the bytes/object shape that the validator originally hashed.
+    const current_hashes = hashValidationInputs({
+      // Validation plans are persisted as JSON between stages. Canonical
+      // parsers may materialize optional properties as `undefined`; JSON drops
+      // those properties, so bind the same persisted identity at every gate.
+      plan: JSON.parse(JSON.stringify(input.plan)),
+      model_source: input.model_source,
+      manifest,
+    })
     const plan = parseValidationPlan(input.plan, {
       manifest,
       model_source: input.model_source,
       model_requirements: contract.characterization.requirements,
     })
     const result = parsePassedResult(input.result, plan)
-    const current_hashes = hashValidationInputs({
-      plan: input.plan,
-      model_source: input.model_source,
-      manifest,
-    })
     const mismatches = (Object.keys(current_hashes) as Array<keyof ValidationInputHashes>).filter(
       (key) => current_hashes[key] !== result.hashes[key],
     )
@@ -235,11 +308,23 @@ export function validateModelCompletionIntegrity(input: {
                 ? "model.lib"
                 : "model-manifest.json",
           )
-          .join(", ")}`,
+          .join(", ")}: ${mismatches
+          .map((key) => `${key} expected ${result.hashes[key]}, current ${current_hashes[key]}`)
+          .join("; ")}`,
       )
     }
     return { valid: true, contract, manifest, plan, result }
   } catch (error) {
     return { valid: false, reason: readableError(error) }
   }
+}
+
+export function requireModelCompletionIntegrity(
+  input: ModelCompletionIntegrityInput,
+): Extract<ModelCompletionIntegrity, { valid: true }> {
+  const integrity = validateModelCompletionIntegrity(input)
+  if (!integrity.valid) {
+    throw new Error(`Model completion integrity check failed: ${integrity.reason}`)
+  }
+  return integrity
 }

@@ -11,6 +11,7 @@ import { restorePersistedJobs } from "@/server/job-restorer"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import { runModel } from "@/server/model-workflow"
+import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const ngspice_path = Bun.which("ngspice")
 const testWithNgspice = ngspice_path ? test : test.skip
@@ -48,7 +49,9 @@ const characterization = {
         tolerance: 1e-6,
         points: [
           { x: 0, y: 0 },
+          { x: 0.25, y: 0.5 },
           { x: 0.5, y: 1 },
+          { x: 0.75, y: 1.5 },
           { x: 1, y: 2 },
         ],
       },
@@ -117,6 +120,10 @@ function deterministicAgent(calls: string[]): AgentClient {
   return {
     async run(input) {
       calls.push(input.phase_label)
+      const application_plan = JSON.parse(
+        await Bun.file(join(input.workspace, "typical-application-plan.json")).text(),
+      ) as { availability?: string }
+      expect(application_plan.availability).toBe("not_present")
       if (input.phase_label === "Model characterization") {
         await Bun.write(
           join(input.workspace, "model-characterization.json"),
@@ -201,6 +208,14 @@ testWithNgspice(
     await mkdir(job_dir, { recursive: true })
 
     const evidence_source = { page: 1, method: "pdf_text", confidence: "high" }
+    const land_pattern_source = {
+      page: 2,
+      figure: "Recommended land pattern",
+      method: "pdf_visual",
+      confidence: "high",
+      image: "visual-reference/land-pattern.png",
+      render_dpi: 200,
+    }
     const component_evidence = {
       version: 1,
       status: "resolved",
@@ -219,11 +234,35 @@ testWithNgspice(
       footprint: {
         view: "pcb_top",
         units: "mm",
-        drawing_orientation: { value: "pcb_top", sources: [evidence_source] },
+        drawing_orientation: { value: "pcb_top", sources: [land_pattern_source] },
         pads: [
-          { pin: "1", kind: "smt", x: -1, y: -1, width: 0.6, height: 1, sources: [evidence_source] },
-          { pin: "2", kind: "smt", x: 1, y: -1, width: 0.6, height: 1, sources: [evidence_source] },
-          { pin: "3", kind: "smt", x: 0, y: 1, width: 0.6, height: 1, sources: [evidence_source] },
+          {
+            pin: "1",
+            kind: "smt",
+            x: -1,
+            y: -1,
+            width: 0.6,
+            height: 1,
+            sources: [land_pattern_source],
+          },
+          {
+            pin: "2",
+            kind: "smt",
+            x: 1,
+            y: -1,
+            width: 0.6,
+            height: 1,
+            sources: [land_pattern_source],
+          },
+          {
+            pin: "3",
+            kind: "smt",
+            x: 0,
+            y: 1,
+            width: 0.6,
+            height: 1,
+            sources: [land_pattern_source],
+          },
         ],
       },
       unresolved_ambiguities: [],
@@ -251,13 +290,27 @@ testWithNgspice(
         port_hints: [`pin${pin}`, label],
       })),
     ] as AnyCircuitElement[]
+    const application_plan = {
+      version: 4,
+      availability: "not_present",
+      title: "No documented application",
+      description: "The fixture datasheet does not contain an application circuit.",
+      source_references: [evidence_source],
+      searched_sections: ["application information", "reference design"],
+      components: [],
+      connections: [],
+    }
     await Promise.all([
-      Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.4\n% deterministic test fixture\n"),
-      Bun.write(join(job_dir, "component-evidence.json"), `${JSON.stringify(component_evidence, null, 2)}\n`),
       Bun.write(join(job_dir, "component.circuit.tsx"), component_source),
       Bun.write(join(job_dir, "index.circuit.tsx"), component_source),
       Bun.write(join(job_dir, "component.circuit.json"), `${JSON.stringify(component_circuit, null, 2)}\n`),
     ])
+    await publishCommittedEvidenceFixture({
+      job_dir,
+      datasheet: "%PDF-1.4\n% deterministic test fixture\n",
+      component_evidence,
+      application_plan,
+    })
 
     let rejected_post_commit_job_checkpoints = 0
     const job_store = new JobStore({

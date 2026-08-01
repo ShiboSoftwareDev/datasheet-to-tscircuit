@@ -4,7 +4,20 @@ export {
   writeIntegratedComponent,
 } from "./component-integration"
 export { createModelManifest, readGeneratedModel, validateModelSource } from "./model-artifacts"
+export {
+  requireModelCompletionIntegrity,
+  validateModelCompletionIntegrity,
+  type ModelCompletionIntegrity,
+  type ModelCompletionIntegrityInput,
+} from "./model-completion-integrity"
+export { modelCheckpointRequiresPublicationPointer } from "./model-publication-checkpoint"
 export { createModelInterface } from "./model-interface"
+export {
+  createModelTrainingContract,
+  MIN_FRESH_REFERENCE_CURVE_POINTS,
+  partitionReferenceCurvePoints,
+  type ReferenceCurvePartition,
+} from "./model-training-contract"
 export {
   commitModelPublication,
   MODEL_PUBLICATION_FILE,

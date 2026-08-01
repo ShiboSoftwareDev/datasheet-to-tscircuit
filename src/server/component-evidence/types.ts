@@ -1,21 +1,19 @@
 import type { ExpectedFootprintPad } from "../job-artifact-validator"
+import type {
+  COMPONENT_EVIDENCE_STATUSES,
+  DRAWING_ORIENTATIONS,
+  EVIDENCE_CONFIDENCES,
+  EVIDENCE_METHODS,
+  SCHEMATIC_PIN_ROLES,
+} from "./contract"
 
-export type EvidenceConfidence = "high" | "medium" | "low"
+export type EvidenceConfidence = (typeof EVIDENCE_CONFIDENCES)[number]
 
-export type EvidenceMethod = "pdf_text" | "pdf_visual" | "calculated" | "package_standard"
+export type EvidenceMethod = (typeof EVIDENCE_METHODS)[number]
 
-export type DrawingOrientation = "pcb_top" | "package_top" | "package_bottom" | "side" | "unknown"
+export type DrawingOrientation = (typeof DRAWING_ORIENTATIONS)[number]
 
-export type SchematicPinRole =
-  | "power_input"
-  | "power_output"
-  | "ground"
-  | "input"
-  | "output"
-  | "bidirectional"
-  | "passive"
-  | "no_connect"
-  | "other"
+export type SchematicPinRole = (typeof SCHEMATIC_PIN_ROLES)[number]
 
 export interface EvidenceSource {
   page: number
@@ -49,7 +47,7 @@ export interface EvidencePad extends ExpectedFootprintPad {
 
 export interface ComponentEvidence {
   version: 1
-  status: "resolved" | "unresolved"
+  status: (typeof COMPONENT_EVIDENCE_STATUSES)[number]
   part_number: EvidenceField<string>
   ordering_code?: EvidenceField<string>
   package: {

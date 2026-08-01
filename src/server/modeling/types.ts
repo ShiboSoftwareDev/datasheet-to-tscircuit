@@ -13,6 +13,7 @@ export type ModelFamily =
   | "digital_mixed_signal"
   | "other"
 
+/** `vendor` is retained only so previously published contracts remain readable. */
 export type ModelStrategyId = "vendor" | "equation" | "behavioral" | "hybrid"
 
 export type ModelAnalysis = "operating_point" | "dc_sweep" | "transient"

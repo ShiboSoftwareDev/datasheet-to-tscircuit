@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ProcessError } from "@/server/infrastructure/process"
-import type { ModelContract, ModelInterface, ModelRequirement } from "@/server/modeling"
+import {
+  createModelTrainingContract,
+  type ModelContract,
+  type ModelInterface,
+  type ModelRequirement,
+} from "@/server/modeling"
 import {
   compileValidationCase,
   extractObservationSeries,
@@ -392,6 +397,22 @@ describe("ValidationPlan contract", () => {
     }
   })
 
+  test("rejects curve validation whose analysis cannot cover the authoritative x range", () => {
+    const truncated_sweep = structuredClone(validPlan())
+    const dc_case = truncated_sweep.cases[0]
+    if (!dc_case || dc_case.analysis.type !== "dc_sweep") throw new Error("Expected a DC case")
+    dc_case.analysis.start = 0.25
+
+    try {
+      parseValidationPlan(truncated_sweep, { model_interface, model_source, model_requirements })
+      throw new Error("Expected ValidationPlanError")
+    } catch (error) {
+      expect((error as ValidationPlanError).errors.map(({ code }) => code)).toContain(
+        "reference_curve_outside_analysis_range",
+      )
+    }
+  })
+
   test("aggregates precise errors instead of stopping at the first invalid field", () => {
     const invalid_plan: unknown = {
       version: 2,
@@ -594,6 +615,82 @@ test("scoring checks every scalar sample and interpolates curve references deter
   expect(curve_result.passed).toBe(true)
   expect(curve_result.metrics.normalized_rmse).toBe(0)
   expect(curve_result.metrics.normalized_max_error).toBe(0)
+})
+
+test("full server scoring includes curve samples withheld from model generation", () => {
+  const full_points = [
+    { x: 0, y: 0 },
+    { x: 1, y: 1 },
+    { x: 2, y: 4 },
+    { x: 3, y: 9 },
+    { x: 4, y: 16 },
+  ]
+  const contract: ModelContract = {
+    version: 1,
+    interface: model_interface,
+    characterization: {
+      version: 1,
+      family: "other",
+      strategy: "behavioral",
+      requirements: [
+        {
+          requirement_id: "nonlinear_curve",
+          title: "Nonlinear curve",
+          behavior: "Follow the nonlinear response",
+          analysis: "dc_sweep",
+          support: { status: "modeled" },
+          conditions: {},
+          expected: { unit: "V", min: 0, max: 16 },
+          reference_curve: {
+            x_quantity: "input voltage",
+            x_unit: "V",
+            y_quantity: "output voltage",
+            y_unit: "V",
+            tolerance: 0.01,
+            points: full_points,
+          },
+          sources: [{ page: 1, locator: "Figure 1", statement: "Nonlinear response" }],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    },
+  }
+  const training_curve =
+    createModelTrainingContract(contract).characterization.requirements[0]?.reference_curve
+  expect(training_curve?.points).toEqual(full_points.filter(({ x }) => x !== 2))
+
+  const simulated_points = full_points.map((point) => (point.x === 2 ? { x: point.x, y: 0 } : { ...point }))
+  const full_result = scoreObservation(
+    {
+      type: "voltage",
+      id: "full_curve",
+      requirement_id: "nonlinear_curve",
+      positive: "dut.OUT",
+      negative: "gnd",
+      unit: "V",
+      scale: "linear",
+      reference: { type: "curve", tolerance: 0.01, points: full_points },
+    },
+    simulated_points,
+  )
+  const training_only_result = scoreObservation(
+    {
+      type: "voltage",
+      id: "training_curve",
+      requirement_id: "nonlinear_curve",
+      positive: "dut.OUT",
+      negative: "gnd",
+      unit: "V",
+      scale: "linear",
+      reference: { type: "curve", tolerance: 0.01, points: training_curve?.points ?? [] },
+    },
+    simulated_points,
+  )
+
+  expect(training_only_result.passed).toBe(true)
+  expect(full_result.passed).toBe(false)
+  expect(full_result.metrics.sample_count).toBe(5)
 })
 
 test("log-scale curves are interpolated and compared in logarithmic space", () => {

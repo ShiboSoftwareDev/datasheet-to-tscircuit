@@ -1,10 +1,12 @@
-import { readFile } from "node:fs/promises"
+import { lstat } from "node:fs/promises"
 import { join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
 import {
   createStageWorkspace,
   promoteStageDirectory,
+  readBoundedJsonArtifact,
   validatePngArtifact,
+  validateStageDirectory,
 } from "../../infrastructure/artifacts"
 import {
   buildCharacterizationPrompt,
@@ -64,6 +66,7 @@ export const characterizeStage = defineModelStage({
             { source: join(context.model_dir, "datasheet.pdf") },
             { source: join(context.model_dir, "model-interface.json") },
             { source: join(context.model_dir, "component-evidence.json") },
+            { source: join(context.model_dir, "typical-application-plan.json") },
             { source: join(context.model_dir, "component.circuit.tsx") },
           ],
         }),
@@ -80,10 +83,29 @@ export const characterizeStage = defineModelStage({
         directories: ["evidence"],
       },
       validate: async (workspace) => {
-        const raw = await readFile(join(workspace, "model-characterization.json"), "utf8")
-        const characterization = parseModelCharacterization(JSON.parse(raw))
+        const characterization = parseModelCharacterization(
+          await readBoundedJsonArtifact({
+            path: join(workspace, "model-characterization.json"),
+            max_bytes: 4 * 1024 * 1024,
+            max_depth: 64,
+            max_nodes: 100_000,
+          }),
+          {
+            enforce_current_tolerance_limits: true,
+            reject_unknown_fields: true,
+          },
+        )
         services.strategy_registry.require(characterization.strategy, characterization.family)
         await assertReferencedImagesExist(workspace, characterization)
+        const evidence_dir = join(workspace, "evidence")
+        if (await lstat(evidence_dir).catch(() => undefined)) {
+          await validateStageDirectory({
+            root: evidence_dir,
+            max_files: 64,
+            max_total_bytes: 32 * 1024 * 1024,
+            validate_file: validatePngArtifact,
+          })
+        }
         return characterization
       },
       promote: async (workspace, characterization, promotion_signal) => {

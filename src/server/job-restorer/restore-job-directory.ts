@@ -2,11 +2,11 @@ import { constants } from "node:fs"
 import { lstat, open, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job, JobDisplayStatus } from "@/shared/job-types"
-import { hasCommittedEvidence } from "../component-workflow/evidence-commit"
+import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import type { JobStore } from "../job-store"
 import { MODEL_PUBLICATION_FILE, readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
 import { parsePublicPipelineSnapshot } from "../pipeline"
-import { isRecord, readJson, readPersistedLogs } from "./read-persisted-logs"
+import { isRecord, readPersistedLogs } from "./read-persisted-logs"
 import { inferFileName, readRestoredCircuitJson } from "./read-restored-circuit-json"
 import { ACTIVE_JOB_STATUSES, JOB_STATUSES } from "./restore-types"
 import { isJobProvenance, isJobValidation } from "./restored-job-metadata"
@@ -112,54 +112,101 @@ export async function restoreJobDirectory(input: {
     )
   }
   const saved = snapshot
-  const publication = await readModelPublication(input.job_dir, input.job_id)
-  if (!(await Bun.file(join(input.job_dir, "datasheet.pdf")).exists())) return undefined
-  const readComponentSource = async (): Promise<string | undefined> =>
-    publication
-      ? new TextDecoder().decode(
-          await readVerifiedPublicationArtifact({
-            publication,
-            bundle: "published_component",
-            relative_path: "index.circuit.tsx",
-            max_bytes: 2 * 1024 * 1024,
-          }),
-        )
-      : readFile(join(input.job_dir, "index.circuit.tsx"), "utf8").catch(() => undefined)
+  const [publication_result, evidence_result, mutable_datasheet_exists] = await Promise.all([
+    readModelPublication(input.job_dir, input.job_id).then(
+      (publication) => ({ publication, publication_integrity_error: undefined }),
+      (error: unknown) => ({
+        publication: undefined,
+        publication_integrity_error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+    readCommittedEvidenceSnapshot(input.job_dir).then(
+      (evidence_snapshot) => ({ evidence_snapshot, evidence_integrity_error: undefined }),
+      (error: unknown) => ({
+        evidence_snapshot: undefined,
+        evidence_integrity_error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+    Bun.file(join(input.job_dir, "datasheet.pdf")).exists(),
+  ])
+  const { publication } = publication_result
+  let { publication_integrity_error } = publication_result
+  const { evidence_snapshot, evidence_integrity_error } = evidence_result
+  if (!mutable_datasheet_exists && evidence_snapshot?.version !== 3) return undefined
+  const readBaseComponentSource = async (): Promise<string | undefined> => {
+    const component_source = await readFile(join(input.job_dir, "component.circuit.tsx"), "utf8").catch(
+      () => undefined,
+    )
+    if (component_source !== undefined || publication_integrity_error) return component_source
+    return readFile(join(input.job_dir, "index.circuit.tsx"), "utf8").catch(() => undefined)
+  }
+  const readComponentArtifacts = async () => {
+    if (!publication) {
+      return {
+        component_code: await readBaseComponentSource(),
+        circuit_json: await readRestoredCircuitJson(input.job_dir, "component", undefined, {
+          base_component_only: true,
+        }),
+      }
+    }
+    try {
+      const [component_source_bytes, circuit_json] = await Promise.all([
+        readVerifiedPublicationArtifact({
+          publication,
+          bundle: "published_component",
+          relative_path: "index.circuit.tsx",
+          max_bytes: 2 * 1024 * 1024,
+        }),
+        readRestoredCircuitJson(input.job_dir, "component", publication),
+      ])
+      return { component_code: new TextDecoder().decode(component_source_bytes), circuit_json }
+    } catch (error) {
+      publication_integrity_error = error instanceof Error ? error.message : String(error)
+      return {
+        component_code: await readBaseComponentSource(),
+        circuit_json: await readRestoredCircuitJson(input.job_dir, "component", undefined, {
+          base_component_only: true,
+        }),
+      }
+    }
+  }
   const [
     logs,
-    component_code,
-    circuit_json,
+    component_artifacts,
     typical_application_code_candidate,
     typical_application_circuit_json_candidate,
     directory_stat,
-    evidence_is_committed,
   ] = await Promise.all([
     readPersistedLogs(join(input.job_dir, "agent.log")),
-    readComponentSource(),
-    readRestoredCircuitJson(input.job_dir, "component", publication),
+    readComponentArtifacts(),
     readFile(join(input.job_dir, "typical-application.circuit.tsx"), "utf8").catch(() => undefined),
     readRestoredCircuitJson(input.job_dir, "typical_application"),
     stat(input.job_dir),
-    hasCommittedEvidence(input.job_dir),
   ])
-  const saved_typical_application_title =
-    evidence_is_committed &&
-    typeof saved?.typical_application_title === "string" &&
-    saved.typical_application_title.trim()
-      ? saved.typical_application_title.trim()
-      : undefined
-  const restored_application_plan = saved_typical_application_title
-    ? undefined
-    : evidence_is_committed
-      ? await readJson(join(input.job_dir, "typical-application-plan.json"))
-      : undefined
+  const { component_code, circuit_json } = component_artifacts
+  const publication_is_usable = Boolean(publication && !publication_integrity_error)
+  const evidence_is_committed = evidence_snapshot !== undefined
+  let restored_application_plan: unknown
+  if (evidence_snapshot) {
+    const plan_bytes = evidence_snapshot.files.get("typical-application-plan.json")
+    if (!plan_bytes) throw new Error("Committed evidence snapshot is missing typical-application-plan.json")
+    try {
+      restored_application_plan = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(plan_bytes),
+      ) as unknown
+    } catch (error) {
+      throw new Error("Committed typical-application-plan.json is not valid UTF-8 JSON", {
+        cause: error,
+      })
+    }
+  }
   const typical_application_title =
-    saved_typical_application_title ??
-    (isRecord(restored_application_plan) &&
+    isRecord(restored_application_plan) &&
+    restored_application_plan.availability === "documented" &&
     typeof restored_application_plan.title === "string" &&
     restored_application_plan.title.trim()
       ? restored_application_plan.title.trim()
-      : undefined)
+      : undefined
   const saved_status =
     typeof saved?.display_status === "string" && JOB_STATUSES.has(saved.display_status as JobDisplayStatus)
       ? (saved.display_status as JobDisplayStatus)
@@ -195,7 +242,7 @@ export async function restoreJobDirectory(input: {
     (saved_validation?.component_visual === "passed" || saved_validation?.component_visual === "inconclusive")
   const component_ready = Boolean(
     has_component_artifact &&
-      (publication ||
+      (publication_is_usable ||
         component_validation_passed ||
         (saved_status === "complete" && saved?.component_ready === true) ||
         has_complete_artifact),
@@ -208,7 +255,7 @@ export async function restoreJobDirectory(input: {
       restored_pipeline.stage_results.publish?.status === "completed",
   )
   const recover_published_component =
-    interrupted && (published_pipeline_completed || Boolean(publication)) && component_ready
+    interrupted && (published_pipeline_completed || publication_is_usable) && component_ready
   const invalid_saved_completion = saved_status === "complete" && !component_ready
   const display_status: JobDisplayStatus = invalid_saved_completion
     ? "failed"
@@ -221,15 +268,17 @@ export async function restoreJobDirectory(input: {
     typeof saved?.created_at === "string"
       ? saved.created_at
       : (logs[0]?.created_at ?? directory_stat.birthtime.toISOString())
-  const error_message = invalid_saved_completion
-    ? "The saved task claimed completion, but its validated component artifacts are missing or inconsistent. Retry to rebuild it."
-    : recover_published_component
-      ? undefined
-      : display_status === "failed" && interrupted
-        ? "The server restarted before this component task finished. Retry to continue."
-        : typeof saved?.error_message === "string"
-          ? saved.error_message
-          : undefined
+  const error_message = publication_integrity_error
+    ? `The committed model publication failed integrity validation and was not restored: ${publication_integrity_error}`
+    : invalid_saved_completion
+      ? "The saved task claimed completion, but its validated component artifacts are missing or inconsistent. Retry to rebuild it."
+      : recover_published_component
+        ? undefined
+        : display_status === "failed" && interrupted
+          ? "The server restarted before this component task finished. Retry to continue."
+          : typeof saved?.error_message === "string"
+            ? saved.error_message
+            : undefined
   const restored_validation = isJobValidation(saved_validation) ? saved_validation : undefined
   const restored_job = input.job_store.restoreJob({
     job_id: input.job_id,
@@ -257,11 +306,22 @@ export async function restoreJobDirectory(input: {
       display_status === "failed" ||
       display_status === "cancelled",
     has_errors:
-      display_status === "failed" || (recover_published_component ? false : Boolean(saved?.has_errors)),
+      display_status === "failed" ||
+      Boolean(publication_integrity_error) ||
+      Boolean(evidence_integrity_error) ||
+      (recover_published_component ? false : Boolean(saved?.has_errors)),
     error_message,
     warnings: [
       ...(Array.isArray(saved.warnings)
         ? saved.warnings.filter((warning): warning is string => typeof warning === "string")
+        : []),
+      ...(evidence_integrity_error
+        ? [`Committed evidence failed integrity validation and was not restored: ${evidence_integrity_error}`]
+        : []),
+      ...(publication_integrity_error
+        ? [
+            `Committed model publication failed integrity validation; the base component remains available: ${publication_integrity_error}`,
+          ]
         : []),
     ],
     logs,

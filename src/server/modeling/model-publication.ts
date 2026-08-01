@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { constants, type Dirent } from "node:fs"
 import { lstat, open, opendir, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
-import { atomicWriteJsonSync } from "../infrastructure/persistence/atomic-write"
+import { atomicWriteJsonSync, type AtomicWriteResult } from "../infrastructure/persistence/atomic-write"
 import { stableStringify } from "../spice-validation/hashing"
 import { assertCircuitEmbedsModel, createIntegratedComponentSource } from "./component-integration"
 import { createModelManifest } from "./model-artifacts"
@@ -647,8 +647,8 @@ export function commitModelPublication(
   job_dir: string,
   expected_job_id: string,
   commit: ModelPublicationCommit,
-): void {
+): AtomicWriteResult {
   // Validate the exact pointer shape before the atomic rename makes it public.
   assertPublicationOwnership(parseModelPublication(commit), expected_job_id)
-  atomicWriteJsonSync(join(job_dir, MODEL_PUBLICATION_FILE), commit)
+  return atomicWriteJsonSync(join(job_dir, MODEL_PUBLICATION_FILE), commit)
 }

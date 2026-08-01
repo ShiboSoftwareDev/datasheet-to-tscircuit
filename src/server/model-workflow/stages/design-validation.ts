@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
-import { createStageWorkspace } from "../../infrastructure/artifacts"
+import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
 import { buildValidationPlanGuide, buildValidationPlanPrompt, parseModelContract } from "../../modeling"
 import { parseValidationPlan, type ValidationPlan } from "../../spice-validation"
 import {
@@ -66,6 +66,7 @@ export const designValidationStage = defineModelStage({
             },
             { source: join(context.model_dir, "component.circuit.tsx") },
             { source: join(context.model_dir, "component-evidence.json") },
+            { source: join(context.model_dir, "typical-application-plan.json") },
           ],
           directories: [{ source: evidence_dir, destination: "evidence", required: false }],
         }),
@@ -78,7 +79,12 @@ export const designValidationStage = defineModelStage({
         files: ["validation-plan.json"],
       },
       validate: async (workspace) => {
-        const raw = await readJson(join(workspace, "validation-plan.json"))
+        const raw = await readBoundedJsonArtifact({
+          path: join(workspace, "validation-plan.json"),
+          max_bytes: 4 * 1024 * 1024,
+          max_depth: 64,
+          max_nodes: 100_000,
+        })
         const plan = parseValidationPlan(raw, {
           model_interface: contract.interface,
           model_requirements: contract.characterization.requirements,

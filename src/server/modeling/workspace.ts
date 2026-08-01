@@ -2,6 +2,7 @@ import { mkdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { isCircuitJson } from "../component-circuit-json"
 import { parseComponentEvidence } from "../component-evidence"
+import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import { createModelInterface } from "./model-interface"
 import { parseModelContract } from "./parse-model-contract"
 import type { ModelContract, ModelInterface } from "./types"
@@ -13,7 +14,8 @@ This workspace is controlled by the server pipeline.
 - Read only the inputs named by the current prompt.
 - Write only the declared output artifacts for the current stage.
 - Never modify model-interface.json, model-contract.json, validation-plan.json,
-  component.circuit.tsx, component-evidence.json, or datasheet.pdf.
+  component.circuit.tsx, component-evidence.json,
+  typical-application-plan.json, or datasheet.pdf.
 - Validation plans are declarative JSON. Never create raw .cir or .measure files.
 - The server compiles fixtures, runs ngspice, records hashes, and owns pass/fail.
 - model.lib must expose exactly one public subcircuit with the exact server-owned
@@ -31,9 +33,32 @@ export async function prepareModelWorkspace(input: {
   job_dir: string
   model_dir: string
 }): Promise<ModelInterface> {
+  const evidence_snapshot = await readCommittedEvidenceSnapshot(input.job_dir)
+  if (!evidence_snapshot) {
+    throw new Error(
+      "Model workspace requires approved evidence, but evidence-commit.json has not been published",
+    )
+  }
+  if (evidence_snapshot.version === 1) {
+    throw new Error(
+      "Model workspace requires PDF-bound evidence version 2 or newer; retry component generation to replace the legacy version-1 evidence commit",
+    )
+  }
+  const evidence_bytes = evidence_snapshot.files.get("component-evidence.json")
+  const application_plan_bytes = evidence_snapshot.files.get("typical-application-plan.json")
+  if (!evidence_bytes || !application_plan_bytes) {
+    throw new Error("Committed evidence snapshot is missing a required model-workspace input")
+  }
+  let evidence_value: unknown
+  try {
+    evidence_value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(evidence_bytes)) as unknown
+  } catch (error) {
+    throw new Error("Committed component-evidence.json is not valid UTF-8 JSON", { cause: error })
+  }
+  const evidence = parseComponentEvidence(evidence_value)
+  const datasheet_bytes = evidence_snapshot.source_pdf
+
   await mkdir(input.model_dir, { recursive: true })
-  const evidence_text = await readFile(join(input.job_dir, "component-evidence.json"), "utf8")
-  const evidence = parseComponentEvidence(JSON.parse(evidence_text))
   const component_circuit_json: unknown = JSON.parse(
     await readFile(join(input.job_dir, "component.circuit.json"), "utf8"),
   )
@@ -46,9 +71,10 @@ export async function prepareModelWorkspace(input: {
     ? preserved_component
     : join(input.job_dir, "index.circuit.tsx")
   await Promise.all([
-    copyCanonical(join(input.job_dir, "datasheet.pdf"), join(input.model_dir, "datasheet.pdf")),
+    Bun.write(join(input.model_dir, "datasheet.pdf"), datasheet_bytes),
     copyCanonical(component_source, join(input.model_dir, "component.circuit.tsx")),
-    Bun.write(join(input.model_dir, "component-evidence.json"), evidence_text),
+    Bun.write(join(input.model_dir, "component-evidence.json"), evidence_bytes),
+    Bun.write(join(input.model_dir, "typical-application-plan.json"), application_plan_bytes),
     Bun.write(
       join(input.model_dir, "component.circuit.json"),
       `${JSON.stringify(component_circuit_json, null, 2)}\n`,
@@ -62,7 +88,6 @@ export async function prepareModelWorkspace(input: {
       "tsconfig.json",
       "tscircuit.config.json",
       "tscircuit.config.ts",
-      "typical-application-plan.json",
       "typical-application.circuit.tsx",
     ].map(async (file_name) => {
       const source = join(input.job_dir, file_name)

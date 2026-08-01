@@ -1,7 +1,7 @@
-import { copyFile, mkdir, readFile } from "node:fs/promises"
+import { copyFile, mkdir, readFile, rm } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
-import type { ModelManifest, ModelProgressPhase, ModelSelectedPreview } from "@/shared/job-types"
+import type { ModelProgressPhase, ModelSelectedPreview } from "@/shared/job-types"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 import type { PipelineArtifact } from "@/shared/pipeline-types"
 import { selectPreferredComponentCircuitJson } from "../component-circuit-json"
@@ -17,7 +17,9 @@ import type { ModelRunStore } from "../model-run-store"
 import {
   commitModelPublication,
   projectModelUi,
+  readModelPublication,
   readVerifiedPublicationArtifact,
+  requireModelCompletionIntegrity,
   type GeneratedModel,
   type ModelContract,
   type ModelPublicationCommit,
@@ -109,6 +111,7 @@ export async function persistCandidateValidationUi(input: {
 
 export interface PreparedModelPublication {
   commit: ModelPublicationCommit
+  job_dir: string
   accepted_model_dir: string
   published_component_dir: string
   projection: ReturnType<typeof projectModelUi>
@@ -127,8 +130,16 @@ export async function prepareModelPublication(input: {
   evidence_dir: string
   wrapper_source: string
   circuit_json: AnyCircuitElement[]
+  signal?: AbortSignal
 }): Promise<PreparedModelPublication> {
-  if (!input.result.passed) throw new Error("Only a passing validation result can be published")
+  input.signal?.throwIfAborted()
+  requireModelCompletionIntegrity({
+    model_source: input.generated.source,
+    manifest: input.generated.manifest,
+    contract: input.contract,
+    plan: input.plan,
+    result: input.result,
+  })
   const published_at = new Date().toISOString()
   const publication_id = crypto.randomUUID()
   const snapshot_id = `${input.generated.manifest.revision}-${publication_id}`
@@ -206,11 +217,13 @@ export async function prepareModelPublication(input: {
         return writes
       }),
     ])
+    input.signal?.throwIfAborted()
     ;[accepted_bundle_manifest_sha256, published_component_bundle_manifest_sha256] = await Promise.all([
       writePublicationBundleManifest(accepted_bundle),
       writePublicationBundleManifest(component_bundle),
     ])
-    await Promise.all([
+    input.signal?.throwIfAborted()
+    const promotions = await Promise.allSettled([
       promoteStageDirectory({
         workspace: workspace.path,
         source: "accepted",
@@ -218,6 +231,7 @@ export async function prepareModelPublication(input: {
         destination: join("accepted-revisions", snapshot_id),
         max_files: 256,
         max_total_bytes: 64 * 1024 * 1024,
+        signal: input.signal,
       }),
       promoteStageDirectory({
         workspace: workspace.path,
@@ -226,10 +240,26 @@ export async function prepareModelPublication(input: {
         destination: join("published-models", snapshot_id),
         max_files: 8,
         max_total_bytes: 8 * 1024 * 1024,
+        signal: input.signal,
       }),
     ])
+    const promotion_failures = promotions.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    )
+    if (promotion_failures.length > 0) {
+      throw new AggregateError(
+        promotion_failures,
+        "Prepared model publication did not materialize both immutable bundles",
+      )
+    }
+  } catch (error) {
+    await Promise.all([
+      rm(accepted_model_dir, { recursive: true, force: true }).catch(() => undefined),
+      rm(published_component_dir, { recursive: true, force: true }).catch(() => undefined),
+    ])
+    throw error
   } finally {
-    await workspace.dispose()
+    await workspace.dispose().catch(() => undefined)
   }
 
   return {
@@ -238,17 +268,33 @@ export async function prepareModelPublication(input: {
       accepted_bundle_manifest_sha256,
       published_component_bundle_manifest_sha256,
     },
+    job_dir: input.job_dir,
     accepted_model_dir,
     published_component_dir,
     projection,
   }
 }
 
+export async function discardPreparedModelPublication(prepared: PreparedModelPublication): Promise<void> {
+  try {
+    const current = await readModelPublication(prepared.job_dir, prepared.commit.job_id)
+    if (current?.commit.publication_id === prepared.commit.publication_id) return
+  } catch {
+    // Preserve the generation when the current pointer cannot be classified.
+    // It may be the only recoverable copy selected by a damaged checkpoint.
+    return
+  }
+  await Promise.all([
+    rm(prepared.accepted_model_dir, { recursive: true, force: true }).catch(() => undefined),
+    rm(prepared.published_component_dir, { recursive: true, force: true }).catch(() => undefined),
+  ])
+}
+
 function withoutRetainedAcceptedWarning(warnings: readonly string[] | undefined): string[] {
   return (warnings ?? []).filter((warning) => !warning.startsWith(RETAINED_ACCEPTED_WARNING_PREFIX))
 }
 
-export async function commitPreparedModelPublication(input: {
+async function commitPreparedModelPublicationWithoutCleanup(input: {
   prepared: PreparedModelPublication
   job_id: string
   job_dir: string
@@ -307,7 +353,9 @@ export async function commitPreparedModelPublication(input: {
     model_source,
     model_card,
     manifest_value,
+    contract_value,
     plan_value,
+    result_value,
     projection_value,
     circuit_value,
   ] = await Promise.all([
@@ -338,8 +386,20 @@ export async function commitPreparedModelPublication(input: {
     readVerifiedPublicationArtifact({
       publication: resolved_publication,
       bundle: "accepted_model",
+      relative_path: "model-contract.json",
+      max_bytes: 4 * 1024 * 1024,
+    }).then((bytes) => JSON.parse(new TextDecoder().decode(bytes))),
+    readVerifiedPublicationArtifact({
+      publication: resolved_publication,
+      bundle: "accepted_model",
       relative_path: "validation-plan.json",
       max_bytes: 8 * 1024 * 1024,
+    }).then((bytes) => JSON.parse(new TextDecoder().decode(bytes))),
+    readVerifiedPublicationArtifact({
+      publication: resolved_publication,
+      bundle: "accepted_model",
+      relative_path: "validation-results.json",
+      max_bytes: 32 * 1024 * 1024,
     }).then((bytes) => JSON.parse(new TextDecoder().decode(bytes))),
     readVerifiedPublicationArtifact({
       publication: resolved_publication,
@@ -354,12 +414,19 @@ export async function commitPreparedModelPublication(input: {
       max_bytes: 16 * 1024 * 1024,
     }).then((bytes) => JSON.parse(new TextDecoder().decode(bytes))),
   ])
+  const completion_integrity = requireModelCompletionIntegrity({
+    model_source,
+    manifest: manifest_value,
+    contract: contract_value,
+    plan: plan_value,
+    result: result_value,
+  })
   const authoritative_generated: GeneratedModel = {
     source: model_source,
     card: model_card,
-    manifest: manifest_value as ModelManifest,
+    manifest: completion_integrity.manifest,
   }
-  const authoritative_plan = plan_value as ValidationPlan
+  const authoritative_plan = completion_integrity.plan
   const authoritative_projection = projection_value as PreparedModelPublication["projection"]
   const published_circuit = selectPreferredComponentCircuitJson(circuit_value)
   if (!published_circuit) throw new Error("Published component bundle contains invalid Circuit JSON")
@@ -400,8 +467,13 @@ export async function commitPreparedModelPublication(input: {
   assertCurrentPublicationIdentity()
   // This atomic pointer is the irreversible commit barrier. All following
   // operations are recoverable live-view or legacy-root synchronization.
-  commitModelPublication(input.job_dir, input.job_id, input.prepared.commit)
   const post_commit_warnings: string[] = []
+  const pointer_commit = commitModelPublication(input.job_dir, input.job_id, input.prepared.commit)
+  if (pointer_commit.durability_warning) {
+    post_commit_warnings.push(
+      `The accepted publication pointer is visible, but crash durability could not be confirmed: ${pointer_commit.durability_warning}`,
+    )
+  }
   try {
     const projection_result = input.job_store.projectCommittedPublication(input.job_id, {
       component_code: wrapper_source,
@@ -502,25 +574,156 @@ export async function commitPreparedModelPublication(input: {
   return post_commit_warnings
 }
 
-export function validationFailureFeedback(result: ValidationRunResult): string {
-  const lines = result.cases.flatMap((validation_case) => {
-    if (validation_case.status === "passed") return []
-    const case_errors = validation_case.errors.map(
-      ({ code, message, path }) =>
-        `${validation_case.case_id}: ${code}${path ? ` at ${path}` : ""}: ${message}`,
-    )
-    const series_errors = validation_case.series.flatMap((series) =>
-      series.passed
-        ? []
-        : [
-            `${validation_case.case_id}/${series.observation_id}: metrics=${JSON.stringify(series.metrics)}; ` +
-              `${series.errors.map(({ code, message }) => `${code}: ${message}`).join("; ") || "comparison failed"}`,
-          ],
-    )
-    return [...case_errors, ...series_errors]
-  })
-  for (const error of result.errors) {
-    lines.push(`${error.code}${error.path ? ` at ${error.path}` : ""}: ${error.message}`)
+export async function commitPreparedModelPublication(
+  input: Parameters<typeof commitPreparedModelPublicationWithoutCleanup>[0],
+): Promise<string[]> {
+  try {
+    return await commitPreparedModelPublicationWithoutCleanup(input)
+  } catch (error) {
+    // A rejected commit is still before the pointer barrier. If an unexpected
+    // post-pointer error ever reaches this wrapper, the pointer lookup in the
+    // discard helper protects the selected generation from deletion.
+    await discardPreparedModelPublication(input.prepared)
+    throw error
   }
-  return [...new Set(lines)].join("\n").slice(0, 14_000) || "Validation did not pass."
+}
+
+export type ModelRepairFeedbackCategory =
+  | "target_mismatch"
+  | "bounds_violation"
+  | "curve_mismatch"
+  | "invalid_log_output"
+  | "non_finite_output"
+  | "convergence_failure"
+  | "simulator_rejected_model"
+  | "comparison_failure"
+  | "validation_failure"
+
+export interface ModelRepairFeedbackIssue {
+  category: ModelRepairFeedbackCategory
+  affected_cases: number
+  affected_observations: number
+}
+
+export interface ModelRepairFeedback {
+  version: 1
+  status: "failed"
+  issues: ModelRepairFeedbackIssue[]
+}
+
+const REPAIR_FEEDBACK_CATEGORY_ORDER: readonly ModelRepairFeedbackCategory[] = [
+  "target_mismatch",
+  "bounds_violation",
+  "curve_mismatch",
+  "invalid_log_output",
+  "non_finite_output",
+  "convergence_failure",
+  "simulator_rejected_model",
+  "comparison_failure",
+  "validation_failure",
+]
+
+const REPAIR_FEEDBACK_DESCRIPTIONS: Readonly<Record<ModelRepairFeedbackCategory, string>> = {
+  target_mismatch: "one or more outputs missed a required target tolerance",
+  bounds_violation: "one or more outputs fell outside required bounds",
+  curve_mismatch: "one or more output curves exceeded their normalized comparison tolerance",
+  invalid_log_output: "the model produced a value outside the valid logarithmic domain",
+  non_finite_output: "the model produced a non-finite output",
+  convergence_failure: "the model caused the simulator to fail convergence",
+  simulator_rejected_model: "the simulator rejected the generated model",
+  comparison_failure: "one or more server-owned comparisons failed",
+  validation_failure: "server-owned validation did not pass",
+}
+
+function repairFeedbackCategory(error: ValidationRunResult["errors"][number]): ModelRepairFeedbackCategory {
+  if (error.kind === "convergence") return "convergence_failure"
+  if (error.kind === "simulator" && error.code === "ngspice_failed") {
+    return "simulator_rejected_model"
+  }
+  if (error.kind !== "comparison") return "validation_failure"
+  switch (error.code) {
+    case "target_tolerance_exceeded":
+      return "target_mismatch"
+    case "bounds_exceeded":
+      return "bounds_violation"
+    case "curve_tolerance_exceeded":
+      return "curve_mismatch"
+    case "invalid_log_sample":
+      return "invalid_log_output"
+    case "non_finite_series":
+      return "non_finite_output"
+    default:
+      return "comparison_failure"
+  }
+}
+
+/**
+ * Builds the only validation information that may cross into an agent repair
+ * workspace. The output is deliberately derived from a closed enum and
+ * aggregate counts: simulator output, paths, fixture values, points, hashes,
+ * metrics, and validation identifiers never enter this object.
+ */
+export function createModelRepairFeedback(result: ValidationRunResult): ModelRepairFeedback {
+  const aggregate = new Map<ModelRepairFeedbackCategory, { cases: Set<number>; observations: Set<string> }>()
+  const add = (category: ModelRepairFeedbackCategory, case_index?: number, series_index?: number): void => {
+    const current = aggregate.get(category) ?? { cases: new Set<number>(), observations: new Set<string>() }
+    if (case_index !== undefined) current.cases.add(case_index)
+    if (case_index !== undefined && series_index !== undefined) {
+      current.observations.add(`${case_index}:${series_index}`)
+    }
+    aggregate.set(category, current)
+  }
+
+  result.cases.forEach((validation_case, case_index) => {
+    if (validation_case.status === "passed") return
+    validation_case.series.forEach((series, series_index) => {
+      if (series.passed) return
+      if (series.errors.length === 0) {
+        add("comparison_failure", case_index, series_index)
+        return
+      }
+      for (const error of series.errors) {
+        add(repairFeedbackCategory(error), case_index, series_index)
+      }
+    })
+    for (const error of validation_case.errors) {
+      add(repairFeedbackCategory(error), case_index)
+    }
+    if (validation_case.errors.length === 0 && validation_case.series.every(({ passed }) => passed)) {
+      add("validation_failure", case_index)
+    }
+  })
+  if (result.cases.length === 0) {
+    for (const error of result.errors) add(repairFeedbackCategory(error))
+  }
+  if (aggregate.size === 0) add("validation_failure")
+
+  return {
+    version: 1,
+    status: "failed",
+    issues: REPAIR_FEEDBACK_CATEGORY_ORDER.flatMap((category) => {
+      const value = aggregate.get(category)
+      return value
+        ? [
+            {
+              category,
+              affected_cases: value.cases.size,
+              affected_observations: value.observations.size,
+            },
+          ]
+        : []
+    }),
+  }
+}
+
+export function validationFailureFeedback(result: ValidationRunResult): string {
+  const feedback = createModelRepairFeedback(result)
+  return [
+    "Server-owned redacted validation summary:",
+    ...feedback.issues.map(
+      ({ category, affected_cases, affected_observations }) =>
+        `- ${category}: ${REPAIR_FEEDBACK_DESCRIPTIONS[category]}. ` +
+        `Affected cases: ${affected_cases}; affected observations: ${affected_observations}.`,
+    ),
+  ].join("\n")
 }

@@ -4,6 +4,7 @@ set -eu
 docker compose run --rm --no-deps app sh -c '
   set -eu
   test "$(id -u)" -ne 0
+  test -f /app/bun.lock
   test -w /app/.runtime/jobs
   probe="/app/.runtime/jobs/.docker-smoke-test-$$"
   touch "$probe"

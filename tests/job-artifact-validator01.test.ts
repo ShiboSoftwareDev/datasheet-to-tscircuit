@@ -163,6 +163,268 @@ test("datasheet connectivity gate catches a cleanly-built pull-up on the wrong n
   ])
 })
 
+test("datasheet connectivity verifies named external terminals through source nets", () => {
+  const plan = {
+    ...connectivityPlan,
+    connections: [
+      { net: "VIN", pins: ["U1.VIN", "R3.pin1", "VIN"] },
+      { net: "PG", pins: ["U1.PG", "R3.pin2", "PG"] },
+    ],
+  }
+  const external_nets = [
+    {
+      type: "source_net",
+      source_net_id: "net_vin",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "vin",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_pg",
+      name: "PG",
+      subcircuit_connectivity_map_key: "pg",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(
+    getTypicalApplicationConnectivityErrors(plan, [...applicationCircuit("vin"), ...external_nets]),
+  ).toEqual([])
+
+  const swapped = external_nets.map((net) => ({
+    ...net,
+    subcircuit_connectivity_map_key: (net as unknown as { name: string }).name === "VIN" ? "pg" : "vin",
+  })) as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(plan, [...applicationCircuit("vin"), ...swapped])).toEqual([
+    "VIN: expected pins are not electrically connected: U1.VIN, R3.pin1, VIN",
+    "PG: expected pins are not electrically connected: U1.PG, R3.pin2, PG",
+  ])
+})
+
+test("datasheet connectivity rejects missing or ambiguous external source nets", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = applicationCircuit("vin").filter(
+    (element) => (element as unknown as { type: string; name?: string }).name !== "R3",
+  )
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toContain(
+    'VIN: Expected external terminal "VIN" resolved to 0 source nets',
+  )
+
+  const duplicate_nets = ["net_vin_a", "net_vin_b"].map((source_net_id) => ({
+    type: "source_net",
+    source_net_id,
+    name: "VIN",
+    subcircuit_connectivity_map_key: "vin",
+  })) as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(plan, [...circuit, ...duplicate_nets])).toContain(
+    'VIN: Expected external terminal "VIN" resolved to 2 source nets',
+  )
+})
+
+test("datasheet connectivity follows trace-connected source net ids", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = [
+    { type: "source_component", source_component_id: "u1", name: "U1" },
+    { type: "source_port", source_port_id: "u1_vin", source_component_id: "u1", name: "VIN" },
+    { type: "source_net", source_net_id: "net_vin", name: "VIN" },
+    {
+      type: "source_trace",
+      source_trace_id: "trace_vin",
+      connected_source_port_ids: ["u1_vin"],
+      connected_source_net_ids: ["net_vin"],
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([])
+})
+
+test("datasheet connectivity scopes repeated keys and external names to the application subcircuit", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = [
+    {
+      type: "source_group",
+      source_group_id: "application_group",
+      subcircuit_id: "application_subcircuit",
+    },
+    { type: "source_component", source_component_id: "u1", source_group_id: "application_group", name: "U1" },
+    {
+      type: "source_port",
+      source_port_id: "u1_vin",
+      source_component_id: "u1",
+      name: "VIN",
+      subcircuit_id: "application_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+    {
+      type: "source_net",
+      source_net_id: "application_vin",
+      name: "VIN",
+      subcircuit_id: "application_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+    {
+      type: "source_net",
+      source_net_id: "child_vin",
+      name: "VIN",
+      subcircuit_id: "child_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([])
+
+  const cross_scope_plan = {
+    components: [{ reference: "U1" }, { reference: "C1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "C1.1"] }],
+  }
+  const cross_scope_circuit = [
+    ...circuit,
+    {
+      type: "source_component",
+      source_component_id: "c1",
+      source_group_id: "application_group",
+      name: "C1",
+    },
+    {
+      type: "source_port",
+      source_port_id: "c1_1",
+      source_component_id: "c1",
+      name: "pin1",
+      pin_number: 1,
+      subcircuit_id: "child_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(cross_scope_plan, cross_scope_circuit)).toContain(
+    'VIN: Expected pin "C1.1" resolved to 0 source ports',
+  )
+})
+
+test("datasheet connectivity includes ordinary nested groups but excludes child subcircuits", () => {
+  const grouped_circuit = applicationCircuit("vin").map((element) => {
+    const record = element as unknown as Record<string, unknown>
+    if (record.type === "source_component") {
+      return {
+        ...record,
+        source_group_id: record.name === "R3" ? "layout_group" : "application_group",
+      }
+    }
+    if (record.type === "source_port") {
+      return { ...record, subcircuit_id: "application_subcircuit" }
+    }
+    return record
+  }) as unknown as AnyCircuitElement[]
+  grouped_circuit.unshift(
+    {
+      type: "source_group",
+      source_group_id: "layout_group",
+      parent_source_group_id: "application_group",
+      name: "layout",
+    } as unknown as AnyCircuitElement,
+    {
+      type: "source_group",
+      source_group_id: "application_group",
+      subcircuit_id: "application_subcircuit",
+      is_subcircuit: true,
+    } as unknown as AnyCircuitElement,
+  )
+
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, grouped_circuit)).toEqual([])
+
+  const unplanned_nested = [
+    ...grouped_circuit,
+    {
+      type: "source_component",
+      source_component_id: "r99",
+      source_group_id: "layout_group",
+      name: "R99",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, unplanned_nested)).toContain(
+    "Unexpected application component R99",
+  )
+
+  const child_subcircuit = [
+    ...grouped_circuit,
+    {
+      type: "source_group",
+      source_group_id: "child_implementation_group",
+      parent_subcircuit_id: "instantiated_child",
+    },
+    {
+      type: "source_component",
+      source_component_id: "internal_r1",
+      source_group_id: "child_implementation_group",
+      name: "R_INTERNAL",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, child_subcircuit)).toEqual([])
+
+  const hidden_sibling_root = [
+    ...grouped_circuit,
+    {
+      type: "source_group",
+      source_group_id: "sibling_root",
+      subcircuit_id: "sibling_subcircuit",
+    },
+    {
+      type: "source_component",
+      source_component_id: "hidden_r99",
+      source_group_id: "sibling_root",
+      name: "R99",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, hidden_sibling_root)).toContain(
+    "Application component R99 is outside the selected root scope application_group",
+  )
+})
+
+test("datasheet connectivity rejects unplanned root-level electrical connections", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = [
+    { type: "source_component", source_component_id: "u1", name: "U1" },
+    {
+      type: "source_port",
+      source_port_id: "u1_vin",
+      source_component_id: "u1",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "vin",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_vin",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "vin",
+    },
+    {
+      type: "source_port",
+      source_port_id: "u1_en",
+      source_component_id: "u1",
+      name: "EN",
+      subcircuit_connectivity_map_key: "bad",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_bad",
+      name: "BAD",
+      subcircuit_connectivity_map_key: "bad",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([
+    "Unexpected root-level application connection: BAD, U1.EN",
+  ])
+})
+
 test("datasheet connectivity rejects components absent from the approved plan", () => {
   const circuit = [
     ...applicationCircuit("vin"),
@@ -398,6 +660,46 @@ test("application value gate catches a changed feedback-divider value", () => {
 
   expect(getTypicalApplicationComponentValueErrors(plan, circuit)).toEqual([
     "Application component R2 has resistance 110000, expected 100k",
+  ])
+})
+
+test("application value gate cannot be satisfied by a same-name child-subcircuit component", () => {
+  const plan = {
+    components: [{ reference: "C1", kind: "capacitor", value: "10uF" }],
+    connections: [{ net: "VIN", pins: ["C1.pin1", "VIN"] }],
+  }
+  const circuit = [
+    { type: "source_group", source_group_id: "app", subcircuit_id: "app-subcircuit" },
+    {
+      type: "source_component",
+      source_component_id: "root-c1",
+      source_group_id: "app",
+      name: "C1",
+      capacitance: "1uF",
+    },
+    {
+      type: "source_group",
+      source_group_id: "child-implementation",
+      parent_subcircuit_id: "child-subcircuit",
+    },
+    {
+      type: "source_component",
+      source_component_id: "child-c1",
+      source_group_id: "child-implementation",
+      name: "C1",
+      capacitance: "10uF",
+    },
+    {
+      type: "source_port",
+      source_port_id: "root-c1-pin1",
+      source_component_id: "root-c1",
+      subcircuit_id: "app-subcircuit",
+      name: "pin1",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationComponentValueErrors(plan, circuit)).toEqual([
+    "Application component C1 has capacitance 0.000001, expected 10uF",
   ])
 })
 

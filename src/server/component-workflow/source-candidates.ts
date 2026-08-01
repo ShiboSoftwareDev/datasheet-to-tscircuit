@@ -1,39 +1,76 @@
-import { readFile, stat } from "node:fs/promises"
-import { join } from "node:path"
-import { runAgentArtifactStage, type AgentClient } from "../infrastructure/agent"
-import { createStageWorkspace, promoteStageFile } from "../infrastructure/artifacts"
+import { mkdir } from "node:fs/promises"
+import { dirname, join } from "node:path"
+import { isDeepStrictEqual } from "node:util"
+import { type AgentClient, runAgentArtifactStage } from "../infrastructure/agent"
+import { createStageWorkspace, promoteStageFile, readBoundedTextArtifact } from "../infrastructure/artifacts"
 import type { TypicalApplicationPlan } from "./application-plan"
+import type { CommittedEvidenceSnapshot } from "./evidence-commit"
 import { applicationPrompt, componentPrompt } from "./prompts"
-import { validateGeneratedSource } from "./stage-helpers"
+import { readApprovedEvidenceBundle, validateGeneratedSource } from "./stage-helpers"
 import {
   APPLICATION_SOURCE_STAGE_INSTRUCTIONS,
   COMPONENT_SOURCE_STAGE_INSTRUCTIONS,
 } from "./stage-instructions"
 
-const COMMON_FILES = [
+const PROJECT_FILES = [
   "package.json",
   "tsconfig.json",
   "tscircuit.config.json",
   "tscircuit.config.ts",
+] as const
+
+const GENERATION_EVIDENCE_FILES = [
   "component-evidence.json",
   "component-schematic-plan.json",
   "footprint-plan.json",
   "typical-application-plan.json",
-]
+] as const
+
+function committedGenerationFiles(
+  snapshot: CommittedEvidenceSnapshot,
+): Array<{ relative_path: string; bytes: Uint8Array }> {
+  const relative_paths = [
+    ...GENERATION_EVIDENCE_FILES,
+    ...[...snapshot.files.keys()]
+      .filter((relative_path) => relative_path.startsWith("visual-reference/"))
+      .sort(),
+  ]
+  return relative_paths.map((relative_path) => {
+    const bytes = snapshot.files.get(relative_path)
+    if (!bytes) throw new Error(`Committed evidence snapshot is missing ${relative_path}`)
+    return { relative_path, bytes }
+  })
+}
+
+async function materializeCommittedEvidence(
+  workspace: string,
+  snapshot: CommittedEvidenceSnapshot,
+): Promise<void> {
+  for (const file of committedGenerationFiles(snapshot)) {
+    const destination = join(workspace, file.relative_path)
+    await mkdir(dirname(destination), { recursive: true })
+    await Bun.write(destination, file.bytes)
+  }
+}
 
 async function createSourceWorkspace(input: {
   prefix: string
-  job_dir: string
   files: Array<{ source: string; required?: boolean }>
+  evidence_snapshot: CommittedEvidenceSnapshot
   instructions: string
 }) {
   const workspace = await createStageWorkspace({
     prefix: input.prefix,
     files: input.files,
-    directories: [{ source: join(input.job_dir, "visual-reference"), required: false }],
   })
-  await Bun.write(join(workspace.path, "AGENTS.md"), input.instructions)
-  return workspace
+  try {
+    await materializeCommittedEvidence(workspace.path, input.evidence_snapshot)
+    await Bun.write(join(workspace.path, "AGENTS.md"), input.instructions)
+    return workspace
+  } catch (error) {
+    await workspace.dispose().catch(() => undefined)
+    throw error
+  }
 }
 
 export async function generateComponentSource(input: {
@@ -45,6 +82,7 @@ export async function generateComponentSource(input: {
   feedback?: string
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
 }) {
+  const { snapshot } = await readApprovedEvidenceBundle(input.job_dir)
   return runAgentArtifactStage({
     stage_id: input.feedback ? "repair_component" : "generate_component",
     phase_label: input.feedback ? "Component source repair" : "Component source generation",
@@ -55,14 +93,14 @@ export async function generateComponentSource(input: {
     create_workspace: () =>
       createSourceWorkspace({
         prefix: "component-source",
-        job_dir: input.job_dir,
         files: [
-          ...COMMON_FILES.map((file_name) => ({ source: join(input.job_dir, file_name) })),
+          ...PROJECT_FILES.map((file_name) => ({ source: join(input.job_dir, file_name) })),
           {
             source: join(input.job_dir, "index.circuit.tsx"),
             required: Boolean(input.feedback),
           },
         ],
+        evidence_snapshot: snapshot,
         instructions: COMPONENT_SOURCE_STAGE_INSTRUCTIONS,
       }),
     build_prompt: (artifact_feedback) =>
@@ -76,9 +114,10 @@ export async function generateComponentSource(input: {
       files: ["index.circuit.tsx"],
     },
     validate: async (workspace) => {
-      const path = join(workspace, "index.circuit.tsx")
-      const [source, metadata] = await Promise.all([readFile(path, "utf8"), stat(path)])
-      if (metadata.size > 512 * 1024) throw new Error("Component source exceeds 512 KiB")
+      const source = await readBoundedTextArtifact({
+        path: join(workspace, "index.circuit.tsx"),
+        max_bytes: 512 * 1024,
+      })
       validateGeneratedSource(source, "component")
       return source
     },
@@ -103,6 +142,11 @@ export async function generateApplicationSource(input: {
   feedback?: string
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
 }) {
+  const { snapshot, evidence } = await readApprovedEvidenceBundle(input.job_dir)
+  if (!isDeepStrictEqual(input.plan, evidence.application_plan)) {
+    throw new Error("Application source plan does not match the committed evidence snapshot")
+  }
+  const committed_plan = evidence.application_plan
   return runAgentArtifactStage({
     stage_id: input.feedback ? "repair_application" : "generate_application",
     phase_label: input.feedback ? "Application source repair" : "Application source generation",
@@ -113,9 +157,8 @@ export async function generateApplicationSource(input: {
     create_workspace: () =>
       createSourceWorkspace({
         prefix: "application-source",
-        job_dir: input.job_dir,
         files: [
-          ...COMMON_FILES,
+          ...PROJECT_FILES,
           "index.circuit.tsx",
           "component.circuit.tsx",
           "typical-application.circuit.tsx",
@@ -123,11 +166,12 @@ export async function generateApplicationSource(input: {
           source: join(input.job_dir, file_name),
           required: file_name !== "typical-application.circuit.tsx",
         })),
+        evidence_snapshot: snapshot,
         instructions: APPLICATION_SOURCE_STAGE_INSTRUCTIONS,
       }),
     build_prompt: (artifact_feedback) =>
       applicationPrompt({
-        plan: input.plan,
+        plan: committed_plan,
         feedback: [input.feedback, artifact_feedback].filter(Boolean).join("\n\n"),
       }),
     heartbeat_paths: (workspace) => [join(workspace, "typical-application.circuit.tsx")],
@@ -137,9 +181,10 @@ export async function generateApplicationSource(input: {
       files: ["typical-application.circuit.tsx"],
     },
     validate: async (workspace) => {
-      const path = join(workspace, "typical-application.circuit.tsx")
-      const [source, metadata] = await Promise.all([readFile(path, "utf8"), stat(path)])
-      if (metadata.size > 1024 * 1024) throw new Error("Application source exceeds 1 MiB")
+      const source = await readBoundedTextArtifact({
+        path: join(workspace, "typical-application.circuit.tsx"),
+        max_bytes: 1024 * 1024,
+      })
       validateGeneratedSource(source, "application")
       return source
     },

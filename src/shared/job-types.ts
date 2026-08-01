@@ -72,6 +72,9 @@ export interface JobValidation {
 
 export interface JobProvenance {
   source_commit: string
+  /** Hash of the actual server/shared workflow files, including uncommitted edits. */
+  workflow_source_sha256?: string
+  evidence_contract_sha256?: string
   bun_version: string
   tscircuit_version: string
   tsci_agent_version: string

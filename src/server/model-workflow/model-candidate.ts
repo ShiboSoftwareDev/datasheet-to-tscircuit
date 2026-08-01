@@ -4,6 +4,7 @@ import { type AgentArtifactAttempt, type AgentClient, runAgentArtifactStage } fr
 import { createStageWorkspace, promoteStageFile } from "../infrastructure/artifacts"
 import {
   buildModelGenerationPrompt,
+  createModelTrainingContract,
   type GeneratedModel,
   type ModelContract,
   readGeneratedModel,
@@ -16,7 +17,6 @@ export interface StoredGeneratedModel extends GeneratedModel {
 export async function generateModelCandidate(input: {
   model_dir: string
   contract: ModelContract
-  contract_path: string
   evidence_dir: string
   previous_candidate?: { model_path: string; model_card_path: string }
   strategy_guidance: string
@@ -40,6 +40,7 @@ export async function generateModelCandidate(input: {
           { source: input.previous_candidate!.model_card_path, destination: "model-card.md" },
         ]
       : []
+  const training_contract = createModelTrainingContract(input.contract)
   return runAgentArtifactStage({
     stage_id: input.stage_id,
     phase_label: input.phase_label,
@@ -47,19 +48,31 @@ export async function generateModelCandidate(input: {
     signal: input.signal,
     use_openai: input.use_openai,
     agent_client: input.agent_client,
-    create_workspace: () =>
-      createStageWorkspace({
+    tool_profile: "model_candidate_files",
+    create_workspace: async () => {
+      const workspace = await createStageWorkspace({
         prefix: input.stage_id.replaceAll("_", "-"),
         files: [
           { source: join(input.model_dir, "AGENTS.md") },
-          { source: input.contract_path, destination: "model-contract.json" },
           { source: join(input.model_dir, "model-interface.json") },
           { source: join(input.model_dir, "component.circuit.tsx") },
           { source: join(input.model_dir, "component-evidence.json") },
+          { source: join(input.model_dir, "typical-application-plan.json") },
           ...repair_inputs,
         ],
         directories: [{ source: input.evidence_dir, destination: "evidence", required: false }],
-      }),
+      })
+      try {
+        await Bun.write(
+          join(workspace.path, "model-contract.json"),
+          `${JSON.stringify(training_contract, null, 2)}\n`,
+        )
+        return workspace
+      } catch (error) {
+        await workspace.dispose().catch(() => undefined)
+        throw error
+      }
+    },
     build_prompt: (artifact_feedback) =>
       buildModelGenerationPrompt({
         contract: input.contract,

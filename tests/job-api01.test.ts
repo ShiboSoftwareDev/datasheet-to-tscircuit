@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { chmod, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createJobApiHandler } from "@/server/job-api"
@@ -8,6 +9,21 @@ import type { ProcessRunRequest, ProcessRunner } from "@/server/infrastructure/p
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import type { Job } from "@/shared/job-types"
+
+async function writeLegacyEvidenceCommit(job_dir: string, relative_paths: string[]): Promise<void> {
+  const files: Record<string, { sha256: string; size_bytes: number }> = {}
+  for (const relative_path of relative_paths.sort()) {
+    const bytes = new Uint8Array(await Bun.file(join(job_dir, relative_path)).arrayBuffer())
+    files[relative_path] = {
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      size_bytes: bytes.byteLength,
+    }
+  }
+  await Bun.write(
+    join(job_dir, "evidence-commit.json"),
+    `${JSON.stringify({ version: 1, committed_at: new Date().toISOString(), files }, null, 2)}\n`,
+  )
+}
 
 test("job create accepts a PDF and starts the injected background runner", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-api-"))
@@ -46,12 +62,100 @@ test("job create accepts a PDF and starts the injected background runner", async
   await rm(jobs_root, { recursive: true, force: true })
 })
 
-test("component download reports a corrupt accepted publication", async () => {
+test("component download matches the UI base source when a model pointer is missing", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-file-missing-publication-"))
+  const job_id = "job_missing_publication"
+  const job_dir = join(jobs_root, job_id)
+  const base_component = 'export default () => <chip name="BASE" />\n'
+  const unverified_wrapper = 'export default () => <chip name="WRAPPER"><spicemodel /></chip>\n'
+  await mkdir(job_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "component.circuit.tsx"), base_component),
+    Bun.write(join(job_dir, "index.circuit.tsx"), unverified_wrapper),
+  ])
+  const job_store = new JobStore()
+  job_store.createJob({ job_id, job_dir, file_name: "sensor.pdf" })
+  job_store.updateJob(job_id, { component_code: base_component })
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+  })
+
+  const ui_response = await handle(new Request(`http://localhost/api/job/get?job_id=${job_id}`))
+  const ui_body = (await ui_response?.json()) as { job: { component_code?: string } }
+  const download_response = await handle(
+    new Request(`http://localhost/api/job/file?job_id=${job_id}&file=component`),
+  )
+
+  expect(ui_response?.status).toBe(200)
+  expect(download_response?.status).toBe(200)
+  expect(download_response?.headers.get("X-Tscircuit-Artifact-Warning")).toBeNull()
+  expect(ui_body.job.component_code).toBe(base_component)
+  expect(await download_response?.text()).toBe(ui_body.job.component_code)
+  expect(ui_body.job.component_code).not.toBe(unverified_wrapper)
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("component download matches the UI base source when a model pointer is corrupt", async () => {
   const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-job-file-corrupt-publication-"))
   const job_id = "job_corrupt_publication"
   const job_dir = join(jobs_root, job_id)
+  const base_component = 'export default () => <chip name="BASE" />\n'
+  const unverified_wrapper = 'export default () => <chip name="WRAPPER"><spicemodel /></chip>\n'
   await mkdir(job_dir, { recursive: true })
-  await Bun.write(join(job_dir, "published-model.json"), '{"version":1}\n')
+  await Promise.all([
+    Bun.write(join(job_dir, "component.circuit.tsx"), base_component),
+    Bun.write(join(job_dir, "index.circuit.tsx"), unverified_wrapper),
+    Bun.write(join(job_dir, "published-model.json"), '{"version":1}\n'),
+  ])
+  const job_store = new JobStore()
+  job_store.createJob({ job_id, job_dir, file_name: "sensor.pdf" })
+  job_store.updateJob(job_id, {
+    component_code: base_component,
+    has_errors: true,
+    error_message: "Committed model publication failed integrity validation.",
+  })
+  const handle = createJobApiHandler({
+    jobs_root,
+    job_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+  })
+
+  const ui_response = await handle(new Request(`http://localhost/api/job/get?job_id=${job_id}`))
+  const ui_body = (await ui_response?.json()) as { job: { component_code?: string } }
+  const download_response = await handle(
+    new Request(`http://localhost/api/job/file?job_id=${job_id}&file=component`),
+  )
+
+  expect(ui_response?.status).toBe(200)
+  expect(download_response?.status).toBe(200)
+  expect(download_response?.headers.get("X-Tscircuit-Artifact-Warning")).toBe("accepted_publication_invalid")
+  expect(ui_body.job.component_code).toBe(base_component)
+  expect(await download_response?.text()).toBe(ui_body.job.component_code)
+  expect(ui_body.job.component_code).not.toBe(unverified_wrapper)
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("component fallback rejects unsafe preserved sources before using a legacy index", async () => {
+  const fixture_root = await mkdtemp(join(tmpdir(), "datasheet-job-file-safe-component-"))
+  const jobs_root = join(fixture_root, "jobs")
+  const job_id = "job_safe_component"
+  const job_dir = join(jobs_root, job_id)
+  const base_path = join(job_dir, "component.circuit.tsx")
+  const outside_path = join(fixture_root, "outside.circuit.tsx")
+  const legacy_component = 'export default () => <chip name="LEGACY" />\n'
+  const outside_component = 'export default () => <chip name="OUTSIDE" />\n'
+  await mkdir(job_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "index.circuit.tsx"), legacy_component),
+    Bun.write(outside_path, outside_component),
+  ])
+  await symlink(outside_path, base_path)
   const job_store = new JobStore()
   job_store.createJob({ job_id, job_dir, file_name: "sensor.pdf" })
   const handle = createJobApiHandler({
@@ -61,17 +165,27 @@ test("component download reports a corrupt accepted publication", async () => {
     tsci_bin: "unused-tsci",
   })
 
-  const response = await handle(new Request(`http://localhost/api/job/file?job_id=${job_id}&file=component`))
-  expect(response?.status).toBe(500)
-  expect(await response?.json()).toMatchObject({
-    error: {
-      error_code: "accepted_publication_invalid",
-      message:
-        "The accepted component publication failed its integrity checks. Inspect the server diagnostic for this job.",
-    },
-  })
+  const linked_response = await handle(
+    new Request(`http://localhost/api/job/file?job_id=${job_id}&file=component`),
+  )
+  expect(linked_response?.status).toBe(404)
+  expect(await Bun.file(outside_path).text()).toBe(outside_component)
 
-  await rm(jobs_root, { recursive: true, force: true })
+  await rm(base_path)
+  await Bun.write(base_path, "x".repeat(2 * 1024 * 1024 + 1))
+  const oversized_response = await handle(
+    new Request(`http://localhost/api/job/file?job_id=${job_id}&file=component`),
+  )
+  expect(oversized_response?.status).toBe(404)
+
+  await rm(base_path)
+  const legacy_response = await handle(
+    new Request(`http://localhost/api/job/file?job_id=${job_id}&file=component`),
+  )
+  expect(legacy_response?.status).toBe(200)
+  expect(await legacy_response?.text()).toBe(legacy_component)
+
+  await rm(fixture_root, { recursive: true, force: true })
 })
 
 test("job creation removes a published workspace when durable registration fails", async () => {
@@ -498,6 +612,7 @@ test("retained evidence is downloadable", async () => {
       }),
     ),
     Bun.write(join(job_dir, "footprint-plan.json"), '{"pads":[]}\n'),
+    Bun.write(join(job_dir, "component-schematic-plan.json"), '{"version":1}\n'),
     Bun.write(join(job_dir, "typical-application-plan.json"), '{"availability":"documented"}\n'),
     Bun.write(join(job_dir, "visual-reference", "land-pattern.png"), "png fixture"),
     Bun.write(join(job_dir, "visual-reference", "typical-application.png"), "application fixture"),
@@ -519,20 +634,49 @@ test("retained evidence is downloadable", async () => {
     run_job: async () => undefined,
   })
 
-  for (const [file, expected] of [
+  const expected_downloads = [
     ["component_evidence", "unresolved"],
     ["footprint_plan", "pads"],
     ["application_plan", "documented"],
     ["land_pattern", "png fixture"],
     ["component_schematic_reference", "pinout fixture"],
     ["application_reference", "application fixture"],
-  ] as const) {
+  ] as const
+
+  for (const [file] of expected_downloads) {
+    const response = await handle(
+      new Request(`http://localhost/api/job/file?job_id=evidence_job&file=${file}`),
+    )
+    expect(response?.status).toBe(404)
+  }
+
+  await writeLegacyEvidenceCommit(job_dir, [
+    "component-evidence.json",
+    "footprint-plan.json",
+    "component-schematic-plan.json",
+    "typical-application-plan.json",
+    "visual-reference/land-pattern.png",
+    "visual-reference/typical-application.png",
+    "visual-reference/pages/page-004.png",
+    "visual-reference/pages/page-007.png",
+  ])
+
+  for (const [file, expected] of expected_downloads) {
     const response = await handle(
       new Request(`http://localhost/api/job/file?job_id=evidence_job&file=${file}`),
     )
     expect(response?.status).toBe(200)
     expect(await response?.text()).toContain(expected)
   }
+
+  await Bun.write(join(job_dir, "visual-reference", "pages", "page-007.png"), "tampered fixture")
+  const tampered_response = await handle(
+    new Request("http://localhost/api/job/file?job_id=evidence_job&file=component_evidence"),
+  )
+  expect(tampered_response?.status).toBe(500)
+  expect(await tampered_response?.json()).toMatchObject({
+    error: { error_code: "artifact_resolution_failed" },
+  })
 
   const retry_response = await handle(
     new Request("http://localhost/api/job/retry?job_id=evidence_job", { method: "POST" }),

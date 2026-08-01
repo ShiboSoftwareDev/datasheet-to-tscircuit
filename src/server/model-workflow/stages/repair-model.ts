@@ -92,7 +92,6 @@ export const repairModelStage = defineModelStage({
       const candidate = await generateModelCandidate({
         model_dir: context.model_dir,
         contract,
-        contract_path,
         evidence_dir,
         previous_candidate,
         strategy_guidance: strategy.guidance,

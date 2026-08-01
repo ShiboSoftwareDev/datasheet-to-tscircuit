@@ -3,6 +3,38 @@ import type { ValidationModelDefinition } from "./model-definition"
 import type { ValidationCollector } from "./parse-helpers"
 import type { ReferenceContract, ValidationCase } from "./types"
 
+function validateCurveAnalysisRange(input: {
+  validation_case: ValidationCase
+  reference: Extract<ReferenceContract, { type: "curve" }>
+  path: string
+  collector: ValidationCollector
+}): void {
+  if (input.reference.points.length === 0) return
+  const analysis = input.validation_case.analysis
+  if (analysis.type === "operating_point") return
+  const analysis_min =
+    analysis.type === "dc_sweep" ? Math.min(analysis.start, analysis.stop) : (analysis.start ?? 0)
+  const analysis_max = analysis.type === "dc_sweep" ? Math.max(analysis.start, analysis.stop) : analysis.stop
+  const reference_x = input.reference.points.map(({ x }) => x)
+  const reference_min = Math.min(...reference_x)
+  const reference_max = Math.max(...reference_x)
+  const magnitude = Math.max(
+    1,
+    Math.abs(analysis_min),
+    Math.abs(analysis_max),
+    Math.abs(reference_min),
+    Math.abs(reference_max),
+  )
+  const epsilon = magnitude * Number.EPSILON * 32
+  if (reference_min < analysis_min - epsilon || reference_max > analysis_max + epsilon) {
+    input.collector.add(
+      input.path,
+      "reference_curve_outside_analysis_range",
+      `curve x range [${reference_min}, ${reference_max}] must fit inside the ${analysis.type} range [${analysis_min}, ${analysis_max}]`,
+    )
+  }
+}
+
 function addDuplicateErrors(values: string[], base_path: string, collector: ValidationCollector): void {
   const first_index = new Map<string, number>()
   values.forEach((value, index) => {
@@ -186,6 +218,14 @@ export function validateCaseConnectivity(input: {
 
   validation_case.observations.forEach((observation, observation_index) => {
     const observation_path = `${case_path}.observations[${observation_index}]`
+    if (observation.reference.type === "curve") {
+      validateCurveAnalysisRange({
+        validation_case,
+        reference: observation.reference,
+        path: `${observation_path}.reference.points`,
+        collector,
+      })
+    }
     if (observation.type === "voltage") {
       validate_endpoint(observation.positive, `${observation_path}.positive`, false)
       validate_endpoint(observation.negative, `${observation_path}.negative`, false)

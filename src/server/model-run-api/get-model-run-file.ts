@@ -1,5 +1,10 @@
 import { join } from "node:path"
-import { readVerifiedPublicationArtifact, resolveAcceptedModelPublication } from "../modeling"
+import { readBoundedTextArtifact } from "../infrastructure/artifacts"
+import {
+  modelCheckpointRequiresPublicationPointer,
+  readVerifiedPublicationArtifact,
+  resolveAcceptedModelPublication,
+} from "../modeling"
 import { acceptedPublicationErrorResponse } from "./accepted-publication-error"
 import { ModelRunApiContext } from "./model-run-api-context"
 import { errorResponse, getJobId } from "./model-run-api-responses"
@@ -11,7 +16,8 @@ export async function getModelRunFile(request_url: URL, context: ModelRunApiCont
   }
   const model_run_id = context.model_run_store.getModelRunIdForJob(job_id)
   const model_dir = model_run_id ? context.model_run_store.getModelDir(model_run_id) : undefined
-  if (!model_run_id || !model_dir) {
+  const model_run = model_run_id ? context.model_run_store.getModelRun(model_run_id) : undefined
+  if (!model_run_id || !model_dir || !model_run) {
     return errorResponse({
       error_code: "model_run_not_found",
       message: "This job has no SPICE model run.",
@@ -47,22 +53,59 @@ export async function getModelRunFile(request_url: URL, context: ModelRunApiCont
   }
   let body: Bun.BunFile | Uint8Array<ArrayBuffer>
   if (file_kind !== "log") {
+    let publication: Awaited<ReturnType<typeof resolveAcceptedModelPublication>>
     try {
-      const publication = await resolveAcceptedModelPublication(model_dir, job_id)
-      body = publication
-        ? await readVerifiedPublicationArtifact({
-            publication,
-            bundle: "accepted_model",
-            relative_path: selected.name,
-            max_bytes: selected.max_bytes,
-          })
-        : Bun.file(join(model_dir, selected.name))
+      publication = await resolveAcceptedModelPublication(model_dir, job_id)
     } catch (error) {
       return acceptedPublicationErrorResponse({
         job_id,
         operation: `download_${file_kind}`,
         error,
       })
+    }
+    if (publication) {
+      try {
+        body = await readVerifiedPublicationArtifact({
+          publication,
+          bundle: "accepted_model",
+          relative_path: selected.name,
+          max_bytes: selected.max_bytes,
+        })
+      } catch (error) {
+        return acceptedPublicationErrorResponse({
+          job_id,
+          operation: `download_${file_kind}`,
+          error,
+        })
+      }
+    } else if (modelCheckpointRequiresPublicationPointer(model_run)) {
+      return acceptedPublicationErrorResponse({
+        job_id,
+        operation: `download_${file_kind}`,
+        error: new Error(
+          "published-model.json is missing even though the completed datasheet_model pipeline crossed the publish_model commit barrier",
+        ),
+      })
+    } else {
+      try {
+        body = new TextEncoder().encode(
+          await readBoundedTextArtifact({
+            path: join(model_dir, selected.name),
+            max_bytes: selected.max_bytes,
+          }),
+        )
+      } catch (error) {
+        console.error("[model-artifact] legacy_reader_failed", {
+          job_id,
+          file_kind,
+          cause: error instanceof Error ? error.message : String(error),
+        })
+        return errorResponse({
+          error_code: "file_not_ready",
+          message: `${selected.name} is not ready or failed its legacy artifact checks.`,
+          status: 404,
+        })
+      }
     }
   } else {
     body = Bun.file(join(model_dir, selected.name))

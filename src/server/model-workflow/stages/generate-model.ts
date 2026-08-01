@@ -23,7 +23,6 @@ export const generateModelStage = defineModelStage({
     const attempt = await generateModelCandidate({
       model_dir: context.model_dir,
       contract,
-      contract_path,
       evidence_dir,
       strategy_guidance: strategy.guidance,
       stage_id: "generate_model",

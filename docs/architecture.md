@@ -120,6 +120,9 @@ trace:
     │   ├── output.json
     │   ├── error.json
     │   └── metrics.json
+    ├── 02-extract_evidence/
+    │   ├── attempt-history.json
+    │   └── rejected-attempts/<attempt>/...
     └── ...
 
 .runtime/jobs/<job-id>/spice/runs/<invocation-id>/.pipeline/
@@ -164,11 +167,11 @@ prepare
 
 | Stage | Responsibility |
 | --- | --- |
-| `prepare` | Record source/tool provenance and initialize public validation state. |
-| `extract_evidence` | Let an isolated agent inspect the PDF, then strictly parse pinout, package, application, and retained image evidence. Derive the footprint and schematic plans on the server, structurally validate PNGs, and publish a hashed evidence-set commit last. |
+| `prepare` | Record source/tool provenance, including the actual workflow-tree and evidence-contract hashes, and initialize public validation state. |
+| `extract_evidence` | Let an isolated agent inspect the PDF, canonicalize only representation-equivalent input forms, strictly parse pinout/package/application evidence, render every cited page on the server, then independently transcribe both PCB-top pad geometry and the application graph from trusted page images. Pad geometry and net partitions must agree before the server derives plans and publishes the semantic evidence-set commit. |
 | `generate_component` | Generate only `index.circuit.tsx` from accepted JSON plans and reference images. The PDF is not present in this workspace. |
 | `validate_component` | Run `tsci build`; reject Circuit JSON errors; verify the footprint, pinout, schematic plan, and a server-created board fixture. |
-| `repair_component` | Feed deterministic validation errors into bounded clean repair attempts. Publish `component.circuit.tsx` as soon as the component passes. |
+| `repair_component` | Feed deterministic validation errors into bounded isolated repair attempts. Publish `component.circuit.tsx` as soon as the component passes. |
 | `generate_application` | Generate a typical application only when the accepted application plan says one is documented. |
 | `validate_application` | Check source shape, values, connectivity, and the resulting Circuit JSON against the accepted plan. |
 | `repair_application` | Run bounded repairs. A still-invalid optional application becomes a warning rather than hiding a valid component. |
@@ -179,12 +182,19 @@ Important durable component artifacts include:
 ```text
 datasheet.pdf
 provenance.json
-component-evidence.json
-footprint-plan.json
-component-schematic-plan.json
-typical-application-plan.json
-visual-reference/
 evidence-commit.json
+evidence-revisions/<generation-id>/
+├── datasheet.pdf
+├── component-evidence.json
+├── footprint-plan.json
+├── component-schematic-plan.json
+├── typical-application-plan.json
+├── footprint-geometry-review.json
+├── footprint-geometry-verification.json
+├── application-connectivity-review.json
+├── application-connectivity-verification.json
+├── evidence-image-manifest.json
+└── visual-reference/
 index.circuit.tsx
 component.circuit.tsx
 component.circuit.json
@@ -198,7 +208,52 @@ artifact attempt receives a fresh temporary workspace containing only declared
 inputs. The server parses and validates the candidate there, then promotes
 declared files atomically. Invalid attempts are not promoted: their declared
 files and validation error are retained under the stage's `rejected-attempts/`
-debug directory, and the next bounded attempt receives explicit feedback.
+debug directory. A correction workspace is safely seeded from those bounded,
+no-symlink files and receives cumulative diagnostics plus the contract hash.
+The expensive PDF extraction therefore survives a serialization correction.
+
+The evidence contract is defined by shared version/enum constants and exact
+canonical examples. Safe boundary canonicalization is deliberately narrow:
+integer pin identifiers become strings, the industry synonym `smd` becomes
+`smt`, and no other meaning-changing conversion is allowed. Missing versions,
+prose or unsupported orientations, identities, dimensions, sources, and
+connectivity are never invented. Agent-authored PNG pixels are discarded. The
+server renders every cited PDF page at 200 DPI and binds each trusted image,
+alias, source page, and the datasheet hash in `evidence-image-manifest.json`.
+
+For every application claim, including `not_present`, a second isolated agent
+receives the trusted full-page render and explicitly incomplete,
+non-authoritative page and target-pin hints—but not the first agent's component
+inventory or graph. It independently emits visible components and electrical
+endpoint partitions, or the sections it searched. The server compares the
+component inventory and kind (plus any independently visible value or MPN),
+canonicalizes physical U1 identities, external terminals, and unordered net
+membership, ignores net names and ordering, and requires exact multiset graph
+agreement. This catches omitted parts, kind/value disagreements, and misplaced
+endpoints without trusting extractor-owned topology.
+
+Footprint geometry has the same independent boundary. A separate isolated
+reviewer receives `datasheet.pdf`, the server-rendered full-page
+`visual-reference/land-pattern.png`, and non-authoritative pin-name hints. It
+never receives `component-evidence.json`, `footprint-plan.json`, or any
+extractor-authored dimensions. The server strictly parses the review, rejects
+low-confidence or duplicate-pad identities, and compares every pad center,
+copper dimension, kind, and hole dimension at 0.01 mm tolerance. A valid
+disagreement rejects the outer extraction candidate, so a plausible but copied
+special-pad dimension cannot publish merely because generated TSX repeats it.
+
+The version-3 evidence commit is the publication barrier. The server first
+semantically re-parses the canonical evidence, derived plans, independent
+footprint and application reviews, both agreement records, and trusted-image
+manifest. It then materializes one fully synced immutable
+`evidence-revisions/<generation-id>` directory and atomically replaces
+`evidence-commit.json` to select it. API readers serve only the snapshotted
+bytes covered by that pointer, so a failed replacement, partial promotion, or
+later root-file mutation cannot expose a mixed evidence generation. Each
+revision carries the exact datasheet bytes bound by the trusted-image manifest,
+so model characterization cannot race a later PDF replacement. Version-1 and
+version-2 markers remain read-compatible, but version 1 is not accepted as a
+model-generation input because it did not bind the PDF.
 
 Transport retries and artifact retries are separate. The agent adapter retries
 only classified transient transport failures; schema, source, build, and
@@ -206,8 +261,8 @@ electrical failures go through their owning validation or repair stage.
 
 ## Model workflow
 
-The model pipeline starts alongside the component job but waits on the validated
-component milestone:
+The model pipeline starts alongside the component job but waits for the
+component pipeline's terminal publication:
 
 ```text
 wait_for_component
@@ -222,7 +277,7 @@ wait_for_component
 
 | Stage | Responsibility |
 | --- | --- |
-| `wait_for_component` | Wait for a validated component and fail with component context if the component job cannot produce one. |
+| `wait_for_component` | Wait for terminal component publication, not the early live-preview milestone, and fail with component context if the job cannot produce one. |
 | `prepare_workspace` | Copy canonical inputs and derive an exact server-owned SPICE interface from accepted pin evidence. |
 | `characterize` | Extract versioned behavioral requirements, assumptions, limitations, sources, and optional reference curves. Each requirement is explicitly `modeled` or `documented_only`. |
 | `design_validation` | Accept a strictly parsed declarative fixture plan that covers every modeled requirement and every DUT pin. |
@@ -243,8 +298,9 @@ markers:
 - `model-contract.json` combines the interface fixed for the current invocation
   with accepted characterization requirements.
 - `validation-plan.json` is a declarative circuit contract. An agent proposes
-  fixture elements, analyses, observations, and numeric references; the server
-  accepts and canonicalizes it before any model is generated.
+  fixture elements, analyses, and observations; the server binds numeric
+  references from the immutable model contract and canonicalizes the plan
+  before any model is generated.
 - `model.lib` must expose exactly one public `.SUBCKT` with the server-owned
   entry and pin order. Self-contained private helper subcircuits and `.MODEL`
   definitions are allowed; external includes, control blocks, and shell commands
@@ -259,10 +315,25 @@ markers:
   legacy root paths afterward are compatibility mirrors.
 
 The model-generation agent does not receive `validation-plan.json` or raw
-validation artifacts. It works from the datasheet-derived model contract. A
-repair attempt receives the preceding model plus bounded server feedback, but
-the independent fixture topology and exact sweep points remain private. This
-keeps optimization tied to documented behavior instead of a visible testbench.
+validation artifacts. For each fresh modeled reference curve, the server keeps
+the endpoints and alternating interior samples in a deterministic training view
+and withholds the complementary interior samples. Fresh curves therefore need
+at least five points. Generation and repair see only that training contract;
+the immutable full contract remains authoritative for scoring and publication.
+A regression model that matches every visible sample but misses a held-out
+sample fails full server scoring.
+
+Generation and repair also use a fail-closed agent capability profile. The only
+enabled tool names come from one explicit extension: one reader confined to the
+canonical temporary workspace and one writer confined to `model.lib` and
+`model-card.md`. There is no shell, unrestricted built-in file tool, ambient
+context-file discovery, or additional extension. The custom names do not match
+built-ins, so an extension-load failure leaves the agent without tools instead
+of silently restoring broad filesystem access. A repair receives the preceding
+model plus an aggregate enum-and-count failure summary; simulator output, paths,
+case IDs, observation IDs, metrics, sample counts, fixture values, hashes, and
+validation coordinates never cross into its workspace. This keeps optimization
+tied to documented behavior instead of a visible testbench.
 
 The declarative validation language currently supports operating-point, DC
 sweep, and transient analyses; resistor, capacitor, inductor, diode, voltage
@@ -332,8 +403,16 @@ owning job and invocation, model revision, deterministic wrapper, embedded
 source, and exact pin map before selecting it. They then reopen individual
 artifacts with `O_NOFOLLOW`, enforce per-file bounds, and recheck size and
 SHA-256 before returning buffered bytes. A corrupt pointer or bundle is isolated
-to that job during startup and reported with its job ID; it cannot prevent
-healthy siblings from restoring.
+to that job during startup: the base component remains visible as failed with a
+traceable integrity warning, and healthy siblings still restore. Prepared model
+directories are removed on cancellation, stale identity, or any other
+pre-pointer failure. Cleanup first resolves the current pointer and never
+deletes the generation it selects.
+
+Pointer and checkpoint writers treat rename as the visibility boundary. A
+parent-directory `fsync` failure after rename is reported as a durability
+warning rather than as a failed write, preventing callers from rolling back
+live state after readers can already observe the new pointer.
 
 ## UI preservation
 

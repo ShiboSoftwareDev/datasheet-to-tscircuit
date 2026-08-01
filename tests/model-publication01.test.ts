@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, unlink } from "node:fs/promises"
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
@@ -27,6 +27,7 @@ import {
 } from "@/server/modeling"
 import {
   commitPreparedModelPublication,
+  discardPreparedModelPublication,
   prepareModelPublication,
 } from "@/server/model-workflow/stage-helpers"
 import { publishModelStage } from "@/server/model-workflow/stages/publish-model"
@@ -221,6 +222,7 @@ async function createPreparedPublication(input: {
   model_run_id: string
   invocation_id: string
   generated: GeneratedModel
+  result?: ValidationRunResult
 }) {
   const wrapper_dir = join(input.model_dir, "wrapper-stage")
   await mkdir(wrapper_dir, { recursive: true })
@@ -239,13 +241,75 @@ async function createPreparedPublication(input: {
     invocation_id: input.invocation_id,
     contract,
     plan,
-    result: passingResult(input.generated),
+    result: input.result ?? passingResult(input.generated),
     generated: input.generated,
     evidence_dir: input.evidence_dir,
     wrapper_source,
     circuit_json,
   })
 }
+
+async function pathExists(path: string): Promise<boolean> {
+  return lstat(path).then(
+    () => true,
+    () => false,
+  )
+}
+
+test("publication preparation rejects a forged passing result with a truncated case list", async () => {
+  const workspace = await createWorkspace("model-publication-truncated-cases-")
+  const accepted = generatedModel(1)
+
+  await expect(
+    createPreparedPublication({
+      ...workspace,
+      model_run_id: "model_truncated_cases",
+      invocation_id: crypto.randomUUID(),
+      generated: accepted,
+      result: { ...passingResult(accepted), cases: [] },
+    }),
+  ).rejects.toThrow(/cases has 0 cases; the current plan has 1/)
+
+  expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
+  expect(await Bun.file(join(workspace.model_dir, "accepted-revisions")).exists()).toBe(false)
+})
+
+test("publication preparation rejects a passing flag over non-finite simulator points", async () => {
+  const workspace = await createWorkspace("model-publication-non-finite-points-")
+  const accepted = generatedModel(1)
+  const forged = passingResult(accepted)
+  forged.cases[0]!.series[0]!.points[0]!.y = Number.POSITIVE_INFINITY
+
+  await expect(
+    createPreparedPublication({
+      ...workspace,
+      model_run_id: "model_non_finite_points",
+      invocation_id: crypto.randomUUID(),
+      generated: accepted,
+      result: forged,
+    }),
+  ).rejects.toThrow(/points\[0\]\.y must be a finite number/)
+
+  expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
+})
+
+test("publication preparation rolls back a sibling bundle after a partial promotion failure", async () => {
+  const workspace = await createWorkspace("model-publication-partial-promotion-")
+  await Bun.write(join(workspace.job_dir, "published-models"), "blocks the destination directory\n")
+
+  await expect(
+    createPreparedPublication({
+      ...workspace,
+      model_run_id: "model_partial_promotion",
+      invocation_id: crypto.randomUUID(),
+      generated: generatedModel(1),
+    }),
+  ).rejects.toThrow(/materialize both immutable bundles/)
+
+  const accepted_revisions = await readdir(join(workspace.model_dir, "accepted-revisions")).catch(() => [])
+  expect(accepted_revisions).toEqual([])
+  expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
+})
 
 test("a committed pointer recovers one authoritative pair before store and root mirrors catch up", async () => {
   const workspace = await createWorkspace("model-publication-crash-")
@@ -867,9 +931,13 @@ test("a copied publication cannot cross-wire another job or duplicate its model 
     },
   })
 
-  expect(result).toEqual({ jobs_restored: 1, model_runs_restored: 1 })
+  expect(result).toEqual({ jobs_restored: 2, model_runs_restored: 1 })
   expect(restored_jobs.getJob(owner_job_id)?.component_code).toContain("<spicemodel")
-  expect(restored_jobs.getJob(copied_job_id)).toBeUndefined()
+  expect(restored_jobs.getJob(copied_job_id)).toMatchObject({
+    has_errors: true,
+    error_message: expect.stringContaining("belongs to job"),
+    warnings: [expect.stringContaining("Committed model publication failed integrity validation")],
+  })
   expect(restored_models.getModelRunForJob(owner_job_id)?.model_run_id).toBe("model_owner")
   expect(restored_models.getModelRunForJob(copied_job_id)).toBeUndefined()
   expect(failures).toEqual([
@@ -924,6 +992,75 @@ test("cancellation is checked again before the publication pointer is committed"
     }),
   ).rejects.toThrow("cancel before publication")
   expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
+  expect(await pathExists(prepared.accepted_model_dir)).toBe(false)
+  expect(await pathExists(prepared.published_component_dir)).toBe(false)
+})
+
+test("prepared publication cleanup preserves the generation selected by the pointer", async () => {
+  const workspace = await createWorkspace("model-publication-selected-cleanup-")
+  const prepared = await createPreparedPublication({
+    ...workspace,
+    model_run_id: "model_selected_cleanup",
+    invocation_id: crypto.randomUUID(),
+    generated: generatedModel(1),
+  })
+  commitModelPublication(workspace.job_dir, prepared.commit.job_id, prepared.commit)
+
+  await discardPreparedModelPublication(prepared)
+
+  expect(await pathExists(prepared.accepted_model_dir)).toBe(true)
+  expect(await pathExists(prepared.published_component_dir)).toBe(true)
+})
+
+test("the commit barrier rejects a hash-consistent bundle with truncated passing series", async () => {
+  const workspace = await createWorkspace("model-publication-truncated-series-")
+  const job_store = new JobStore()
+  const model_store = new ModelRunStore()
+  const invocation_id = crypto.randomUUID()
+  job_store.createJob({
+    job_id: "job_truncated_series",
+    job_dir: workspace.job_dir,
+    file_name: "part.pdf",
+  })
+  model_store.createModelRun({
+    model_run_id: "model_truncated_series",
+    job_id: "job_truncated_series",
+    model_dir: workspace.model_dir,
+    effort_multiplier: 1,
+  })
+  model_store.updateModelRun("model_truncated_series", { current_invocation_id: invocation_id })
+  const accepted = generatedModel(1)
+  const prepared = await createPreparedPublication({
+    ...workspace,
+    model_run_id: "model_truncated_series",
+    invocation_id,
+    generated: accepted,
+  })
+  const forged = passingResult(accepted)
+  forged.cases[0]!.series = []
+  await Bun.write(join(prepared.accepted_model_dir, "validation-results.json"), JSON.stringify(forged))
+  prepared.commit.accepted_bundle_manifest_sha256 = await writePublicationBundleManifest(
+    prepared.accepted_model_dir,
+  )
+
+  await expect(
+    commitPreparedModelPublication({
+      prepared,
+      job_id: "job_truncated_series",
+      job_dir: workspace.job_dir,
+      job_store,
+      model_dir: workspace.model_dir,
+      model_run_id: "model_truncated_series",
+      model_run_store: model_store,
+      plan,
+      generated: accepted,
+      circuit_json: componentCircuit(accepted.source),
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/series does not cover every current validation-plan observation/)
+
+  expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
+  expect(model_store.getModelRun("model_truncated_series")?.model_source).toBeUndefined()
 })
 
 test("a stale prepared publication cannot replace the current invocation", async () => {
@@ -963,6 +1100,8 @@ test("a stale prepared publication cannot replace the current invocation", async
     }),
   ).rejects.toThrow(/invocation_id is no longer current/)
   expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
+  expect(await pathExists(prepared.accepted_model_dir)).toBe(false)
+  expect(await pathExists(prepared.published_component_dir)).toBe(false)
 })
 
 test("live publication state must match the validated immutable bundle", async () => {
@@ -1003,4 +1142,6 @@ test("live publication state must match the validated immutable bundle", async (
   ).rejects.toThrow(/caller state differs.*generated model/)
   expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
   expect(model_store.getModelRun("model_caller_state")?.model_source).toBeUndefined()
+  expect(await pathExists(prepared.accepted_model_dir)).toBe(false)
+  expect(await pathExists(prepared.published_component_dir)).toBe(false)
 })

@@ -8,6 +8,7 @@ export async function readRestoredCircuitJson(
   job_dir: string,
   artifact: "component" | "typical_application",
   publication?: ResolvedModelPublication,
+  options: { base_component_only?: boolean } = {},
 ): Promise<Job["circuit_json"] | undefined> {
   if (artifact === "component" && publication) {
     const bytes = await readVerifiedPublicationArtifact({
@@ -20,13 +21,15 @@ export async function readRestoredCircuitJson(
   }
   const candidates =
     artifact === "component"
-      ? [
-          join(job_dir, "spice", "component-with-model.circuit.json"),
-          join(job_dir, "spice", "dist", "component-with-model", "circuit.json"),
-          join(job_dir, "dist", "spice", "component-with-model", "circuit.json"),
-          join(job_dir, "component.circuit.json"),
-          join(job_dir, "dist", "index", "circuit.json"),
-        ]
+      ? options.base_component_only
+        ? [join(job_dir, "component.circuit.json"), join(job_dir, "dist", "index", "circuit.json")]
+        : [
+            join(job_dir, "spice", "component-with-model.circuit.json"),
+            join(job_dir, "spice", "dist", "component-with-model", "circuit.json"),
+            join(job_dir, "dist", "spice", "component-with-model", "circuit.json"),
+            join(job_dir, "component.circuit.json"),
+            join(job_dir, "dist", "index", "circuit.json"),
+          ]
       : [join(job_dir, "dist", "typical-application", "circuit.json")]
   const values = await Promise.all(candidates.map((candidate) => readJson(candidate)))
   return selectPreferredComponentCircuitJson(...values)

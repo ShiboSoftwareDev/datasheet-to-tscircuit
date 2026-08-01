@@ -101,8 +101,31 @@ their typed execution traces. The durable files under
 - Each `.pipeline/stages/<number>-<stage-id>` directory contains `input.json`,
   `output.json`, `error.json`, `metrics.json`, and immutable copies of declared
   artifacts under `artifacts/`.
+- Agent-backed stages also retain `attempt-history.json` plus every rejected
+  candidate. Correction attempts receive those exact files and cumulative
+  diagnostics, so fixing one field cannot silently regress an earlier fix.
 - `component-validation.json` and `application-validation.json` contain the
   deterministic component validation outcomes.
+- `footprint-geometry-review.json` and
+  `footprint-geometry-verification.json` preserve a second agent's independent
+  PCB-top pad transcription and the server-computed 0.01 mm agreement record.
+  The reviewer receives pin-name hints, but never the extractor's pad geometry.
+- `application-connectivity-review.json` and
+  `application-connectivity-verification.json` record an independently
+  transcribed visible-component inventory and image-to-netlist graph plus their
+  agreement hashes. Net names and ordering are ignored; component facts and
+  endpoint connectivity must match.
+- `evidence-image-manifest.json` binds server-rendered 200-DPI reference pages
+  and UI aliases to the exact datasheet hash; agent-authored image pixels are
+  never trusted.
+- `evidence-commit.json` is the version-3 atomic pointer for the complete
+  semantic evidence set. It selects one immutable
+  `evidence-revisions/<generation-id>` directory containing the evidence and
+  its exact source PDF. API readers return only those captured, hash-checked
+  bytes, so a failed replacement, partial promotion, or later root-file
+  mutation cannot expose a mixed generation. Legacy version-1 and version-2
+  markers remain readable; model generation rejects version 1 because it did
+  not bind a source PDF.
 - `spice/candidates/<revision>-<id>/validation/<case-id>` contains the exact
   ngspice netlist, process logs, raw output, and per-case result used for that
   immutable candidate.
@@ -121,7 +144,8 @@ filesystem path.
 
 Pipeline failures include a stable error code, the failed stage, the operation,
 related artifact or entity references, a cause chain, and a direct path to the
-stage debug bundle.
+stage debug bundle. `provenance.json` records both the Git revision and a hash
+of the actual workflow source files, so a dirty runtime remains reproducible.
 
 ## Source map
 
@@ -145,7 +169,11 @@ src/
 This is a trusted local application, not a public upload service. The Docker
 container runs as a non-root user, drops Linux capabilities, publishes only on
 host loopback, and mounts only `.runtime`. Agent attempts receive isolated
-working directories, but the agent process is not an OS security sandbox: it
-still has outbound network access, configured credentials, and the container
-user's filesystem permissions. A hosted deployment needs separate
-authentication, quotas, durable storage, and stronger per-job sandboxing.
+working directories. Model generation and repair additionally run without a
+shell or built-in filesystem tools: a fail-closed extension can read only the
+candidate workspace and can write only `model.lib` and `model-card.md`, keeping
+server validation fixtures and held-out curve samples outside that tool
+boundary. The overall agent process is still not an OS or network sandbox: it
+has outbound provider access, configured credentials, and the container user's
+process permissions. A hosted deployment needs separate authentication, quotas,
+durable storage, and stronger per-job process/network sandboxing.

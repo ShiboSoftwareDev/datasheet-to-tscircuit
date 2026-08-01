@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
@@ -13,6 +13,7 @@ import {
 import { JobStore } from "@/server/job-store"
 
 const temporary_directories: string[] = []
+setDefaultTimeout(20_000)
 const png_bytes = Uint8Array.from(
   atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
   (character) => character.charCodeAt(0),
@@ -87,15 +88,51 @@ const application_plan = {
   pcb_implementation: "schematic_only",
   title: "Input bypass",
   description: "The documented application bypasses INPUT to RETURN with 100 nF.",
-  source_references: [{ page: 3, figure: "Typical application" }],
+  source_references: [
+    {
+      page: 3,
+      figure: "Typical application",
+      method: "pdf_visual",
+      confidence: "high",
+      image: "visual-reference/typical-application.png",
+      render_dpi: 200,
+    },
+  ],
   components: [
     { reference: "U1", kind: "integrated_circuit", value: "GENERIC-2" },
     { reference: "C1", kind: "capacitor", value: "100nF" },
   ],
   connections: [
-    { net: "INPUT", pins: ["U1.INPUT", "C1.pin1"] },
-    { net: "RETURN", pins: ["U1.RETURN", "C1.pin2"] },
+    { net: "INPUT", pins: ["U1.INPUT", "C1.pin1", "INPUT"] },
+    { net: "RETURN", pins: ["U1.RETURN", "C1.pin2", "RETURN"] },
   ],
+}
+
+const application_connectivity_review = {
+  version: 1,
+  availability: "documented",
+  source: {
+    page: 3,
+    figure: "Typical application",
+    method: "pdf_visual",
+    confidence: "high",
+    image: "visual-reference/typical-application.png",
+    render_dpi: 200,
+  },
+  components: application_plan.components.map(({ reference, kind, value }) => ({
+    reference,
+    kind,
+    value,
+  })),
+  connections: application_plan.connections.map(({ pins }) => ({ pins })),
+}
+
+const footprint_geometry_review = {
+  version: 1,
+  source: visual_source,
+  view: "pcb_top",
+  units: "mm",
+  pads: component_evidence.footprint.pads.map(({ sources: _sources, ...pad }) => pad),
 }
 
 const component_source = `export default function Generic2() {
@@ -111,7 +148,9 @@ export default function InputBypass() {
       <Generic2 name="U1" />
       <capacitor name="C1" capacitance="100nF" />
       <trace from=".U1 > .INPUT" to=".C1 > .pin1" />
+      <trace from=".U1 > .INPUT" to="net.INPUT" />
       <trace from=".U1 > .RETURN" to=".C1 > .pin2" />
+      <trace from=".U1 > .RETURN" to="net.RETURN" />
     </>
   )
 }
@@ -234,14 +273,26 @@ const application_circuit_json = [
     port_hints: ["pin2"],
   },
   {
+    type: "source_net",
+    source_net_id: "source_net_input",
+    name: "INPUT",
+  },
+  {
+    type: "source_net",
+    source_net_id: "source_net_return",
+    name: "RETURN",
+  },
+  {
     type: "source_trace",
     source_trace_id: "source_trace_input",
     connected_source_port_ids: ["source_port_application_u1_input", "source_port_c1_1"],
+    connected_source_net_ids: ["source_net_input"],
   },
   {
     type: "source_trace",
     source_trace_id: "source_trace_return",
     connected_source_port_ids: ["source_port_application_u1_return", "source_port_c1_2"],
+    connected_source_net_ids: ["source_net_return"],
   },
   {
     type: "schematic_component",
@@ -274,6 +325,16 @@ function deterministicAgent(calls: string[]): AgentClient {
           Bun.write(join(reference_dir, "land-pattern.png"), png_bytes),
           Bun.write(join(reference_dir, "typical-application.png"), png_bytes),
         ])
+      } else if (input.phase_label === "Independent footprint geometry verification") {
+        await Bun.write(
+          join(input.workspace, "footprint-geometry-review.json"),
+          `${JSON.stringify(footprint_geometry_review, null, 2)}\n`,
+        )
+      } else if (input.phase_label === "Independent application connectivity verification") {
+        await Bun.write(
+          join(input.workspace, "application-connectivity-review.json"),
+          `${JSON.stringify(application_connectivity_review, null, 2)}\n`,
+        )
       } else if (input.phase_label === "Component source generation") {
         await Bun.write(join(input.workspace, "index.circuit.tsx"), component_source)
       } else if (input.phase_label === "Application source generation") {
@@ -292,6 +353,12 @@ class FakeTscircuitRunner implements ProcessRunner {
 
   async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
     this.calls.push(request)
+    if (request.command[0] === "pdftoppm") {
+      const output_prefix = request.command.at(-1)
+      if (!output_prefix) throw new Error("Fixture pdftoppm command omitted its output prefix")
+      await Bun.write(`${output_prefix}.png`, png_bytes)
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
     if (request.command[1] === "check") {
       return { exit_code: 0, duration_ms: 1, output_tail: "" }
     }
@@ -403,6 +470,8 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
   )
   expect(agent_calls).toEqual([
     "Datasheet evidence extraction",
+    "Independent footprint geometry verification",
+    "Independent application connectivity verification",
     "Component source generation",
     "Application source generation",
   ])
@@ -429,9 +498,27 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
   expect(await readFile(join(job_dir, "component.circuit.tsx"), "utf8")).toBe(component_source)
   expect(await readFile(join(job_dir, "index.circuit.tsx"), "utf8")).toBe(component_source)
   expect(await readFile(join(job_dir, "typical-application.circuit.tsx"), "utf8")).toBe(application_source)
-  expect(await Bun.file(join(job_dir, "visual-reference", "land-pattern.png")).exists()).toBe(true)
-  expect(await Bun.file(join(job_dir, "visual-reference", "typical-application.png")).exists()).toBe(true)
   expect(await Bun.file(join(job_dir, "evidence-commit.json")).exists()).toBe(true)
+  const evidence_pointer = (await Bun.file(join(job_dir, "evidence-commit.json")).json()) as {
+    version: number
+    evidence_directory: string
+  }
+  expect(evidence_pointer.version).toBe(3)
+  const evidence_dir = join(job_dir, evidence_pointer.evidence_directory)
+  expect(await Bun.file(join(evidence_dir, "visual-reference", "land-pattern.png")).exists()).toBe(true)
+  expect(await Bun.file(join(evidence_dir, "visual-reference", "typical-application.png")).exists()).toBe(
+    true,
+  )
+  expect(await Bun.file(join(evidence_dir, "footprint-geometry-verification.json")).json()).toMatchObject({
+    version: 1,
+    status: "verified",
+  })
+  expect(
+    await Bun.file(join(evidence_dir, "application-connectivity-verification.json")).json(),
+  ).toMatchObject({
+    version: 1,
+    status: "verified",
+  })
   expect(await Bun.file(join(job_dir, "dist", "index", "pcb.png")).exists()).toBe(true)
   expect(await Bun.file(join(job_dir, "dist", "index", "schematic.png")).exists()).toBe(true)
   expect(await Bun.file(join(job_dir, "dist", "typical-application", "schematic.png")).exists()).toBe(true)
@@ -449,6 +536,88 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
         command.includes("--disable-pcb"),
     ),
   ).toBe(true)
+})
+
+test("evidence correction repairs a retained agent-71-shaped candidate without re-extraction", async () => {
+  const root = await mkdtemp(join(tmpdir(), "datasheet-component-pipeline-retained-repair-"))
+  temporary_directories.push(root)
+  const job_dir = join(root, "job")
+  await mkdir(job_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.4\n% deterministic fixture\n"),
+    Bun.write(join(job_dir, "package.json"), '{"private":true}\n'),
+    Bun.write(join(job_dir, "tsconfig.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.ts"), "export default {}\n"),
+  ])
+  const job_store = new JobStore()
+  job_store.createJob({
+    job_id: "component_retained_repair",
+    job_dir,
+    file_name: "generic-2.pdf",
+  })
+  const agent_calls: string[] = []
+  const base_agent = deterministicAgent(agent_calls)
+  let extraction_attempt = 0
+  let repaired_retained_candidate = false
+  const repair_agent: AgentClient = {
+    async run(input) {
+      if (input.phase_label !== "Datasheet evidence extraction") return base_agent.run(input)
+      extraction_attempt += 1
+      if (extraction_attempt === 1) {
+        const result = await base_agent.run(input)
+        const variant = JSON.parse(await Bun.file(join(input.workspace, "component-evidence.json")).text())
+        Reflect.deleteProperty(variant, "version")
+        for (const pin of variant.pinout.pins) pin.number = Number(pin.number)
+        for (const pad of variant.footprint.pads) {
+          pad.pin = Number(pad.pin)
+          pad.kind = "smd"
+        }
+        variant.footprint.drawing_orientation.value = "PCB-top land-pattern view; pin 1 is upper-left."
+        await Bun.write(
+          join(input.workspace, "component-evidence.json"),
+          `${JSON.stringify(variant, null, 2)}\n`,
+        )
+        return result
+      }
+
+      agent_calls.push(input.phase_label)
+      const retained = await Bun.file(join(input.workspace, "component-evidence.json")).json()
+      repaired_retained_candidate = retained.version === undefined && retained.pinout.pins[0].number === 1
+      retained.version = 1
+      retained.footprint.drawing_orientation.value = "pcb_top"
+      await Bun.write(
+        join(input.workspace, "component-evidence.json"),
+        `${JSON.stringify(retained, null, 2)}\n`,
+      )
+      await input.on_output("stdout", "fixture repaired the retained contract fields\n")
+      return { attempts: 1, duration_ms: 1, output_tail: "" }
+    },
+  }
+
+  await runJob(
+    { job_id: "component_retained_repair" },
+    {
+      job_store,
+      agent_bin: "unused-agent",
+      tsci_bin: "fixture-tsci",
+      agent_client: repair_agent,
+      process_runner: new FakeTscircuitRunner(),
+    },
+  )
+
+  expect(repaired_retained_candidate).toBe(true)
+  expect(job_store.getJob("component_retained_repair")).toMatchObject({
+    display_status: "complete",
+    validation: { evidence: "passed" },
+  })
+  expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(2)
+  expect(agent_calls.filter((phase) => phase === "Independent footprint geometry verification")).toHaveLength(
+    1,
+  )
+  expect(
+    agent_calls.filter((phase) => phase === "Independent application connectivity verification"),
+  ).toHaveLength(1)
 })
 
 test("component workflow preserves missing-tsci failures and never invokes source repair", async () => {
@@ -472,6 +641,12 @@ test("component workflow preserves missing-tsci failures and never invokes sourc
   const agent_calls: string[] = []
   const process_runner: ProcessRunner = {
     async run(request) {
+      if (request.command[0] === "pdftoppm") {
+        const output_prefix = request.command.at(-1)
+        if (!output_prefix) throw new Error("Fixture pdftoppm command omitted its output prefix")
+        await Bun.write(`${output_prefix}.png`, png_bytes)
+        return { exit_code: 0, duration_ms: 1, output_tail: "" }
+      }
       throw new ProcessError({
         code: "process_spawn_failed",
         command_label: request.command_label,
@@ -504,10 +679,15 @@ test("component workflow preserves missing-tsci failures and never invokes sourc
     error: { code: "process_spawn_failed", operation: "run_external_process" },
   })
   expect(job?.pipeline?.stage_results.repair_component.status).toBe("skipped")
-  expect(agent_calls).toEqual(["Datasheet evidence extraction", "Component source generation"])
+  expect(agent_calls).toEqual([
+    "Datasheet evidence extraction",
+    "Independent footprint geometry verification",
+    "Independent application connectivity verification",
+    "Component source generation",
+  ])
 })
 
-test("evidence extraction validates every PNG before publishing any canonical evidence", async () => {
+test("evidence extraction rejects an invalid server-rendered PNG before publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "datasheet-component-pipeline-invalid-png-"))
   temporary_directories.push(root)
   const job_dir = join(root, "job")
@@ -526,14 +706,16 @@ test("evidence extraction validates every PNG before publishing any canonical ev
     file_name: "generic-2.pdf",
   })
   const agent_calls: string[] = []
-  const valid_agent = deterministicAgent(agent_calls)
-  const invalid_png_agent: AgentClient = {
-    async run(input) {
-      const result = await valid_agent.run(input)
-      if (input.phase_label === "Datasheet evidence extraction") {
-        await Bun.write(join(input.workspace, "visual-reference", "typical-application.png"), "not a png")
+  const valid_runner = new FakeTscircuitRunner()
+  const invalid_png_renderer: ProcessRunner = {
+    async run(request) {
+      if (request.command[0] === "pdftoppm") {
+        const output_prefix = request.command.at(-1)
+        if (!output_prefix) throw new Error("Fixture pdftoppm command omitted its output prefix")
+        await Bun.write(`${output_prefix}.png`, "not a png")
+        return { exit_code: 0, duration_ms: 1, output_tail: "" }
       }
-      return result
+      return valid_runner.run(request)
     },
   }
 
@@ -543,8 +725,8 @@ test("evidence extraction validates every PNG before publishing any canonical ev
       job_store,
       agent_bin: "unused-agent",
       tsci_bin: "unused-tsci",
-      agent_client: invalid_png_agent,
-      process_runner: new FakeTscircuitRunner(),
+      agent_client: deterministicAgent(agent_calls),
+      process_runner: invalid_png_renderer,
     },
   )
 
@@ -556,6 +738,7 @@ test("evidence extraction validates every PNG before publishing any canonical ev
     },
   })
   expect(job_store.getJob("component_invalid_reference_png")?.evidence_available).toBeFalsy()
+  expect(job_store.getJob("component_invalid_reference_png")?.validation?.evidence).toBe("failed")
   expect(agent_calls).toEqual(Array(3).fill("Datasheet evidence extraction"))
   expect(await Bun.file(join(job_dir, "component-evidence.json")).exists()).toBe(false)
   expect(await Bun.file(join(job_dir, "visual-reference")).exists()).toBe(false)
