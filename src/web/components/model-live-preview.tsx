@@ -15,10 +15,17 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import type {
   ModelCircuitPreview as ModelCircuitPreviewData,
   ModelCurvePoint,
+  ModelPreviewArtifactIdentity,
   ModelPreviewOption,
   ModelReferencePreview,
   ModelSelectedPreview,
 } from "@/shared/job-types"
+import { hasCompletedTransientSimulation } from "@/shared/model-preview-capabilities"
+import {
+  MODEL_PREVIEW_GENERATION_PATTERN,
+  MODEL_PREVIEW_REVISION_PATTERN,
+  parseModelSelectedPreview,
+} from "@/shared/model-selected-preview"
 import { getModelReferenceImageUrl, getModelSelectedPreview } from "../api"
 
 const CircuitJsonPreview = lazy(async () => {
@@ -28,6 +35,36 @@ const CircuitJsonPreview = lazy(async () => {
 
 export const MODEL_SCHEMATIC_CODE_TABS: TabId[] = ["code", "schematic"]
 export const MODEL_ANALOG_ONLY_TABS: TabId[] = ["analog_simulation"]
+
+type ModelReferenceKind = "curve" | "target" | "bounds"
+
+/** Supports old persisted previews without letting scalar runs masquerade as curves. */
+export function getModelReferenceKind(preview?: ModelReferencePreview): ModelReferenceKind | undefined {
+  if (!preview) return undefined
+  if (preview.reference_kind) return preview.reference_kind
+  if (preview.reference_bounds) return "bounds"
+  // Legacy target previews repeated one scalar value across result timestamps,
+  // so a time-shaped point array is not proof that it came from a datasheet curve.
+  return "target"
+}
+
+/** A schematic snapshot alone is not an analog simulation. */
+export function hasRunnableAnalogSimulation(preview?: ModelCircuitPreviewData): boolean {
+  if (!preview?.circuit_json) return false
+  if (preview.analog_simulation_status !== "available") return false
+  if (preview.analysis_type !== "transient") return false
+  return hasCompletedTransientSimulation(preview.circuit_json)
+}
+
+/** Analog is a capability of one validated circuit/reference/result bundle, never a loose circuit half. */
+export function hasRunnableAnalogPreviewBundle(value: unknown): boolean {
+  try {
+    const preview = parseModelSelectedPreview(value)
+    return Boolean(preview.reference_preview && hasRunnableAnalogSimulation(preview.circuit_preview))
+  } catch {
+    return false
+  }
+}
 
 function ModelCode({ preview }: { preview: ModelCircuitPreviewData }) {
   const [is_copied, setIsCopied] = useState(false)
@@ -79,7 +116,7 @@ function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) 
           (preview?.build_status === "building"
             ? "tsci is building this benchmark. The viewer will use the first persisted Circuit JSON output."
             : preview
-              ? "No Circuit JSON snapshot is stored for this benchmark, so the source is shown here. Validation graphs come from persisted ngspice results."
+              ? "No Circuit JSON snapshot is stored for this benchmark, so the source is shown here. The analog viewer appears only after tscircuit stores a completed transient waveform."
               : "This appears as soon as the agent writes its first benchmark circuit.")}
       </p>
       {preview?.code && (
@@ -102,7 +139,13 @@ export function getRunframeCircuitJson(input: {
     : live_circuit_json
 }
 
-function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData }) {
+function ModelCircuitPreview({
+  preview,
+  show_analog_simulation,
+}: {
+  preview?: ModelCircuitPreviewData
+  show_analog_simulation: boolean
+}) {
   const [active_tab, setActiveTab] = useState<TabId>("schematic")
   // Runframe leaves Code whenever the Circuit JSON prop changes. Keep the snapshot
   // that was visible on entry, then reveal the newest live data on a visual tab.
@@ -118,7 +161,6 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
     setActiveTab(tab)
   }
   const project_name = preview?.source_file.replace(/\.circuit\.tsx$/i, "")
-
   return (
     <section className="model-preview-pane model-circuit-preview" aria-label="Live model circuit preview">
       {preview?.circuit_json && preview.error_message && (
@@ -149,22 +191,24 @@ function ModelCircuitPreview({ preview }: { preview?: ModelCircuitPreviewData })
                 projectName={project_name}
               />
             </div>
-            <div className="model-runframe-shell model-analog-only-runframe">
-              <CircuitJsonPreview
-                circuitJson={preview.circuit_json ?? runframe_circuit_json}
-                code={preview.code}
-                availableTabs={MODEL_ANALOG_ONLY_TABS}
-                defaultActiveTab="analog_simulation"
-                defaultTab="analog_simulation"
-                showJsonTab={false}
-                hideSchematicInAnalogSimulation
-                showRenderLogTab={false}
-                showFileMenu={false}
-                allowSelectingVersion={false}
-                isWebEmbedded
-                projectName={project_name}
-              />
-            </div>
+            {show_analog_simulation && (
+              <div className="model-runframe-shell model-analog-only-runframe">
+                <CircuitJsonPreview
+                  circuitJson={preview.circuit_json ?? runframe_circuit_json}
+                  code={preview.code}
+                  availableTabs={MODEL_ANALOG_ONLY_TABS}
+                  defaultActiveTab="analog_simulation"
+                  defaultTab="analog_simulation"
+                  showJsonTab={false}
+                  hideSchematicInAnalogSimulation
+                  showRenderLogTab={false}
+                  showFileMenu={false}
+                  allowSelectingVersion={false}
+                  isWebEmbedded
+                  projectName={project_name}
+                />
+              </div>
+            )}
           </div>
         </Suspense>
       )}
@@ -328,6 +372,73 @@ export function getComparisonScaleDisparity(
   return { reference_min, reference_max, result_min, result_max }
 }
 
+function SpecificationCheck({
+  preview,
+  reference_kind,
+}: {
+  preview: ModelReferencePreview
+  reference_kind: Exclude<ModelReferenceKind, "curve">
+}) {
+  const unit = preview.y_axis_unit?.trim()
+  const formatValue = (value: number) => `${formatAxisValue(value)}${unit ? ` ${unit}` : ""}`
+  const target = preview.reference_points.find(({ y }) => Number.isFinite(y))?.y
+  const result_values = (preview.result_points ?? [])
+    .map(({ y }) => y)
+    .filter((value) => Number.isFinite(value))
+  const result_min = result_values.length > 0 ? Math.min(...result_values) : undefined
+  const result_max = result_values.length > 0 ? Math.max(...result_values) : undefined
+
+  return (
+    <div
+      className="model-specification-check"
+      role="group"
+      aria-label={`${preview.title} specification check`}
+    >
+      <dl>
+        {reference_kind === "target" && target !== undefined && (
+          <div>
+            <dt>Datasheet target</dt>
+            <dd>{formatValue(target)}</dd>
+          </div>
+        )}
+        {reference_kind === "bounds" && preview.reference_bounds?.min !== undefined && (
+          <div>
+            <dt>Minimum</dt>
+            <dd>{formatValue(preview.reference_bounds.min)}</dd>
+          </div>
+        )}
+        {reference_kind === "bounds" && preview.reference_bounds?.max !== undefined && (
+          <div>
+            <dt>Maximum</dt>
+            <dd>{formatValue(preview.reference_bounds.max)}</dd>
+          </div>
+        )}
+        {result_min !== undefined && result_max !== undefined && (
+          <div>
+            <dt>{result_min === result_max ? "Observed result" : "Observed range"}</dt>
+            <dd>
+              {result_min === result_max
+                ? formatValue(result_min)
+                : `${formatValue(result_min)} – ${formatValue(result_max)}`}
+            </dd>
+          </div>
+        )}
+      </dl>
+      {result_values.length === 0 && (
+        <p>
+          {preview.result_status === "failed"
+            ? "The server specification check failed before producing a finite result."
+            : preview.result_status === "cancelled"
+              ? "The server specification check was cancelled."
+              : "The server specification check has no retained result."}
+        </p>
+      )}
+      {preview.result_status === "failed" && <p>Server validation · failed</p>}
+      {preview.result_status === "cancelled" && <p>Server validation · cancelled</p>}
+    </div>
+  )
+}
+
 export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview }) {
   if (!preview) {
     return (
@@ -338,6 +449,8 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
       </div>
     )
   }
+
+  const reference_kind = getModelReferenceKind(preview) ?? "target"
 
   if (preview.series && preview.series.length > 1) {
     return (
@@ -359,6 +472,7 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
                 y_axis_label: formatQuantityLabel(series.quantity),
                 y_axis_unit: series.unit,
                 y_scale: series.y_scale,
+                reference_kind: series.reference_kind,
                 reference_points: series.reference_points,
                 reference_bounds: series.reference_bounds,
                 result_points: series.result_points,
@@ -369,6 +483,10 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
         ))}
       </div>
     )
+  }
+
+  if (reference_kind !== "curve") {
+    return <SpecificationCheck preview={preview} reference_kind={reference_kind} />
   }
 
   const bound_points: ModelCurvePoint[] = [
@@ -440,12 +558,18 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
   const comparison_is_unverified = preview.result_status === "unverified"
   const comparison_is_failed = preview.result_status === "failed"
   const comparison_is_cancelled = preview.result_status === "cancelled"
-  const scale_disparity = getComparisonScaleDisparity(preview.reference_points, preview.result_points)
+  const scale_disparity =
+    reference_kind === "curve"
+      ? getComparisonScaleDisparity(preview.reference_points, preview.result_points)
+      : undefined
   const primary_series = preview.series?.find((series) => series.role === "response") ?? preview.series?.[0]
   const resolved_y_axis_label =
     preview.y_axis_label ?? (primary_series ? formatQuantityLabel(primary_series.quantity) : undefined)
   const resolved_y_axis_unit = preview.y_axis_unit ?? primary_series?.unit
-  const x_axis_title = formatAxisTitle(preview.x_axis_label ?? "Time", preview.x_axis_unit ?? "ms", "Time")
+  const x_axis_title =
+    reference_kind === "curve"
+      ? formatAxisTitle(preview.x_axis_label ?? "Time", preview.x_axis_unit ?? "ms", "Time")
+      : formatAxisTitle(preview.x_axis_label, preview.x_axis_unit, "Operating point")
   const y_axis_title = formatAxisTitle(resolved_y_axis_label, resolved_y_axis_unit, "Value")
   const y_axis_unit = resolved_y_axis_unit?.trim() ? ` ${resolved_y_axis_unit.trim()}` : ""
   const result_label = comparison_is_deprecated
@@ -460,7 +584,9 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
             : "Simulation run · unverified"
           : preview.result_status === "partial"
             ? "Server validation · in progress"
-            : "Server-verified model"
+            : preview.result_origin === "tscircuit_viewer"
+              ? "tscircuit-verified waveform"
+              : "Server-verified model"
 
   return (
     <div className="model-reference-plot">
@@ -482,7 +608,7 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
         <svg
           viewBox="0 0 650 366"
           role="img"
-          aria-label={`${preview.title} comparison graph; ${x_axis_title}; ${y_axis_title}`}
+          aria-label={`${preview.title} ${reference_kind === "curve" ? "comparison graph" : "specification check plot"}; ${x_axis_title}; ${y_axis_title}`}
         >
           <g className="reference-grid">
             {y_axis.ticks.map((tick) => {
@@ -581,7 +707,7 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
         </svg>
         <div className="reference-legend">
           <span className="reference-series">
-            <i /> {preview.reference_bounds ? "Datasheet bounds" : "Datasheet reference"}
+            <i /> Datasheet reference
           </span>
           {preview.result_points && (
             <span
@@ -597,7 +723,9 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
                 ? "No waveform: server validation failed"
                 : comparison_is_cancelled
                   ? "No waveform: server validation cancelled"
-                  : "Model result pending verification"}
+                  : reference_kind === "curve"
+                    ? "Model waveform pending verification"
+                    : "Model check pending verification"}
             </span>
           )}
         </div>
@@ -609,10 +737,12 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
 function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
   if (!preview) return null
 
+  const reference_kind = getModelReferenceKind(preview) ?? "target"
+  const is_curve = reference_kind === "curve"
   const comparison_is_deprecated = preview.result_status === "deprecated" || preview.is_stale
   const has_summary =
-    preview.normalized_rmse !== undefined ||
-    preview.normalized_max_error !== undefined ||
+    (is_curve && preview.normalized_rmse !== undefined) ||
+    (is_curve && preview.normalized_max_error !== undefined) ||
     comparison_is_deprecated ||
     preview.result_status === "failed" ||
     preview.result_status === "cancelled" ||
@@ -621,13 +751,13 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
 
   return (
     <section className="model-comparison-summary" aria-label="Comparison statistics">
-      {preview.normalized_rmse !== undefined && (
+      {is_curve && preview.normalized_rmse !== undefined && (
         <span className="model-comparison-metric">
           <span>NRMSE</span>
           <strong>{(preview.normalized_rmse * 100).toFixed(1)}%</strong>
         </span>
       )}
-      {preview.normalized_max_error !== undefined && (
+      {is_curve && preview.normalized_max_error !== undefined && (
         <span className="model-comparison-metric">
           <span>Peak error</span>
           <strong>{(preview.normalized_max_error * 100).toFixed(1)}%</strong>
@@ -655,12 +785,12 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
       ) : preview.matches_reference === false ? (
         <span className="model-comparison-state is-mismatch" role="status">
           <AlertTriangle size={12} />
-          Outside tolerance
+          {is_curve ? "Outside curve tolerance" : "Outside datasheet limits"}
         </span>
       ) : preview.matches_reference === true ? (
         <span className="model-comparison-state is-match" role="status">
           <Check size={12} />
-          Matches reference
+          {is_curve ? "Matches reference curve" : "Within datasheet limits"}
         </span>
       ) : null}
     </section>
@@ -671,22 +801,23 @@ function ModelDatasheetReferencePane({
   job_id,
   benchmark_id,
   preview,
+  artifact_identity,
 }: {
   job_id: string
   benchmark_id: string
   preview?: ModelReferencePreview
+  artifact_identity?: ModelPreviewArtifactIdentity
 }) {
   const [image_failed, setImageFailed] = useState(false)
+  const reference_kind = getModelReferenceKind(preview)
+  const is_curve = reference_kind === "curve"
   const resolved_benchmark_id = preview?.benchmark_id ?? benchmark_id
-  const base_image_url =
-    resolved_benchmark_id === "live" ? undefined : getModelReferenceImageUrl(job_id, resolved_benchmark_id)
   const image_url =
-    base_image_url && preview?.updated_at
-      ? `${base_image_url}&generation=${encodeURIComponent(preview.updated_at)}`
-      : base_image_url
+    resolved_benchmark_id === "live"
+      ? undefined
+      : getModelReferenceImageUrl(job_id, resolved_benchmark_id, artifact_identity)
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: retry the image when its URL or preview revision changes
-  useEffect(() => setImageFailed(false), [image_url, preview?.updated_at])
+  useEffect(() => setImageFailed(false), [image_url])
 
   return (
     <section className="model-preview-pane model-reference-card" aria-label="SPICE benchmark reference">
@@ -701,14 +832,17 @@ function ModelDatasheetReferencePane({
           <div className="model-reference-empty">
             <ImageOff size={25} />
             <strong>Datasheet reference unavailable</strong>
-            <p>No retained datasheet graph image is available for this benchmark.</p>
+            <p>
+              No retained datasheet {is_curve ? "graph crop" : "specification evidence"} is available for this
+              benchmark.
+            </p>
           </div>
         ) : (
           <img
             className="model-datasheet-reference-image"
-            key={`${image_url}:${preview?.updated_at ?? "pending"}`}
+            key={image_url}
             src={image_url}
-            alt={`Datasheet graph reference for ${preview?.title ?? resolved_benchmark_id}`}
+            alt={`Datasheet ${is_curve ? "graph" : "specification"} reference for ${preview?.title ?? resolved_benchmark_id}`}
             draggable={false}
             onError={() => setImageFailed(true)}
           />
@@ -719,11 +853,15 @@ function ModelDatasheetReferencePane({
 }
 
 function ModelReferenceGraphsPane({ preview }: { preview?: ModelReferencePreview }) {
+  const is_curve = getModelReferenceKind(preview) === "curve"
   return (
-    <section className="model-reference-graphs-card" aria-label="Reference graph comparisons">
+    <section
+      className="model-reference-graphs-card"
+      aria-label={is_curve ? "Reference graph comparisons" : "Datasheet specification checks"}
+    >
       <header className="model-reference-graphs-toolbar">
         <ChartLine size={14} />
-        <strong>Reference graphs</strong>
+        <strong>{is_curve ? "Reference graph comparison" : "Specification checks"}</strong>
       </header>
       <div className="model-reference-graphs-content">
         <ReferenceGraph preview={preview} />
@@ -732,18 +870,93 @@ function ModelReferenceGraphsPane({ preview }: { preview?: ModelReferencePreview
   )
 }
 
+type ModelPreviewLoadResult = {
+  benchmark_id: string
+  preview?: ModelSelectedPreview
+  error?: string
+}
+
+interface ModelPreviewCacheState {
+  scope_key: string
+  previews: Record<string, ModelSelectedPreview>
+  errors: Record<string, string>
+}
+
+export function getModelPreviewBundleScopeKey(input: {
+  job_id: string
+  preview_generation?: string
+  model_revision?: string
+  preview_option_key: string
+}): string {
+  return JSON.stringify([
+    input.job_id,
+    input.preview_generation ?? null,
+    input.model_revision ?? null,
+    input.preview_option_key,
+  ])
+}
+
+/** A failed refresh intentionally evicts the previous payload for that case. */
+export function collectModelPreviewLoadResults(
+  results: ModelPreviewLoadResult[],
+): Pick<ModelPreviewCacheState, "previews" | "errors"> {
+  const previews: Record<string, ModelSelectedPreview> = {}
+  const errors: Record<string, string> = {}
+  for (const result of results) {
+    if (result.preview) previews[result.benchmark_id] = result.preview
+    else if (result.error) errors[result.benchmark_id] = result.error
+  }
+  return { previews, errors }
+}
+
+function parseLiveModelPreview(input: {
+  circuit_preview?: ModelCircuitPreviewData
+  reference_preview?: ModelReferencePreview
+  preview_generation?: string
+  model_revision?: string
+}): { preview?: ModelSelectedPreview; error?: string } {
+  if (!input.circuit_preview && !input.reference_preview) return {}
+  const artifact_identity =
+    input.preview_generation &&
+    input.model_revision &&
+    MODEL_PREVIEW_GENERATION_PATTERN.test(input.preview_generation) &&
+    MODEL_PREVIEW_REVISION_PATTERN.test(input.model_revision)
+      ? {
+          preview_generation: input.preview_generation,
+          model_revision: input.model_revision,
+        }
+      : undefined
+  try {
+    return {
+      preview: parseModelSelectedPreview({
+        ...(artifact_identity ? { artifact_identity } : {}),
+        ...(input.circuit_preview ? { circuit_preview: input.circuit_preview } : {}),
+        ...(input.reference_preview ? { reference_preview: input.reference_preview } : {}),
+      }),
+    }
+  } catch (error) {
+    return {
+      error: `Live model preview is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    }
+  }
+}
+
 export function ModelLivePreview({
   job_id,
   is_complete,
   circuit_preview,
   reference_preview,
   preview_options,
+  preview_generation,
+  model_revision,
 }: {
   job_id: string
   is_complete: boolean
   circuit_preview?: ModelCircuitPreviewData
   reference_preview?: ModelReferencePreview
   preview_options: ModelPreviewOption[]
+  preview_generation?: string
+  model_revision?: string
 }) {
   const live_benchmark_id = useMemo(() => {
     if (reference_preview?.benchmark_id) return reference_preview.benchmark_id
@@ -751,14 +964,40 @@ export function ModelLivePreview({
     return source_name?.replace(/\.circuit\.tsx$/i, "")
   }, [circuit_preview?.source_file, reference_preview?.benchmark_id])
   const preview_option_key = preview_options.map((option) => option.benchmark_id).join("\u0000")
-  const [loaded_previews, setLoadedPreviews] = useState<Record<string, ModelSelectedPreview>>({})
-  const [load_errors, setLoadErrors] = useState<Record<string, string>>({})
+  const preview_cache_scope = getModelPreviewBundleScopeKey({
+    job_id,
+    preview_generation,
+    model_revision,
+    preview_option_key,
+  })
+  const [preview_cache, setPreviewCache] = useState<ModelPreviewCacheState>({
+    scope_key: preview_cache_scope,
+    previews: {},
+    errors: {},
+  })
+  const scoped_cache =
+    preview_cache.scope_key === preview_cache_scope
+      ? preview_cache
+      : { scope_key: preview_cache_scope, previews: {}, errors: {} }
+  const live_preview = useMemo(
+    () =>
+      parseLiveModelPreview({
+        circuit_preview,
+        reference_preview,
+        preview_generation,
+        model_revision,
+      }),
+    [circuit_preview, model_revision, preview_generation, reference_preview],
+  )
 
   useEffect(() => {
     const benchmark_ids = preview_option_key ? preview_option_key.split("\u0000") : []
+    setPreviewCache((current) =>
+      current.scope_key === preview_cache_scope
+        ? current
+        : { scope_key: preview_cache_scope, previews: {}, errors: {} },
+    )
     if (benchmark_ids.length === 0) {
-      setLoadedPreviews({})
-      setLoadErrors({})
       return
     }
     let cancelled = false
@@ -777,21 +1016,10 @@ export function ModelLivePreview({
         }),
       )
       if (cancelled) return
-      setLoadedPreviews((current) => {
-        const next: Record<string, ModelSelectedPreview> = {}
-        for (const result of results) {
-          const preview = result.preview
-          const current_preview = current[result.benchmark_id]
-          if (preview) next[result.benchmark_id] = preview
-          else if (current_preview) next[result.benchmark_id] = current_preview
-        }
-        return next
-      })
-      const next_errors: Record<string, string> = {}
-      for (const result of results) {
-        if (result.error) next_errors[result.benchmark_id] = result.error
-      }
-      setLoadErrors(next_errors)
+      const next = collectModelPreviewLoadResults(results)
+      setPreviewCache((current) =>
+        current.scope_key === preview_cache_scope ? { scope_key: preview_cache_scope, ...next } : current,
+      )
     }
     void load()
     if (!is_complete) interval = window.setInterval(() => void load(), 2_000)
@@ -799,7 +1027,7 @@ export function ModelLivePreview({
       cancelled = true
       if (interval !== undefined) window.clearInterval(interval)
     }
-  }, [is_complete, job_id, preview_option_key])
+  }, [is_complete, preview_cache_scope, preview_option_key])
 
   const preview_entries: Array<{ benchmark_id: string; title: string }> =
     preview_options.length > 0
@@ -814,17 +1042,20 @@ export function ModelLivePreview({
   return (
     <section className="model-preview-list" aria-label="SPICE benchmark comparisons">
       {preview_entries.map((entry) => {
-        const loaded = loaded_previews[entry.benchmark_id]
+        const loaded = scoped_cache.previews[entry.benchmark_id]
         const can_use_live_preview = entry.benchmark_id === live_benchmark_id || entry.benchmark_id === "live"
-        const displayed_circuit =
-          loaded?.circuit_preview ?? (can_use_live_preview ? circuit_preview : undefined)
-        const displayed_reference =
-          loaded?.reference_preview ?? (can_use_live_preview ? reference_preview : undefined)
+        const displayed_bundle = loaded ?? (can_use_live_preview ? live_preview.preview : undefined)
+        const displayed_circuit = displayed_bundle?.circuit_preview
+        const displayed_reference = displayed_bundle?.reference_preview
+        const load_error =
+          scoped_cache.errors[entry.benchmark_id] ??
+          (!loaded && can_use_live_preview ? live_preview.error : undefined)
+        const comparison_kind = getModelReferenceKind(displayed_reference)
 
         return (
           <section
             className="workspace-card model-preview-workspace"
-            aria-label={`${entry.title} simulation comparison`}
+            aria-label={`${entry.title} ${comparison_kind === "curve" ? "simulation comparison" : "specification validation"}`}
             key={entry.benchmark_id}
           >
             <header className="card-toolbar model-preview-toolbar">
@@ -834,20 +1065,22 @@ export function ModelLivePreview({
               </div>
               <ComparisonSummary preview={displayed_reference} />
             </header>
-            {load_errors[entry.benchmark_id] && !loaded && (
+            {load_error && !loaded && (
               <p className="model-preview-load-error" role="alert">
-                {load_errors[entry.benchmark_id]}
+                {load_error}
               </p>
             )}
             <div className="model-preview-grid">
               <ModelCircuitPreview
-                key={`${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
+                key={`${preview_cache_scope}:${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
                 preview={displayed_circuit}
+                show_analog_simulation={hasRunnableAnalogPreviewBundle(displayed_bundle)}
               />
               <ModelDatasheetReferencePane
                 job_id={job_id}
                 benchmark_id={entry.benchmark_id}
                 preview={displayed_reference}
+                artifact_identity={displayed_bundle?.artifact_identity}
               />
               <ModelReferenceGraphsPane preview={displayed_reference} />
             </div>

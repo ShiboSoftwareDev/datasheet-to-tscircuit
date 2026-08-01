@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { parseModelContract } from "../../modeling"
+import { parseFreshModelContract } from "../../modeling"
 import { generateModelCandidate } from "../model-candidate"
 import { appendModelLog, modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
@@ -15,7 +15,7 @@ export const generateModelStage = defineModelStage({
       message: "Generating a bounded self-contained SPICE subcircuit",
     })
     const { contract_path, plan_path, evidence_dir } = dependency_outputs.design_validation
-    const contract = parseModelContract(await readJson(contract_path))
+    const contract = parseFreshModelContract(await readJson(contract_path))
     const strategy = services.strategy_registry.require(
       contract.characterization.strategy,
       contract.characterization.family,

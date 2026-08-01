@@ -9,8 +9,8 @@ import {
 } from "@/server/model-workflow/stage-helpers"
 import {
   createModelManifest,
-  loadStoredModelPreview,
   type GeneratedModel,
+  loadStoredModelPreview,
   type ModelContract,
 } from "@/server/modeling"
 import {
@@ -240,6 +240,38 @@ test("a failed candidate bundle is atomically projected into the live run withou
   })
   await mkdir(join(immutable_artifact_dir, "output"), { recursive: true })
   await Bun.write(join(immutable_artifact_dir, "output", "result.raw"), "large private simulator trace")
+  const stale_projection = structuredClone(projection)
+  stale_projection.validation.model_revision = "0".repeat(16)
+  await expect(
+    projectCandidateValidationUi({
+      model_run_store: store,
+      model_run_id: "live_model",
+      model_dir,
+      immutable_artifact_dir,
+      evidence_dir,
+      revision: failed.manifest.revision,
+      projection: stale_projection,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/revision does not match its immutable candidate bundle/)
+  const mixed_projection = structuredClone(projection)
+  const mixed_preview_identity = mixed_projection.selected_previews.output?.artifact_identity
+  if (!mixed_preview_identity) {
+    throw new Error("Expected the output preview to carry an artifact identity")
+  }
+  mixed_preview_identity.preview_generation = "mixed-candidate-generation-01"
+  await expect(
+    projectCandidateValidationUi({
+      model_run_store: store,
+      model_run_id: "live_model",
+      model_dir,
+      immutable_artifact_dir,
+      evidence_dir,
+      revision: failed.manifest.revision,
+      projection: mixed_projection,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/does not match its immutable artifact identity/)
   await projectCandidateValidationUi({
     model_run_store: store,
     model_run_id: "live_model",
@@ -277,6 +309,7 @@ test("a failed candidate bundle is atomically projected into the live run withou
       case_id: "output",
       prefer_current_preview: true,
       current_preview_generation: `fixture-${failed.manifest.revision}`,
+      current_model_revision: failed.manifest.revision,
     }),
   ).toMatchObject({ reference_preview: { result_status: "failed" } })
   expect(await Bun.file(join(model_dir, "model.lib")).exists()).toBe(false)

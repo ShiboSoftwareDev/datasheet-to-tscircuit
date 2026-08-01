@@ -3519,6 +3519,53 @@ a {
   padding: 4px 1px 0;
 }
 
+.model-specification-check {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  padding: 18px;
+}
+
+.model-specification-check dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.model-specification-check dl > div {
+  padding: 12px;
+  border: 1px solid #e3e5e8;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.model-specification-check dt {
+  color: #707985;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.model-specification-check dd {
+  margin: 5px 0 0;
+  color: #28323d;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.model-specification-check p {
+  margin: 0;
+  color: #777f89;
+  font-size: 11px;
+}
+
 .model-reference-series-stack {
   display: grid;
   width: 100%;

@@ -651,6 +651,8 @@ export function ModelPanel({
         circuit_preview={model_run.circuit_preview}
         reference_preview={model_run.reference_preview}
         preview_options={model_run.preview_options}
+        preview_generation={model_run.validation?.preview_generation}
+        model_revision={model_run.validation?.model_revision}
       />
     </div>
   )

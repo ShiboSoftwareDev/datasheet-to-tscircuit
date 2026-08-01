@@ -8,23 +8,165 @@ type ModelSourceInterface = Pick<ModelInterface, "entry_name"> & {
   pins: readonly Pick<ModelInterface["pins"][number], "spice_node">[]
 }
 
-function normalizedLines(source: string): string[] {
+interface LogicalSpiceLine {
+  text: string
+  physical_line: number
+}
+
+const INDEPENDENT_TRANSIENT_SOURCE_PATTERN = /\b(?:pwl|pulse|sin|exp|sffm|am|trrandom|trnoise)\b/i
+const AUTONOMOUS_RANDOM_EXPRESSION_PATTERN = /\b(?:white|unif|aunif|gauss|agauss|rand|random)\s*\(/i
+
+function stripInlineComment(line: string): string {
+  // ngspice treats `$` as the start of an inline comment. Full-line `*`
+  // comments are handled after trimming. Cutting comments before joining `+`
+  // continuations prevents examples in comments from becoming executable
+  // detector input.
+  const comment_index = line.indexOf("$")
+  return comment_index < 0 ? line : line.slice(0, comment_index)
+}
+
+function normalizedLines(source: string): LogicalSpiceLine[] {
   const physical = source.replace(/\r\n?/g, "\n").split("\n")
-  const logical: string[] = []
-  for (const raw_line of physical) {
-    const line = raw_line.trim()
+  const logical: LogicalSpiceLine[] = []
+  for (const [index, raw_line] of physical.entries()) {
+    const line = stripInlineComment(raw_line).trim()
+    if (!line || line.startsWith("*")) continue
     if (line.startsWith("+") && logical.length > 0) {
-      logical[logical.length - 1] = `${logical.at(-1)} ${line.slice(1).trim()}`
+      const previous = logical.at(-1)!
+      previous.text = `${previous.text} ${line.slice(1).trim()}`
     } else {
-      logical.push(line)
+      logical.push({ text: line, physical_line: index + 1 })
     }
   }
   return logical
 }
 
+function expressionContainsBuiltinTime(expression: string): boolean {
+  const masked = [...expression]
+  let index = 0
+  while (index < expression.length) {
+    const identifier = /^[A-Za-z_][A-Za-z0-9_]*/.exec(expression.slice(index))?.[0]
+    if (!identifier) {
+      index += 1
+      continue
+    }
+    const identifier_start = index
+    index += identifier.length
+    let open_parenthesis = index
+    while (/\s/.test(expression[open_parenthesis] ?? "")) open_parenthesis += 1
+    if (!/^[vi]$/i.test(identifier) || expression[open_parenthesis] !== "(") continue
+
+    let depth = 0
+    let close_parenthesis = open_parenthesis
+    for (; close_parenthesis < expression.length; close_parenthesis += 1) {
+      const character = expression[close_parenthesis]
+      if (character === "(") depth += 1
+      if (character === ")") {
+        depth -= 1
+        if (depth === 0) {
+          close_parenthesis += 1
+          break
+        }
+      }
+    }
+    // V(TIME) and I(TIME) name an electrical node or branch; TIME there is not
+    // ngspice's elapsed-time variable. Mask the complete probe call before the
+    // reserved-variable scan. Malformed calls remain for ngspice to reject.
+    if (depth === 0) {
+      for (let mask_index = identifier_start; mask_index < close_parenthesis; mask_index += 1) {
+        masked[mask_index] = " "
+      }
+      index = close_parenthesis
+    }
+  }
+  return /\btime\b/i.test(masked.join(""))
+}
+
+function behavioralExpression(line: string): string | undefined {
+  const subcircuit_header = /^\.subckt\s+\S+\s+(.+)$/i.exec(line)?.[1]
+  if (subcircuit_header) {
+    const tokens = subcircuit_header.split(/\s+/)
+    const parameter_index = tokens.findIndex((token) => /^params?:/i.test(token) || token.includes("="))
+    if (parameter_index >= 0) return tokens.slice(parameter_index).join(" ")
+    return undefined
+  }
+
+  const behavioral_source = /^b\S*\s+\S+\s+\S+\s+(.+)$/i.exec(line)
+  if (behavioral_source) return behavioral_source[1]
+
+  const parameter = /^\.param\b(.+)$/i.exec(line)?.[1]
+  if (parameter) {
+    const assignment_index = parameter.indexOf("=")
+    return assignment_index < 0 ? undefined : parameter.slice(assignment_index + 1)
+  }
+
+  const spice_function = /^\.func\s+\S+?\s*\(([^)]*)\)\s*=?\s*(.+)$/i.exec(line)
+  if (spice_function) {
+    const arguments_list = new Set(
+      spice_function[1]
+        .split(",")
+        .map((argument) => argument.trim().toLowerCase())
+        .filter(Boolean),
+    )
+    // A formal function argument named TIME is ordinary caller-supplied data,
+    // not the simulator clock. The body is still checked when TIME is not a
+    // declared formal parameter.
+    return arguments_list.has("time") ? undefined : spice_function[2]
+  }
+
+  const expression_source = /^[eg]\S*\s+\S+\s+\S+\s+(.+)$/i.exec(line)?.[1]
+  if (expression_source && /\b(?:value|table|laplace)\b/i.test(expression_source)) {
+    return expression_source
+  }
+
+  const behavioral_passive = /^[rcl]\S*\s+\S+\s+\S+\s+(.+)$/i.exec(line)?.[1]
+  if (behavioral_passive) return behavioral_passive
+
+  const braced_expressions = [...line.matchAll(/\{([^{}]*)\}/g)].map((match) => match[1])
+  return braced_expressions.length > 0 ? braced_expressions.join(" ") : undefined
+}
+
+function assertCausalModelSource(lines: readonly LogicalSpiceLine[]): void {
+  for (const { text: line, physical_line } of lines) {
+    if (/^a\S*\s+/i.test(line)) {
+      throw new Error(
+        `model.lib line ${physical_line} contains an XSPICE code-model device; fresh models allow inspectable analog devices and equations only`,
+      )
+    }
+    if (/^\.ic\b/i.test(line) || /^[cl]\S*\s+.+\bic\s*=/i.test(line)) {
+      throw new Error(
+        `model.lib line ${physical_line} contains an autonomous initial-condition script; dynamic state must be established causally through public electrical pins`,
+      )
+    }
+    const independent_source = /^[vi]\S*\s+\S+\s+\S+\s+(.+)$/i.exec(line)
+    if (independent_source && INDEPENDENT_TRANSIENT_SOURCE_PATTERN.test(independent_source[1])) {
+      throw new Error(
+        `model.lib line ${physical_line} contains an independent transient source; PWL, PULSE, SIN, EXP, SFFM, and AM waveforms belong only in server-owned validation fixtures`,
+      )
+    }
+    if (independent_source && expressionContainsBuiltinTime(independent_source[1])) {
+      throw new Error(
+        `model.lib line ${physical_line} contains an autonomous source expression that references ngspice's elapsed-time variable`,
+      )
+    }
+
+    const expression = behavioralExpression(line)
+    if (expression && expressionContainsBuiltinTime(expression)) {
+      throw new Error(
+        `model.lib line ${physical_line} contains an autonomous behavioral expression that references ngspice's elapsed-time variable`,
+      )
+    }
+    if (expression && AUTONOMOUS_RANDOM_EXPRESSION_PATTERN.test(expression)) {
+      throw new Error(
+        `model.lib line ${physical_line} contains an autonomous random/noise expression; fresh transient behavior must be caused by public electrical pins`,
+      )
+    }
+  }
+}
+
 export function validateModelSource(source: string, model_interface: ModelSourceInterface): void {
   const lines = normalizedLines(source)
-  const executable = lines.filter((line) => line && !line.startsWith("*"))
+  const executable = lines.map(({ text }) => text)
   const external_file_directive = executable.find((line) => /^\.(?:include|lib)\b/i.test(line))
   if (external_file_directive) {
     throw new Error(`model.lib must be self-contained; found ${external_file_directive}`)
@@ -35,6 +177,7 @@ export function validateModelSource(source: string, model_interface: ModelSource
   if (executable.some((line) => /^\.end(?:\s|$)/i.test(line))) {
     throw new Error("model.lib must not contain the top-level .END directive")
   }
+  assertCausalModelSource(lines)
   const subcircuits = executable
     .filter((line) => /^\.subckt\b/i.test(line))
     .map((line) => {

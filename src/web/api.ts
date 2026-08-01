@@ -1,4 +1,12 @@
-import type { ApiError, Job, JobSummary, ModelRun, ModelSelectedPreview } from "@/shared/job-types"
+import type {
+  ApiError,
+  Job,
+  JobSummary,
+  ModelPreviewArtifactIdentity,
+  ModelRun,
+  ModelSelectedPreview,
+} from "@/shared/job-types"
+import { parseModelSelectedPreview } from "@/shared/model-selected-preview"
 import { getInitialUseOpenai } from "./agent-provider-preference"
 
 interface JobResponse {
@@ -161,13 +169,20 @@ export async function getModelSelectedPreview(
 ): Promise<ModelSelectedPreview> {
   const response = await fetch(
     `/api/model-run/preview?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}`,
+    { cache: "no-store" },
   )
   if (!response.ok) throw new Error(await readApiError(response))
-  return (await response.json()) as ModelSelectedPreview
+  return parseModelSelectedPreview(await response.json())
 }
 
-export function getModelReferenceImageUrl(job_id: string, benchmark_id: string): string {
-  return `/api/model-run/reference-image?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}`
+export function getModelReferenceImageUrl(
+  job_id: string,
+  benchmark_id: string,
+  artifact_identity?: ModelPreviewArtifactIdentity,
+): string {
+  const base = `/api/model-run/reference-image?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}`
+  if (!artifact_identity) return base
+  return `${base}&preview_generation=${encodeURIComponent(artifact_identity.preview_generation)}&model_revision=${encodeURIComponent(artifact_identity.model_revision)}`
 }
 
 export type ModelRunFileKind =

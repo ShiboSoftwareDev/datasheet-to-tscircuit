@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { assertValidationPlanSensitiveToDut } from "@/server/model-workflow/validation-sensitivity"
-import { type ModelContract, parseModelContract } from "@/server/modeling"
+import { type ModelContract, parseModelCharacterization, parseModelContract } from "@/server/modeling"
 import {
   executeLocalNgspice,
   parseAgentValidationPlan,
@@ -51,6 +51,21 @@ function parseProposal(replay: { contract: ModelContract; proposal: unknown }): 
 }
 
 describe("production model-agent validation-plan replays", () => {
+  test("retained OP-only production characterizations remain readable but cannot pass fresh waveform policy", async () => {
+    for (const file_name of replay_files) {
+      const replay = await readReplay(file_name)
+      expect(() => parseModelCharacterization(replay.contract.characterization)).not.toThrow()
+      expect(() => parseModelCharacterization(replay.contract.characterization, { policy: "fresh" })).toThrow(
+        /analysis must be transient for fresh modeled requirements/,
+      )
+      expect(
+        replay.contract.characterization.requirements
+          .filter(({ support }) => support.status === "modeled")
+          .every(({ analysis, reference_curve }) => analysis === "operating_point" && !reference_curve),
+      ).toBe(true)
+    }
+  })
+
   test("normalizes the exact run 91/92 proposals while keeping persisted parsing strict", async () => {
     for (const file_name of replay_files) {
       const replay = await readReplay(file_name)

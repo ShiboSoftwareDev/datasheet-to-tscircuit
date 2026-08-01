@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { isCircuitJson } from "../component-circuit-json"
 import { parseComponentEvidence } from "../component-evidence"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
+import {
+  applicationTargetIdentityFromEvidence,
+  parseTypicalApplicationPlan,
+} from "../component-workflow/application-plan"
+import { compileApplicationFixtureContract } from "./application-fixture-contract"
 import { createModelInterface } from "./model-interface"
 import { parseModelContract } from "./parse-model-contract"
 import type { ModelContract, ModelInterface } from "./types"
@@ -15,7 +21,7 @@ This workspace is controlled by the server pipeline.
 - Write only the declared output artifacts for the current stage.
 - Never modify model-interface.json, model-contract.json, validation-plan.json,
   component.circuit.tsx, component-evidence.json,
-  typical-application-plan.json, or datasheet.pdf.
+  typical-application-plan.json, application-fixture-contract.json, or datasheet.pdf.
 - Validation plans are declarative JSON. Never create raw .cir or .measure files.
 - The server compiles fixtures, runs ngspice, records hashes, and owns pass/fail.
 - model.lib must expose exactly one public subcircuit with the exact server-owned
@@ -27,6 +33,10 @@ This workspace is controlled by the server pipeline.
 async function copyCanonical(source: string, destination: string): Promise<void> {
   const bytes = await readFile(source)
   await Bun.write(destination, bytes)
+}
+
+function sha256Bytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex")
 }
 
 export async function prepareModelWorkspace(input: {
@@ -57,6 +67,16 @@ export async function prepareModelWorkspace(input: {
   }
   const evidence = parseComponentEvidence(evidence_value)
   const datasheet_bytes = evidence_snapshot.source_pdf
+  let application_plan_value: unknown
+  try {
+    application_plan_value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(application_plan_bytes),
+    ) as unknown
+  } catch (error) {
+    throw new Error("Committed typical-application-plan.json is not valid UTF-8 JSON", {
+      cause: error,
+    })
+  }
 
   await mkdir(input.model_dir, { recursive: true })
   const component_circuit_json: unknown = JSON.parse(
@@ -66,6 +86,16 @@ export async function prepareModelWorkspace(input: {
     throw new Error("component.circuit.json must contain validated Circuit JSON")
   }
   const model_interface = createModelInterface(evidence, component_circuit_json)
+  const application_plan = parseTypicalApplicationPlan(
+    application_plan_value,
+    applicationTargetIdentityFromEvidence(evidence),
+  )
+  const application_fixture = compileApplicationFixtureContract({
+    plan: application_plan,
+    model_interface,
+    source_plan_sha256: sha256Bytes(application_plan_bytes),
+    source_pdf_sha256: sha256Bytes(datasheet_bytes),
+  })
   const preserved_component = join(input.job_dir, "component.circuit.tsx")
   const component_source = (await Bun.file(preserved_component).exists())
     ? preserved_component
@@ -75,6 +105,10 @@ export async function prepareModelWorkspace(input: {
     copyCanonical(component_source, join(input.model_dir, "component.circuit.tsx")),
     Bun.write(join(input.model_dir, "component-evidence.json"), evidence_bytes),
     Bun.write(join(input.model_dir, "typical-application-plan.json"), application_plan_bytes),
+    Bun.write(
+      join(input.model_dir, "application-fixture-contract.json"),
+      `${JSON.stringify(application_fixture, null, 2)}\n`,
+    ),
     Bun.write(
       join(input.model_dir, "component.circuit.json"),
       `${JSON.stringify(component_circuit_json, null, 2)}\n`,

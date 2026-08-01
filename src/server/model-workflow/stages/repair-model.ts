@@ -1,20 +1,19 @@
 import { join } from "node:path"
-import { parseModelContract } from "../../modeling"
+import { parseFreshModelContract } from "../../modeling"
 import { PipelineError } from "../../pipeline"
-import { runSpiceValidation, type ValidationPlan, type ValidationRunResult } from "../../spice-validation"
+import type { ValidationPlan, ValidationRunResult } from "../../spice-validation"
+import { validateCandidate } from "../candidate-validation"
 import { generateModelCandidate } from "../model-candidate"
 import {
   appendModelLog,
+  createModelRepairFeedback,
+  formatModelRepairFeedback,
   modelArtifact,
-  persistCandidateValidationUi,
-  projectCandidateValidationUi,
   readJson,
   updateModelProgress,
-  validationFailureFeedback,
 } from "../stage-helpers"
 import { getNonRepairableValidationErrors } from "../validation-repair-policy"
 import { defineModelStage } from "./stage-factory"
-import { buildValidationCircuitPreviews } from "../validation-circuit-previews"
 
 export const repairModelStage = defineModelStage({
   id: "repair_model",
@@ -41,13 +40,15 @@ export const repairModelStage = defineModelStage({
 
     const { contract_path, plan_path, evidence_dir } = dependency_outputs.validate_model
     const [contract_value, plan_value] = await Promise.all([readJson(contract_path), readJson(plan_path)])
-    const contract = parseModelContract(contract_value)
+    const contract = parseFreshModelContract(contract_value)
     const plan = plan_value as ValidationPlan
     const strategy = services.strategy_registry.require(
       contract.characterization.strategy,
       contract.characterization.family,
     )
     let result = (await readJson(dependency_outputs.validate_model.result_path)) as ValidationRunResult
+    let repair_feedback =
+      dependency_outputs.validate_model.repair_feedback ?? createModelRepairFeedback(result)
     const non_repairable_errors = getNonRepairableValidationErrors(result)
     if (non_repairable_errors.length > 0) {
       throw new PipelineError({
@@ -97,7 +98,7 @@ export const repairModelStage = defineModelStage({
         evidence_dir,
         previous_candidate,
         strategy_guidance: strategy.guidance,
-        feedback: validationFailureFeedback(result),
+        feedback: formatModelRepairFeedback(repair_feedback),
         stage_id: "repair_model",
         phase_label: `SPICE model repair ${repair_attempt}`,
         signal,
@@ -118,52 +119,54 @@ export const repairModelStage = defineModelStage({
         message: `Validating repaired model ${repair_attempt}/${currentRepairBudget()}`,
         iteration: repair_attempt,
       })
-      result = await runSpiceValidation({
+      const validation_artifact_dir = join(candidate.value.artifact_dir, "validation")
+      const validation = await validateCandidate({
         plan,
-        manifest: candidate.value.manifest,
-        model_source: candidate.value.source,
+        contract,
+        generated: candidate.value,
         model_dir: context.model_dir,
-        model_contract: contract,
-        artifact_directory: join(candidate.value.artifact_dir, "validation"),
+        validation_artifact_dir,
+        evidence_dir,
+        preview_generation: `${context.invocation_id}-${candidate.value.manifest.revision}`,
+        model_run_store: services.model_run_store,
+        model_run_id: context.model_run_id,
+        tsci_bin: services.tsci_bin,
+        process_runner: services.process_runner,
         signal,
         ngspice: services.ngspice_executor,
         ngspice_path: services.ngspice_bin,
         append: (stream, message) =>
           appendModelLog(services.model_run_store, context.model_run_id, stream, message),
       })
-      const validation_artifact_dir = join(candidate.value.artifact_dir, "validation")
-      const preview_build = await buildValidationCircuitPreviews({
-        model_dir: context.model_dir,
-        plan,
-        generated: candidate.value,
-        tsci_bin: services.tsci_bin,
-        process_runner: services.process_runner,
-        signal,
-        append: (stream, message) =>
-          appendModelLog(services.model_run_store, context.model_run_id, stream, message),
-      })
-      const projection = await persistCandidateValidationUi({
-        plan,
-        result,
-        generated: candidate.value,
-        contract,
-        immutable_artifact_dir: validation_artifact_dir,
-        preview_generation: `${context.invocation_id}-${candidate.value.manifest.revision}`,
-        circuit_json_by_case: preview_build.circuit_json_by_case,
-        circuit_build_errors_by_case: preview_build.errors_by_case,
-      })
-      await projectCandidateValidationUi({
-        model_run_store: services.model_run_store,
-        model_run_id: context.model_run_id,
-        model_dir: context.model_dir,
-        immutable_artifact_dir: validation_artifact_dir,
-        evidence_dir,
-        revision: candidate.value.manifest.revision,
-        projection,
-        signal,
-      })
-      if (result.passed) {
-        const result_path = join(candidate.value.artifact_dir, "validation", "validation-results.json")
+      result = validation.result
+      const { infrastructure_failure, passed, preview_build, result_path, stimulus_causality } = validation
+      if (infrastructure_failure?.source === "server_validation") {
+        throw new PipelineError({
+          code: "model_validation_infrastructure_failed",
+          message:
+            `Validation of repaired model ${repair_attempt} failed outside the model boundary: ` +
+            infrastructure_failure.errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
+          stage_id: "repair_model",
+          operation: "classify_validation_failure",
+          artifact_refs: [{ path: result_path }],
+          hint: "Inspect the simulator and validation trace; the failed TSX/reference preview was retained, but another model-generation attempt would not repair this failure.",
+        })
+      }
+      if (infrastructure_failure?.source === "tscircuit_viewer") {
+        throw new PipelineError({
+          code: "model_viewer_simulation_failed",
+          message:
+            `Validation TSX for repaired model ${repair_attempt} did not produce the required tscircuit transient graph: ` +
+            infrastructure_failure.failures
+              .map(({ case_id, message }) => `${case_id}: ${message}`)
+              .join("; "),
+          stage_id: "repair_model",
+          operation: "validate_tscircuit_transient_graph",
+          artifact_refs: [{ path: result_path }],
+          hint: "Another model-only repair cannot fix a non-transient plan or broken TSX projection. Inspect the validation case and Circuit JSON trace.",
+        })
+      }
+      if (passed) {
         return {
           status: "completed",
           output: {
@@ -189,21 +192,11 @@ export const repairModelStage = defineModelStage({
           metrics: { repair_attempts: repair_attempt },
         }
       }
-      const non_repairable_repair_errors = getNonRepairableValidationErrors(result)
-      if (non_repairable_repair_errors.length > 0) {
-        throw new PipelineError({
-          code: "model_validation_infrastructure_failed",
-          message:
-            `Validation of repaired model ${repair_attempt} failed outside the model boundary: ` +
-            non_repairable_repair_errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
-          stage_id: "repair_model",
-          operation: "classify_validation_failure",
-          artifact_refs: [
-            { path: join(candidate.value.artifact_dir, "validation", "validation-results.json") },
-          ],
-          hint: "Inspect the simulator and validation trace; another model-generation attempt would not repair this failure.",
-        })
-      }
+      repair_feedback = createModelRepairFeedback(
+        result,
+        preview_build.viewer_validation_by_case,
+        stimulus_causality,
+      )
       previous_candidate = {
         model_path: join(candidate.value.artifact_dir, "model.lib"),
         model_card_path: join(candidate.value.artifact_dir, "model-card.md"),
@@ -217,7 +210,7 @@ export const repairModelStage = defineModelStage({
       code: "model_validation_failed",
       message:
         `Model did not pass the immutable validation plan after ${attempted_repairs} repair attempt(s).\n` +
-        validationFailureFeedback(result),
+        formatModelRepairFeedback(repair_feedback),
       stage_id: "repair_model",
       operation: "repair_and_validate_model",
       artifact_refs: [{ path: previous_candidate.result_path }, { path: previous_candidate.model_path }],

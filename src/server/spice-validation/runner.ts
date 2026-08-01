@@ -274,6 +274,7 @@ export async function runSpiceValidation(input: RunSpiceValidationInput): Promis
       model_source: input.model_source,
       model_requirements: input.model_contract.characterization.requirements,
       model_family: input.model_contract.characterization.family,
+      application_fixture: input.model_contract.application_fixture,
     })
   } catch (error) {
     const errors =

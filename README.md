@@ -4,6 +4,11 @@ Datasheet to tscircuit is a local Bun + React application that turns a PDF
 datasheet into a validated tscircuit component and, optionally, a validated
 behavioral SPICE model.
 
+Fresh SPICE generation starts only when the datasheet contains a reproducible
+public-pin voltage waveform plotted against elapsed time. Static tables, DC
+curves, operating points, and current-only plots remain visible as documented
+specifications but are not presented as simulations.
+
 The backend is organized as two explicit typed pipelines. AI agents work in
 isolated temporary directories and propose narrowly scoped artifacts. The
 server parses those artifacts, runs deterministic tscircuit and ngspice checks,
@@ -52,8 +57,8 @@ bun run stop
 
 ## Develop locally
 
-Install Bun 1.2.21 or newer, ngspice, and Poppler (`pdftotext`, `pdfinfo`, and
-`pdftoppm`), then run:
+Install Bun 1.2.21 or newer, ngspice, Poppler (`pdftotext`, `pdfinfo`, and
+`pdftoppm`), and Tesseract OCR (`tesseract`), then run:
 
 ```bash
 bun install
@@ -141,9 +146,35 @@ their typed execution traces. The durable files under
 - `spice/candidates/<revision>-<id>/validation/<case-id>` contains the exact
   ngspice netlist, process logs, raw output, and per-case result used for that
   immutable candidate.
-- `published-model.json` is the version-2 atomic pointer binding the owning job
-  and invocation, an accepted model revision, and its exact integrated
-  component wrapper. It selects the
+- `spice/attempts/<attempt-id>/time-graph-hints.json`,
+  `model-reference-observation.json`, `model-reference-source-proof.json`, and
+  `model-reference-verification.json` show which complete-PDF graph candidates
+  were reviewed and how each accepted crop and numeric voltage/time trace were
+  independently matched. A graph can become executable only when server code
+  extracts its response, stimulus, levels, and edge times from printed numeric
+  test conditions in the same PDF section; a missing or unsupported fixture is
+  authoritative and cannot be filled in by an agent. The retained verification
+  binds the exact observer crop, its adjacent figure caption, source-read axis
+  units/scales, pixel-axis-calibrated observer points, observer/candidate curve
+  digests, interpolation metrics, and the exact server-rendered graph pixels.
+  Publication recomputes that PDF/OCR receipt instead of trusting retained
+  metadata; the accepted bundle retains the hash-bound canonical
+  `datasheet.pdf`, and the generation agent never receives the private observer
+  trace.
+- `spice/candidates/<revision>-<id>/validation/viewer-validation.json` and
+  `validation/cases/<case-id>.circuit.json` bind the exact tscircuit transient
+  voltage waveforms used by the TSX/Runframe UI to the generated model, pin
+  map, pulsed source values, polarity, and source connectivity. The validation
+  result also carries a hash-bound private replay receipt proving the response
+  changes materially when the bound pulse is flattened.
+- Accepted bundles contain `model-workflow-policy.json`. New runs are fixed to
+  `fresh_time_voltage_v1`, so changing a candidate contract to scalar/DC data
+  cannot downgrade publication into the legacy compatibility path.
+- `published-model.json` is the version-3 atomic pointer binding the owning job,
+  invocation, immutable fresh-waveform policy, accepted model revision, and
+  exact integrated component wrapper. Version-2 pointers remain readable only
+  for existing publications; the writer cannot create them. The pointer selects
+  the
   hash-verified bundles under
   `spice/accepted-revisions/<revision>-<publication-id>` and
   `published-models/<revision>-<publication-id>`.

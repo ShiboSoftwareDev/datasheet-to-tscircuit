@@ -1,0 +1,162 @@
+import type { ViewerSimulationValidation } from "../../modeling"
+import type { ValidationRunResult } from "../../spice-validation"
+import type { CandidateStimulusCausalityCheck } from "../candidate-stimulus-causality"
+import type { ModelRepairFeedback, ModelRepairFeedbackCategory } from "../types"
+
+const REPAIR_FEEDBACK_CATEGORY_ORDER: readonly ModelRepairFeedbackCategory[] = [
+  "target_mismatch",
+  "bounds_violation",
+  "curve_mismatch",
+  "viewer_curve_mismatch",
+  "stimulus_insensitive",
+  "invalid_log_output",
+  "non_finite_output",
+  "convergence_failure",
+  "simulator_rejected_model",
+  "comparison_failure",
+  "validation_failure",
+]
+
+const REPAIR_FEEDBACK_DESCRIPTIONS: Readonly<Record<ModelRepairFeedbackCategory, string>> = {
+  target_mismatch: "one or more outputs missed a required target tolerance",
+  bounds_violation: "one or more outputs fell outside required bounds",
+  curve_mismatch: "one or more output curves exceeded their normalized comparison tolerance",
+  viewer_curve_mismatch: "one or more tscircuit viewer waveforms exceeded their curve tolerance",
+  stimulus_insensitive:
+    "one or more dynamic outputs did not materially depend on the server-owned bound electrical stimulus",
+  invalid_log_output: "the model produced a value outside the valid logarithmic domain",
+  non_finite_output: "the model produced a non-finite output",
+  convergence_failure: "the model caused the simulator to fail convergence",
+  simulator_rejected_model: "the simulator rejected the generated model",
+  comparison_failure: "one or more server-owned comparisons failed",
+  validation_failure: "server-owned validation did not pass",
+}
+
+function repairFeedbackCategory(error: ValidationRunResult["errors"][number]): ModelRepairFeedbackCategory {
+  if (error.kind === "convergence") return "convergence_failure"
+  if (error.kind === "simulator" && error.code === "ngspice_failed") {
+    return "simulator_rejected_model"
+  }
+  if (error.kind !== "comparison") return "validation_failure"
+  switch (error.code) {
+    case "target_tolerance_exceeded":
+      return "target_mismatch"
+    case "bounds_exceeded":
+      return "bounds_violation"
+    case "curve_tolerance_exceeded":
+      return "curve_mismatch"
+    case "invalid_log_sample":
+      return "invalid_log_output"
+    case "non_finite_series":
+      return "non_finite_output"
+    default:
+      return "comparison_failure"
+  }
+}
+
+/**
+ * Builds the only validation information that may cross into an agent repair
+ * workspace. The output is deliberately derived from a closed enum and
+ * aggregate counts: simulator output, paths, fixture values, points, hashes,
+ * metrics, and validation identifiers never enter this object.
+ */
+export function createModelRepairFeedback(
+  result: ValidationRunResult,
+  viewer_validation_by_case?: Readonly<Record<string, ViewerSimulationValidation | undefined>>,
+  stimulus_causality?: CandidateStimulusCausalityCheck,
+): ModelRepairFeedback {
+  const aggregate = new Map<ModelRepairFeedbackCategory, { cases: Set<number>; observations: Set<string> }>()
+  const add = (category: ModelRepairFeedbackCategory, case_index?: number, series_index?: number): void => {
+    const current = aggregate.get(category) ?? { cases: new Set<number>(), observations: new Set<string>() }
+    if (case_index !== undefined) current.cases.add(case_index)
+    if (case_index !== undefined && series_index !== undefined) {
+      current.observations.add(`${case_index}:${series_index}`)
+    }
+    aggregate.set(category, current)
+  }
+
+  result.cases.forEach((validation_case, case_index) => {
+    if (validation_case.status === "passed") return
+    validation_case.series.forEach((series, series_index) => {
+      if (series.passed) return
+      if (series.errors.length === 0) {
+        add("comparison_failure", case_index, series_index)
+        return
+      }
+      for (const error of series.errors) {
+        add(repairFeedbackCategory(error), case_index, series_index)
+      }
+    })
+    for (const error of validation_case.errors) {
+      add(repairFeedbackCategory(error), case_index)
+    }
+    if (validation_case.errors.length === 0 && validation_case.series.every(({ passed }) => passed)) {
+      add("validation_failure", case_index)
+    }
+  })
+  if (result.cases.length === 0) {
+    for (const error of result.errors) add(repairFeedbackCategory(error))
+  }
+  Object.values(viewer_validation_by_case ?? {}).forEach((validation, case_index) => {
+    if (!validation?.simulation_valid || validation.passed) return
+    const failed_series = validation.series.flatMap((series, series_index) =>
+      series.passed ? [] : [series_index],
+    )
+    if (failed_series.length === 0) {
+      add("viewer_curve_mismatch", case_index)
+      return
+    }
+    for (const series_index of failed_series) {
+      add("viewer_curve_mismatch", case_index, series_index)
+    }
+  })
+  if (stimulus_causality?.required && !stimulus_causality.passed) {
+    const current = aggregate.get("stimulus_insensitive") ?? {
+      cases: new Set<number>(),
+      observations: new Set<string>(),
+    }
+    for (let index = 0; index < stimulus_causality.affected_case_count; index += 1) {
+      current.cases.add(index)
+    }
+    for (let index = 0; index < stimulus_causality.affected_observation_count; index += 1) {
+      current.observations.add(`aggregate:${index}`)
+    }
+    aggregate.set("stimulus_insensitive", current)
+  }
+  if (aggregate.size === 0) add("validation_failure")
+
+  return {
+    version: 1,
+    status: "failed",
+    issues: REPAIR_FEEDBACK_CATEGORY_ORDER.flatMap((category) => {
+      const value = aggregate.get(category)
+      return value
+        ? [
+            {
+              category,
+              affected_cases: value.cases.size,
+              affected_observations: value.observations.size,
+            },
+          ]
+        : []
+    }),
+  }
+}
+
+export function formatModelRepairFeedback(feedback: ModelRepairFeedback): string {
+  return [
+    "Server-owned redacted validation summary:",
+    ...feedback.issues.map(
+      ({ category, affected_cases, affected_observations }) =>
+        `- ${category}: ${REPAIR_FEEDBACK_DESCRIPTIONS[category]}. ` +
+        `Affected cases: ${affected_cases}; affected observations: ${affected_observations}.`,
+    ),
+  ].join("\n")
+}
+
+export function validationFailureFeedback(
+  result: ValidationRunResult,
+  viewer_validation_by_case?: Readonly<Record<string, ViewerSimulationValidation | undefined>>,
+): string {
+  return formatModelRepairFeedback(createModelRepairFeedback(result, viewer_validation_by_case))
+}

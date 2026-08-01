@@ -226,6 +226,161 @@ describe("ValidationPlan contract", () => {
     ])
   })
 
+  test("locks fresh graph observations and PULSE fixtures to the requirement's electrical binding", () => {
+    const requirement: ModelRequirement = {
+      ...structuredClone(model_requirements[1]!),
+      reference_curve: {
+        x_quantity: "time",
+        x_unit: "s",
+        y_quantity: "voltage",
+        y_unit: "V",
+        tolerance: 0.05,
+        points: [
+          { x: 0, y: 0 },
+          { x: 0.001, y: 2 },
+          { x: 0.003, y: 2 },
+        ],
+        electrical_binding: {
+          response: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
+          stimulus: {
+            type: "voltage_step",
+            positive: "dut.IN",
+            negative: "gnd",
+            pulse: {
+              low: 0,
+              high: 1,
+              delay: 0,
+              rise: 1e-6,
+              fall: 1e-6,
+              width: 1e-3,
+              period: 2e-3,
+            },
+          },
+        },
+      },
+    }
+    const plan: ValidationPlan = {
+      version: 1,
+      model: { entry_name: "GAIN", pins: ["IN", "OUT", "GND"] },
+      cases: [structuredClone(validPlan().cases[1]!)],
+    }
+    const context = { model_interface, model_source, model_requirements: [requirement] }
+
+    expect(() => parseAgentValidationPlan(plan, context)).not.toThrow()
+
+    const current_requirement = structuredClone(requirement)
+    const current_binding = current_requirement.reference_curve?.electrical_binding
+    if (!current_binding) throw new Error("Expected electrical binding")
+    current_binding.stimulus = {
+      type: "current_step",
+      positive: "dut.OUT",
+      negative: "gnd",
+      pulse: {
+        low: 0.1,
+        high: 1,
+        delay: 0,
+        rise: 1e-6,
+        fall: 1e-6,
+        width: 1e-3,
+        period: 2e-3,
+      },
+    }
+    const current_plan = structuredClone(plan)
+    const dc_input = current_plan.cases[0]!.fixtures[0]
+    if (dc_input?.type !== "voltage_source") throw new Error("Expected voltage source")
+    delete dc_input.pulse
+    current_plan.cases[0]!.fixtures.push({
+      type: "current_source",
+      id: "load_step",
+      positive: "dut.OUT",
+      negative: "gnd",
+      dc_amps: 0.1,
+      pulse: structuredClone(current_binding.stimulus.pulse),
+    })
+    expect(() =>
+      parseAgentValidationPlan(current_plan, {
+        ...context,
+        model_requirements: [current_requirement],
+      }),
+    ).not.toThrow()
+
+    const mixed_requirement: ModelRequirement = {
+      ...structuredClone(model_requirements[1]!),
+      requirement_id: "legacy_transient",
+    }
+    const mixed_case = structuredClone(plan)
+    mixed_case.cases[0]!.requirement_ids.push(mixed_requirement.requirement_id)
+    mixed_case.cases[0]!.observations.push({
+      ...structuredClone(mixed_case.cases[0]!.observations[0]!),
+      id: "legacy_output",
+      requirement_id: mixed_requirement.requirement_id,
+    })
+    try {
+      parseAgentValidationPlan(mixed_case, {
+        ...context,
+        model_requirements: [requirement, mixed_requirement],
+      })
+      throw new Error("Expected bound multi-requirement case rejection")
+    } catch (error) {
+      expect((error as ValidationPlanError).errors.map(({ code }) => code)).toEqual(
+        expect.arrayContaining(["bound_case_requirement_count", "bound_case_observation_mismatch"]),
+      )
+    }
+
+    const wrong_response = structuredClone(plan)
+    const response = wrong_response.cases[0]!.observations[0]
+    if (response?.type !== "voltage") throw new Error("Expected voltage observation")
+    response.positive = "dut.IN"
+    expect(() => parseAgentValidationPlan(wrong_response, context)).toThrow(
+      /requirement_response_endpoint_mismatch/,
+    )
+
+    const wrong_source_kind = structuredClone(plan) as unknown as {
+      cases: Array<{ fixtures: Array<Record<string, unknown>> }>
+    }
+    const stimulus = wrong_source_kind.cases[0]!.fixtures[0]!
+    stimulus.type = "current_source"
+    stimulus.dc_amps = 0
+    delete stimulus.dc_volts
+    expect(() => parseAgentValidationPlan(wrong_source_kind, context)).toThrow(
+      /requirement_stimulus_mismatch/,
+    )
+
+    const wrong_pulse = structuredClone(plan)
+    const wrong_pulse_source = wrong_pulse.cases[0]!.fixtures[0]
+    if (wrong_pulse_source?.type !== "voltage_source" || !wrong_pulse_source.pulse) {
+      throw new Error("Expected pulsed voltage source")
+    }
+    wrong_pulse_source.pulse.high = 0.9
+    expect(() => parseAgentValidationPlan(wrong_pulse, context)).toThrow(
+      /requirement_stimulus_pulse_mismatch/,
+    )
+
+    const wrong_dc = structuredClone(plan)
+    const wrong_dc_source = wrong_dc.cases[0]!.fixtures[0]
+    if (wrong_dc_source?.type !== "voltage_source") {
+      throw new Error("Expected pulsed voltage source")
+    }
+    wrong_dc_source.dc_volts = 0.25
+    expect(() => parseAgentValidationPlan(wrong_dc, context)).toThrow(/requirement_stimulus_dc_mismatch/)
+
+    const truncated = structuredClone(plan)
+    const analysis = truncated.cases[0]!.analysis
+    if (analysis.type !== "transient") throw new Error("Expected transient analysis")
+    analysis.stop = 0.0005
+    expect(() => parseAgentValidationPlan(truncated, context)).toThrow(
+      /bound_stimulus_outside_analysis_range/,
+    )
+
+    const flat_pulse = structuredClone(plan)
+    const flat_pulse_source = flat_pulse.cases[0]!.fixtures[0]
+    if (flat_pulse_source?.type !== "voltage_source" || !flat_pulse_source.pulse) {
+      throw new Error("Expected pulsed voltage source")
+    }
+    flat_pulse_source.pulse.high = flat_pulse_source.pulse.low
+    expect(() => parseAgentValidationPlan(flat_pulse, context)).toThrow(/flat_bound_stimulus/)
+  })
+
   test("regulator and power-converter plans must exercise a real operating range", () => {
     const scalar_requirement: ModelRequirement = {
       requirement_id: "output_voltage",
@@ -612,7 +767,7 @@ describe("ValidationPlan contract", () => {
     }
 
     const excessive_cases = structuredClone(validPlan())
-    excessive_cases.cases = Array.from({ length: 17 }, (_, index) => ({
+    excessive_cases.cases = Array.from({ length: 33 }, (_, index) => ({
       ...structuredClone(validPlan().cases[index % 2]!),
       id: `case_${index}`,
     }))

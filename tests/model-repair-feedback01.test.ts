@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { createModelRepairFeedback, validationFailureFeedback } from "@/server/model-workflow/stage-helpers"
+import type { ViewerSimulationValidation } from "@/server/modeling"
 import type { ValidationRunResult } from "@/server/spice-validation"
 
 test("model repair feedback exposes only typed aggregate failure categories", () => {
@@ -120,4 +121,72 @@ test("unknown validation details collapse to a fixed generic category", () => {
     { category: "validation_failure", affected_cases: 0, affected_observations: 0 },
   ])
   expect(validationFailureFeedback(result)).not.toMatch(/private|123456789|fixture\.json/)
+})
+
+test("viewer-only curve mismatches enter repair as category/count feedback", () => {
+  const result: ValidationRunResult = {
+    version: 1,
+    passed: true,
+    hashes: {
+      plan_sha256: "a".repeat(64),
+      model_sha256: "b".repeat(64),
+      manifest_sha256: "c".repeat(64),
+    },
+    cases: [
+      {
+        case_id: "private_viewer_case_987654",
+        status: "passed",
+        analysis: "transient",
+        series: [],
+        errors: [],
+        elapsed_ms: 1,
+        netlist_sha256: "d".repeat(64),
+        raw_sha256: "e".repeat(64),
+      },
+    ],
+    errors: [],
+  }
+  const viewer_validation: ViewerSimulationValidation = {
+    simulation_valid: true,
+    passed: false,
+    series: [
+      {
+        observation_id: "secret_viewer_observation",
+        type: "voltage",
+        unit: "V",
+        scale: "linear",
+        points: [
+          { x: 123.456, y: 987.654 },
+          { x: 234.567, y: 876.543 },
+        ],
+        passed: false,
+        metrics: { sample_count: 2, normalized_rmse: 42.5, normalized_max_error: 43.5 },
+        errors: [
+          {
+            kind: "comparison",
+            code: "curve_tolerance_exceeded",
+            message: "Private viewer peak 43.5 exceeded hidden tolerance 0.012345",
+          },
+        ],
+      },
+    ],
+    errors: [
+      {
+        kind: "comparison",
+        code: "curve_tolerance_exceeded",
+        message: "Private viewer peak 43.5 exceeded hidden tolerance 0.012345",
+      },
+    ],
+  }
+
+  expect(createModelRepairFeedback(result, { private_viewer_case_987654: viewer_validation })).toEqual({
+    version: 1,
+    status: "failed",
+    issues: [{ category: "viewer_curve_mismatch", affected_cases: 1, affected_observations: 1 }],
+  })
+  const feedback = validationFailureFeedback(result, {
+    private_viewer_case_987654: viewer_validation,
+  })
+  expect(feedback).toContain("viewer_curve_mismatch")
+  expect(feedback).not.toMatch(/private|secret|987\.654|43\.5|0\.012345|123\.456|234\.567/)
 })

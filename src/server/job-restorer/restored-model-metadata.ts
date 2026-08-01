@@ -1,6 +1,6 @@
 import type { ModelCircuitPreview, ModelProgress, ModelReferencePreview } from "@/shared/job-types"
+import { tryParseModelCircuitPreview, tryParseModelReferencePreview } from "@/shared/model-selected-preview"
 import { parseModelProgress } from "../model-progress"
-import { isRecord } from "./read-persisted-logs"
 
 export function parseRestoredModelProgress(value: unknown): ModelProgress | undefined {
   try {
@@ -11,26 +11,9 @@ export function parseRestoredModelProgress(value: unknown): ModelProgress | unde
 }
 
 export function isModelCircuitPreview(value: unknown): value is ModelCircuitPreview {
-  return (
-    isRecord(value) &&
-    typeof value.source_file === "string" &&
-    typeof value.code === "string" &&
-    (value.build_status === "source_ready" ||
-      value.build_status === "building" ||
-      value.build_status === "ready" ||
-      value.build_status === "failed") &&
-    typeof value.updated_at === "string"
-  )
+  return tryParseModelCircuitPreview(value) !== undefined
 }
 
 export function isModelReferencePreview(value: unknown): value is ModelReferencePreview {
-  return (
-    isRecord(value) &&
-    typeof value.title === "string" &&
-    typeof value.source_file === "string" &&
-    (value.x_scale === "linear" || value.x_scale === "log") &&
-    (value.y_scale === "linear" || value.y_scale === "log") &&
-    Array.isArray(value.reference_points) &&
-    typeof value.updated_at === "string"
-  )
+  return tryParseModelReferencePreview(value) !== undefined
 }

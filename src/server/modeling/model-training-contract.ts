@@ -1,6 +1,6 @@
 import type { ModelContract, ModelReferencePoint } from "./types"
 
-export const MIN_FRESH_REFERENCE_CURVE_POINTS = 5
+export const MIN_FRESH_REFERENCE_CURVE_POINTS = 8
 
 export interface ReferenceCurvePartition {
   training_points: ModelReferencePoint[]
@@ -51,6 +51,9 @@ export function partitionReferenceCurvePoints(
 export function createModelTrainingContract(contract: ModelContract): ModelContract {
   return {
     version: 1,
+    ...(contract.application_fixture
+      ? { application_fixture: structuredClone(contract.application_fixture) }
+      : {}),
     interface: {
       ...contract.interface,
       pins: contract.interface.pins.map((pin) => ({ ...pin, labels: [...pin.labels] })),

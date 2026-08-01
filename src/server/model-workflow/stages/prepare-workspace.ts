@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
-import { prepareModelWorkspace } from "../../modeling"
-import { modelArtifact, updateModelProgress } from "../stage-helpers"
+import { parseApplicationFixtureContract, prepareModelWorkspace } from "../../modeling"
+import { modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
 
 export const prepareWorkspaceStage = defineModelStage({
@@ -24,8 +24,20 @@ export const prepareWorkspaceStage = defineModelStage({
       model_dir: context.model_dir,
     })
     const interface_path = join(context.model_dir, "model-interface.json")
+    const workspace_application_fixture_path = join(
+      context.model_dir,
+      "application-fixture-contract.json",
+    )
+    const application_fixture = parseApplicationFixtureContract(
+      await readJson(workspace_application_fixture_path),
+    )
     const attempt_dir = join(context.model_dir, "attempts", context.invocation_id)
     await mkdir(join(attempt_dir, "evidence"), { recursive: true })
+    const application_fixture_path = join(attempt_dir, "application-fixture-contract.json")
+    await Bun.write(
+      application_fixture_path,
+      await Bun.file(workspace_application_fixture_path).arrayBuffer(),
+    )
     return {
       status: "completed",
       output: {
@@ -34,6 +46,8 @@ export const prepareWorkspaceStage = defineModelStage({
         pin_count: model_interface.pins.length,
         interface_path,
         attempt_dir,
+        application_fixture_path,
+        application_fixture_sha256: application_fixture.contract_sha256,
       },
       artifacts: [
         await modelArtifact({
@@ -42,8 +56,17 @@ export const prepareWorkspaceStage = defineModelStage({
           media_type: "application/json",
           role: "model_contract",
         }),
+        await modelArtifact({
+          id: "application_fixture_contract",
+          path: application_fixture_path,
+          media_type: "application/json",
+          role: "model_contract",
+        }),
       ],
-      metrics: { pin_count: model_interface.pins.length },
+      metrics: {
+        pin_count: model_interface.pins.length,
+        application_fixture_documented: application_fixture.availability === "documented" ? 1 : 0,
+      },
     }
   },
 })

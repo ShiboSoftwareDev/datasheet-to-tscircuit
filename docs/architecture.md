@@ -308,12 +308,12 @@ wait_for_component
 | --- | --- |
 | `wait_for_component` | Wait for terminal component publication, not the early live-preview milestone, and fail with component context if the job cannot produce one. |
 | `prepare_workspace` | Copy canonical inputs and derive an exact server-owned SPICE interface from accepted pin evidence. |
-| `characterize` | Extract versioned behavioral requirements, assumptions, limitations, sources, and optional reference curves. Each requirement is explicitly `modeled` or `documented_only`. |
+| `characterize` | Scan the complete PDF for time-graph hints, run a candidate-independent source observer, then accept only elapsed-time voltage curves whose cited crop agrees with that observation. Each requirement is explicitly `modeled` or `documented_only`. |
 | `design_validation` | Accept a strictly parsed declarative fixture plan that covers every modeled requirement and every DUT pin. |
 | `generate_model` | Generate a self-contained `model.lib` and explanatory `model-card.md`; derive the manifest and revision on the server. |
-| `validate_model` | Compile fixtures, execute ngspice, compare numeric series, persist hashes/results, and update UI projections. |
-| `repair_model` | Repair only the model from server-produced validation feedback. The validation plan remains unchanged; the effort multiplier bounds repair attempts. |
-| `publish_model` | Generate the wrapper on the server, build it with `tsci`, verify its exact model and pin mapping, stage hash-verified immutable model/component bundles, and atomically select the pair with one publication pointer. |
+| `validate_model` | Compile fixtures, execute ngspice, privately replay the candidate with each bound pulse flattened, build the same transient-voltage TSX consumed by Runframe, score both waveform paths, persist their hashes/results, and update UI projections. |
+| `repair_model` | Repair only the model from typed aggregate server feedback, then rerun direct simulation, private causality replay, and viewer validation. The validation plan remains unchanged; the effort multiplier bounds repair attempts. |
+| `publish_model` | Revalidate the hash-bound candidate/viewer receipts, re-render every reference crop from the canonical PDF, generate and build the wrapper, verify its exact model and pin mapping, stage hash-verified immutable model/component bundles, and atomically select the pair with one publication pointer. |
 
 ### Stable model contracts
 
@@ -324,6 +324,38 @@ markers:
   It owns the subcircuit entry name, physical pin order, the exact selector-safe
   port hints and source-port IDs present in that build, and SPICE node names.
 - `model-characterization.json` is the parsed agent proposal.
+- `time-graph-hints.json` is a deterministic complete-PDF `pdftotext` scan for
+  timing captions and printed time axes, including plural/title-before-figure
+  layouts. Each hint retains source-grounded nearby operating conditions and
+  deterministic blockers for register programming, digital protocols, and
+  internal configuration. It also retains a server-derived transient fixture
+  only when the graph's own layout-preserving section prints the response and
+  stimulus signals, numeric low/high levels, and rise/fall times. The explicit
+  `null` form is authoritative and prevents a later agent from inventing a
+  convenient pulse for switching, startup, or other unqualified waveforms.
+- `model-reference-observation.json` is produced in a separate source-only
+  workspace with no candidate characterization. It inventories elapsed-time
+  graphs, their visible time-axis evidence, public-pin response, supported
+  fixture reproducibility, and an independent 200-DPI crop containing the
+  plotted axes and immediately adjacent figure-number caption. Every eligible
+  voltage/time graph also carries a private pixel trace: SI axis ranges, two
+  pixel/value calibration anchors per axis, trace color, and distributed
+  pixel-bound numeric points. The characterization agent receives only a
+  sanitized graph/crop inventory, never this numeric provenance.
+- `model-reference-source-proof.json` is a deterministic receipt built from
+  canonical `datasheet.pdf`, not agent assertions. It binds the PDF and exact
+  crop hashes, a 600-DPI Poppler render, the Tesseract version and bounded OCR
+  token boxes, an adjacent `pdftotext -bbox-layout` figure identity, and either
+  two source-read ticks per axis or source-read oscilloscope division scales
+  reconciled with detected grid spacing and a local printed nominal voltage.
+  Missing OCR executables are a typed non-retryable infrastructure failure;
+  ambiguous or unsupported source calibration makes only that graph ineligible.
+- `model-reference-verification.json` records the server-computed one-to-one
+  page, figure, electrical-binding, and exact canonical-crop match between that
+  observation and every modeled curve. It also binds the source-calibration
+  receipt digest, observer/candidate curve digests, independent interpolation
+  error and coverage metrics, and a hash-checked proof that every withheld
+  observer point remains inside and touches the waveform in that exact crop.
 - `model-contract.json` combines the interface fixed for the current invocation
   with accepted characterization requirements.
 - `validation-plan.json` is a declarative circuit contract. An agent proposes
@@ -340,20 +372,61 @@ markers:
 - `model-manifest.json` is generated by the server and contains the canonical
   pin mapping plus a revision derived from the model source.
 - `validation-results.json` records per-case series, metrics, errors, and hashes
-  of the plan, model, and manifest used for the run.
-- `published-model.json` version 2 binds the owning job, one invocation, model
-  revision, accepted-model bundle manifest, and integrated-component bundle
-  manifest. The pointer is the only publication commit point; files copied to
-  legacy root paths afterward are compatibility mirrors.
+  of the plan, model, and manifest used for the run. For an electrically bound
+  curve it also contains a server-owned `bound_pulse_flatten_v2` receipt: the
+  same candidate must change by a material fraction of the immutable reference
+  span and the flattened-stimulus replay must fail the reference comparison.
+- `viewer-validation.json` binds the plan, manifest, model source, and one
+  canonical Circuit JSON file per case. Publication rereads these hashed files,
+  proves that each graph embeds the exact DUT model and pin map, and requires
+  the exact Runframe waveform to pass rescoring.
+- `published-model.json` version 3 binds the owning job, one invocation, the
+  immutable `fresh_time_voltage_v1` policy, model revision, accepted-model
+  bundle manifest, and integrated-component bundle manifest. Version-2
+  pointers remain readable for existing jobs, but the publication writer only
+  accepts version 3. The pointer is the only publication commit point; files
+  copied to legacy root paths afterward are compatibility mirrors.
 
 The model-generation agent does not receive `validation-plan.json` or raw
 validation artifacts. For each fresh modeled reference curve, the server keeps
 the endpoints and alternating interior samples in a deterministic training view
 and withholds the complementary interior samples. Fresh curves therefore need
-at least five points. Generation and repair see only that training contract;
-the immutable full contract remains authoritative for scoring and publication.
-A regression model that matches every visible sample but misses a held-out
-sample fails full server scoring.
+at least eight points, with the minimum increasing by crop width up to 48 points.
+Generation and repair see only that training contract; the immutable full
+contract remains authoritative for scoring and publication. A regression model
+that matches every visible sample but misses a held-out sample fails full server
+scoring.
+
+Fresh executable characterization is intentionally narrower than the generic
+persisted schema: a modeled requirement must be a public-pin transient response
+with elapsed time in seconds, a digitized voltage reference curve, and the exact
+source-observer crop derived from the cited PDF page at 200 DPI. Scalar,
+operating-point, DC-only, and current-only evidence remains `documented_only`;
+it cannot be promoted into a fake waveform. The server replaces the
+characterizer's rectangle with the observer-owned crop before materialization;
+publication accepts no shifted, clipped, containing, or merely overlapping
+variant. The crop must be at least 96×64 pixels, fit the canonical page, contain
+visible nonuniform pixels, retain a source-local matching caption, and carry a
+source-grounded axis-calibration receipt. A graph is eligible only when its
+printed numeric conditions identify a stimulus that can be
+expressed by the supported passive and pulsed/DC fixture language without
+hidden register, protocol, or internal configuration setup. The server binds
+that exact stimulus and response to the public interface and constrains pulse
+timing to the graph window. An all-documented proposal is retried when the
+independent observer found an eligible graph. If the source-only observer finds
+none, the workflow ends immediately with the typed
+`no_eligible_time_domain_graph` diagnostic before characterization can invent a
+model. Compatibility parsing still accepts already-published scalar/DC
+contracts, while the immutable fresh-publication policy marker prevents a new
+run from selecting that compatibility path.
+
+Generated DUT source is causal: behavioral access to simulator time,
+independent PWL/PULSE/SIN/EXP/SFFM/AM playback sources, autonomous random/noise
+expressions, XSPICE code models, and scripted initial state are rejected.
+Ordinary electrical state and input-dependent B/E/G behavior remain supported.
+The private flattened-pulse replay runs after initial generation and every
+repair; its dynamic-region comparison rejects token stimulus dependence and its
+detailed waveform is never returned to the repair agent.
 
 Generation and repair also use a fail-closed agent capability profile. The only
 enabled tool names come from one explicit extension: one reader confined to the
@@ -394,6 +467,9 @@ The replayable layout is:
 spice/candidates/<revision>-<id>/validation/
 ├── model.lib
 ├── validation-results.json
+├── viewer-validation.json
+├── cases/
+│   └── <case-id>.circuit.json
 └── <case-id>/
     ├── .spiceinit
     ├── circuit.cir
@@ -407,6 +483,22 @@ This directory answers four debugging questions without rerunning an agent:
 which inputs were tested, which netlist was executed, what the simulator
 returned, and why the comparison passed or failed.
 
+A passing candidate is still private until its deterministic validation TSX
+also builds through tscircuit and the retained Circuit JSON contains exactly one
+traceable transient experiment with a scored voltage waveform for every
+observation. The Circuit JSON must also contain the exact planned PULSE helper,
+including source kind, DC/low/high levels, edge timing, DUT endpoint, polarity,
+and ground/net connectivity. Current graphs are not accepted because the
+installed tscircuit runtime does not currently emit them.
+The direct server ngspice result and the Runframe-consumed waveform must both
+pass the immutable datasheet curve. The same viewer check runs again immediately
+before publication, so a schematic-only snapshot, an operating-point result, or
+a missing graph cannot become an accepted model. Publication independently
+re-renders each exact graph crop from canonical `datasheet.pdf`, compares
+decoded pixels with the retained crop, re-runs the source axis/caption proof,
+and requires byte-stable proof semantics. A coherent synthetic PNG, a same-page
+neighboring plot, or a stale receipt cannot publish.
+
 A passing candidate is still private until the integrated wrapper also builds
 and its pin map matches. Publication creates a new immutable accepted pair:
 
@@ -415,15 +507,28 @@ published-model.json
 spice/accepted-revisions/<revision>-<publication-id>/
 ├── bundle-manifest.json
 ├── publication-record.json
+├── model-workflow-policy.json
 ├── model.lib
 ├── model-card.md
+├── model-manifest.json
 ├── model-contract.json
+├── model-characterization.json
 ├── validation-plan.json
 ├── validation-results.json
-└── validation/cases/...
+├── model-ui.json
+├── time-graph-hints.json
+├── model-reference-observation.json
+├── model-reference-source-proof.json
+├── model-reference-verification.json
+├── datasheet.pdf
+├── evidence/figures/...
+└── validation/
+    ├── viewer-validation.json
+    └── cases/<case-id>.{preview.json,circuit.tsx,circuit.json}
 published-models/<revision>-<publication-id>/
 ├── bundle-manifest.json
 ├── publication-record.json
+├── model-workflow-policy.json
 ├── index.circuit.tsx
 ├── component.circuit.json
 └── model.lib
@@ -463,10 +568,12 @@ The rewrite keeps the existing browser contracts and visualization surfaces:
 `modeling/ui-projection.ts` derives display data from the selected accepted
 validation plan and server-scored result. It writes
 `model-ui.json`, `validation/cases/<case-id>.preview.json`, and deterministic
-`validation/cases/<case-id>.circuit.tsx`. A supported saved Circuit JSON snapshot
-is used when one is available; otherwise the UI labels the deterministic TSX
-projection as source-ready. The numeric comparison always comes from
-`validation-results.json`.
+`validation/cases/<case-id>.circuit.tsx`. A saved Circuit JSON snapshot exposes
+the analog tab only when it contains a completed transient experiment and
+waveform. The displayed result curve and comparison metrics come from those
+exact Runframe-consumed samples; `validation-results.json` remains the separate
+server-validation record. Scalar compatibility previews are labeled as
+specification checks and never as graph matches.
 
 The UI is a projection of canonical artifacts, not an independent validation
 path. Changing tabs or selecting a case does not redefine the model contract or

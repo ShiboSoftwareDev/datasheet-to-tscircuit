@@ -2,12 +2,20 @@ import type {
   ModelAnalysis,
   ModelCharacterization,
   ModelFamily,
+  ModelReferenceCropRegion,
+  ModelReferenceElectricalBinding,
   ModelReferencePoint,
   ModelRequirement,
   ModelSourceReference,
   ModelStrategyId,
 } from "./types"
+import {
+  MODEL_REFERENCE_CROP_DPI,
+  MODEL_REFERENCE_CROP_MIN_HEIGHT,
+  MODEL_REFERENCE_CROP_MIN_WIDTH,
+} from "./types"
 import { MIN_FRESH_REFERENCE_CURVE_POINTS } from "./model-training-contract"
+import { parseModelReferenceElectricalBinding } from "./reference-electrical-binding"
 
 const MODEL_FAMILIES = new Set<ModelFamily>([
   "passive",
@@ -28,7 +36,7 @@ const MODEL_FAMILIES = new Set<ModelFamily>([
 const MODEL_STRATEGIES = new Set<ModelStrategyId>(["vendor", "equation", "behavioral", "hybrid"])
 const MODEL_ANALYSES = new Set<ModelAnalysis>(["operating_point", "dc_sweep", "transient"])
 const BASE_OBSERVATION_UNITS = new Set(["V", "A"])
-const MAX_NORMALIZED_CURVE_TOLERANCE = 0.5
+const MAX_NORMALIZED_CURVE_TOLERANCE = 0.1
 
 function maximumModeledExpectedTolerance(expected: ModelRequirement["expected"]): number | undefined {
   const absolute_floor = expected.unit === "V" ? 1e-3 : expected.unit === "A" ? 1e-6 : undefined
@@ -77,12 +85,49 @@ class CharacterizationReader {
     return value
   }
 
+  integer(value: unknown, path: string, minimum: number): number {
+    if (!Number.isSafeInteger(value) || (value as number) < minimum) {
+      this.errors.push(`${path} must be a safe integer greater than or equal to ${minimum}`)
+      return minimum
+    }
+    return value as number
+  }
+
   stringArray(value: unknown, path: string): string[] {
     if (!Array.isArray(value)) {
       this.errors.push(`${path} must be an array`)
       return []
     }
     return value.map((item, index) => this.string(item, `${path}[${index}]`)).filter(Boolean)
+  }
+}
+
+function readCropRegion(
+  reader: CharacterizationReader,
+  value: unknown,
+  path: string,
+  reject_unknown_fields: boolean,
+): ModelReferenceCropRegion | undefined {
+  if (!isRecord(value)) {
+    reader.errors.push(`${path} must be an object`)
+    return undefined
+  }
+  reader.onlyKeys(
+    value,
+    ["page", "render_dpi", "x_px", "y_px", "width_px", "height_px"],
+    path,
+    reject_unknown_fields,
+  )
+  if (value.render_dpi !== MODEL_REFERENCE_CROP_DPI) {
+    reader.errors.push(`${path}.render_dpi must be ${MODEL_REFERENCE_CROP_DPI}`)
+  }
+  return {
+    page: reader.integer(value.page, `${path}.page`, 1),
+    render_dpi: MODEL_REFERENCE_CROP_DPI,
+    x_px: reader.integer(value.x_px, `${path}.x_px`, 0),
+    y_px: reader.integer(value.y_px, `${path}.y_px`, 0),
+    width_px: reader.integer(value.width_px, `${path}.width_px`, 1),
+    height_px: reader.integer(value.height_px, `${path}.height_px`, 1),
   }
 }
 
@@ -258,23 +303,51 @@ function readRequirement(
     } else {
       reader.onlyKeys(
         record.reference_curve,
-        ["x_quantity", "x_unit", "y_quantity", "y_unit", "points", "tolerance", "image"],
+        [
+          "x_quantity",
+          "x_unit",
+          "y_quantity",
+          "y_unit",
+          "points",
+          "tolerance",
+          "crop",
+          "image",
+          "electrical_binding",
+        ],
         `${path}.reference_curve`,
         reject_unknown_fields,
       )
+      const crop =
+        record.reference_curve.crop === undefined
+          ? undefined
+          : readCropRegion(
+              reader,
+              record.reference_curve.crop,
+              `${path}.reference_curve.crop`,
+              reject_unknown_fields,
+            )
       const points = Array.isArray(record.reference_curve.points)
         ? record.reference_curve.points.map((point, point_index) =>
             readPoint(reader, point, `${path}.reference_curve.points[${point_index}]`, reject_unknown_fields),
           )
         : []
       if (points.length < 2) reader.errors.push(`${path}.reference_curve.points needs at least two points`)
+      const fresh_point_minimum = crop
+        ? Math.min(48, Math.max(8, Math.ceil(crop.width_px / 12)))
+        : Math.max(8, MIN_FRESH_REFERENCE_CURVE_POINTS)
+      if (enforce_fresh_policy && support.status === "modeled" && points.length < fresh_point_minimum) {
+        reader.errors.push(
+          `${path}.reference_curve.points needs at least ${fresh_point_minimum} points for this graph crop so server validation can withhold interior samples from model generation`,
+        )
+      }
       if (
         enforce_fresh_policy &&
         support.status === "modeled" &&
-        points.length < MIN_FRESH_REFERENCE_CURVE_POINTS
+        crop &&
+        (crop.width_px < MODEL_REFERENCE_CROP_MIN_WIDTH || crop.height_px < MODEL_REFERENCE_CROP_MIN_HEIGHT)
       ) {
         reader.errors.push(
-          `${path}.reference_curve.points needs at least ${MIN_FRESH_REFERENCE_CURVE_POINTS} points so server validation can withhold interior samples from model generation`,
+          `${path}.reference_curve.crop must be at least ${MODEL_REFERENCE_CROP_MIN_WIDTH}x${MODEL_REFERENCE_CROP_MIN_HEIGHT} pixels at ${MODEL_REFERENCE_CROP_DPI} DPI`,
         )
       }
       for (let point_index = 1; point_index < points.length; point_index += 1) {
@@ -285,6 +358,20 @@ function readRequirement(
           break
         }
       }
+      if (enforce_fresh_policy && support.status === "modeled" && points.some(({ x }) => x < 0)) {
+        reader.errors.push(`${path}.reference_curve.points cannot contain negative elapsed time`)
+      }
+      let electrical_binding: ModelReferenceElectricalBinding | undefined
+      if (record.reference_curve.electrical_binding !== undefined) {
+        try {
+          electrical_binding = parseModelReferenceElectricalBinding(
+            record.reference_curve.electrical_binding,
+            `${path}.reference_curve.electrical_binding`,
+          )
+        } catch (error) {
+          reader.errors.push(error instanceof Error ? error.message : String(error))
+        }
+      }
       reference_curve = {
         x_quantity: reader.string(record.reference_curve.x_quantity, `${path}.reference_curve.x_quantity`),
         x_unit: reader.string(record.reference_curve.x_unit, `${path}.reference_curve.x_unit`),
@@ -292,10 +379,12 @@ function readRequirement(
         y_unit: reader.string(record.reference_curve.y_unit, `${path}.reference_curve.y_unit`),
         points,
         tolerance: reader.finite(record.reference_curve.tolerance, `${path}.reference_curve.tolerance`),
+        crop,
         image:
           record.reference_curve.image === undefined
             ? undefined
             : reader.string(record.reference_curve.image, `${path}.reference_curve.image`),
+        electrical_binding,
       }
       if (reference_curve.tolerance !== undefined && reference_curve.tolerance <= 0) {
         reader.errors.push(`${path}.reference_curve.tolerance must be positive`)
@@ -313,9 +402,14 @@ function readRequirement(
   }
 
   if (support.status === "modeled") {
-    if (enforce_fresh_policy && analysis === "dc_sweep" && !reference_curve) {
+    if (enforce_fresh_policy && analysis !== "transient") {
       reader.errors.push(
-        `${path}.reference_curve is required for modeled dc_sweep behavior; use operating_point when one scalar target or bound applies at every static sample`,
+        `${path}.analysis must be transient for fresh modeled requirements; operating_point and dc_sweep may only be documented_only`,
+      )
+    }
+    if (enforce_fresh_policy && !reference_curve) {
+      reader.errors.push(
+        `${path}.reference_curve is required for fresh modeled requirements; executable models must be grounded in a printed elapsed-time graph`,
       )
     }
     if (expected.unit && !BASE_OBSERVATION_UNITS.has(expected.unit)) {
@@ -323,9 +417,29 @@ function readRequirement(
         `${path}.expected.unit must be V or A for modeled behavior; express ratios and other quantities as an observable base-unit response`,
       )
     }
+    if (enforce_fresh_policy && expected.unit !== "V") {
+      reader.errors.push(
+        `${path}.expected.unit must be V for fresh modeled requirements; the current tscircuit runtime does not emit transient current graphs`,
+      )
+    }
     if (reference_curve) {
       if (!BASE_OBSERVATION_UNITS.has(reference_curve.y_unit)) {
         reader.errors.push(`${path}.reference_curve.y_unit must be V or A for modeled behavior`)
+      }
+      if (enforce_fresh_policy && !reference_curve.electrical_binding) {
+        reader.errors.push(
+          `${path}.reference_curve.electrical_binding is required for fresh modeled requirements so the datasheet response and pulsed stimulus cannot be reassigned to different DUT pins`,
+        )
+      }
+      if (enforce_fresh_policy && reference_curve.y_unit !== "V") {
+        reader.errors.push(
+          `${path}.reference_curve.y_unit must be V for fresh modeled requirements; the current tscircuit runtime does not emit transient current graphs`,
+        )
+      }
+      if (enforce_fresh_policy && reference_curve.y_quantity !== "voltage") {
+        reader.errors.push(
+          `${path}.reference_curve.y_quantity must be voltage for fresh modeled requirements`,
+        )
       }
       if (analysis === "operating_point") {
         reader.errors.push(`${path}.reference_curve is incompatible with operating_point analysis`)
@@ -333,6 +447,17 @@ function readRequirement(
         reader.errors.push(`${path}.reference_curve.x_unit must be V or A for dc_sweep analysis`)
       } else if (analysis === "transient" && reference_curve.x_unit !== "s") {
         reader.errors.push(`${path}.reference_curve.x_unit must be s for transient analysis`)
+      }
+      if (enforce_fresh_policy && reference_curve.x_unit !== "s") {
+        reader.errors.push(`${path}.reference_curve.x_unit must be s for fresh modeled requirements`)
+      }
+      if (enforce_fresh_policy && reference_curve.x_quantity !== "time") {
+        reader.errors.push(`${path}.reference_curve.x_quantity must be time for fresh modeled requirements`)
+      }
+      if (enforce_fresh_policy && !reference_curve.crop) {
+        reader.errors.push(
+          `${path}.reference_curve.crop is required for fresh modeled requirements and must identify the exact printed graph at 200 DPI`,
+        )
       }
     }
   }
@@ -343,6 +468,11 @@ function readRequirement(
       )
     : []
   if (sources.length === 0) reader.errors.push(`${path}.sources must cite at least one datasheet source`)
+  if (reference_curve?.crop && sources[0]?.page !== reference_curve.crop.page) {
+    reader.errors.push(
+      `${path}.reference_curve.crop.page must match the primary PDF page at ${path}.sources[0]`,
+    )
+  }
 
   return {
     requirement_id,
@@ -398,7 +528,7 @@ export function parseModelCharacterization(
   if (new Set(ids).size !== ids.length) {
     reader.errors.push("model-characterization.json requirement ids must be unique")
   }
-  if (!requirements.some(({ support }) => support.status === "modeled")) {
+  if (options.policy !== "fresh" && !requirements.some(({ support }) => support.status === "modeled")) {
     reader.errors.push("model-characterization.json must contain at least one modeled requirement")
   }
   const assumptions = reader.stringArray(value.assumptions, "model-characterization.json.assumptions")

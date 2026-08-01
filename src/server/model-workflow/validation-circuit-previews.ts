@@ -4,14 +4,44 @@ import { isCircuitJson } from "../component-circuit-json"
 import { createStageWorkspace } from "../infrastructure/artifacts"
 import type { ProcessRunner } from "../infrastructure/process"
 import { buildTscircuitSource } from "../infrastructure/tscircuit"
-import { renderValidationCaseTsx, type GeneratedModel } from "../modeling"
+import {
+  assertValidationCircuitEmbedsModel,
+  getAnalogProjectionIssue,
+  renderValidationCaseTsx,
+  type GeneratedModel,
+} from "../modeling"
+import { validateViewerSimulation, type ViewerSimulationValidation } from "../modeling/viewer-simulation"
 import type { ValidationPlan } from "../spice-validation"
 
 const MAX_CONCURRENT_PREVIEW_BUILDS = 3
 
 export interface ValidationCircuitPreviewBuild {
   circuit_json_by_case: Readonly<Record<string, AnyCircuitElement[] | undefined>>
+  /** Only tsci/build failures that make the Circuit JSON unusable as a schematic. */
+  circuit_build_errors_by_case: Readonly<Record<string, string | undefined>>
+  /** All viewer acceptance failures, including an out-of-tolerance runnable waveform. */
   errors_by_case: Readonly<Record<string, string | undefined>>
+  viewer_validation_by_case: Readonly<Record<string, ViewerSimulationValidation | undefined>>
+}
+
+export interface ViewerPreviewFailure {
+  case_id: string
+  message: string
+}
+
+export function getViewerPreviewFailures(build: ValidationCircuitPreviewBuild): ViewerPreviewFailure[] {
+  return Object.entries(build.errors_by_case).flatMap(([case_id, message]) =>
+    message ? [{ case_id, message }] : [],
+  )
+}
+
+export function getViewerInfrastructureFailures(
+  build: ValidationCircuitPreviewBuild,
+): ViewerPreviewFailure[] {
+  return getViewerPreviewFailures(build).filter(({ case_id }) => {
+    const validation = build.viewer_validation_by_case[case_id]
+    return !validation || validation.errors.some(({ kind }) => kind !== "comparison")
+  })
 }
 
 async function buildOnePreview(input: {
@@ -22,7 +52,13 @@ async function buildOnePreview(input: {
   process_runner: ProcessRunner
   signal: AbortSignal
   append: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
-}): Promise<{ case_id: string; circuit_json?: AnyCircuitElement[]; error?: string }> {
+}): Promise<{
+  case_id: string
+  circuit_json?: AnyCircuitElement[]
+  error?: string
+  circuit_build_error?: string
+  viewer_validation?: ViewerSimulationValidation
+}> {
   const case_id = input.validation_case.id
   const workspace = await createStageWorkspace({
     prefix: `model-preview-${case_id}`,
@@ -59,18 +95,52 @@ async function buildOnePreview(input: {
     })
     const error = build.errors.length > 0 ? build.errors.join("; ") : undefined
     if (error) await input.append("stderr", `Validation TSX preview ${case_id}: ${error}\n`)
-    if (error) return { case_id, error }
+    if (error) return { case_id, error, circuit_build_error: error }
     if (!isCircuitJson(build.circuit_json)) {
       const empty_error = "tsci produced no renderable Circuit JSON"
       await input.append("stderr", `Validation TSX preview ${case_id}: ${empty_error}\n`)
-      return { case_id, error: empty_error }
+      return { case_id, error: empty_error, circuit_build_error: empty_error }
     }
-    return { case_id, circuit_json: build.circuit_json }
+    try {
+      assertValidationCircuitEmbedsModel(build.circuit_json, input.generated.source, input.generated.manifest)
+    } catch (error) {
+      const provenance_error = `viewer_model_provenance_failed: ${error instanceof Error ? error.message : String(error)}`
+      await input.append("stderr", `Validation TSX preview ${case_id}: ${provenance_error}\n`)
+      return { case_id, circuit_json: build.circuit_json, error: provenance_error }
+    }
+    const projection_issue = getAnalogProjectionIssue(input.validation_case)
+    if (projection_issue) {
+      const unsupported_error = `viewer_projection_unsupported: ${projection_issue}`
+      await input.append(
+        "stderr",
+        `Validation TSX preview ${case_id} cannot produce a publishable graph: ${unsupported_error}\n`,
+      )
+      return { case_id, circuit_json: build.circuit_json, error: unsupported_error }
+    }
+    const viewer_validation = validateViewerSimulation({
+      validation_case: input.validation_case,
+      circuit_json: build.circuit_json,
+    })
+    if (!viewer_validation.passed) {
+      const validation_error = viewer_validation.errors
+        .map(({ code, message }) => `${code}: ${message}`)
+        .join("; ")
+      await input.append(
+        "stderr",
+        `Validation TSX preview ${case_id} is not a publishable time-domain simulation: ${validation_error}\n`,
+      )
+      return { case_id, circuit_json: build.circuit_json, error: validation_error, viewer_validation }
+    }
+    await input.append(
+      "system",
+      `Validated tscircuit transient graph ${case_id} (${viewer_validation.series.map(({ points }) => points.length).join(", ")} samples)\n`,
+    )
+    return { case_id, circuit_json: build.circuit_json, viewer_validation }
   } catch (error) {
     input.signal.throwIfAborted()
     const message = error instanceof Error ? error.message : String(error)
     await input.append("stderr", `Validation TSX preview ${case_id} could not be built: ${message}\n`)
-    return { case_id, error: message }
+    return { case_id, error: message, circuit_build_error: message }
   } finally {
     await workspace.dispose().catch(() => undefined)
   }
@@ -107,8 +177,14 @@ export async function buildValidationCircuitPreviews(input: {
     circuit_json_by_case: Object.fromEntries(
       results.flatMap((result) => (result ? [[result.case_id, result.circuit_json]] : [])),
     ),
+    circuit_build_errors_by_case: Object.fromEntries(
+      results.flatMap((result) => (result ? [[result.case_id, result.circuit_build_error]] : [])),
+    ),
     errors_by_case: Object.fromEntries(
       results.flatMap((result) => (result ? [[result.case_id, result.error]] : [])),
+    ),
+    viewer_validation_by_case: Object.fromEntries(
+      results.flatMap((result) => (result ? [[result.case_id, result.viewer_validation]] : [])),
     ),
   }
 }

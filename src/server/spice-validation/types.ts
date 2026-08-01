@@ -1,4 +1,8 @@
 import type { ModelFamily, ModelInterface, ModelRequirement } from "@/server/modeling/types"
+import type {
+  ApplicationFixtureContract,
+  ResolvedApplicationFixture,
+} from "@/server/modeling/application-fixture-contract"
 import type { ModelManifest } from "@/shared/job-types"
 
 export type SpiceEndpoint = "gnd" | `dut.${string}` | `net.${string}`
@@ -134,6 +138,8 @@ export interface ValidationCase {
   fixtures: FixtureElement[]
   analysis: ValidationAnalysis
   observations: ValidationObservation[]
+  /** Server-injected exact application topology for a fresh bound experiment. */
+  application_fixture?: ResolvedApplicationFixture
 }
 
 export interface ValidationPlan {
@@ -233,12 +239,24 @@ export interface ValidationInputHashes {
   manifest_sha256: string
 }
 
+/** Server-owned proof that dynamic output depends materially on the bound electrical step. */
+export interface ValidationStimulusCausalityReceipt {
+  version: 1
+  method: "bound_pulse_flatten_v2"
+  status: "passed"
+  hashes: ValidationInputHashes
+  checked_case_count: number
+  checked_observation_count: number
+}
+
 export interface ValidationRunResult {
   version: 1
   passed: boolean
   hashes: ValidationInputHashes
   cases: ValidationCaseResult[]
   errors: ValidationExecutionError[]
+  /** Present on fresh time-domain results only after the private flattened-stimulus check passes. */
+  stimulus_causality?: ValidationStimulusCausalityReceipt
 }
 
 export type ValidationAppendLogger = (
@@ -250,6 +268,7 @@ interface ValidationContextBase {
   model_requirements: readonly ModelRequirement[]
   model_source?: string
   model_family?: ModelFamily
+  application_fixture?: ApplicationFixtureContract
 }
 
 export type ValidationContext = ValidationContextBase &

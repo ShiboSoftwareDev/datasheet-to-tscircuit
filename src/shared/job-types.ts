@@ -320,6 +320,8 @@ export interface ModelReferenceSeriesPreview {
   source_file: string
   result_file?: string
   y_scale: "linear" | "log"
+  /** Distinguishes a sampled time-domain curve from scalar specification checks. */
+  reference_kind?: "curve" | "target" | "bounds"
   reference_points: ModelCurvePoint[]
   reference_bounds?: {
     min?: number
@@ -337,6 +339,10 @@ export interface ModelCircuitPreview {
   build_status: "source_ready" | "building" | "ready" | "failed"
   updated_at: string
   circuit_json?: AnyCircuitElement[]
+  /** Analysis represented by the generated validation-case TSX. */
+  analysis_type?: "operating_point" | "dc_sweep" | "transient"
+  /** Whether Circuit JSON contains a completed transient experiment and waveform. */
+  analog_simulation_status?: "available" | "unsupported" | "failed"
   snapshot_origin?: "workspace" | "server_validation"
   is_stale?: boolean
   error_message?: string
@@ -353,6 +359,8 @@ export interface ModelReferencePreview {
   y_axis_unit?: string
   x_scale: "linear" | "log"
   y_scale: "linear" | "log"
+  /** Distinguishes a sampled time-domain curve from scalar specification checks. */
+  reference_kind?: "curve" | "target" | "bounds"
   reference_points: ModelCurvePoint[]
   reference_bounds?: {
     min?: number
@@ -361,7 +369,7 @@ export interface ModelReferencePreview {
   result_points?: ModelCurvePoint[]
   series?: ModelReferenceSeriesPreview[]
   result_status?: "unverified" | "partial" | "verified" | "failed" | "cancelled" | "deprecated"
-  result_origin?: "workspace" | "server_validation"
+  result_origin?: "workspace" | "server_validation" | "tscircuit_viewer"
   normalized_rmse?: number
   normalized_max_error?: number
   matches_reference?: boolean
@@ -377,7 +385,15 @@ export interface ModelPreviewOption {
   result_file?: string
 }
 
+/** Immutable identity shared by one selected preview and its datasheet image. */
+export interface ModelPreviewArtifactIdentity {
+  preview_generation: string
+  model_revision: string
+}
+
 export interface ModelSelectedPreview {
+  /** Missing only for preview artifacts written before immutable image binding was introduced. */
+  artifact_identity?: ModelPreviewArtifactIdentity
   circuit_preview?: ModelCircuitPreview
   reference_preview?: ModelReferencePreview
 }

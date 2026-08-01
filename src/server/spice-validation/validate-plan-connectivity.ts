@@ -64,6 +64,13 @@ function isVoltageClamped(validation_case: ValidationCase, positive: string, neg
   for (const fixture of validation_case.fixtures) {
     if (fixture.type === "voltage_source") connect(fixture.positive, fixture.negative)
   }
+  for (const group of validation_case.application_fixture?.node_groups ?? []) {
+    const node = group.is_ground ? "gnd" : `net.${group.id}`
+    for (const endpoint of group.dut_endpoints) connect(endpoint, node)
+  }
+  for (const overlay of validation_case.application_fixture?.condition_overlays ?? []) {
+    connect(overlay.endpoint, overlay.reference)
+  }
   const pending = [positive]
   const visited = new Set<string>()
   while (pending.length > 0) {
@@ -168,6 +175,34 @@ export function validateCaseConnectivity(input: {
     } else if (counts_as_terminal) {
       net_terminal_counts.set(parsed.identifier, (net_terminal_counts.get(parsed.identifier) ?? 0) + 1)
     }
+  }
+
+  for (const [group_index, group] of (validation_case.application_fixture?.node_groups ?? []).entries()) {
+    const group_path = `${case_path}.application_fixture.node_groups[${group_index}]`
+    const group_node = group.is_ground ? "gnd" : `net.${group.id}`
+    if (group.is_ground) has_ground = true
+    else if (!declared_nets.has(group.id)) {
+      collector.add(
+        `${group_path}.id`,
+        "unknown_application_net",
+        `application node group ${JSON.stringify(group.id)} must be declared in case.nets`,
+      )
+    }
+    for (const [endpoint_index, endpoint] of group.dut_endpoints.entries()) {
+      validate_endpoint(endpoint, `${group_path}.dut_endpoints[${endpoint_index}]`, true)
+      if (!group.is_ground) {
+        connect(endpoint, group_node)
+        net_terminal_counts.set(group.id, (net_terminal_counts.get(group.id) ?? 0) + 1)
+      }
+    }
+  }
+  for (const [overlay_index, overlay] of (
+    validation_case.application_fixture?.condition_overlays ?? []
+  ).entries()) {
+    const overlay_path = `${case_path}.application_fixture.condition_overlays[${overlay_index}]`
+    validate_endpoint(overlay.endpoint, `${overlay_path}.endpoint`, true)
+    validate_endpoint(overlay.reference, `${overlay_path}.reference`, false)
+    connect(overlay.endpoint, overlay.reference)
   }
 
   validation_case.fixtures.forEach((fixture, fixture_index) => {

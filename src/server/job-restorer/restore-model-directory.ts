@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import type {
   ModelManifest,
   ModelRun,
@@ -7,6 +7,7 @@ import type {
   ModelSelectedPreview,
   ModelValidationSummary,
 } from "@/shared/job-types"
+import { parseModelSelectedPreview, tryParseModelSelectedPreview } from "@/shared/model-selected-preview"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 import type { ModelRunStore } from "../model-run-store"
 import {
@@ -25,11 +26,7 @@ import {
 } from "./restored-model-metadata"
 
 function selectedPreview(value: unknown): ModelSelectedPreview | undefined {
-  if (!isRecord(value)) return undefined
-  return {
-    circuit_preview: isModelCircuitPreview(value.circuit_preview) ? value.circuit_preview : undefined,
-    reference_preview: isModelReferencePreview(value.reference_preview) ? value.reference_preview : undefined,
-  }
+  return tryParseModelSelectedPreview(value)
 }
 
 function restoredProgressHistory(value: unknown): ModelRun["progress_history"] {
@@ -72,21 +69,36 @@ async function readCurrentCandidateProjection(input: {
   ) {
     return undefined
   }
+  const marker_revision = marker_value.revision as string
+  const marker_preview_generation = marker_value.preview_generation as string
   const ui_value = await readJson(
-    join(input.model_dir, "current-previews", marker_value.preview_generation, "model-ui.json"),
+    join(input.model_dir, "current-previews", marker_preview_generation, "model-ui.json"),
   )
   if (!isRecord(ui_value) || !isRecord(ui_value.validation)) return undefined
   const validation = ui_value.validation
   if (
     validation.artifact_state !== "candidate" ||
-    validation.model_revision !== marker_value.revision ||
-    validation.preview_generation !== marker_value.preview_generation ||
+    validation.model_revision !== marker_revision ||
+    validation.preview_generation !== marker_preview_generation ||
     !Array.isArray(ui_value.preview_options) ||
     !isRecord(ui_value.selected_previews)
   ) {
     return undefined
   }
-  return ui_value
+  const parsed_selected_previews = Object.fromEntries(
+    Object.entries(ui_value.selected_previews).flatMap(([case_id, value]) => {
+      const preview = tryParseModelSelectedPreview(value, {
+        expected_artifact_identity: /^[a-f0-9]{16}$/.test(marker_revision)
+          ? {
+              preview_generation: marker_preview_generation,
+              model_revision: marker_revision,
+            }
+          : undefined,
+      })
+      return preview ? [[case_id, preview]] : []
+    }),
+  )
+  return { ...ui_value, selected_previews: parsed_selected_previews }
 }
 
 function restorePublicationIntegrityFailure(input: {
@@ -316,7 +328,14 @@ export async function restoreModelDirectory(input: {
   )
   const completion_integrity =
     raw_status === "complete" || publication
-      ? validateModelCompletionIntegrity({ model_source, manifest, contract, plan, result })
+      ? validateModelCompletionIntegrity({
+          model_source,
+          manifest,
+          contract,
+          plan,
+          result,
+          policy: "legacy_compatibility",
+        })
       : undefined
   const invalid_completion = completion_integrity?.valid === false
   const status: ModelRunStatus = invalid_completion
@@ -354,7 +373,35 @@ export async function restoreModelDirectory(input: {
       : undefined
   const display_ui = candidate_ui ?? ui
   const selected_previews = isRecord(display_ui?.selected_previews) ? display_ui.selected_previews : undefined
-  const first_selected = selected_previews ? selectedPreview(Object.values(selected_previews)[0]) : undefined
+  let first_selected: ModelSelectedPreview | undefined
+  if (publication?.commit.version === 3 && display_ui === ui) {
+    try {
+      if (!selected_previews || Object.keys(selected_previews).length === 0) {
+        throw new Error("Fresh accepted model-ui.json has no selected previews")
+      }
+      const parsed_previews = Object.values(selected_previews).map((value) =>
+        parseModelSelectedPreview(value, {
+          fresh_accepted: true,
+          expected_artifact_identity: {
+            preview_generation: basename(publication.accepted_model_dir),
+            model_revision: publication.commit.revision,
+          },
+        }),
+      )
+      first_selected = parsed_previews[0]
+    } catch (error) {
+      if (!checkpoint_exists) throw error
+      return restorePublicationIntegrityFailure({
+        ...input,
+        directory_stat,
+        saved,
+        logs,
+        error,
+      })
+    }
+  } else {
+    first_selected = selected_previews ? selectedPreview(Object.values(selected_previews)[0]) : undefined
+  }
   const error_message = recovered_publication
     ? undefined
     : uncommitted_completion

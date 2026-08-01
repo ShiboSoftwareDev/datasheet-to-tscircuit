@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
 import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
-import { buildValidationPlanGuide, buildValidationPlanPrompt, parseModelContract } from "../../modeling"
+import {
+  buildValidationPlanGuide,
+  buildValidationPlanPrompt,
+  parseFreshModelContract,
+} from "../../modeling"
 import { parseAgentValidationPlan, type ValidationPlan } from "../../spice-validation"
 import {
   appendModelLog,
@@ -43,7 +47,7 @@ export const designValidationStage = defineModelStage({
     const contract_path = dependency_outputs.characterize.contract_path
     const attempt_dir = dirname(contract_path)
     const evidence_dir = join(attempt_dir, "evidence")
-    const contract = parseModelContract(await readJson(contract_path))
+    const contract = parseFreshModelContract(await readJson(contract_path))
     const requirement_ids = modeledRequirementIds(contract)
     await Bun.write(join(attempt_dir, "validation-plan-guide.md"), buildValidationPlanGuide(contract))
     const attempt = await runAgentArtifactStage({
@@ -67,6 +71,7 @@ export const designValidationStage = defineModelStage({
             { source: join(context.model_dir, "component.circuit.tsx") },
             { source: join(context.model_dir, "component-evidence.json") },
             { source: join(context.model_dir, "typical-application-plan.json") },
+            { source: join(context.model_dir, "application-fixture-contract.json") },
           ],
           directories: [{ source: evidence_dir, destination: "evidence", required: false }],
         }),
@@ -89,6 +94,7 @@ export const designValidationStage = defineModelStage({
           model_interface: contract.interface,
           model_requirements: contract.characterization.requirements,
           model_family: contract.characterization.family,
+          application_fixture: contract.application_fixture,
         })
         await assertPlanEvidencePaths(workspace, plan)
         await assertValidationPlanSensitiveToDut({

@@ -1,4 +1,5 @@
 import { parseModelCharacterization } from "./parse-model-characterization"
+import { parseApplicationFixtureContract } from "./application-fixture-contract"
 import type { ModelContract, ModelInterface } from "./types"
 
 const SPICE_IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -87,14 +88,45 @@ export function parseModelInterface(value: unknown, path = "model-interface.json
   return { version: 1, part_number, entry_name, pins }
 }
 
-export function parseModelContract(value: unknown): ModelContract {
+export interface ParseModelContractOptions {
+  characterization_policy?: "compatibility" | "fresh"
+  reject_unknown_characterization_fields?: boolean
+}
+
+export function parseModelContract(
+  value: unknown,
+  options: ParseModelContractOptions = {},
+): ModelContract {
   const path = "model-contract.json"
   const contract = record(value, path)
-  exactKeys(contract, ["version", "interface", "characterization"], path)
+  exactKeys(contract, ["version", "interface", "characterization", "application_fixture"], path)
   if (contract.version !== 1) throw new Error(`${path}.version must be 1`)
   return {
     version: 1,
     interface: parseModelInterface(contract.interface, `${path}.interface`),
-    characterization: parseModelCharacterization(contract.characterization),
+    characterization: parseModelCharacterization(contract.characterization, {
+      policy: options.characterization_policy,
+      reject_unknown_fields: options.reject_unknown_characterization_fields,
+    }),
+    ...(contract.application_fixture === undefined
+      ? {}
+      : {
+          application_fixture: parseApplicationFixtureContract(
+            contract.application_fixture,
+            `${path}.application_fixture`,
+          ),
+        }),
   }
+}
+
+/** Parse a contract that is about to participate in the executable model workflow. */
+export function parseFreshModelContract(value: unknown): ModelContract {
+  const contract = parseModelContract(value, {
+    characterization_policy: "fresh",
+    reject_unknown_characterization_fields: true,
+  })
+  if (!contract.characterization.requirements.some(({ support }) => support.status === "modeled")) {
+    throw new Error("Fresh executable model contract must contain at least one modeled requirement")
+  }
+  return contract
 }

@@ -5,6 +5,31 @@ import type { ModelRunStore } from "../model-run-store"
 import type { ModelStrategyRegistry } from "../modeling"
 import type { NgspiceExecutor } from "../spice-validation"
 
+export type ModelRepairFeedbackCategory =
+  | "target_mismatch"
+  | "bounds_violation"
+  | "curve_mismatch"
+  | "viewer_curve_mismatch"
+  | "stimulus_insensitive"
+  | "invalid_log_output"
+  | "non_finite_output"
+  | "convergence_failure"
+  | "simulator_rejected_model"
+  | "comparison_failure"
+  | "validation_failure"
+
+export type ModelRepairFeedbackIssue = {
+  readonly category: ModelRepairFeedbackCategory
+  readonly affected_cases: number
+  readonly affected_observations: number
+}
+
+export type ModelRepairFeedback = {
+  readonly version: 1
+  readonly status: "failed"
+  readonly issues: readonly ModelRepairFeedbackIssue[]
+}
+
 export interface ModelRunnerContext {
   job_store: JobStore
   model_run_store: ModelRunStore
@@ -31,6 +56,8 @@ export type ModelPipelineOutputs = {
     pin_count: number
     interface_path: string
     attempt_dir: string
+    application_fixture_path: string
+    application_fixture_sha256: string
   }
   characterize: {
     contract_path: string
@@ -38,6 +65,12 @@ export type ModelPipelineOutputs = {
     strategy: string
     modeled_requirement_ids: string[]
     documented_only_count: number
+    application_fixture_path: string
+    application_fixture_sha256: string
+    time_graph_hints_path: string
+    reference_observation_path: string
+    reference_source_proof_path: string
+    reference_verification_path: string
   }
   design_validation: {
     plan_path: string
@@ -66,6 +99,8 @@ export type ModelPipelineOutputs = {
     passed: boolean
     case_count: number
     failing_case_ids: string[]
+    /** Redacted category/count-only feedback, including viewer-only curve mismatches. */
+    repair_feedback?: ModelRepairFeedback
     revision: string
   }
   repair_model: {

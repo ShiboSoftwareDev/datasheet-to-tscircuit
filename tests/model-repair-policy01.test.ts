@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test"
-import { getNonRepairableValidationErrors, isModelRepairableValidationError } from "@/server/model-workflow"
+import {
+  classifyValidationInfrastructureFailure,
+  getNonRepairableValidationErrors,
+  isModelRepairableValidationError,
+} from "@/server/model-workflow"
 import type { ValidationExecutionError, ValidationRunResult } from "@/server/spice-validation"
 
 function error(kind: ValidationExecutionError["kind"], code: string): ValidationExecutionError {
@@ -35,4 +39,30 @@ test("non-repairable validation failures are returned without hiding repairable 
   }
 
   expect(getNonRepairableValidationErrors(result)).toEqual(errors.slice(1))
+  expect(
+    classifyValidationInfrastructureFailure({
+      result,
+      viewer_failures: [{ case_id: "startup", message: "tsci build failed" }],
+    }),
+  ).toEqual({ source: "server_validation", errors: errors.slice(1) })
+})
+
+test("viewer infrastructure is primary only when direct validation has no non-repairable fault", () => {
+  const result: ValidationRunResult = {
+    version: 1,
+    passed: false,
+    hashes: {
+      plan_sha256: "a".repeat(64),
+      model_sha256: "b".repeat(64),
+      manifest_sha256: "c".repeat(64),
+    },
+    cases: [],
+    errors: [error("comparison", "curve_tolerance_exceeded")],
+  }
+  const viewer_failures = [{ case_id: "startup", message: "tsci build failed" }]
+
+  expect(classifyValidationInfrastructureFailure({ result, viewer_failures })).toEqual({
+    source: "tscircuit_viewer",
+    failures: viewer_failures,
+  })
 })

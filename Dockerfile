@@ -39,7 +39,7 @@ FROM oven/bun:1.3.9 AS runtime
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu ngspice poppler-utils \
+    && apt-get install -y --no-install-recommends gosu ngspice poppler-utils tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 ARG SOURCE_COMMIT=unavailable

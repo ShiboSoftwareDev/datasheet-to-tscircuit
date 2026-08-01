@@ -29,14 +29,65 @@ function compilePulse(
     .join(" ")})`
 }
 
-function getNodeResolver(manifest: ModelManifest): (endpoint: SpiceEndpoint) => string {
+function getNodeResolver(
+  manifest: ModelManifest,
+  validation_case: ValidationCase,
+): (endpoint: SpiceEndpoint) => string {
   const dut_nodes = new Map(manifest.pins.map((pin, index) => [pin.spice_node, getDutNodeName(index)]))
+  const grouped_dut_nodes = new Map<string, string>()
+  for (const group of validation_case.application_fixture?.node_groups ?? []) {
+    const group_node = group.is_ground ? "0" : getNetNodeName(group.id)
+    for (const endpoint of group.dut_endpoints) {
+      if (!endpoint.startsWith("dut.")) {
+        throw new ValidationCompileError(
+          `Application node group ${JSON.stringify(group.id)} contains non-DUT endpoint ${JSON.stringify(endpoint)}`,
+        )
+      }
+      const spice_node = endpoint.slice("dut.".length)
+      if (!dut_nodes.has(spice_node)) {
+        throw new ValidationCompileError(
+          `Application node group ${JSON.stringify(group.id)} references unknown DUT pin ${JSON.stringify(spice_node)}`,
+        )
+      }
+      if (grouped_dut_nodes.has(spice_node)) {
+        throw new ValidationCompileError(
+          `DUT pin ${JSON.stringify(spice_node)} belongs to more than one application node group`,
+        )
+      }
+      grouped_dut_nodes.set(spice_node, group_node)
+    }
+  }
+  for (const overlay of validation_case.application_fixture?.condition_overlays ?? []) {
+    if (!overlay.endpoint.startsWith("dut.")) {
+      throw new ValidationCompileError(
+        `Application logic overlay contains non-DUT endpoint ${JSON.stringify(overlay.endpoint)}`,
+      )
+    }
+    const spice_node = overlay.endpoint.slice("dut.".length)
+    if (!dut_nodes.has(spice_node) || grouped_dut_nodes.has(spice_node)) {
+      throw new ValidationCompileError(
+        `Application logic overlay endpoint ${JSON.stringify(spice_node)} is not one detached DUT pin`,
+      )
+    }
+    const reference_node =
+      overlay.reference === "gnd"
+        ? "0"
+        : overlay.reference.startsWith("dut.")
+          ? grouped_dut_nodes.get(overlay.reference.slice("dut.".length))
+          : undefined
+    if (!reference_node) {
+      throw new ValidationCompileError(
+        `Application logic overlay reference ${JSON.stringify(overlay.reference)} is not anchored by the resolved topology`,
+      )
+    }
+    grouped_dut_nodes.set(spice_node, reference_node)
+  }
   return (endpoint) => {
     const parsed = parseEndpointSyntax(endpoint)
     if (!parsed) throw new ValidationCompileError(`Invalid endpoint ${JSON.stringify(endpoint)}`)
     if (parsed.scope === "gnd") return "0"
     if (parsed.scope === "net") return getNetNodeName(parsed.identifier)
-    const node = dut_nodes.get(parsed.identifier)
+    const node = grouped_dut_nodes.get(parsed.identifier) ?? dut_nodes.get(parsed.identifier)
     if (!node) throw new ValidationCompileError(`Unknown DUT pin ${JSON.stringify(parsed.identifier)}`)
     return node
   }
@@ -134,7 +185,7 @@ export function compileValidationCase(
   validation_case: ValidationCase,
   manifest: ModelManifest,
 ): CompiledValidationCase {
-  const resolve_node = getNodeResolver(manifest)
+  const resolve_node = getNodeResolver(manifest, validation_case)
   const fixtures = [...validation_case.fixtures].sort((a, b) => a.id.localeCompare(b.id))
   const fixture_by_id = new Map(fixtures.map((fixture) => [fixture.id, fixture]))
   const element_names = Object.fromEntries(
@@ -147,7 +198,7 @@ export function compileValidationCase(
   if (saved_vectors.length === 0) {
     throw new ValidationCompileError(`Case ${JSON.stringify(validation_case.id)} has no save vectors`)
   }
-  const dut_nodes = manifest.pins.map((_pin, index) => getDutNodeName(index))
+  const dut_nodes = manifest.pins.map(({ spice_node }) => resolve_node(`dut.${spice_node}`))
   const lines = [
     `* spice-validation version 1 case ${validation_case.id}`,
     ".include ../model.lib",

@@ -281,12 +281,29 @@ export function parseObservation(
         )
       }
     }
+    const positive = parseEndpoint(record.positive, `${path}.positive`, collector)
+    const negative = parseEndpoint(record.negative, `${path}.negative`, collector)
+    const electrical_binding = requirement?.reference_curve?.electrical_binding
+    if (electrical_binding && positive !== electrical_binding.response.positive) {
+      collector.add(
+        `${path}.positive`,
+        "requirement_response_endpoint_mismatch",
+        `must exactly match requirement ${JSON.stringify(requirement_id)} response.positive (${JSON.stringify(electrical_binding.response.positive)})`,
+      )
+    }
+    if (electrical_binding && negative !== electrical_binding.response.negative) {
+      collector.add(
+        `${path}.negative`,
+        "requirement_response_endpoint_mismatch",
+        `must exactly match requirement ${JSON.stringify(requirement_id)} response.negative (${JSON.stringify(electrical_binding.response.negative)})`,
+      )
+    }
     return {
       type,
       id,
       requirement_id,
-      positive: parseEndpoint(record.positive, `${path}.positive`, collector),
-      negative: parseEndpoint(record.negative, `${path}.negative`, collector),
+      positive,
+      negative,
       unit: "V",
       scale,
       reference,
@@ -304,6 +321,13 @@ export function parseObservation(
       collector.add(`${path}.element_id`, "invalid_identifier", "must be a stable fixture identifier")
     }
     if (record.unit !== "A") collector.add(`${path}.unit`, "invalid_unit", 'must be "A"')
+    if (requirement?.reference_curve?.electrical_binding) {
+      collector.add(
+        `${path}.type`,
+        "requirement_response_type_mismatch",
+        `requirement ${JSON.stringify(requirement_id)} is bound to a public-pin voltage response`,
+      )
+    }
     const reference = requirement
       ? canonicalRequirementReference({ requirement, observation_unit: "A", path, collector })
       : parseReference(record.reference, `${path}.reference`, collector)

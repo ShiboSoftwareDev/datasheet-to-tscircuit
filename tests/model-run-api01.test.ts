@@ -641,7 +641,14 @@ test("model preview APIs bind candidate generations exactly and never mistake qu
   const model_dir = join(job_dir, "spice")
   const generation_a = "candidate-generation-a1"
   const generation_b = "candidate-generation-b2"
-  const writePreviewBundle = async (root: string, label: string, image_byte: number) => {
+  const revision_a = "a".repeat(16)
+  const revision_b = "b".repeat(16)
+  const writePreviewBundle = async (
+    root: string,
+    label: string,
+    image_byte: number,
+    artifact_identity?: { preview_generation: string; model_revision: string },
+  ) => {
     await Promise.all([
       mkdir(join(root, "cases"), { recursive: true }),
       mkdir(join(root, "evidence"), { recursive: true }),
@@ -649,7 +656,17 @@ test("model preview APIs bind candidate generations exactly and never mistake qu
     await Promise.all([
       Bun.write(
         join(root, "cases", "output.preview.json"),
-        JSON.stringify({ reference_preview: { title: label } }),
+        JSON.stringify({
+          ...(artifact_identity ? { artifact_identity } : {}),
+          reference_preview: {
+            title: label,
+            source_file: "validation-plan.json",
+            x_scale: "linear",
+            y_scale: "linear",
+            reference_points: [],
+            updated_at: "2026-08-01T00:00:00.000Z",
+          },
+        }),
       ),
       Bun.write(
         join(root, "validation-plan.json"),
@@ -666,8 +683,14 @@ test("model preview APIs bind candidate generations exactly and never mistake qu
     ])
   }
   await Promise.all([
-    writePreviewBundle(join(model_dir, "current-previews", generation_a), "generation a", 1),
-    writePreviewBundle(join(model_dir, "current-previews", generation_b), "generation b", 2),
+    writePreviewBundle(join(model_dir, "current-previews", generation_a), "generation a", 1, {
+      preview_generation: generation_a,
+      model_revision: revision_a,
+    }),
+    writePreviewBundle(join(model_dir, "current-previews", generation_b), "generation b", 2, {
+      preview_generation: generation_b,
+      model_revision: revision_b,
+    }),
   ])
 
   const job_store = new JobStore()
@@ -679,9 +702,13 @@ test("model preview APIs bind candidate generations exactly and never mistake qu
     model_dir,
     effort_multiplier: 1,
   })
-  const validationSummary = (artifact_state: "candidate" | "accepted", preview_generation?: string) => ({
+  const validationSummary = (
+    artifact_state: "candidate" | "accepted",
+    preview_generation?: string,
+    model_revision = artifact_state === "candidate" ? revision_a : "accepted-r1",
+  ) => ({
     artifact_state,
-    model_revision: artifact_state === "candidate" ? "candidate-r2" : "accepted-r1",
+    model_revision,
     ...(preview_generation ? { preview_generation } : {}),
     benchmark_count: 1,
     passing_count: 0,
@@ -705,11 +732,96 @@ test("model preview APIs bind candidate generations exactly and never mistake qu
   const candidate_preview = await handle(
     new Request("http://localhost/api/model-run/preview?job_id=job_generation&benchmark_id=output"),
   )
+  expect(candidate_preview?.headers.get("Cache-Control")).toBe("no-store")
   expect(await candidate_preview?.json()).toMatchObject({ reference_preview: { title: "generation a" } })
   const candidate_image = await handle(
-    new Request("http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output"),
+    new Request(
+      `http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output&preview_generation=${generation_a}&model_revision=${revision_a}`,
+    ),
   )
   expect(new Uint8Array(await candidate_image!.arrayBuffer())).toEqual(new Uint8Array([137, 80, 78, 71, 1]))
+  expect(candidate_image?.headers.get("Cache-Control")).toBe("no-store")
+
+  const missing_candidate_identity = await handle(
+    new Request("http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(missing_candidate_identity?.status).toBe(400)
+  expect(missing_candidate_identity?.headers.get("Cache-Control")).toBe("no-store")
+  expect(await missing_candidate_identity?.json()).toMatchObject({
+    error: { error_code: "preview_artifact_identity_required" },
+  })
+
+  const incomplete_candidate_identity = await handle(
+    new Request(
+      `http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output&preview_generation=${generation_a}`,
+    ),
+  )
+  expect(incomplete_candidate_identity?.status).toBe(400)
+  expect(await incomplete_candidate_identity?.json()).toMatchObject({
+    error: { error_code: "preview_artifact_identity_incomplete" },
+  })
+
+  model_run_store.updateModelRun("model_generation", {
+    validation: validationSummary("candidate", generation_b, revision_b),
+  })
+  const stale_candidate_image = await handle(
+    new Request(
+      `http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output&preview_generation=${generation_a}&model_revision=${revision_a}`,
+    ),
+  )
+  expect(stale_candidate_image?.status).toBe(409)
+  expect(stale_candidate_image?.headers.get("Cache-Control")).toBe("no-store")
+  expect(await stale_candidate_image?.json()).toMatchObject({
+    error: { error_code: "preview_artifact_identity_mismatch" },
+  })
+  const current_candidate_image = await handle(
+    new Request(
+      `http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output&preview_generation=${generation_b}&model_revision=${revision_b}`,
+    ),
+  )
+  expect(new Uint8Array(await current_candidate_image!.arrayBuffer())).toEqual(
+    new Uint8Array([137, 80, 78, 71, 2]),
+  )
+
+  await writePreviewBundle(join(model_dir, "current-preview"), "unbound mutable candidate", 9)
+  model_run_store.updateModelRun("model_generation", {
+    validation: validationSummary("candidate", undefined, revision_b),
+  })
+  const unbound_candidate_preview = await handle(
+    new Request("http://localhost/api/model-run/preview?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(unbound_candidate_preview?.status).toBe(500)
+  expect(await unbound_candidate_preview?.json()).toMatchObject({
+    error: { error_code: "candidate_preview_invalid" },
+  })
+  const unbound_candidate_image = await handle(
+    new Request("http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(unbound_candidate_image?.status).toBe(500)
+  expect(await unbound_candidate_image?.json()).toMatchObject({
+    error: { error_code: "candidate_reference_image_invalid" },
+  })
+
+  const malformed_generation = "candidate-generation-malformed"
+  await mkdir(join(model_dir, "current-previews", malformed_generation, "cases"), { recursive: true })
+  await Bun.write(
+    join(model_dir, "current-previews", malformed_generation, "cases", "output.preview.json"),
+    JSON.stringify({ reference_preview: { title: "missing required fields" } }),
+  )
+  model_run_store.updateModelRun("model_generation", {
+    validation: validationSummary("candidate", malformed_generation, "c".repeat(16)),
+  })
+  const malformed_candidate = await handle(
+    new Request("http://localhost/api/model-run/preview?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(malformed_candidate?.status).toBe(500)
+  expect(malformed_candidate?.headers.get("Cache-Control")).toBe("no-store")
+  expect(await malformed_candidate?.json()).toMatchObject({
+    error: {
+      error_code: "candidate_preview_invalid",
+      message: expect.stringContaining("artifact_identity is required"),
+    },
+  })
 
   await Promise.all([
     writePreviewBundle(join(model_dir, "validation"), "accepted root", 3),
@@ -732,6 +844,42 @@ test("model preview APIs bind candidate generations exactly and never mistake qu
     new Request("http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output"),
   )
   expect(new Uint8Array(await queued_image!.arrayBuffer())).toEqual(new Uint8Array([137, 80, 78, 71, 3]))
+
+  const pipeline_timestamp = "2026-08-01T00:00:00.000Z"
+  model_run_store.updateModelRun("model_generation", {
+    validation: validationSummary("accepted", generation_a),
+    pipeline: {
+      pipeline_id: "datasheet_model",
+      status: "completed",
+      sequence: 1,
+      started_at: pipeline_timestamp,
+      updated_at: pipeline_timestamp,
+      stage_results: {
+        publish_model: {
+          stage_id: "publish_model",
+          status: "completed",
+          debug_ref: ".pipeline/stages/publish-model",
+          started_at: pipeline_timestamp,
+          completed_at: pipeline_timestamp,
+          duration_ms: 1,
+        },
+      },
+    },
+  })
+  const missing_current_publication = await handle(
+    new Request("http://localhost/api/model-run/preview?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(missing_current_publication?.status).toBe(500)
+  expect(await missing_current_publication?.json()).toMatchObject({
+    error: { error_code: "accepted_publication_invalid" },
+  })
+  const missing_current_reference = await handle(
+    new Request("http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(missing_current_reference?.status).toBe(500)
+  expect(await missing_current_reference?.json()).toMatchObject({
+    error: { error_code: "accepted_publication_invalid" },
+  })
   await rm(job_dir, { recursive: true, force: true })
 })
 

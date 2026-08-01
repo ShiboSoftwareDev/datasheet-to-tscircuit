@@ -1,0 +1,21 @@
+8.2.3 Application Curves
+Figure 8-3 and Figure 8-4 show the ALERT pin response to a bus overvoltage fault with a conversion time of
+50 μs, averaging set to 1, and the SLOWALERT bit set to 0 for bus only conversions. For these scope shots,
+persistence was enabled on the ALERT channel to show the variation in the alert response for many sequential
+fault events. If the magnitude of the fault is sufficient the ALERT response can be as fast as one quarter of the
+ADC conversion time as shown in Figure 8-3. For fault conditions that are just exceeding the limit threshold,
+the response time for the ALERT pin can vary from approximately 0.5 to 1.5 conversion cycles as shown in
+Figure 8-4. Variation in the alert response exists because the external fault event is not synchronized to the
+internal ADC conversion start.
+
+BUS VOLTAGE (1 V / div)
+ALERT (1 V / div)
+Minimum Delay: 12.4 µs
+TIME (10 µs / div)
+Figure 8-3. Alert Response Time (Sampled Values Significantly Above Threshold)
+
+BUS VOLTAGE (1 V / div)
+ALERT (1 V / div)
+Minimum Delay: 24 µs
+TIME (10 µs / div)
+Figure 8-4. Alert Response Time (Sampled Values Slightly Above Threshold)

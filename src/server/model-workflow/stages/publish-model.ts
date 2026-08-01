@@ -1,11 +1,12 @@
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { isCircuitJson } from "../../component-circuit-json"
 import { createStageWorkspace } from "../../infrastructure/artifacts"
 import { buildTscircuitSource } from "../../infrastructure/tscircuit"
 import {
   assertCircuitEmbedsModel,
+  assertValidationCircuitEmbedsModel,
   requireModelCompletionIntegrity,
+  validateViewerSimulation,
   writeIntegratedComponent,
 } from "../../modeling"
 import {
@@ -17,6 +18,7 @@ import {
   readJson,
   updateModelProgress,
 } from "../stage-helpers"
+import { readVerifiedViewerCircuitJson } from "../viewer-validation-artifacts"
 import { defineModelStage } from "./stage-factory"
 
 export const publishModelStage = defineModelStage({
@@ -44,6 +46,7 @@ export const publishModelStage = defineModelStage({
       contract: contract_value,
       plan: plan_value,
       result: result_value,
+      policy: "fresh_time_voltage_v1",
     })
     const contract = completion_integrity.contract
     const generated = {
@@ -56,18 +59,11 @@ export const publishModelStage = defineModelStage({
     }
     const plan = completion_integrity.plan
     const result = completion_integrity.result
-    const candidate_ui = (await readJson(
-      join(dirname(dependency_outputs.repair_model.result_path), "model-ui.json"),
-    ).catch(() => ({}))) as {
-      selected_previews?: Record<string, { circuit_preview?: { circuit_json?: unknown } }>
-    }
-    const circuit_json_by_case = Object.fromEntries(
-      plan.cases.flatMap(({ id }) => {
-        const circuit_json = candidate_ui.selected_previews?.[id]?.circuit_preview?.circuit_json
-        return isCircuitJson(circuit_json) ? [[id, circuit_json]] : []
-      }),
-    )
-
+    const circuit_json_by_case = await readVerifiedViewerCircuitJson({
+      validation_dir: dirname(dependency_outputs.repair_model.result_path),
+      plan,
+      generated,
+    })
     let prepared_for_cleanup: Awaited<ReturnType<typeof prepareModelPublication>> | undefined
     let publication_committed = false
     try {
@@ -105,6 +101,30 @@ export const publishModelStage = defineModelStage({
             throw new Error(`Integrated component build failed: ${build.errors.join("; ")}`)
           }
           assertCircuitEmbedsModel(build.circuit_json, generated.source, contract.interface)
+          const viewer_failures = plan.cases.flatMap((validation_case) => {
+            const circuit_json = circuit_json_by_case[validation_case.id]
+            if (!circuit_json) return [`${validation_case.id}: no validation Circuit JSON was retained`]
+            try {
+              assertValidationCircuitEmbedsModel(circuit_json, generated.source, generated.manifest)
+            } catch (error) {
+              return [
+                `${validation_case.id}: viewer_model_provenance_failed: ${error instanceof Error ? error.message : String(error)}`,
+              ]
+            }
+            const validation = validateViewerSimulation({ validation_case, circuit_json })
+            return validation.passed
+              ? []
+              : [
+                  `${validation_case.id}: ${validation.errors
+                    .map(({ code, message }) => `${code}: ${message}`)
+                    .join("; ")}`,
+                ]
+          })
+          if (viewer_failures.length > 0) {
+            throw new Error(
+              `Model publication requires a verified tscircuit transient graph for every validation case: ${viewer_failures.join(" | ")}`,
+            )
+          }
           signal.throwIfAborted()
           const prepared = await prepareModelPublication({
             job_id: context.job_id,
@@ -120,6 +140,7 @@ export const publishModelStage = defineModelStage({
             wrapper_source,
             circuit_json: build.circuit_json,
             circuit_json_by_case,
+            process_runner: services.process_runner,
             signal,
           })
           prepared_for_cleanup = prepared

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { deflateSync } from "node:zlib"
 import type { AnyCircuitElement } from "circuit-json"
 import type { AgentClient } from "@/server/infrastructure/agent"
 import { atomicWriteJsonSync } from "@/server/infrastructure/persistence/atomic-write"
@@ -10,16 +11,72 @@ import type { ProcessRunner, ProcessRunRequest, ProcessRunResult } from "@/serve
 import { restorePersistedJobs } from "@/server/job-restorer"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
+import { resolveBenchmarkReferenceImage } from "@/server/modeling/reference-image"
 import { runModel } from "@/server/model-workflow"
 import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const ngspice_path = Bun.which("ngspice")
 const testWithNgspice = ngspice_path ? test : test.skip
 const temporary_directories: string[] = []
-const png_bytes = Uint8Array.from(
-  atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
-  (character) => character.charCodeAt(0),
-)
+
+const crc32_table = Uint32Array.from({ length: 256 }, (_, value) => {
+  let crc = value
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = (crc & 1) === 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
+  }
+  return crc >>> 0
+})
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff
+  for (const byte of bytes) crc = (crc32_table[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8)
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type: string, data = new Uint8Array()): Uint8Array {
+  const type_bytes = Buffer.from(type, "ascii")
+  const chunk = Buffer.alloc(12 + data.byteLength)
+  chunk.writeUInt32BE(data.byteLength, 0)
+  chunk.set(type_bytes, 4)
+  chunk.set(data, 8)
+  chunk.writeUInt32BE(crc32(Buffer.concat([type_bytes, Buffer.from(data)])), 8 + data.byteLength)
+  return chunk
+}
+
+function minimalPng(width: number, height: number): Uint8Array {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header.set([8, 6, 0, 0, 0], 8)
+  const scanlines = Buffer.alloc((width * 4 + 1) * height)
+  for (let y = 0; y < height; y += 1) {
+    const row_offset = y * (width * 4 + 1)
+    for (let x = 0; x < width; x += 1) {
+      const pixel_offset = row_offset + 1 + x * 4
+      const plot_left = 8
+      const plot_right = width - 8
+      const plot_top = 8
+      const plot_bottom = height - 8
+      const is_axis = x === plot_left || y === plot_bottom
+      const time_ratio = (x - plot_left) / (plot_right - plot_left)
+      const trace_y = Math.round(
+        plot_bottom - Math.min(1, Math.max(0, time_ratio) * 3) * (plot_bottom - plot_top),
+      )
+      const is_trace = x >= plot_left && x <= plot_right && y === trace_y
+      const value = is_axis || is_trace ? 0 : 255
+      scanlines[pixel_offset] = value
+      scanlines[pixel_offset + 1] = value
+      scanlines[pixel_offset + 2] = value
+      scanlines[pixel_offset + 3] = 255
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(scanlines)),
+    pngChunk("IEND"),
+  ])
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -38,38 +95,71 @@ const characterization = {
   strategy: "behavioral",
   requirements: [
     {
-      requirement_id: "dc_gain",
-      title: "DC voltage gain",
-      behavior: "The output is twice the input voltage relative to ground.",
-      analysis: "dc_sweep",
+      requirement_id: "transient_gain",
+      title: "Transient voltage gain",
+      behavior: "The output follows twice the printed input ramp relative to ground.",
+      analysis: "transient",
       support: { status: "modeled" },
       conditions: { load_resistance_ohms: 10_000 },
       expected: { unit: "V", min: 0, max: 2 },
       reference_curve: {
-        x_quantity: "input voltage",
-        x_unit: "V",
-        y_quantity: "output voltage",
+        x_quantity: "time",
+        x_unit: "s",
+        y_quantity: "voltage",
         y_unit: "V",
         tolerance: 1e-6,
         points: [
           { x: 0, y: 0 },
-          { x: 0.25, y: 0.5 },
-          { x: 0.5, y: 1 },
-          { x: 0.75, y: 1.5 },
-          { x: 1, y: 2 },
+          { x: 0.00025, y: 0.5 },
+          { x: 0.0005, y: 1 },
+          { x: 0.00075, y: 1.5 },
+          { x: 0.001, y: 2 },
+          { x: 0.0015, y: 2 },
+          { x: 0.002, y: 2 },
+          { x: 0.003, y: 2 },
         ],
+        crop: {
+          page: 1,
+          render_dpi: 200,
+          x_px: 10,
+          y_px: 20,
+          width_px: 96,
+          height_px: 64,
+        },
+        electrical_binding: {
+          response: {
+            type: "voltage",
+            positive: "dut.OUT",
+            negative: "gnd",
+            nominal_volts: 2,
+          },
+          stimulus: {
+            type: "voltage_step",
+            positive: "dut.IN",
+            negative: "gnd",
+            pulse: {
+              low: 0,
+              high: 1,
+              delay: 0,
+              rise: 0.001,
+              fall: 0.001,
+              width: 0.003,
+              period: 0.006,
+            },
+          },
+        },
       },
       sources: [
         {
           page: 1,
-          locator: "Electrical characteristics, voltage gain",
-          statement: "The nominal voltage gain is two.",
+          locator: "Figure 1, transient voltage gain",
+          statement: "The output follows twice the input ramp over elapsed time.",
         },
       ],
     },
   ],
   assumptions: ["The test fixture uses an ideal ground reference."],
-  limitations: ["This fixture exercises only the documented DC gain."],
+  limitations: ["This fixture exercises only the documented transient gain."],
 }
 
 const validation_plan = {
@@ -77,9 +167,9 @@ const validation_plan = {
   model: { entry_name: "TEST_GAIN", pins: ["IN", "OUT", "GND"] },
   cases: [
     {
-      id: "dc_gain",
-      title: "DC gain sweep",
-      requirement_ids: ["dc_gain"],
+      id: "transient_gain",
+      title: "Transient gain response",
+      requirement_ids: ["transient_gain"],
       nets: [],
       fixtures: [
         {
@@ -88,6 +178,15 @@ const validation_plan = {
           positive: "dut.IN",
           negative: "gnd",
           dc_volts: 0,
+          pulse: {
+            low: 0,
+            high: 1,
+            delay: 0,
+            rise: 0.001,
+            fall: 0.001,
+            width: 0.003,
+            period: 0.006,
+          },
         },
         {
           type: "resistor",
@@ -104,12 +203,12 @@ const validation_plan = {
           dc_volts: 0,
         },
       ],
-      analysis: { type: "dc_sweep", source_id: "vin", start: 0, stop: 1, step: 0.25 },
+      analysis: { type: "transient", step: 0.00025, stop: 0.003 },
       observations: [
         {
           type: "voltage",
           id: "output_voltage",
-          requirement_id: "dc_gain",
+          requirement_id: "transient_gain",
           positive: "dut.OUT",
           negative: "gnd",
           unit: "V",
@@ -135,11 +234,121 @@ function deterministicAgent(calls: string[]): AgentClient {
   return {
     async run(input) {
       calls.push(input.phase_label)
-      const application_plan = JSON.parse(
-        await Bun.file(join(input.workspace, "typical-application-plan.json")).text(),
-      ) as { availability?: string }
-      expect(application_plan.availability).toBe("not_present")
+      if (input.phase_label === "Independent datasheet graph inventory") {
+        const discovery = JSON.parse(
+          await Bun.file(join(input.workspace, "time-graph-hints.json")).text(),
+        ) as { source_pdf_sha256: string }
+        await Bun.write(
+          join(input.workspace, "model-reference-observation.json"),
+          `${JSON.stringify(
+            {
+              version: 1,
+              source_pdf_sha256: discovery.source_pdf_sha256,
+              reviewed_hints: [
+                {
+                  hint_id: "time_graph_001",
+                  disposition: "graph",
+                  graph_id: "transient_gain_graph",
+                  reason: "The printed transient voltage graph has an elapsed-time horizontal axis.",
+                },
+              ],
+              graphs: [
+                {
+                  graph_id: "transient_gain_graph",
+                  page: 1,
+                  locator: "Figure 1, transient voltage gain",
+                  x_axis: "time",
+                  time_axis_evidence: "Time (ms)",
+                  response_quantity: "voltage",
+                  public_pin_observable: true,
+                  fixture_reproducible: true,
+                  reason: "The printed graph shows output voltage against elapsed time.",
+                  crop: {
+                    page: 1,
+                    render_dpi: 200,
+                    x_px: 10,
+                    y_px: 20,
+                    width_px: 96,
+                    height_px: 64,
+                  },
+                  electrical_binding: {
+                    response: {
+                      type: "voltage",
+                      positive: "dut.OUT",
+                      negative: "gnd",
+                      nominal_volts: 2,
+                    },
+                    stimulus: {
+                      type: "voltage_step",
+                      positive: "dut.IN",
+                      negative: "gnd",
+                      pulse: {
+                        low: 0,
+                        high: 1,
+                        delay: 0,
+                        rise: 0.001,
+                        fall: 0.001,
+                        width: 0.003,
+                        period: 0.006,
+                      },
+                    },
+                  },
+                  digitized_curve: {
+                    method: "manual_pixel_trace",
+                    x_quantity: "time",
+                    x_unit: "s",
+                    y_quantity: "voltage",
+                    y_unit: "V",
+                    x_range: { min: 0, max: 0.003 },
+                    y_range: { min: 0, max: 2 },
+                    x_axis: {
+                      scale: "linear",
+                      first: { pixel: 8, value: 0 },
+                      second: { pixel: 88, value: 0.003 },
+                    },
+                    y_axis: {
+                      scale: "linear",
+                      first: { pixel: 56, value: 0 },
+                      second: { pixel: 8, value: 2 },
+                    },
+                    trace_color: { r: 0, g: 0, b: 0, tolerance: 24 },
+                    points: Array.from({ length: 13 }, (_, index) => {
+                      const x = (index / 12) * 0.003
+                      const y = Math.min(2, x * 2_000)
+                      return {
+                        pixel_x: 8 + (x / 0.003) * 80,
+                        pixel_y: 56 - (y / 2) * 48,
+                        x,
+                        y,
+                      }
+                    }),
+                  },
+                },
+              ],
+            },
+            null,
+            2,
+          )}\n`,
+        )
+        await input.on_output("stdout", `fixture completed ${input.phase_label}\n`)
+        return { attempts: 1, duration_ms: 1, output_tail: "" }
+      } else {
+        const application_plan = JSON.parse(
+          await Bun.file(join(input.workspace, "typical-application-plan.json")).text(),
+        ) as { availability?: string }
+        expect(application_plan.availability).toBe("not_present")
+      }
       if (input.phase_label === "Model characterization") {
+        const sanitized_observation = JSON.parse(
+          await Bun.file(join(input.workspace, "model-reference-observation.json")).text(),
+        )
+        expect(sanitized_observation.graphs[0]).toMatchObject({
+          graph_id: "transient_gain_graph",
+          numeric_curve_withheld: true,
+          electrical_binding: characterization.requirements[0]!.reference_curve.electrical_binding,
+        })
+        expect(JSON.stringify(sanitized_observation)).not.toContain("digitized_curve")
+        expect(JSON.stringify(sanitized_observation)).not.toContain("pixel_x")
         await Bun.write(
           join(input.workspace, "model-characterization.json"),
           `${JSON.stringify(characterization, null, 2)}\n`,
@@ -154,7 +363,7 @@ function deterministicAgent(calls: string[]): AgentClient {
           Bun.write(join(input.workspace, "model.lib"), model_source),
           Bun.write(
             join(input.workspace, "model-card.md"),
-            "# TEST-GAIN\n\nA deterministic two-times DC gain model.\n",
+            "# TEST-GAIN\n\nA deterministic two-times transient gain model.\n",
           ),
         ])
       } else {
@@ -171,10 +380,46 @@ class FakeWrapperBuildRunner implements ProcessRunner {
 
   async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
     this.calls.push(request)
+    if (request.command[0] === "pdftotext") {
+      const output_path = request.command.at(-1)
+      if (!output_path) throw new Error("Fixture pdftotext command omitted its output path")
+      await Bun.write(
+        output_path,
+        request.command.includes("-bbox-layout")
+          ? `<?xml version="1.0"?><doc><page width="100" height="100"><flow><block><line><word xMin="5" yMin="34" xMax="15" yMax="38">Figure</word><word xMin="16" yMin="34" xMax="20" yMax="38">1.</word></line></block></flow></page></doc>`
+          : "VOUT = 2 V. IN from 0 V to 1 V, tr = 1 ms, tf = 1 ms.\nTIME (0.5 ms / div)\nFigure 1. Transient Voltage Gain\f",
+      )
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
+    if (request.command[0] === "tesseract" && request.command[1] === "--version") {
+      return { exit_code: 0, duration_ms: 1, output_tail: "tesseract 5.5.1\n" }
+    }
+    if (request.command[0] === "tesseract") {
+      const output_base = request.command[2]
+      if (!output_base) throw new Error("Fixture tesseract command omitted its output base")
+      const rows = [
+        [1, 1, 1, 1, 20, 166, 8, 6, 95, "0s"],
+        [2, 1, 1, 1, 252, 166, 24, 6, 95, "3ms"],
+        [3, 1, 1, 1, 2, 165, 16, 6, 95, "0V"],
+        [4, 1, 1, 1, 2, 21, 16, 6, 95, "2V"],
+      ]
+      const tsv = [
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+        ...rows.map(([block, paragraph, line, word, left, top, width, height, confidence, text]) =>
+          [5, 1, block, paragraph, line, word, left, top, width, height, confidence, text].join("\t"),
+        ),
+      ].join("\n")
+      await Bun.write(`${output_base}.tsv`, `${tsv}\n`)
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
     if (request.command[0] === "pdftoppm") {
       const output_prefix = request.command.at(-1)
       if (!output_prefix) throw new Error("Fixture pdftoppm command omitted its output prefix")
-      await Bun.write(`${output_prefix}.png`, png_bytes)
+      const width_index = request.command.indexOf("-W")
+      const height_index = request.command.indexOf("-H")
+      const width = width_index === -1 ? 240 : Number(request.command[width_index + 1])
+      const height = height_index === -1 ? 160 : Number(request.command[height_index + 1])
+      await Bun.write(`${output_prefix}.png`, minimalPng(width, height))
       return { exit_code: 0, duration_ms: 1, output_tail: "" }
     }
     if (
@@ -187,7 +432,181 @@ class FakeWrapperBuildRunner implements ProcessRunner {
       await mkdir(output_directory, { recursive: true })
       await writeFile(
         join(output_directory, "circuit.json"),
-        `${JSON.stringify([{ type: "source_component", source_component_id: `preview_${output_stem}` }])}\n`,
+        `${JSON.stringify([
+          {
+            type: "source_component",
+            source_component_id: "preview_dut",
+            name: "DUT",
+            manufacturer_part_number: "TEST-GAIN",
+          },
+          ...[
+            ["IN", "pin1", "preview_port_in"],
+            ["OUT", "pin2", "preview_port_out"],
+            ["GND", "pin3", "preview_port_gnd"],
+          ].map(([spice_node, component_pin, source_port_id]) => ({
+            type: "source_port",
+            source_port_id,
+            source_component_id: "preview_dut",
+            name: spice_node,
+            port_hints: [spice_node, component_pin],
+          })),
+          {
+            type: "simulation_spice_subcircuit",
+            simulation_spice_subcircuit_id: "preview_model",
+            source_component_id: "preview_dut",
+            spice_pin_to_source_port_map: {
+              IN: "preview_port_in",
+              OUT: "preview_port_out",
+              GND: "preview_port_gnd",
+            },
+            subcircuit_source: model_source,
+          },
+          {
+            type: "source_component",
+            source_component_id: "preview_vin",
+            name: "vin",
+            ftype: "simple_chip",
+          },
+          {
+            type: "source_port",
+            source_port_id: "preview_vin_pos",
+            source_component_id: "preview_vin",
+            name: "POS",
+            port_hints: ["POS", "pin1"],
+          },
+          {
+            type: "source_port",
+            source_port_id: "preview_vin_neg",
+            source_component_id: "preview_vin",
+            name: "NEG",
+            port_hints: ["NEG", "pin2"],
+          },
+          {
+            type: "source_net",
+            source_net_id: "preview_gnd",
+            name: "GND",
+            member_source_group_ids: [],
+            is_ground: true,
+          },
+          {
+            type: "source_trace",
+            source_trace_id: "preview_vin_positive_trace",
+            connected_source_port_ids: ["preview_vin_pos", "preview_port_in"],
+            connected_source_net_ids: [],
+          },
+          {
+            type: "source_trace",
+            source_trace_id: "preview_vin_negative_trace",
+            connected_source_port_ids: ["preview_vin_neg"],
+            connected_source_net_ids: ["preview_gnd"],
+          },
+          {
+            type: "simulation_spice_subcircuit",
+            simulation_spice_subcircuit_id: "preview_vin_model",
+            source_component_id: "preview_vin",
+            spice_pin_to_source_port_map: {
+              POS: "preview_vin_pos",
+              NEG: "preview_vin_neg",
+            },
+            subcircuit_source:
+              ".SUBCKT VALIDATION_VIN POS NEG\n" +
+              "VDRIVE POS NEG DC 0 PULSE(0 1 0 0.001 0.001 0.003 0.006)\n" +
+              ".ENDS VALIDATION_VIN\n",
+          },
+          {
+            type: "source_component",
+            source_component_id: "preview_load",
+            name: "load",
+            ftype: "simple_resistor",
+            resistance: 10_000,
+          },
+          {
+            type: "source_port",
+            source_port_id: "preview_load_pin1",
+            source_component_id: "preview_load",
+            name: "pin1",
+            port_hints: ["pin1", "1"],
+          },
+          {
+            type: "source_port",
+            source_port_id: "preview_load_pin2",
+            source_component_id: "preview_load",
+            name: "pin2",
+            port_hints: ["pin2", "2"],
+          },
+          {
+            type: "source_trace",
+            source_trace_id: "preview_load_positive_trace",
+            connected_source_port_ids: ["preview_load_pin1", "preview_port_out"],
+            connected_source_net_ids: [],
+          },
+          {
+            type: "source_trace",
+            source_trace_id: "preview_load_negative_trace",
+            connected_source_port_ids: ["preview_load_pin2"],
+            connected_source_net_ids: ["preview_gnd"],
+          },
+          {
+            type: "source_component",
+            source_component_id: "preview_ground_ref",
+            name: "ground_ref",
+            ftype: "simple_voltage_source",
+            voltage: 0,
+          },
+          {
+            type: "source_port",
+            source_port_id: "preview_ground_ref_pin1",
+            source_component_id: "preview_ground_ref",
+            name: "pin1",
+            port_hints: ["pin1", "1"],
+          },
+          {
+            type: "source_port",
+            source_port_id: "preview_ground_ref_pin2",
+            source_component_id: "preview_ground_ref",
+            name: "pin2",
+            port_hints: ["pin2", "2"],
+          },
+          {
+            type: "source_trace",
+            source_trace_id: "preview_ground_ref_positive_trace",
+            connected_source_port_ids: ["preview_ground_ref_pin1", "preview_port_gnd"],
+            connected_source_net_ids: [],
+          },
+          {
+            type: "source_trace",
+            source_trace_id: "preview_ground_ref_negative_trace",
+            connected_source_port_ids: ["preview_ground_ref_pin2"],
+            connected_source_net_ids: ["preview_gnd"],
+          },
+          {
+            type: "simulation_experiment",
+            simulation_experiment_id: `experiment_${output_stem}`,
+            name: "validation",
+            experiment_type: "spice_transient_analysis",
+            time_per_step: 0.25,
+            start_time_ms: 0,
+            end_time_ms: 3,
+          },
+          {
+            type: "simulation_voltage_probe",
+            simulation_voltage_probe_id: "probe_output_voltage",
+            name: "probe_output_voltage",
+            signal_input_source_port_id: "preview_port_out",
+          },
+          {
+            type: "simulation_transient_voltage_graph",
+            simulation_transient_voltage_graph_id: "graph_output_voltage",
+            simulation_experiment_id: `experiment_${output_stem}`,
+            source_probe_id: "probe_output_voltage",
+            name: "probe_output_voltage",
+            timestamps_ms: Array.from({ length: 13 }, (_, index) => index * 0.25),
+            voltage_levels: Array.from({ length: 13 }, (_, index) => Math.min(2, index * 0.5)),
+            time_per_step: 0.25,
+            start_time_ms: 0,
+            end_time_ms: 3,
+          },
+        ])}\n`,
         "utf8",
       )
       return { exit_code: 0, duration_ms: 1, output_tail: "" }
@@ -399,6 +818,7 @@ testWithNgspice(
     )
 
     const run = model_run_store.getModelRun("model_e2e")
+    expect(run?.error_message).toBeUndefined()
     expect(rejected_post_commit_job_checkpoints).toBeGreaterThan(0)
     expect(rejected_post_commit_checkpoints).toBeGreaterThan(0)
     expect(run).toMatchObject({
@@ -406,8 +826,20 @@ testWithNgspice(
       is_complete: true,
       has_errors: false,
       validation: { all_passed: true, all_critical_passed: true, passing_count: 1 },
-      circuit_preview: { build_status: "ready", circuit_json: [{ type: "source_component" }] },
+      circuit_preview: { build_status: "ready", analog_simulation_status: "available" },
       pipeline: { pipeline_id: "datasheet_model", status: "completed" },
+    })
+    expect(
+      run?.circuit_preview?.circuit_json?.some(({ type }) => type === "simulation_transient_voltage_graph"),
+    ).toBe(true)
+    expect(run?.circuit_preview?.code).toContain("<analogsimulation")
+    expect(run?.reference_preview).toMatchObject({
+      source_file: "evidence/figures/transient_gain.png",
+      reference_kind: "curve",
+      result_origin: "tscircuit_viewer",
+      matches_reference: true,
+      x_axis_label: "time",
+      x_axis_unit: "s",
     })
     expect(Object.values(run!.pipeline!.stage_results).map(({ status }) => status)).toEqual([
       "completed",
@@ -420,11 +852,35 @@ testWithNgspice(
       "completed",
     ])
     expect(agent_calls).toEqual([
+      "Independent datasheet graph inventory",
       "Model characterization",
       "Validation-plan design",
       "SPICE model generation",
     ])
-    expect(process_runner.calls).toHaveLength(3)
+    expect(
+      process_runner.calls.filter(
+        ({ command, command_label }) =>
+          command[0] === "tesseract" && command_label === "Read reference-axis OCR engine version",
+      ),
+    ).toHaveLength(2)
+    expect(
+      process_runner.calls.filter(
+        ({ command, command_label }) =>
+          command[0] === "tesseract" && command_label.startsWith("OCR canonical axis crop"),
+      ),
+    ).toHaveLength(2)
+    expect(
+      process_runner.calls.filter(
+        ({ command, command_label }) =>
+          command[0] === "pdftotext" && command_label.startsWith("Extract canonical figure geometry"),
+      ),
+    ).toHaveLength(2)
+    expect(
+      process_runner.calls.filter(
+        ({ command, command_label }) =>
+          command[0] === "pdftoppm" && command_label.startsWith("Re-render canonical reference graph"),
+      ),
+    ).toHaveLength(1)
 
     const candidates = await readdir(join(model_dir, "candidates"))
     expect(candidates).toHaveLength(1)
@@ -435,11 +891,20 @@ testWithNgspice(
     expect(immutable_result).toMatchObject({
       version: 1,
       passed: true,
-      cases: [{ case_id: "dc_gain", status: "passed" }],
+      cases: [{ case_id: "transient_gain", status: "passed" }],
+      stimulus_causality: {
+        version: 1,
+        method: "bound_pulse_flatten_v2",
+        status: "passed",
+        checked_case_count: 1,
+        checked_observation_count: 1,
+      },
     })
     expect(await readFile(join(candidate_dir, "model.lib"), "utf8")).toBe(model_source)
     expect(await Bun.file(join(candidate_dir, "model-manifest.json")).exists()).toBe(true)
-    expect(await Bun.file(join(candidate_dir, "validation", "dc_gain", "result.raw")).exists()).toBe(true)
+    expect(await Bun.file(join(candidate_dir, "validation", "transient_gain", "result.raw")).exists()).toBe(
+      true,
+    )
 
     const canonical_plan = JSON.parse(
       await readFile(join(model_dir, "validation-plan.json"), "utf8"),
@@ -447,8 +912,8 @@ testWithNgspice(
     expect(canonical_plan.cases[0]?.observations[0]).toMatchObject({
       evidence: {
         page: 1,
-        image: "evidence/source-page-1.png",
-        metadata: { figure: "Electrical characteristics, voltage gain" },
+        image: "evidence/figures/transient_gain.png",
+        metadata: { figure: "Figure 1, transient voltage gain" },
       },
       reference: {
         type: "curve",
@@ -460,6 +925,42 @@ testWithNgspice(
     const published_index = await readFile(join(job_dir, "index.circuit.tsx"), "utf8")
     expect(published_index).toContain("<spicemodel")
     expect(published_index).toContain("spicePinMapping")
+    const publication = JSON.parse(await readFile(join(job_dir, "published-model.json"), "utf8")) as {
+      accepted_model_directory: string
+      revision: string
+    }
+    const accepted_dir = join(job_dir, publication.accepted_model_directory)
+    for (const source_file of [
+      "typical-application-plan.json",
+      "datasheet.pdf",
+      "component-evidence.json",
+      "application-fixture-contract.json",
+    ]) {
+      expect(await readFile(join(accepted_dir, source_file))).toEqual(
+        await readFile(join(model_dir, source_file)),
+      )
+    }
+    const retained_observation = JSON.parse(
+      await readFile(join(accepted_dir, "model-reference-observation.json"), "utf8"),
+    )
+    expect(retained_observation.graphs[0].digitized_curve.points).toHaveLength(13)
+    const retained_verification = JSON.parse(
+      await readFile(join(accepted_dir, "model-reference-verification.json"), "utf8"),
+    )
+    expect(retained_verification.matches[0]).toMatchObject({
+      requirement_id: "transient_gain",
+      graph_id: "transient_gain_graph",
+      curve_fidelity: {
+        observer_curve_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        candidate_curve_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+      pixel_trace: {
+        source_image_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        verified_point_count: 13,
+        total_point_count: 13,
+        search_radius_px: 4,
+      },
+    })
     expect(await readFile(join(job_dir, "component.circuit.tsx"), "utf8")).toBe(component_source)
     expect(await readFile(join(job_dir, "model.lib"), "utf8")).toBe(model_source)
     expect(job_store.getJob("job_model_e2e")?.component_code).toBe(published_index)
@@ -469,6 +970,41 @@ testWithNgspice(
         ?.circuit_json?.filter(({ type }) => type === "simulation_spice_subcircuit"),
     ).toHaveLength(1)
     expect(await Bun.file(join(model_dir, "component-with-model.circuit.json")).exists()).toBe(true)
+    const accepted_artifact_identity = {
+      preview_generation: publication.accepted_model_directory.split("/").at(-1)!,
+      model_revision: publication.revision,
+    }
+    await expect(
+      resolveBenchmarkReferenceImage({
+        job_id: "job_model_e2e",
+        model_dir,
+        benchmark_id: "transient_gain",
+      }),
+    ).rejects.toMatchObject({ error_code: "preview_artifact_identity_required", status: 400 })
+    await expect(
+      resolveBenchmarkReferenceImage({
+        job_id: "job_model_e2e",
+        model_dir,
+        benchmark_id: "transient_gain",
+        requested_artifact_identity: {
+          preview_generation: "stale-accepted-preview-01",
+          model_revision: publication.revision,
+        },
+      }),
+    ).rejects.toMatchObject({ error_code: "preview_artifact_identity_mismatch", status: 409 })
+    const served_reference = await resolveBenchmarkReferenceImage({
+      job_id: "job_model_e2e",
+      model_dir,
+      benchmark_id: "transient_gain",
+      requested_artifact_identity: accepted_artifact_identity,
+    })
+    expect(served_reference).toBeDefined()
+    if (!served_reference) throw new Error("Published datasheet reference was not resolved")
+    const served_reference_size =
+      "bytes" in served_reference
+        ? (served_reference.bytes?.byteLength ?? 0)
+        : (await Bun.file(served_reference.file_path).arrayBuffer()).byteLength
+    expect(served_reference_size).toBeGreaterThan(0)
 
     const restored_jobs = new JobStore()
     const restored_models = new ModelRunStore()

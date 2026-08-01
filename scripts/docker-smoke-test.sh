@@ -8,6 +8,7 @@ docker compose run --rm --no-deps app sh -c '
   test -w /app/.runtime/jobs
   command -v ngspice >/dev/null
   command -v pdftoppm >/dev/null
+  command -v tesseract >/dev/null
   test -x /app/node_modules/.bin/tsci
   test -x /app/node_modules/.bin/tsci-agent
 

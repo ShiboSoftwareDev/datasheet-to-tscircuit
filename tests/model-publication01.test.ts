@@ -1,30 +1,30 @@
 import { afterEach, expect, test } from "bun:test"
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, unlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
+import { deflateSync } from "node:zlib"
 import type { AnyCircuitElement } from "circuit-json"
 import type { AgentClient } from "@/server/infrastructure/agent"
-import type { ProcessRunner } from "@/server/infrastructure/process"
+import type { ProcessRunner, ProcessRunRequest, ProcessRunResult } from "@/server/infrastructure/process"
 import { getJobFile } from "@/server/job-api/get-job-file"
 import type { JobApiContext } from "@/server/job-api/job-api-context"
 import { restoreJobDirectory } from "@/server/job-restorer/restore-job-directory"
 import { restoreModelDirectory } from "@/server/job-restorer/restore-model-directory"
 import { restorePersistedJobs } from "@/server/job-restorer/restore-persisted-jobs"
 import { JobStore } from "@/server/job-store"
-import { ModelRunStore } from "@/server/model-run-store"
 import { getModelRunFile } from "@/server/model-run-api/get-model-run-file"
 import type { ModelRunApiContext } from "@/server/model-run-api/model-run-api-context"
+import { ModelRunStore } from "@/server/model-run-store"
 import {
-  commitModelPublication,
-  createModelManifest,
-  ModelStrategyRegistry,
-  readModelPublication,
-  readVerifiedPublicationArtifact,
-  writePublicationBundleManifest,
-  writeIntegratedComponent,
-  type GeneratedModel,
-  type ModelContract,
-} from "@/server/modeling"
+  applyReferenceGraphSourceEligibility,
+  buildReferenceGraphSourceProof,
+} from "@/server/model-workflow/reference-graph-axis-proof"
+import {
+  parseReferenceGraphObservation,
+  verifyCharacterizationGraphEvidence,
+  verifyReferenceGraphTracePixels,
+} from "@/server/model-workflow/reference-graph-observation"
 import {
   commitPreparedModelPublication,
   discardPreparedModelPublication,
@@ -32,7 +32,24 @@ import {
 } from "@/server/model-workflow/stage-helpers"
 import { publishModelStage } from "@/server/model-workflow/stages/publish-model"
 import {
+  deriveTimeGraphTransientFixtureEvidence,
+  parseTimeGraphDiscovery,
+} from "@/server/model-workflow/time-graph-hints"
+import { writeViewerValidationArtifacts } from "@/server/model-workflow/viewer-validation-artifacts"
+import {
+  commitModelPublication,
+  createModelManifest,
+  type GeneratedModel,
+  type ModelContract,
+  ModelStrategyRegistry,
+  readModelPublication,
+  readVerifiedPublicationArtifact,
+  writeIntegratedComponent,
+  writePublicationBundleManifest,
+} from "@/server/modeling"
+import {
   hashValidationInputs,
+  parseValidationPlan,
   type ValidationPlan,
   type ValidationRunResult,
 } from "@/server/spice-validation"
@@ -45,6 +62,36 @@ afterEach(async () => {
     temporary_directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   )
 })
+
+const pulse = {
+  low: 0,
+  high: 0.001,
+  delay: 0,
+  rise: 0.0007,
+  fall: 0.0001,
+  width: 0.001,
+  period: 0.002,
+}
+
+const reference_points = Array.from({ length: 8 }, (_, index) => {
+  const ratio = index / 7
+  return { x: ratio * 0.0007, y: ratio }
+})
+
+const electrical_binding = {
+  response: {
+    type: "voltage" as const,
+    positive: "dut.OUT" as const,
+    negative: "gnd" as const,
+    nominal_volts: 1,
+  },
+  stimulus: {
+    type: "current_step" as const,
+    positive: "dut.OUT" as const,
+    negative: "gnd" as const,
+    pulse,
+  },
+}
 
 const contract: ModelContract = {
   version: 1,
@@ -71,12 +118,29 @@ const contract: ModelContract = {
       {
         requirement_id: "output_voltage",
         title: "Output voltage",
-        behavior: "The output is one volt",
-        analysis: "operating_point",
+        behavior: "The output follows the printed voltage waveform",
+        analysis: "transient",
         support: { status: "modeled" },
         conditions: {},
-        expected: { unit: "V", target: 1, tolerance: 0.01 },
-        sources: [{ page: 1, locator: "table", statement: "Output is one volt" }],
+        expected: { unit: "V", min: 0, max: 1 },
+        reference_curve: {
+          x_quantity: "time",
+          x_unit: "s",
+          y_quantity: "voltage",
+          y_unit: "V",
+          tolerance: 0.05,
+          points: reference_points,
+          crop: { page: 1, render_dpi: 200, x_px: 0, y_px: 0, width_px: 96, height_px: 64 },
+          image: "evidence/figures/output_voltage.png",
+          electrical_binding,
+        },
+        sources: [
+          {
+            page: 1,
+            locator: "Figure 1",
+            statement: "Output voltage versus elapsed time.",
+          },
+        ],
       },
     ],
     assumptions: [],
@@ -94,6 +158,14 @@ const plan: ValidationPlan = {
       nets: [],
       fixtures: [
         {
+          type: "current_source",
+          id: "stimulus",
+          positive: "dut.OUT",
+          negative: "gnd",
+          dc_amps: pulse.low,
+          pulse,
+        },
+        {
           type: "resistor",
           id: "load",
           positive: "dut.OUT",
@@ -101,7 +173,7 @@ const plan: ValidationPlan = {
           resistance_ohms: 1_000,
         },
       ],
-      analysis: { type: "operating_point" },
+      analysis: { type: "transient", step: 0.0001, stop: 0.0007 },
       observations: [
         {
           type: "voltage",
@@ -111,7 +183,18 @@ const plan: ValidationPlan = {
           negative: "gnd",
           unit: "V",
           scale: "linear",
-          reference: { type: "target", target: 1, tolerance: 0.01 },
+          reference: { type: "curve", tolerance: 0.05, points: reference_points },
+          evidence: {
+            page: 1,
+            image: "evidence/figures/output_voltage.png",
+            metadata: {
+              figure: "Figure 1",
+              x_quantity: "time",
+              x_unit: "s",
+              y_quantity: "voltage",
+              y_unit: "V",
+            },
+          },
         },
       ],
     },
@@ -140,16 +223,21 @@ function passingResult(generated: GeneratedModel): ValidationRunResult {
       {
         case_id: "output_voltage",
         status: "passed",
-        analysis: "operating_point",
+        analysis: "transient",
         series: [
           {
             observation_id: "output",
             type: "voltage",
             unit: "V",
             scale: "linear",
-            points: [{ x: 0, y: 1 }],
+            points: reference_points.map((point) => ({ ...point })),
             passed: true,
-            metrics: { sample_count: 1, max_absolute_error: 0 },
+            metrics: {
+              sample_count: reference_points.length,
+              normalized_rmse: 0,
+              normalized_max_error: 0,
+              max_absolute_error: 0,
+            },
             errors: [],
           },
         ],
@@ -160,6 +248,14 @@ function passingResult(generated: GeneratedModel): ValidationRunResult {
       },
     ],
     errors: [],
+    stimulus_causality: {
+      version: 1,
+      method: "bound_pulse_flatten_v2",
+      status: "passed",
+      hashes: hashValidationInputs({ plan, model_source: generated.source, manifest: generated.manifest }),
+      checked_case_count: 1,
+      checked_observation_count: 1,
+    },
   }
 }
 
@@ -184,6 +280,385 @@ function componentCircuit(model_source: string, source_port_id = "source_port_1"
   ] as unknown as AnyCircuitElement[]
 }
 
+function validationCircuit(generated: GeneratedModel): AnyCircuitElement[] {
+  return [
+    {
+      type: "source_component",
+      source_component_id: "validation_dut",
+      name: "DUT",
+      manufacturer_part_number: generated.manifest.part_number,
+    },
+    {
+      type: "source_port",
+      source_port_id: "validation_dut_out",
+      source_component_id: "validation_dut",
+      name: "OUT",
+      port_hints: ["OUT", "pin1"],
+    },
+    {
+      type: "simulation_spice_subcircuit",
+      simulation_spice_subcircuit_id: "validation_dut_model",
+      source_component_id: "validation_dut",
+      spice_pin_to_source_port_map: { OUT: "validation_dut_out" },
+      subcircuit_source: generated.source,
+    },
+    {
+      type: "source_component",
+      source_component_id: "validation_stimulus",
+      name: "stimulus",
+      ftype: "simple_chip",
+    },
+    {
+      type: "source_port",
+      source_port_id: "validation_stimulus_pos",
+      source_component_id: "validation_stimulus",
+      name: "POS",
+      port_hints: ["POS", "pin1"],
+    },
+    {
+      type: "source_port",
+      source_port_id: "validation_stimulus_neg",
+      source_component_id: "validation_stimulus",
+      name: "NEG",
+      port_hints: ["NEG", "pin2"],
+    },
+    {
+      type: "source_net",
+      source_net_id: "validation_ground",
+      name: "GND",
+      member_source_group_ids: [],
+      is_ground: true,
+    },
+    {
+      type: "source_trace",
+      source_trace_id: "validation_stimulus_positive_trace",
+      connected_source_port_ids: ["validation_stimulus_pos", "validation_dut_out"],
+      connected_source_net_ids: [],
+    },
+    {
+      type: "source_trace",
+      source_trace_id: "validation_stimulus_negative_trace",
+      connected_source_port_ids: ["validation_stimulus_neg"],
+      connected_source_net_ids: ["validation_ground"],
+    },
+    {
+      type: "simulation_spice_subcircuit",
+      simulation_spice_subcircuit_id: "validation_stimulus_model",
+      source_component_id: "validation_stimulus",
+      spice_pin_to_source_port_map: {
+        POS: "validation_stimulus_pos",
+        NEG: "validation_stimulus_neg",
+      },
+      subcircuit_source:
+        ".SUBCKT VALIDATION_STIMULUS POS NEG\n" +
+        "IDRIVE POS NEG DC 0 PULSE(0 0.001 0 0.0007 0.0001 0.001 0.002)\n" +
+        ".ENDS VALIDATION_STIMULUS\n",
+    },
+    {
+      type: "source_component",
+      source_component_id: "validation_load",
+      name: "load",
+      ftype: "simple_resistor",
+      resistance: 1_000,
+    },
+    {
+      type: "source_port",
+      source_port_id: "validation_load_pos",
+      source_component_id: "validation_load",
+      name: "pin1",
+      port_hints: ["pin1"],
+    },
+    {
+      type: "source_port",
+      source_port_id: "validation_load_neg",
+      source_component_id: "validation_load",
+      name: "pin2",
+      port_hints: ["pin2"],
+    },
+    {
+      type: "source_trace",
+      source_trace_id: "validation_load_positive_trace",
+      connected_source_port_ids: ["validation_load_pos", "validation_dut_out"],
+      connected_source_net_ids: [],
+    },
+    {
+      type: "source_trace",
+      source_trace_id: "validation_load_negative_trace",
+      connected_source_port_ids: ["validation_load_neg"],
+      connected_source_net_ids: ["validation_ground"],
+    },
+    {
+      type: "simulation_experiment",
+      simulation_experiment_id: "validation_experiment",
+      name: "validation",
+      experiment_type: "spice_transient_analysis",
+      time_per_step: 0.1,
+      end_time_ms: 0.7,
+    },
+    {
+      type: "simulation_voltage_probe",
+      simulation_voltage_probe_id: "validation_output_probe",
+      name: "probe_output",
+      signal_input_source_port_id: "validation_dut_out",
+    },
+    {
+      type: "simulation_transient_voltage_graph",
+      simulation_transient_voltage_graph_id: "validation_output_graph",
+      simulation_experiment_id: "validation_experiment",
+      source_probe_id: "validation_output_probe",
+      name: "probe_output",
+      timestamps_ms: reference_points.map(({ x }) => x * 1_000),
+      voltage_levels: reference_points.map(({ y }) => y),
+      time_per_step: 0.1,
+      start_time_ms: 0,
+      end_time_ms: 0.7,
+    },
+  ] as unknown as AnyCircuitElement[]
+}
+
+const crc32_table = Array.from({ length: 256 }, (_, index) => {
+  let crc = index
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = (crc & 1) === 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1
+  }
+  return crc >>> 0
+})
+
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff
+  for (const byte of bytes) crc = (crc32_table[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8)
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type: string, data = new Uint8Array()): Uint8Array {
+  const type_bytes = Buffer.from(type, "ascii")
+  const chunk = Buffer.alloc(12 + data.byteLength)
+  chunk.writeUInt32BE(data.byteLength, 0)
+  chunk.set(type_bytes, 4)
+  chunk.set(data, 8)
+  chunk.writeUInt32BE(crc32(Buffer.concat([type_bytes, Buffer.from(data)])), 8 + data.byteLength)
+  return chunk
+}
+
+function referenceGraphPng(width = 96, height = 64): Uint8Array {
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header.set([8, 2, 0, 0, 0], 8)
+  const row_bytes = width * 3
+  const scanlines = Buffer.alloc((row_bytes + 1) * height, 255)
+  for (let y = 0; y < height; y += 1) scanlines[y * (row_bytes + 1)] = 0
+  const setPixel = (x: number, y: number) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return
+    const offset = y * (row_bytes + 1) + 1 + x * 3
+    scanlines[offset] = 20
+    scanlines[offset + 1] = 80
+    scanlines[offset + 2] = 180
+  }
+  let x = 4
+  let y = 58
+  const target_x = 91
+  const target_y = 5
+  const dx = Math.abs(target_x - x)
+  const sx = x < target_x ? 1 : -1
+  const dy = -Math.abs(target_y - y)
+  const sy = y < target_y ? 1 : -1
+  let error = dx + dy
+  while (true) {
+    setPixel(x, y - 1)
+    setPixel(x, y)
+    setPixel(x, y + 1)
+    if (x === target_x && y === target_y) break
+    const doubled = error * 2
+    if (doubled >= dy) {
+      error += dy
+      x += sx
+    }
+    if (doubled <= dx) {
+      error += dx
+      y += sy
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(scanlines)),
+    pngChunk("IEND"),
+  ])
+}
+
+class PublicationReferenceRunner implements ProcessRunner {
+  async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
+    if (request.command[0] === "tesseract" && request.command[1] === "--version") {
+      return { exit_code: 0, duration_ms: 1, output_tail: "tesseract 5.0.0-test\n" }
+    }
+    if (request.command[0] === "tesseract") {
+      const output_base = request.command[2]
+      if (!output_base) throw new Error("Publication reference fixture omitted its OCR output base")
+      const tsv = [
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+        "5\t1\t1\t1\t1\t1\t7\t180\t10\t10\t96\t0s",
+        "5\t1\t1\t1\t1\t2\t263\t180\t20\t10\t96\t700us",
+        "5\t1\t2\t1\t1\t1\t0\t169\t10\t10\t96\t0V",
+        "5\t1\t2\t1\t1\t2\t0\t10\t10\t10\t96\t1V",
+      ].join("\n")
+      await Bun.write(`${output_base}.tsv`, `${tsv}\n`)
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
+    if (request.command[0] === "pdftotext") {
+      const output_path = request.command.at(-1)
+      if (!output_path) throw new Error("Publication reference fixture omitted its bbox output path")
+      await Bun.write(
+        output_path,
+        '<doc><page><word xMin="1" yMin="24" xMax="12" yMax="28">Figure</word>' +
+          '<word xMin="13" yMin="24" xMax="16" yMax="28">1</word></page></doc>\n',
+      )
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
+    if (request.command[0] !== "pdftoppm") {
+      throw new Error(`Publication reference fixture received unsupported command ${request.command[0]}`)
+    }
+    const output_prefix = request.command.at(-1)
+    const width_index = request.command.indexOf("-W")
+    const height_index = request.command.indexOf("-H")
+    if (!output_prefix || width_index < 0 || height_index < 0) {
+      throw new Error("Publication reference fixture requires an exact pdftoppm crop")
+    }
+    await Bun.write(
+      `${output_prefix}.png`,
+      referenceGraphPng(Number(request.command[width_index + 1]), Number(request.command[height_index + 1])),
+    )
+    return { exit_code: 0, duration_ms: 1, output_tail: "" }
+  }
+}
+
+const publication_reference_runner = new PublicationReferenceRunner()
+
+async function writeReferenceProof(input: { model_dir: string; evidence_dir: string }): Promise<void> {
+  const datasheet = await readFile(join(input.model_dir, "datasheet.pdf"))
+  const source_pdf_sha256 = createHash("sha256").update(datasheet).digest("hex")
+  const fixture_evidence_context =
+    "Figure 1. VOUT = 1 V. Load current steps from 0 A to 1 mA, tr = 700 us, tf = 100 us. Output voltage response."
+  const transient_fixture_evidence = deriveTimeGraphTransientFixtureEvidence(fixture_evidence_context)
+  if (!transient_fixture_evidence) {
+    throw new Error("Publication reference fixture must prove its printed current step")
+  }
+  const discovery_value = {
+    version: 1,
+    source_pdf_sha256,
+    page_count: 1,
+    hints: [
+      {
+        hint_id: "time_graph_001",
+        page: 1,
+        figure: "Figure 1",
+        reason: "Figure 1. Output voltage response",
+        operating_condition_evidence: fixture_evidence_context,
+        fixture_evidence_context,
+        summary_fixture_evidence_context: null,
+        condition_conflicts: [],
+        unsupported_fixture_conditions: [],
+        transient_fixture_evidence,
+      },
+    ],
+  }
+  const observation_value = {
+    version: 1,
+    source_pdf_sha256,
+    reviewed_hints: [
+      {
+        hint_id: "time_graph_001",
+        disposition: "graph",
+        graph_id: "output_voltage",
+        reason: "The printed horizontal axis is elapsed time.",
+      },
+    ],
+    graphs: [
+      {
+        graph_id: "output_voltage",
+        page: 1,
+        locator: "Figure 1",
+        x_axis: "time",
+        time_axis_evidence: "Time (100 us/div)",
+        response_quantity: "voltage",
+        public_pin_observable: true,
+        fixture_reproducible: true,
+        reason: "The public OUT voltage responds to a public current step.",
+        crop: { page: 1, render_dpi: 200, x_px: 0, y_px: 0, width_px: 96, height_px: 64 },
+        electrical_binding,
+        digitized_curve: {
+          method: "manual_pixel_trace",
+          x_quantity: "time",
+          x_unit: "s",
+          y_quantity: "voltage",
+          y_unit: "V",
+          x_range: { min: 0, max: 0.0007 },
+          y_range: { min: 0, max: 1 },
+          x_axis: {
+            scale: "linear",
+            first: { pixel: 4, value: 0 },
+            second: { pixel: 91, value: 0.0007 },
+          },
+          y_axis: {
+            scale: "linear",
+            first: { pixel: 58, value: 0 },
+            second: { pixel: 5, value: 1 },
+          },
+          trace_color: { r: 20, g: 80, b: 180, tolerance: 24 },
+          points: Array.from({ length: 8 }, (_, index) => {
+            const ratio = index / 7
+            return {
+              pixel_x: 4 + ratio * 87,
+              pixel_y: 58 - ratio * 53,
+              x: ratio * 0.0007,
+              y: ratio,
+            }
+          }),
+        },
+      },
+    ],
+  }
+  await mkdir(join(input.evidence_dir, "figures"), { recursive: true })
+  await Promise.all([
+    Bun.write(join(input.evidence_dir, "figures", "output_voltage.png"), referenceGraphPng()),
+    Bun.write(join(input.model_dir, "time-graph-hints.json"), `${JSON.stringify(discovery_value)}\n`),
+    Bun.write(
+      join(input.model_dir, "model-reference-observation.json"),
+      `${JSON.stringify(observation_value)}\n`,
+    ),
+  ])
+  const discovery = parseTimeGraphDiscovery(discovery_value, source_pdf_sha256)
+  const observation = parseReferenceGraphObservation(observation_value, discovery, contract.interface)
+  const source_proof = await buildReferenceGraphSourceProof({
+    observation,
+    datasheet_path: join(input.model_dir, "datasheet.pdf"),
+    process_runner: publication_reference_runner,
+    signal: new AbortController().signal,
+  })
+  const source_observation = applyReferenceGraphSourceEligibility({ observation, proof: source_proof })
+  const numeric_verification = verifyCharacterizationGraphEvidence({
+    characterization: contract.characterization,
+    observation: source_observation,
+    source_proof,
+  })
+  const verification = await verifyReferenceGraphTracePixels({
+    characterization: contract.characterization,
+    observation: source_observation,
+    numeric_verification,
+    evidence_dir: input.evidence_dir,
+  })
+  await Promise.all([
+    Bun.write(
+      join(input.model_dir, "model-reference-source-proof.json"),
+      `${JSON.stringify(source_proof)}\n`,
+    ),
+    Bun.write(
+      join(input.model_dir, "model-reference-verification.json"),
+      `${JSON.stringify(verification)}\n`,
+    ),
+  ])
+}
+
 async function createWorkspace(prefix: string) {
   const root = await mkdtemp(join(tmpdir(), prefix))
   temporary_directories.push(root)
@@ -205,6 +680,7 @@ async function createWorkspace(prefix: string) {
   ] as unknown as AnyCircuitElement[]
   await Promise.all([
     Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.4\n"),
+    Bun.write(join(model_dir, "datasheet.pdf"), "%PDF-1.4\n"),
     Bun.write(join(job_dir, "index.circuit.tsx"), original_component),
     Bun.write(join(job_dir, "component.circuit.tsx"), original_component),
     Bun.write(join(job_dir, "component.circuit.json"), JSON.stringify(original_circuit)),
@@ -223,6 +699,7 @@ async function createPreparedPublication(input: {
   invocation_id: string
   generated: GeneratedModel
   result?: ValidationRunResult
+  caller_publication_policy?: "legacy_compatibility"
 }) {
   const wrapper_dir = join(input.model_dir, "wrapper-stage")
   await mkdir(wrapper_dir, { recursive: true })
@@ -233,7 +710,8 @@ async function createPreparedPublication(input: {
   })
   const circuit_json = componentCircuit(input.generated.source)
   const job_id = input.model_run_id.replace(/^model_/, "job_")
-  return prepareModelPublication({
+  await writeReferenceProof(input)
+  const publication_input = {
     job_id,
     job_dir: input.job_dir,
     model_dir: input.model_dir,
@@ -246,7 +724,11 @@ async function createPreparedPublication(input: {
     evidence_dir: input.evidence_dir,
     wrapper_source,
     circuit_json,
-  })
+    circuit_json_by_case: { output_voltage: validationCircuit(input.generated) },
+    process_runner: publication_reference_runner,
+    ...(input.caller_publication_policy ? { publication_policy: input.caller_publication_policy } : {}),
+  }
+  return prepareModelPublication(publication_input)
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -288,9 +770,79 @@ test("publication preparation rejects a passing flag over non-finite simulator p
       generated: accepted,
       result: forged,
     }),
-  ).rejects.toThrow(/points\[0\]\.y must be a finite number/)
+  ).rejects.toThrow(/point.*y must be a finite number/)
 
   expect(await Bun.file(join(workspace.job_dir, "published-model.json")).exists()).toBe(false)
+})
+
+test("a caller cannot downgrade the normal publication writer to legacy policy", async () => {
+  const workspace = await createWorkspace("model-publication-fresh-downgrade-")
+  const accepted = generatedModel(1)
+
+  const prepared = await createPreparedPublication({
+    ...workspace,
+    model_run_id: "model_fresh_downgrade",
+    invocation_id: crypto.randomUUID(),
+    generated: accepted,
+    caller_publication_policy: "legacy_compatibility",
+  })
+
+  expect(prepared.commit).toMatchObject({
+    version: 3,
+    publication_policy: "fresh_time_voltage_v1",
+  })
+  for (const bundle of [prepared.accepted_model_dir, prepared.published_component_dir]) {
+    expect(JSON.parse(await readFile(join(bundle, "model-workflow-policy.json"), "utf8"))).toEqual({
+      version: 1,
+      policy: "fresh_time_voltage_v1",
+    })
+  }
+})
+
+test("accepted publication retains and binds the independent reference-graph trace", async () => {
+  const workspace = await createWorkspace("model-publication-reference-trace-")
+  const prepared = await createPreparedPublication({
+    ...workspace,
+    model_run_id: "model_reference_trace",
+    invocation_id: crypto.randomUUID(),
+    generated: generatedModel(1),
+  })
+
+  const expected_artifact_identity = {
+    preview_generation: basename(prepared.accepted_model_dir),
+    model_revision: prepared.commit.revision,
+  }
+  expect(prepared.projection.validation.preview_generation).toBe(
+    expected_artifact_identity.preview_generation,
+  )
+  expect(prepared.projection.selected_previews.output_voltage?.artifact_identity).toEqual(
+    expected_artifact_identity,
+  )
+  expect(
+    JSON.parse(
+      await readFile(
+        join(prepared.accepted_model_dir, "validation", "cases", "output_voltage.preview.json"),
+        "utf8",
+      ),
+    ).artifact_identity,
+  ).toEqual(expected_artifact_identity)
+
+  const manifest = JSON.parse(
+    await readFile(join(prepared.accepted_model_dir, "bundle-manifest.json"), "utf8"),
+  ) as { files: Record<string, { size_bytes: number }> }
+  for (const file of [
+    "time-graph-hints.json",
+    "model-reference-observation.json",
+    "model-reference-source-proof.json",
+    "model-reference-verification.json",
+  ]) {
+    const contents = await readFile(join(workspace.model_dir, file), "utf8")
+    expect(await readFile(join(prepared.accepted_model_dir, file), "utf8")).toBe(contents)
+    expect(manifest.files[file]).toMatchObject({ size_bytes: Buffer.byteLength(contents) })
+  }
+  const datasheet = await readFile(join(workspace.model_dir, "datasheet.pdf"))
+  expect(await readFile(join(prepared.accepted_model_dir, "datasheet.pdf"))).toEqual(datasheet)
+  expect(manifest.files["datasheet.pdf"]).toMatchObject({ size_bytes: datasheet.byteLength })
 })
 
 test("publication preparation rolls back a sibling bundle after a partial promotion failure", async () => {
@@ -480,6 +1032,34 @@ test("a committed pointer recovers one authoritative pair before store and root 
     preview_options: [{ benchmark_id: "output_voltage" }],
     circuit_preview: { source_file: "validation/cases/output_voltage.circuit.tsx" },
   })
+  const forged_candidate_ui = {
+    ...structuredClone(candidate_ui),
+    selected_previews: {
+      ...candidate_ui.selected_previews,
+      output_voltage: {
+        circuit_preview: {
+          source_file: "validation/cases/output_voltage.circuit.tsx",
+          code: "",
+          build_status: "ready",
+          updated_at: "2026-08-01T00:00:00.000Z",
+          analysis_type: "transient",
+          analog_simulation_status: "available",
+        },
+      },
+    },
+  }
+  await Bun.write(join(candidate_preview_dir, "model-ui.json"), `${JSON.stringify(forged_candidate_ui)}\n`)
+  const restored_forged_candidate = await restoreModelDirectory({
+    job_id: "job_publication",
+    model_dir: workspace.model_dir,
+    model_run_store: new ModelRunStore(),
+  })
+  expect(restored_forged_candidate?.validation).toMatchObject({
+    artifact_state: "candidate",
+    preview_generation,
+  })
+  expect(restored_forged_candidate?.circuit_preview).toBeUndefined()
+  expect(restored_forged_candidate?.reference_preview).toBeUndefined()
   await Promise.all([
     rm(join(workspace.model_dir, "current-preview.json"), { force: true }),
     rm(join(workspace.model_dir, "current-previews"), { recursive: true, force: true }),
@@ -651,16 +1231,27 @@ test("a failed integrated build cannot replace the prior accepted root files or 
   const candidate_dir = join(workspace.model_dir, "candidates", "candidate")
   const attempt_dir = join(workspace.model_dir, "attempts", "candidate")
   const validation_dir = join(candidate_dir, "validation")
+  const canonical_plan = parseValidationPlan(plan, {
+    model_interface: contract.interface,
+    model_requirements: contract.characterization.requirements,
+    model_family: contract.characterization.family,
+  })
+  const candidate_result = passingResult(candidate)
+  await Promise.all([mkdir(validation_dir, { recursive: true }), mkdir(attempt_dir, { recursive: true })])
   await Promise.all([
-    mkdir(validation_dir, { recursive: true }),
-    mkdir(attempt_dir, { recursive: true }),
     Bun.write(join(candidate_dir, "model.lib"), candidate.source),
     Bun.write(join(candidate_dir, "model-card.md"), candidate.card),
     Bun.write(join(candidate_dir, "model-manifest.json"), JSON.stringify(candidate.manifest)),
     Bun.write(join(attempt_dir, "model-contract.json"), JSON.stringify(contract)),
-    Bun.write(join(attempt_dir, "validation-plan.json"), JSON.stringify(plan)),
-    Bun.write(join(validation_dir, "validation-results.json"), JSON.stringify(passingResult(candidate))),
+    Bun.write(join(attempt_dir, "validation-plan.json"), JSON.stringify(canonical_plan)),
+    Bun.write(join(validation_dir, "validation-results.json"), JSON.stringify(candidate_result)),
   ])
+  await writeViewerValidationArtifacts({
+    validation_dir,
+    plan: canonical_plan,
+    generated: candidate,
+    circuit_json_by_case: { output_voltage: validationCircuit(candidate) },
+  })
 
   const process_runner: ProcessRunner = {
     async run(request) {
@@ -757,6 +1348,147 @@ test("a committed bundle rejects tampering before readers select it", async () =
   await expect(readModelPublication(workspace.job_dir, prepared.commit.job_id)).rejects.toThrow(
     /bundle contents/,
   )
+})
+
+test("fresh publication readers reject hash-consistent stale validation artifacts", async () => {
+  const workspace = await createWorkspace("model-publication-stale-validation-")
+  const prepared = await createPreparedPublication({
+    ...workspace,
+    model_run_id: "model_stale_validation",
+    invocation_id: crypto.randomUUID(),
+    generated: generatedModel(1),
+  })
+  const result_path = join(prepared.accepted_model_dir, "validation-results.json")
+  const stale_result = JSON.parse(await readFile(result_path, "utf8")) as {
+    hashes: { model_sha256: string }
+    stimulus_causality?: { hashes: { model_sha256: string } }
+  }
+  stale_result.hashes.model_sha256 = "0".repeat(64)
+  if (stale_result.stimulus_causality) {
+    stale_result.stimulus_causality.hashes.model_sha256 = "0".repeat(64)
+  }
+  await Bun.write(result_path, JSON.stringify(stale_result))
+  const accepted_bundle_manifest_sha256 = await writePublicationBundleManifest(prepared.accepted_model_dir)
+  commitModelPublication(workspace.job_dir, prepared.commit.job_id, {
+    ...prepared.commit,
+    accepted_bundle_manifest_sha256,
+  })
+
+  await expect(readModelPublication(workspace.job_dir, prepared.commit.job_id)).rejects.toThrow(
+    /validation input hash mismatch.*model\.lib/,
+  )
+})
+
+test("fresh publication pointers require the bound fresh policy", async () => {
+  const workspace = await createWorkspace("model-publication-pointer-policy-")
+  const prepared = await createPreparedPublication({
+    ...workspace,
+    model_run_id: "model_pointer_policy",
+    invocation_id: crypto.randomUUID(),
+    generated: generatedModel(1),
+  })
+  const pointer_path = join(workspace.job_dir, "published-model.json")
+  const { publication_policy: _publication_policy, ...missing_policy } = prepared.commit
+  await Bun.write(pointer_path, JSON.stringify(missing_policy))
+  await expect(readModelPublication(workspace.job_dir, prepared.commit.job_id)).rejects.toThrow(
+    /unexpected or missing fields/,
+  )
+
+  await Bun.write(
+    pointer_path,
+    JSON.stringify({ ...prepared.commit, publication_policy: "legacy_compatibility" }),
+  )
+  await expect(readModelPublication(workspace.job_dir, prepared.commit.job_id)).rejects.toThrow(
+    /publication_policy must be fresh_time_voltage_v1/,
+  )
+})
+
+test("fresh publication resolution rejects missing or mismatched bundle policy markers", async () => {
+  const missing_workspace = await createWorkspace("model-publication-missing-policy-")
+  const missing_prepared = await createPreparedPublication({
+    ...missing_workspace,
+    model_run_id: "model_missing_policy",
+    invocation_id: crypto.randomUUID(),
+    generated: generatedModel(1),
+  })
+  await unlink(join(missing_prepared.accepted_model_dir, "model-workflow-policy.json"))
+  const missing_manifest_sha256 = await writePublicationBundleManifest(missing_prepared.accepted_model_dir)
+  commitModelPublication(missing_workspace.job_dir, missing_prepared.commit.job_id, {
+    ...missing_prepared.commit,
+    accepted_bundle_manifest_sha256: missing_manifest_sha256,
+  })
+  await expect(
+    readModelPublication(missing_workspace.job_dir, missing_prepared.commit.job_id),
+  ).rejects.toThrow(/does not contain model-workflow-policy\.json/)
+
+  const mismatch_workspace = await createWorkspace("model-publication-mismatched-policy-")
+  const mismatch_prepared = await createPreparedPublication({
+    ...mismatch_workspace,
+    model_run_id: "model_mismatched_policy",
+    invocation_id: crypto.randomUUID(),
+    generated: generatedModel(1),
+  })
+  await Bun.write(
+    join(mismatch_prepared.published_component_dir, "model-workflow-policy.json"),
+    JSON.stringify({ version: 1, policy: "legacy_compatibility" }),
+  )
+  const mismatch_manifest_sha256 = await writePublicationBundleManifest(
+    mismatch_prepared.published_component_dir,
+  )
+  commitModelPublication(mismatch_workspace.job_dir, mismatch_prepared.commit.job_id, {
+    ...mismatch_prepared.commit,
+    published_component_bundle_manifest_sha256: mismatch_manifest_sha256,
+  })
+  await expect(
+    readModelPublication(mismatch_workspace.job_dir, mismatch_prepared.commit.job_id),
+  ).rejects.toThrow(/fresh workflow policy does not match both published bundles/)
+})
+
+test("legacy version 2 publications remain readable but cannot be written by the normal writer", async () => {
+  const workspace = await createWorkspace("model-publication-legacy-read-")
+  const prepared = await createPreparedPublication({
+    ...workspace,
+    model_run_id: "model_legacy_read",
+    invocation_id: crypto.randomUUID(),
+    generated: generatedModel(1),
+  })
+  const bundle_directories = [prepared.accepted_model_dir, prepared.published_component_dir]
+  for (const directory of bundle_directories) {
+    const record = JSON.parse(await readFile(join(directory, "publication-record.json"), "utf8")) as Record<
+      string,
+      unknown
+    >
+    delete record.publication_policy
+    record.version = 2
+    await Promise.all([
+      Bun.write(join(directory, "publication-record.json"), JSON.stringify(record)),
+      unlink(join(directory, "model-workflow-policy.json")),
+    ])
+  }
+  const [accepted_bundle_manifest_sha256, published_component_bundle_manifest_sha256] = await Promise.all(
+    bundle_directories.map(writePublicationBundleManifest),
+  )
+  const {
+    version: _version,
+    publication_policy: _policy,
+    accepted_bundle_manifest_sha256: _accepted_hash,
+    published_component_bundle_manifest_sha256: _component_hash,
+    ...legacy_identity
+  } = prepared.commit
+  const legacy_commit = {
+    version: 2 as const,
+    ...legacy_identity,
+    accepted_bundle_manifest_sha256,
+    published_component_bundle_manifest_sha256,
+  }
+
+  expect(() =>
+    commitModelPublication(workspace.job_dir, prepared.commit.job_id, legacy_commit as never),
+  ).toThrow(/only fresh version 3 publications/)
+
+  await Bun.write(join(workspace.job_dir, "published-model.json"), JSON.stringify(legacy_commit))
+  const resolved = await readModelPublication(workspace.job_dir, prepared.commit.job_id)
+  expect(resolved?.commit).toMatchObject({ version: 2, publication_id: prepared.commit.publication_id })
 })
 
 test("publication identity is bound into both immutable bundles", async () => {

@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import type { AnyCircuitElement } from "circuit-json"
 import type { ComponentEvidence } from "../src/server/component-evidence"
+import { assertHasEligibleTimeDomainGraph } from "../src/server/model-workflow/stages/characterize"
 import {
   assertCircuitEmbedsModel,
+  assertValidationCircuitEmbedsModel,
   buildCharacterizationPrompt,
   buildModelGenerationPrompt,
   buildValidationPlanGuide,
@@ -10,10 +12,12 @@ import {
   createModelInterface,
   createModelManifest,
   ModelStrategyRegistry,
+  parseFreshModelContract,
   parseModelCharacterization,
   parseModelContract,
   validateModelSource,
 } from "../src/server/modeling"
+import { PipelineError } from "../src/server/pipeline"
 
 const evidence: ComponentEvidence = {
   version: 1,
@@ -50,6 +54,24 @@ const component_circuit = evidence.pinout.pins.flatMap((pin, index) => [
     port_hints: [`pin${pin.number}`, ...pin.labels],
   },
 ]) as AnyCircuitElement[]
+
+const fresh_electrical_binding = {
+  response: { type: "voltage" as const, positive: "dut.OUT" as const, negative: "gnd" as const },
+  stimulus: {
+    type: "voltage_step" as const,
+    positive: "dut.INPOS" as const,
+    negative: "gnd" as const,
+    pulse: {
+      low: 0,
+      high: 1,
+      delay: 0,
+      rise: 0.0001,
+      fall: 0.0001,
+      width: 0.004,
+      period: 0.0082,
+    },
+  },
+}
 
 describe("server-owned model interface", () => {
   test("derives stable, selector-safe pins without collapsing polarity", () => {
@@ -167,6 +189,66 @@ describe("server-owned model interface", () => {
       ),
     ).toThrow(/pin mapping/)
   })
+
+  test("binds validation waveforms to the exact generated DUT model", () => {
+    const model_interface = createModelInterface(evidence, component_circuit)
+    const source = `.SUBCKT ABC_123 INPOS INNEG OUT\nEOUT OUT 0 INPOS INNEG 2\n.ENDS ABC_123\n`
+    const manifest = createModelManifest({ model_interface, model_source: source, simulator: "ngspice" })
+    const ports = manifest.pins.map(({ component_pin, spice_node }, index) => ({
+      type: "source_port",
+      source_port_id: `validation_port_${index}`,
+      source_component_id: "validation_dut",
+      name: spice_node,
+      port_hints: [component_pin, spice_node],
+    }))
+    const circuit_json = [
+      {
+        type: "source_component",
+        source_component_id: "validation_dut",
+        name: "DUT",
+        manufacturer_part_number: manifest.part_number,
+      },
+      ...ports,
+      {
+        type: "simulation_spice_subcircuit",
+        simulation_spice_subcircuit_id: "validation_model",
+        source_component_id: "validation_dut",
+        spice_pin_to_source_port_map: Object.fromEntries(
+          manifest.pins.map(({ spice_node }, index) => [spice_node, `validation_port_${index}`]),
+        ),
+        subcircuit_source: source,
+      },
+      {
+        type: "simulation_spice_subcircuit",
+        simulation_spice_subcircuit_id: "fixture_model",
+        source_component_id: "fixture",
+        spice_pin_to_source_port_map: {},
+        subcircuit_source: ".SUBCKT FIXTURE A B\nR1 A B 1k\n.ENDS FIXTURE\n",
+      },
+    ] as AnyCircuitElement[]
+
+    expect(() => assertValidationCircuitEmbedsModel(circuit_json, source, manifest)).not.toThrow()
+    expect(() =>
+      assertValidationCircuitEmbedsModel(
+        circuit_json.filter(({ type }) => type !== "source_component"),
+        source,
+        manifest,
+      ),
+    ).toThrow(/unique DUT/)
+    expect(() =>
+      assertValidationCircuitEmbedsModel(
+        circuit_json.map((element) =>
+          element.type === "simulation_spice_subcircuit" &&
+          "source_component_id" in element &&
+          element.source_component_id === "validation_dut"
+            ? { ...element, subcircuit_source: source.replace(" 2", " 3") }
+            : element,
+        ),
+        source,
+        manifest,
+      ),
+    ).toThrow(/canonical model.lib/)
+  })
 })
 
 describe("model characterization contract", () => {
@@ -177,7 +259,10 @@ describe("model characterization contract", () => {
       "hybrid",
     ])
     expect(buildCharacterizationPrompt()).toContain("typical-application-plan.json")
-    expect(buildCharacterizationPrompt()).toContain("Scalar target/bounds apply independently")
+    expect(buildCharacterizationPrompt()).toContain("complete datasheet.pdf from first page\nto last page")
+    expect(buildCharacterizationPrompt()).toContain('x_quantity exactly "time"')
+    expect(buildCharacterizationPrompt()).toContain("evidence/figures/<requirement_id>.png")
+    expect(buildCharacterizationPrompt()).toContain("do not use a scalar requirement as an escape")
     expect(buildCharacterizationPrompt()).not.toContain("strategy: vendor")
     const vendor_characterization = {
       version: 1,
@@ -229,6 +314,25 @@ describe("model characterization contract", () => {
     expect(buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })).toContain(
       "server has withheld",
     )
+    expect(() => parseFreshModelContract(contract)).toThrow(
+      /analysis must be transient for fresh modeled requirements/,
+    )
+    expect(() =>
+      parseFreshModelContract({
+        ...contract,
+        characterization: {
+          ...vendor_characterization,
+          strategy: "equation",
+          requirements: vendor_characterization.requirements.map((requirement) => ({
+            ...requirement,
+            support: {
+              status: "documented_only",
+              reason: "A scalar operating point is not a fresh executable waveform.",
+            },
+          })),
+        },
+      }),
+    ).toThrow(/must contain at least one modeled requirement/)
   })
 
   test("rejects characterization tolerances that make validation meaningless", () => {
@@ -277,7 +381,7 @@ describe("model characterization contract", () => {
           reference_curve: {
             x_quantity: "input voltage",
             x_unit: "V",
-            y_quantity: "output voltage",
+            y_quantity: "voltage",
             y_unit: "V",
             tolerance: 1e99,
             points: [
@@ -294,7 +398,7 @@ describe("model characterization contract", () => {
       parseModelCharacterization(curve_characterization, {
         policy: "fresh",
       }),
-    ).toThrow(/reference_curve\.tolerance must not exceed 0\.5/)
+    ).toThrow(/reference_curve\.tolerance must not exceed 0\.1/)
   })
 
   test("rejects contradictory mixed target and hard bounds only for fresh characterization", () => {
@@ -370,11 +474,11 @@ describe("model characterization contract", () => {
       parseModelCharacterization(sparse_curve_characterization, {
         policy: "fresh",
       }),
-    ).toThrow(/needs at least 5 points so server validation can withhold interior samples/)
-    expect(buildCharacterizationPrompt()).toContain("must contain at least five points")
+    ).toThrow(/needs at least 8 points for this graph crop/)
+    expect(buildCharacterizationPrompt()).toContain("never fewer than eight points")
   })
 
-  test("requires a response curve for fresh dc_sweep behavior", () => {
+  test("fresh modeled behavior cannot use operating-point or DC analysis", () => {
     const scalar_sweep_characterization = {
       version: 1,
       family: "sensor",
@@ -403,11 +507,11 @@ describe("model characterization contract", () => {
 
     expect(() => parseModelCharacterization(scalar_sweep_characterization)).not.toThrow()
     expect(() => parseModelCharacterization(scalar_sweep_characterization, { policy: "fresh" })).toThrow(
-      /reference_curve is required for modeled dc_sweep behavior/,
+      /analysis must be transient for fresh modeled requirements/,
     )
   })
 
-  test("permits honest scalar regulator bounds when a datasheet has no reference curve", () => {
+  test("preserves scalar regulator compatibility but rejects it as fresh executable evidence", () => {
     const scalarRequirement = {
       requirement_id: "output_voltage",
       title: "Output voltage",
@@ -466,17 +570,19 @@ describe("model characterization contract", () => {
       }
 
       expect(() => parseModelCharacterization(scalarOnly)).not.toThrow()
-      expect(() => parseModelCharacterization(scalarOnly, { policy: "fresh" })).not.toThrow()
+      expect(() => parseModelCharacterization(scalarOnly, { policy: "fresh" })).toThrow(
+        /analysis must be transient for fresh modeled requirements/,
+      )
       expect(() =>
         parseModelCharacterization(
           { ...scalarOnly, requirements: [scalarRequirement, rangeRequirement] },
           { policy: "fresh" },
         ),
-      ).not.toThrow()
+      ).toThrow(/analysis must be transient for fresh modeled requirements/)
     }
   })
 
-  test("curve-free dynamic bounds remain valid but documented-only claims do not count as modeled", () => {
+  test("fresh transient behavior requires a time curve and exact cited-page crop", () => {
     const dynamicRequirement = {
       requirement_id: "startup",
       title: "Startup",
@@ -497,20 +603,32 @@ describe("model characterization contract", () => {
     const transientReferenceCurve = {
       x_quantity: "time",
       x_unit: "s",
-      y_quantity: "output voltage",
+      y_quantity: "voltage",
       y_unit: "V",
       points: [
         { x: 0, y: 0 },
+        { x: 0.0005, y: 0.5 },
         { x: 0.001, y: 1 },
+        { x: 0.0015, y: 2 },
         { x: 0.002, y: 3 },
+        { x: 0.0025, y: 4 },
         { x: 0.003, y: 4.5 },
         { x: 0.004, y: 5 },
       ],
+      crop: {
+        page: 9,
+        render_dpi: 200,
+        x_px: 120,
+        y_px: 240,
+        width_px: 96,
+        height_px: 500,
+      },
+      electrical_binding: fresh_electrical_binding,
     }
 
     expect(() =>
       parseModelCharacterization({ ...base, requirements: [dynamicRequirement] }, { policy: "fresh" }),
-    ).not.toThrow()
+    ).toThrow(/reference_curve is required for fresh modeled requirements/)
     expect(() =>
       parseModelCharacterization(
         {
@@ -527,19 +645,179 @@ describe("model characterization contract", () => {
           requirements: [
             {
               ...dynamicRequirement,
-              support: {
-                status: "documented_only",
-                reason: "The public pins do not expose the internal startup state.",
-              },
-              reference_curve: transientReferenceCurve,
+              reference_curve: { ...transientReferenceCurve, y_quantity: "current" },
             },
           ],
         },
         { policy: "fresh" },
       ),
-    ).toThrow(/must contain at least one modeled requirement/)
-    expect(buildCharacterizationPrompt()).toContain("tabular scalar bounds remain valid")
-    expect(buildCharacterizationPrompt()).toContain("validation plan can strengthen them")
+    ).toThrow(/reference_curve\.y_quantity must be voltage/)
+    const documented_only = parseModelCharacterization(
+      {
+        ...base,
+        requirements: [
+          {
+            ...dynamicRequirement,
+            support: {
+              status: "documented_only",
+              reason: "The public pins do not expose the internal startup state.",
+            },
+            reference_curve: transientReferenceCurve,
+          },
+        ],
+      },
+      { policy: "fresh" },
+    )
+    const no_eligible_error = (() => {
+      try {
+        assertHasEligibleTimeDomainGraph(documented_only)
+      } catch (error) {
+        return error
+      }
+    })()
+    expect(no_eligible_error).toBeInstanceOf(PipelineError)
+    expect((no_eligible_error as PipelineError).diagnostic).toMatchObject({
+      code: "no_eligible_time_domain_graph",
+      stage_id: "characterize",
+      retryable: false,
+    })
+    expect(buildCharacterizationPrompt()).toContain("whole-page crop is\nrejected")
+    expect(buildCharacterizationPrompt()).toContain("Static regulation tables")
+  })
+
+  test("fresh reference crops have strict 200-DPI geometry and cited-page provenance", () => {
+    const valid = {
+      version: 1,
+      family: "sensor",
+      strategy: "behavioral",
+      requirements: [
+        {
+          requirement_id: "step_response",
+          title: "Step response",
+          behavior: "Follow the printed response after an input step",
+          analysis: "transient",
+          support: { status: "modeled" },
+          conditions: { supply_voltage: 5 },
+          expected: { unit: "V", min: 0, max: 5 },
+          reference_curve: {
+            x_quantity: "time",
+            x_unit: "s",
+            y_quantity: "voltage",
+            y_unit: "V",
+            points: [
+              { x: 0, y: 0 },
+              { x: 0.0005, y: 0.5 },
+              { x: 0.001, y: 1 },
+              { x: 0.0015, y: 1.5 },
+              { x: 0.002, y: 2 },
+              { x: 0.0025, y: 3 },
+              { x: 0.003, y: 4 },
+              { x: 0.004, y: 5 },
+            ],
+            crop: {
+              page: 7,
+              render_dpi: 200,
+              x_px: 100,
+              y_px: 200,
+              width_px: 96,
+              height_px: 500,
+            },
+            electrical_binding: fresh_electrical_binding,
+          },
+          sources: [{ page: 7, locator: "Figure 4", statement: "Startup waveform" }],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    }
+
+    expect(() => parseModelCharacterization(valid, { policy: "fresh" })).not.toThrow()
+    const { electrical_binding: _binding, ...legacy_curve } = valid.requirements[0]!.reference_curve
+    const legacy_without_binding = {
+      ...valid,
+      requirements: [{ ...valid.requirements[0]!, reference_curve: legacy_curve }],
+    }
+    expect(() => parseModelCharacterization(legacy_without_binding)).not.toThrow()
+    expect(() => parseModelCharacterization(legacy_without_binding, { policy: "fresh" })).toThrow(
+      /reference_curve\.electrical_binding is required for fresh modeled requirements/,
+    )
+
+    const flat_binding = structuredClone(valid)
+    flat_binding.requirements[0]!.reference_curve.electrical_binding.stimulus.pulse.high = 0
+    expect(() => parseModelCharacterization(flat_binding, { policy: "fresh" })).toThrow(
+      /pulse\.low and .*pulse\.high must differ/,
+    )
+    expect(() =>
+      parseModelCharacterization(
+        {
+          ...valid,
+          requirements: [
+            {
+              ...valid.requirements[0],
+              expected: { unit: "A", min: 0, max: 1 },
+              reference_curve: {
+                ...valid.requirements[0]!.reference_curve,
+                y_quantity: "supply current",
+                y_unit: "A",
+              },
+            },
+          ],
+        },
+        { policy: "fresh" },
+      ),
+    ).toThrow(/current tscircuit runtime does not emit transient current graphs/)
+    expect(() =>
+      parseModelCharacterization(
+        {
+          ...valid,
+          requirements: [
+            {
+              ...valid.requirements[0],
+              reference_curve: {
+                ...valid.requirements[0]!.reference_curve,
+                crop: { ...valid.requirements[0]!.reference_curve.crop, width_px: 0 },
+              },
+            },
+          ],
+        },
+        { policy: "fresh" },
+      ),
+    ).toThrow(/reference_curve\.crop\.width_px must be a safe integer greater than or equal to 1/)
+    expect(() =>
+      parseModelCharacterization(
+        {
+          ...valid,
+          requirements: [
+            {
+              ...valid.requirements[0],
+              reference_curve: {
+                ...valid.requirements[0]!.reference_curve,
+                crop: { ...valid.requirements[0]!.reference_curve.crop, page: 8 },
+              },
+            },
+          ],
+        },
+        { policy: "fresh" },
+      ),
+    ).toThrow(/reference_curve\.crop\.page must match the primary PDF page/)
+    expect(() =>
+      parseModelCharacterization(
+        {
+          ...valid,
+          requirements: [
+            {
+              ...valid.requirements[0],
+              reference_curve: {
+                ...valid.requirements[0]!.reference_curve,
+                x_quantity: "input voltage",
+                points: [{ x: -0.001, y: 0 }, ...valid.requirements[0]!.reference_curve.points.slice(1)],
+              },
+            },
+          ],
+        },
+        { policy: "fresh" },
+      ),
+    ).toThrow(/reference_curve\.x_quantity must be time/)
   })
 
   test("fresh characterization reports unsupported fields instead of dropping typos", () => {
