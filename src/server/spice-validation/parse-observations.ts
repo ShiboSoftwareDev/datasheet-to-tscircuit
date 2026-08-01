@@ -15,6 +15,11 @@ function normalizedUnit(value: string): string {
   return value.trim()
 }
 
+function scalarTargetTolerance(target: number, unit: "V" | "A", tolerance?: number): number {
+  const absolute_floor = unit === "V" ? 1e-3 : 1e-6
+  return tolerance ?? Math.max(Math.abs(target) * DEFAULT_CURVE_TOLERANCE, absolute_floor)
+}
+
 function canonicalRequirementReference(input: {
   requirement: ModelRequirement
   observation_unit: "V" | "A"
@@ -44,20 +49,36 @@ function canonicalRequirementReference(input: {
       `requirement ${JSON.stringify(requirement.requirement_id)} expects ${JSON.stringify(requirement.expected.unit)}, not ${observation_unit}`,
     )
   }
-  if (requirement.expected.min !== undefined || requirement.expected.max !== undefined) {
+  const { target, min, max, tolerance } = requirement.expected
+  if (target !== undefined) {
+    const target_tolerance = scalarTargetTolerance(target, observation_unit, tolerance)
+    if (min === undefined && max === undefined) {
+      return { type: "target", target, tolerance: target_tolerance }
+    }
+
+    const effective_min = Math.max(target - target_tolerance, min ?? Number.NEGATIVE_INFINITY)
+    const effective_max = Math.min(target + target_tolerance, max ?? Number.POSITIVE_INFINITY)
+    if (effective_min > effective_max) {
+      collector.add(
+        `${path}.reference`,
+        "contradictory_requirement_reference",
+        `requirement ${JSON.stringify(requirement.requirement_id)} target tolerance band [${target - target_tolerance}, ${target + target_tolerance}] does not intersect its hard bounds`,
+      )
+    }
+    return { type: "bounds", min: effective_min, max: effective_max }
+  }
+
+  if (min !== undefined || max !== undefined) {
     return {
       type: "bounds",
-      ...(requirement.expected.min === undefined ? {} : { min: requirement.expected.min }),
-      ...(requirement.expected.max === undefined ? {} : { max: requirement.expected.max }),
+      ...(min === undefined ? {} : { min }),
+      ...(max === undefined ? {} : { max }),
     }
   }
-  const target = requirement.expected.target ?? 0
-  const absolute_floor = observation_unit === "V" ? 1e-3 : 1e-6
   return {
     type: "target",
-    target,
-    tolerance:
-      requirement.expected.tolerance ?? Math.max(Math.abs(target) * DEFAULT_CURVE_TOLERANCE, absolute_floor),
+    target: 0,
+    tolerance: scalarTargetTolerance(0, observation_unit, tolerance),
   }
 }
 

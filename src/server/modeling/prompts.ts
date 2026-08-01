@@ -40,17 +40,25 @@ cannot have a curve. Express gain, resistance, and similar derived quantities as
 an observable voltage/current response under explicit conditions, not as V/V,
 ohms, mV, or mA values. documented_only requirements may retain their literal
 units. expected declares at least one of target/min/max and may contain a positive
-absolute tolerance. For modeled behavior, that tolerance cannot exceed half the
+absolute tolerance. A target combined with min/max must lie inside those hard
+bounds. The target tolerance band and hard bounds are both enforced by taking
+their intersection. For modeled behavior, the tolerance cannot exceed half the
 largest declared expected magnitude, with a 1 mV floor for voltage or a 1 uA
-floor for current. A reference_curve may contain a positive normalized tolerance
-no greater than 0.5; the server uses five percent when it is omitted. Conditions
-are named scalar values. Every requirement cites exact PDF pages, table/figure
-locators, and a concise datasheet statement. When a datasheet graph materially
-defines behavior, digitize a modest set of monotonically ordered points into
-reference_curve and retain its exact crop under evidence/. A modeled
-reference_curve must contain at least five points so the server can reserve
-interior samples for independent validation. Scalar specifications are equally
-valid; do not force every device into a transient graph workflow.
+floor for current. Scalar target/bounds apply independently to every simulated
+sample. Use operating_point for scalar static behavior, including an invariant
+limit that validation may strengthen across several DC operating points. A
+modeled requirement whose analysis is dc_sweep must provide a reference_curve;
+use it whenever the expected response changes across the swept domain. A
+reference_curve may contain a positive normalized tolerance no greater than 0.5;
+the server uses five percent when it is omitted. Conditions are named scalar
+values. Every requirement cites exact PDF pages, table/figure locators, and a
+concise datasheet statement. When a datasheet graph materially defines behavior,
+digitize a modest set of monotonically ordered points into reference_curve and
+retain its exact crop under evidence/.
+Every modeled reference_curve must contain at least five points so the server
+can reserve interior samples for independent validation.
+Scalar specifications are equally valid; do not force every device into a
+transient graph workflow.
 
 Vendor-model strategy is disabled until the server has a retained, verified
 vendor-artifact ingestion path. A datasheet link to a vendor model may be cited
@@ -89,12 +97,19 @@ curve after the server binds it to the linked requirement.
 Cover each modeled requirement at least once: ${modeled_ids.join(", ")}.
 Do not create cases for documented_only requirements. Use operating-point and DC
 sweeps for static limits, transient only for actual dynamics, and sufficiently
-broad ranges to expose interpolation or operating-region errors. Measurements
-must depend electrically on X_DUT; do not copy a target into a fixture source or
-observe a source that bypasses the device. Keep external circuits small and use
-the documented application topology where it matters. The server replaces X_DUT
-with a hidden inert baseline and rejects every observation that still passes, so
-each comparison must distinguish real device behavior from a passive open circuit.
+broad ranges to expose interpolation or operating-region errors. A DC sweep may
+strengthen an operating-point check when the same scalar target/bounds apply at
+every sample. If the expected value changes across a DC or transient domain, the
+requirement must supply a reference_curve instead. Measurements must depend
+electrically on X_DUT; do not copy a target into a fixture source or observe a
+source that bypasses the device. For positive current entering a DUT pin, orient
+a series resistor or zero-volt sense source from the external net toward the DUT
+pin; fixture current follows first-terminal-to-second-terminal sign. Keep
+external circuits small and use the documented application topology where it
+matters. For every observation, the server compares finite series from hidden
+weak/inert and active/load-injection DUT probes. A probe may legitimately pass a
+one-sided requirement; the observation must instead change materially when DUT
+behavior changes.
 ${input.feedback ? `\nThe previous plan was rejected. Correct every issue:\n${boundedFeedback(input.feedback)}\n` : ""}`
 }
 

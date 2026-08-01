@@ -132,7 +132,7 @@ function readRequirement(
   reader: CharacterizationReader,
   value: unknown,
   index: number,
-  enforce_current_tolerance_limits: boolean,
+  enforce_fresh_policy: boolean,
   reject_unknown_fields: boolean,
 ): ModelRequirement {
   const path = `model-characterization.json.requirements[${index}]`
@@ -215,7 +215,7 @@ function readRequirement(
       reader.errors.push(`${path}.expected.tolerance must be positive`)
     }
     if (
-      enforce_current_tolerance_limits &&
+      enforce_fresh_policy &&
       support.status === "modeled" &&
       expected.tolerance !== undefined &&
       expected.tolerance > 0
@@ -232,6 +232,22 @@ function readRequirement(
     }
     if (expected.min !== undefined && expected.max !== undefined && expected.min > expected.max) {
       reader.errors.push(`${path}.expected.min cannot exceed max`)
+    }
+    if (
+      enforce_fresh_policy &&
+      expected.target !== undefined &&
+      expected.min !== undefined &&
+      expected.target < expected.min
+    ) {
+      reader.errors.push(`${path}.expected.target cannot be less than min when both are declared`)
+    }
+    if (
+      enforce_fresh_policy &&
+      expected.target !== undefined &&
+      expected.max !== undefined &&
+      expected.target > expected.max
+    ) {
+      reader.errors.push(`${path}.expected.target cannot exceed max when both are declared`)
     }
   }
 
@@ -253,7 +269,7 @@ function readRequirement(
         : []
       if (points.length < 2) reader.errors.push(`${path}.reference_curve.points needs at least two points`)
       if (
-        enforce_current_tolerance_limits &&
+        enforce_fresh_policy &&
         support.status === "modeled" &&
         points.length < MIN_FRESH_REFERENCE_CURVE_POINTS
       ) {
@@ -285,7 +301,7 @@ function readRequirement(
         reader.errors.push(`${path}.reference_curve.tolerance must be positive`)
       }
       if (
-        enforce_current_tolerance_limits &&
+        enforce_fresh_policy &&
         reference_curve.tolerance !== undefined &&
         reference_curve.tolerance > MAX_NORMALIZED_CURVE_TOLERANCE
       ) {
@@ -297,6 +313,11 @@ function readRequirement(
   }
 
   if (support.status === "modeled") {
+    if (enforce_fresh_policy && analysis === "dc_sweep" && !reference_curve) {
+      reader.errors.push(
+        `${path}.reference_curve is required for modeled dc_sweep behavior; use operating_point when one scalar target or bound applies at every static sample`,
+      )
+    }
     if (expected.unit && !BASE_OBSERVATION_UNITS.has(expected.unit)) {
       reader.errors.push(
         `${path}.expected.unit must be V or A for modeled behavior; express ratios and other quantities as an observable base-unit response`,
@@ -339,7 +360,7 @@ function readRequirement(
 export function parseModelCharacterization(
   value: unknown,
   options: {
-    enforce_current_tolerance_limits?: boolean
+    policy?: "compatibility" | "fresh"
     reject_unknown_fields?: boolean
   } = {},
 ): ModelCharacterization {
@@ -365,7 +386,7 @@ export function parseModelCharacterization(
           reader,
           requirement,
           index,
-          options.enforce_current_tolerance_limits === true,
+          options.policy === "fresh",
           options.reject_unknown_fields === true,
         ),
       )

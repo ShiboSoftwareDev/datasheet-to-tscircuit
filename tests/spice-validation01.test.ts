@@ -277,6 +277,63 @@ describe("ValidationPlan contract", () => {
     }
   })
 
+  test("intersects an INA-like typical-current band with its hard maximum", () => {
+    const target = 640e-6
+    const tolerance = 32e-6
+    const maximum = 650e-6
+    const requirement: ModelRequirement = {
+      requirement_id: "supply_current",
+      title: "Supply current",
+      behavior: "Draw the documented quiescent supply current",
+      analysis: "operating_point",
+      support: { status: "modeled" },
+      conditions: { supply_voltage: 5 },
+      expected: { unit: "A", target, tolerance, max: maximum },
+      sources: [],
+    }
+    const parsed = parseValidationPlan(
+      {
+        version: 1,
+        model: { entry_name: "GAIN", pins: ["IN", "OUT", "GND"] },
+        cases: [
+          {
+            id: "supply_current",
+            requirement_ids: ["supply_current"],
+            nets: [],
+            fixtures: fixtures(false),
+            analysis: { type: "operating_point" },
+            observations: [
+              {
+                type: "current",
+                id: "supply_current",
+                requirement_id: "supply_current",
+                element_id: "load",
+                unit: "A",
+                scale: "linear",
+              },
+            ],
+          },
+        ],
+      },
+      { model_interface, model_source, model_requirements: [requirement] },
+    )
+    const observation = parsed.cases[0]?.observations[0]
+    if (!observation) throw new Error("Expected a supply-current observation")
+
+    expect(observation.reference).toEqual({
+      type: "bounds",
+      min: target - tolerance,
+      max: maximum,
+    })
+    expect(scoreObservation(observation, [{ x: 0, y: target }]).passed).toBe(true)
+    expect(
+      scoreObservation(observation, [
+        { x: 0, y: target - tolerance - 1e-6 },
+        { x: 1, y: maximum + 1e-6 },
+      ]).passed,
+    ).toBe(false)
+  })
+
   test("rejects an observation on an independent branch that only shares ground with the DUT", () => {
     const bypass_plan = structuredClone(validPlan())
     const dc_case = bypass_plan.cases[0]
@@ -512,6 +569,10 @@ Values:
   0.002
 `
 
+function dcRawWithCurrentVector(vector_name: string): string {
+  return dc_raw.replace("@r_load[i]", vector_name)
+}
+
 test("ASCII raw parser extracts DC differential voltages and reports missing vectors", () => {
   const raw = parseNgspiceAsciiRaw(dc_raw)
   const plot = selectAnalysisPlot(raw, {
@@ -575,6 +636,40 @@ test("ASCII raw parser extracts DC differential voltages and reports missing vec
       },
     }),
   ).toThrow(MissingRawVectorError)
+})
+
+test("current extraction accepts ngspice-wrapped device currents and branch aliases", () => {
+  const observation: ValidationObservation = {
+    type: "current",
+    id: "load_current",
+    requirement_id: "dc_gain",
+    element_id: "load",
+    unit: "A",
+    scale: "linear",
+    reference: { type: "bounds", min: 0 },
+  }
+  const compiled_observation = {
+    observation,
+    element_name: "R_load",
+    saved_vectors: ["@R_load[i]"],
+  }
+
+  for (const vector_name of ["i(@r_load[i])", "r_load#branch"]) {
+    const raw = parseNgspiceAsciiRaw(dcRawWithCurrentVector(vector_name))
+    const plot = selectAnalysisPlot(raw, {
+      type: "dc_sweep",
+      source_id: "vin",
+      start: 0,
+      stop: 1,
+      step: 1,
+    })
+    const points = extractObservationSeries({
+      plot,
+      analysis: { type: "dc_sweep", source_id: "vin", start: 0, stop: 1, step: 1 },
+      compiled_observation,
+    })
+    expect(points.map((point) => point.y)).toEqual([0.001, 0.002])
+  }
 })
 
 test("scoring checks every scalar sample and interpolates curve references deterministically", () => {

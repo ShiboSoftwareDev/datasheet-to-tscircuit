@@ -22,7 +22,13 @@ export class MissingRawVectorError extends Error {
 }
 
 function normalizedVectorName(name: string): string {
-  return name.trim().toLowerCase()
+  const normalized = name.trim().toLowerCase()
+  // ngspice may serialize a saved device-parameter current such as
+  // `@R_sense[i]` as `i(@r_sense[i])` in an ASCII raw variable table. They are
+  // the same vector; normalize only that wrapper so direct `i(V_source)` and
+  // `<element>#branch` current forms retain their existing meanings.
+  const wrapped_device_current = /^i\((@[^()\s]+\[(?:i|id)\])\)$/.exec(normalized)
+  return wrapped_device_current?.[1] ?? normalized
 }
 
 function vectorValues(plot: RawPlot, names: string[]): number[] | undefined {

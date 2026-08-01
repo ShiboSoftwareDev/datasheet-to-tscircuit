@@ -6,6 +6,7 @@ import {
   buildCharacterizationPrompt,
   buildModelGenerationPrompt,
   buildValidationPlanPrompt,
+  buildValidationPlanGuide,
   createModelInterface,
   createModelManifest,
   ModelStrategyRegistry,
@@ -176,6 +177,7 @@ describe("model characterization contract", () => {
       "hybrid",
     ])
     expect(buildCharacterizationPrompt()).toContain("typical-application-plan.json")
+    expect(buildCharacterizationPrompt()).toContain("Scalar target/bounds apply independently")
     expect(buildCharacterizationPrompt()).not.toContain("strategy: vendor")
     const vendor_characterization = {
       version: 1,
@@ -214,6 +216,8 @@ describe("model characterization contract", () => {
       }),
     }
     expect(buildValidationPlanPrompt({ contract })).toContain("typical-application-plan.json")
+    expect(buildValidationPlanPrompt({ contract })).toContain("same scalar target/bounds apply")
+    expect(buildValidationPlanGuide(contract)).toContain("[A-Za-z][A-Za-z0-9_]{0,63}")
     expect(buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })).toContain(
       "typical-application-plan.json",
     )
@@ -251,7 +255,7 @@ describe("model characterization contract", () => {
     expect(() => parseModelCharacterization(scalar_characterization)).not.toThrow()
     expect(() =>
       parseModelCharacterization(scalar_characterization, {
-        enforce_current_tolerance_limits: true,
+        policy: "fresh",
       }),
     ).toThrow(/expected\.tolerance must not exceed/)
     const curve_characterization = {
@@ -283,9 +287,44 @@ describe("model characterization contract", () => {
     expect(() => parseModelCharacterization(curve_characterization)).not.toThrow()
     expect(() =>
       parseModelCharacterization(curve_characterization, {
-        enforce_current_tolerance_limits: true,
+        policy: "fresh",
       }),
     ).toThrow(/reference_curve\.tolerance must not exceed 0\.5/)
+  })
+
+  test("rejects contradictory mixed target and hard bounds only for fresh characterization", () => {
+    const characterization = {
+      version: 1,
+      family: "sensor",
+      strategy: "behavioral",
+      requirements: [
+        {
+          requirement_id: "supply_current",
+          title: "Supply current",
+          behavior: "Draw the documented quiescent supply current",
+          analysis: "operating_point",
+          support: { status: "modeled" },
+          conditions: { supply_voltage: 5 },
+          expected: { unit: "A", target: 640e-6, max: 600e-6, tolerance: 32e-6 },
+          sources: [
+            {
+              page: 7,
+              locator: "Electrical characteristics",
+              statement: "Supply current has typical and maximum values.",
+            },
+          ],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    }
+
+    expect(parseModelCharacterization(characterization).requirements[0]?.expected.target).toBe(640e-6)
+    expect(() =>
+      parseModelCharacterization(characterization, {
+        policy: "fresh",
+      }),
+    ).toThrow(/expected\.target cannot exceed max when both are declared/)
   })
 
   test("requires holdout-capable fresh curves while preserving version-1 compatibility reads", () => {
@@ -324,10 +363,43 @@ describe("model characterization contract", () => {
     expect(() => parseModelCharacterization(sparse_curve_characterization)).not.toThrow()
     expect(() =>
       parseModelCharacterization(sparse_curve_characterization, {
-        enforce_current_tolerance_limits: true,
+        policy: "fresh",
       }),
     ).toThrow(/needs at least 5 points so server validation can withhold interior samples/)
     expect(buildCharacterizationPrompt()).toContain("must contain at least five points")
+  })
+
+  test("requires a response curve for fresh dc_sweep behavior", () => {
+    const scalar_sweep_characterization = {
+      version: 1,
+      family: "sensor",
+      strategy: "equation",
+      requirements: [
+        {
+          requirement_id: "input_loading",
+          title: "Input loading",
+          behavior: "Input current varies with the swept input voltage",
+          analysis: "dc_sweep",
+          support: { status: "modeled" },
+          conditions: { input_start_v: 0, input_stop_v: 48 },
+          expected: { unit: "A", min: 40e-6, max: 60e-6 },
+          sources: [
+            {
+              page: 5,
+              locator: "Electrical characteristics",
+              statement: "The input has a specified impedance.",
+            },
+          ],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    }
+
+    expect(() => parseModelCharacterization(scalar_sweep_characterization)).not.toThrow()
+    expect(() => parseModelCharacterization(scalar_sweep_characterization, { policy: "fresh" })).toThrow(
+      /reference_curve is required for modeled dc_sweep behavior/,
+    )
   })
 
   test("fresh characterization reports unsupported fields instead of dropping typos", () => {

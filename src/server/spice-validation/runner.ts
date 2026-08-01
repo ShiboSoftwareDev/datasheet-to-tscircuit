@@ -216,15 +216,18 @@ async function runCase(input: {
     })
   } catch (error) {
     const is_convergence = error instanceof RawParseError && error.code === "raw_non_finite"
-    const is_comparison = error instanceof MissingRawVectorError
+    // Observations only name server-compiled fixture vectors. If ngspice does
+    // not return one of those vectors, the simulator adapter is broken or
+    // incompatible; it is not a numeric model comparison failure.
+    const is_missing_vector = error instanceof MissingRawVectorError
     const result = failedCase({
       validation_case: input.validation_case,
       started_at,
       netlist_sha256,
       raw_sha256,
       error: executionError(
-        is_comparison ? "comparison" : is_convergence ? "convergence" : "simulator",
-        is_comparison
+        is_convergence ? "convergence" : "simulator",
+        is_missing_vector
           ? error.code
           : is_convergence
             ? "non_finite_simulation"

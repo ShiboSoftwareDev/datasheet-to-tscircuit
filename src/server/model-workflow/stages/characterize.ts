@@ -91,7 +91,7 @@ export const characterizeStage = defineModelStage({
             max_nodes: 100_000,
           }),
           {
-            enforce_current_tolerance_limits: true,
+            policy: "fresh",
             reject_unknown_fields: true,
           },
         )

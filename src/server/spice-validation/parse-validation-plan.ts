@@ -10,6 +10,17 @@ import { validateCaseConnectivity, validatePlanCoverage } from "./validate-plan-
 
 export const MAX_VALIDATION_CASES = 16
 
+function analysisCoversRequirement(
+  requirement_analysis: ModelRequirement["analysis"],
+  validation_analysis: ValidationCase["analysis"]["type"],
+): boolean {
+  if (requirement_analysis === validation_analysis) return true
+  // A DC sweep is a sequence of operating points. It is a valid strengthening
+  // of a scalar operating-point requirement because the immutable target or
+  // bounds are checked at every sweep sample.
+  return requirement_analysis === "operating_point" && validation_analysis === "dc_sweep"
+}
+
 export class ValidationPlanError extends Error {
   readonly errors: ValidationPathError[]
 
@@ -146,7 +157,7 @@ function parseCase(
   const analysis = parseAnalysis(record.analysis, `${path}.analysis`, collector)
   requirement_ids.forEach((requirement_id, requirement_index) => {
     const requirement = requirement_by_id.get(requirement_id)
-    if (requirement && requirement.analysis !== analysis.type) {
+    if (requirement && !analysisCoversRequirement(requirement.analysis, analysis.type)) {
       collector.add(
         `${path}.requirement_ids[${requirement_index}]`,
         "requirement_analysis_mismatch",
