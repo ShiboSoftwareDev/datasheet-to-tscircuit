@@ -191,15 +191,42 @@ export interface ModelValidationSeries {
 }
 
 export interface ModelValidationSummary {
+  /** Distinguishes an inspectable attempt from the immutable accepted model. */
+  artifact_state?: "candidate" | "accepted"
+  /** Revision whose simulator results produced this exact projection. */
+  model_revision?: string
+  /** Immutable live-preview generation for an unaccepted candidate. */
+  preview_generation?: string
   benchmark_count: number
   passing_count: number
   critical_count: number
   critical_passing_count: number
   score?: number
   worst_normalized_error?: number
+  /** Sample-weighted NRMSE for curve observations only; scalar checks never dilute it. */
+  curve_score?: number
+  curve_worst_normalized_error?: number
   all_critical_passed: boolean
   all_passed: boolean
   benchmarks: ModelValidationBenchmark[]
+  scope?: {
+    total_requirement_count: number
+    modeled_requirement_count: number
+    documented_only_requirement_count: number
+    validated_sample_count: number
+    scalar_observation_count: number
+    curve_observation_count: number
+    compared_curve_observation_count: number
+    curve_sample_count: number
+    swept_case_count: number
+    quality: "scalar_only" | "range_checked" | "curve_attempted" | "curve_validated"
+    documented_only_requirements: Array<{
+      requirement_id: string
+      title: string
+      reason: string
+    }>
+    limitations: string[]
+  }
 }
 
 export interface ModelManifest {

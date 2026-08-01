@@ -5,8 +5,93 @@ import { join } from "node:path"
 import { atomicWriteJsonSync } from "@/server/infrastructure/persistence/atomic-write"
 import { RECENT_LOG_EVENT_LIMIT } from "@/server/infrastructure/persistence/bounded-log"
 import { ModelRunStore } from "@/server/model-run-store"
+import { markAcceptedArtifactsAsRetained } from "@/server/model-workflow/run-model"
+import type { ModelRunnerContext } from "@/server/model-workflow/types"
 import type { JobLog, ModelRun } from "@/shared/job-types"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
+
+test("a failed replacement retains its candidate validation UI without replacing the accepted model", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-candidate-retention-"))
+  const store = new ModelRunStore()
+  try {
+    store.createModelRun({
+      model_run_id: "model_candidate_retention",
+      job_id: "job_candidate_retention",
+      model_dir,
+      effort_multiplier: 1,
+    })
+    store.updateModelRun("model_candidate_retention", {
+      model_source: ".SUBCKT ACCEPTED IN OUT\nR1 IN OUT 1k\n.ENDS ACCEPTED\n",
+      manifest: { revision: "accepted-r1" } as ModelRun["manifest"],
+      validation: {
+        artifact_state: "accepted",
+        model_revision: "accepted-r1",
+        benchmark_count: 1,
+        passing_count: 1,
+        critical_count: 1,
+        critical_passing_count: 1,
+        all_critical_passed: true,
+        all_passed: true,
+        benchmarks: [],
+      },
+    })
+    const context = { model_run_store: store } as ModelRunnerContext
+
+    markAcceptedArtifactsAsRetained({
+      context,
+      model_run_id: "model_candidate_retention",
+      state: "running",
+    })
+    expect(store.getModelRun("model_candidate_retention")?.validation).toBeUndefined()
+
+    store.projectCandidateValidation("model_candidate_retention", {
+      validation: {
+        artifact_state: "candidate",
+        model_revision: "candidate-r2",
+        benchmark_count: 1,
+        passing_count: 0,
+        critical_count: 1,
+        critical_passing_count: 0,
+        all_critical_passed: false,
+        all_passed: false,
+        benchmarks: [],
+      },
+      preview_options: [
+        {
+          benchmark_id: "failed_case",
+          title: "Failed case",
+          circuit_file: "validation/cases/failed_case.circuit.tsx",
+        },
+      ],
+      previews: {
+        circuit_preview: {
+          source_file: "validation/cases/failed_case.circuit.tsx",
+          code: "export default () => <board />",
+          build_status: "source_ready",
+          updated_at: "2026-08-01T00:00:00.000Z",
+        },
+      },
+    })
+    markAcceptedArtifactsAsRetained({
+      context,
+      model_run_id: "model_candidate_retention",
+      state: "failed",
+    })
+
+    expect(store.getModelRun("model_candidate_retention")).toMatchObject({
+      model_source: expect.stringContaining("ACCEPTED"),
+      manifest: { revision: "accepted-r1" },
+      validation: { artifact_state: "candidate", model_revision: "candidate-r2" },
+      preview_options: [{ benchmark_id: "failed_case" }],
+      circuit_preview: { source_file: "validation/cases/failed_case.circuit.tsx" },
+    })
+    expect(store.getModelRun("model_candidate_retention")?.warnings?.[0]).toContain(
+      "validation below belongs to the unaccepted candidate",
+    )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
 
 test("ModelRunStore extends only the repair budget", async () => {
   const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-store-"))

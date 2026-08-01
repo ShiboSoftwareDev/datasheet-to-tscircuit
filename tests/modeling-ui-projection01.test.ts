@@ -2,12 +2,14 @@ import { expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import type { AnyCircuitElement } from "circuit-json"
 import {
   projectModelCircuitPreview,
   projectModelUi,
   renderValidationCaseTsx,
 } from "@/server/modeling/ui-projection"
 import { loadStoredModelPreview } from "@/server/modeling/ui-projection-storage"
+import type { ModelContract } from "@/server/modeling"
 import type { ValidationPlan, ValidationRunResult } from "@/server/spice-validation"
 import type { ModelManifest, ModelSelectedPreview } from "@/shared/job-types"
 
@@ -114,6 +116,63 @@ const plan: ValidationPlan = {
   ],
 }
 
+const contract: ModelContract = {
+  version: 1,
+  interface: {
+    version: 1,
+    part_number: manifest.part_number,
+    entry_name: manifest.entry_name,
+    pins: manifest.pins.map((pin, index) => ({
+      physical_pin: String(index + 1),
+      component_pin: pin.component_pin,
+      source_port_id: `source_port_${index + 1}`,
+      spice_node: pin.spice_node,
+      labels: [pin.spice_node],
+      role: index === 0 ? "input" : "output",
+    })),
+  },
+  characterization: {
+    version: 1,
+    family: "other",
+    strategy: "behavioral",
+    requirements: [
+      {
+        requirement_id: "transfer_behavior",
+        title: "Transfer behavior",
+        behavior: "Follow the transfer curve",
+        analysis: "dc_sweep",
+        support: { status: "modeled" },
+        conditions: {},
+        expected: { unit: "V", min: 0, max: 2 },
+        reference_curve: {
+          x_quantity: "Input voltage",
+          x_unit: "V",
+          y_quantity: "Output voltage",
+          y_unit: "V",
+          points: [
+            { x: 0, y: 0 },
+            { x: 1, y: 1 },
+            { x: 2, y: 2 },
+          ],
+        },
+        sources: [{ page: 8, locator: "Figure 4", statement: "Transfer curve" }],
+      },
+      {
+        requirement_id: "supply_current_limit",
+        title: "Supply current limit",
+        behavior: "Remain below the supply-current limit",
+        analysis: "operating_point",
+        support: { status: "modeled" },
+        conditions: {},
+        expected: { unit: "A", max: 0.001 },
+        sources: [{ page: 3, locator: "Table 1", statement: "Supply current limit" }],
+      },
+    ],
+    assumptions: [],
+    limitations: [],
+  },
+}
+
 const result: ValidationRunResult = {
   version: 1,
   passed: false,
@@ -192,6 +251,7 @@ test("new validation artifacts project deterministically into the existing model
     model_card: "# Generic transfer model\n\nA portable linear model.",
     updated_at: "2026-07-31T11:00:00.000Z",
     circuit_json_by_case: { transfer: [] },
+    contract,
   })
 
   expect(projection.validation.benchmark_count).toBe(2)
@@ -199,6 +259,14 @@ test("new validation artifacts project deterministically into the existing model
   expect(projection.validation.critical_count).toBe(2)
   expect(projection.validation.all_critical_passed).toBe(false)
   expect(projection.validation.score).toBeCloseTo(0.5015)
+  expect(projection.validation.curve_score).toBeCloseTo(0.003)
+  expect(projection.validation.curve_worst_normalized_error).toBeCloseTo(0.005)
+  expect(projection.validation.scope).toMatchObject({
+    curve_observation_count: 1,
+    compared_curve_observation_count: 1,
+    curve_sample_count: 3,
+    quality: "curve_validated",
+  })
   expect(projection.validation.worst_normalized_error).toBe(1)
   expect(projection.validation.benchmarks[1]?.series?.[0]?.error_message ?? "").toContain("documented limit")
 
@@ -251,6 +319,32 @@ test("new validation artifacts project deterministically into the existing model
   expect(current_reference?.result_points).toEqual([{ x: 0, y: 0.002 }])
   expect(current_reference?.result_status).toBe("failed")
   expect(current_reference?.matches_reference).toBe(false)
+})
+
+test("a declared curve with no finite result is reported as attempted, not validated", () => {
+  const failed_result = structuredClone(result)
+  const transfer = failed_result.cases[0]!
+  transfer.status = "failed"
+  transfer.series[0]!.points = []
+  transfer.series[0]!.passed = false
+  transfer.series[0]!.metrics = { sample_count: 0 }
+  const projection = projectModelUi({
+    plan,
+    result: failed_result,
+    manifest,
+    model_source: ".SUBCKT GENERIC_2PIN IN OUT\nR1 IN OUT 1k\n.ENDS GENERIC_2PIN\n",
+    model_card: "# Failed curve",
+    updated_at: "2026-07-31T11:00:00.000Z",
+    contract,
+  })
+
+  expect(projection.validation.curve_score).toBeUndefined()
+  expect(projection.validation.scope).toMatchObject({
+    curve_observation_count: 1,
+    compared_curve_observation_count: 0,
+    curve_sample_count: 0,
+    quality: "curve_attempted",
+  })
 })
 
 test("faithful transient TSX includes exact voltage PULSE timing, probes, and analysis", () => {
@@ -333,8 +427,9 @@ test("faithful transient TSX includes exact voltage PULSE timing, probes, and an
     updated_at: "2026-07-31T11:00:00.000Z",
     circuit_json: [],
   })
-  expect(preview.build_status).toBe("ready")
-  expect(preview.snapshot_origin).toBe("server_validation")
+  expect(preview.build_status).toBe("source_ready")
+  expect(preview.snapshot_origin).toBeUndefined()
+  expect(preview.circuit_json).toBeUndefined()
 })
 
 test("unsupported current PULSE previews retain the exact contract without faking an analog run", () => {
@@ -384,10 +479,30 @@ test("unsupported current PULSE previews retain the exact contract without fakin
 
   expect(preview.build_status).toBe("source_ready")
   expect(preview.circuit_json).toBeUndefined()
+  expect(preview.snapshot_origin).toBeUndefined()
   expect(preview.error_message).toContain("currentsource does not expose exact PULSE")
   expect(preview.code).toContain('"delay": 0.1')
   expect(preview.code).not.toContain("<analogsimulation")
   expect(preview.code).not.toContain('waveShape="square"')
+})
+
+test("a TSX build error cannot advertise a partial Circuit JSON snapshot as ready", () => {
+  const validation_case = plan.cases[1]!
+  const preview = projectModelCircuitPreview({
+    validation_case,
+    manifest,
+    model_source: ".SUBCKT GENERIC_2PIN IN OUT\nR1 IN OUT 1k\n.ENDS GENERIC_2PIN\n",
+    model_card: "# Failed preview build",
+    updated_at: "2026-07-31T11:00:00.000Z",
+    circuit_json: [{ type: "source_component", source_component_id: "partial" }] as AnyCircuitElement[],
+    circuit_build_error: "source pin must be connected",
+  })
+
+  expect(preview.build_status).toBe("failed")
+  expect(preview.circuit_json).toBeUndefined()
+  expect(preview.snapshot_origin).toBeUndefined()
+  expect(preview.error_message).toContain("source pin must be connected")
+  expect(preview.code).toContain("ValidationCasePreview")
 })
 
 test("cancelled cases are not presented as verified comparisons", () => {

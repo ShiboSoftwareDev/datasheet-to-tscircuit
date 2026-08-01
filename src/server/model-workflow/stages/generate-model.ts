@@ -30,6 +30,8 @@ export const generateModelStage = defineModelStage({
       signal,
       use_openai: context.use_openai,
       agent_client: services.agent_client,
+      ngspice: services.ngspice_executor,
+      ngspice_path: services.ngspice_bin,
       max_artifact_attempts: 3,
       debug_dir,
       on_output: (stream, message) =>

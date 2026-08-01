@@ -9,6 +9,8 @@ import {
   type ModelContract,
   readGeneratedModel,
 } from "../modeling"
+import type { NgspiceExecutor } from "../spice-validation"
+import { assertNgspiceAcceptsModelCandidate } from "./model-candidate-smoke"
 
 export interface StoredGeneratedModel extends GeneratedModel {
   artifact_dir: string
@@ -26,6 +28,8 @@ export async function generateModelCandidate(input: {
   signal: AbortSignal
   use_openai: boolean
   agent_client: AgentClient
+  ngspice: NgspiceExecutor
+  ngspice_path: string
   max_artifact_attempts: number
   debug_dir: string
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
@@ -91,6 +95,13 @@ export async function generateModelCandidate(input: {
         model_interface: input.contract.interface,
       })
       if (!generated.card.trim()) throw new Error("model-card.md must not be empty")
+      await assertNgspiceAcceptsModelCandidate({
+        workspace,
+        manifest: generated.manifest,
+        ngspice: input.ngspice,
+        ngspice_path: input.ngspice_path,
+        signal: input.signal,
+      })
       return {
         ...generated,
         artifact_dir: join(

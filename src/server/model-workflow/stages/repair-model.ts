@@ -7,12 +7,14 @@ import {
   appendModelLog,
   modelArtifact,
   persistCandidateValidationUi,
+  projectCandidateValidationUi,
   readJson,
   updateModelProgress,
   validationFailureFeedback,
 } from "../stage-helpers"
 import { getNonRepairableValidationErrors } from "../validation-repair-policy"
 import { defineModelStage } from "./stage-factory"
+import { buildValidationCircuitPreviews } from "../validation-circuit-previews"
 
 export const repairModelStage = defineModelStage({
   id: "repair_model",
@@ -101,6 +103,8 @@ export const repairModelStage = defineModelStage({
         signal,
         use_openai: context.use_openai,
         agent_client: services.agent_client,
+        ngspice: services.ngspice_executor,
+        ngspice_path: services.ngspice_bin,
         max_artifact_attempts: 2,
         debug_dir: join(debug_dir, `candidate-${repair_attempt}`),
         on_output: (stream, message) =>
@@ -127,11 +131,36 @@ export const repairModelStage = defineModelStage({
         append: (stream, message) =>
           appendModelLog(services.model_run_store, context.model_run_id, stream, message),
       })
-      await persistCandidateValidationUi({
+      const validation_artifact_dir = join(candidate.value.artifact_dir, "validation")
+      const preview_build = await buildValidationCircuitPreviews({
+        model_dir: context.model_dir,
+        plan,
+        generated: candidate.value,
+        tsci_bin: services.tsci_bin,
+        process_runner: services.process_runner,
+        signal,
+        append: (stream, message) =>
+          appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+      })
+      const projection = await persistCandidateValidationUi({
         plan,
         result,
         generated: candidate.value,
-        immutable_artifact_dir: join(candidate.value.artifact_dir, "validation"),
+        contract,
+        immutable_artifact_dir: validation_artifact_dir,
+        preview_generation: `${context.invocation_id}-${candidate.value.manifest.revision}`,
+        circuit_json_by_case: preview_build.circuit_json_by_case,
+        circuit_build_errors_by_case: preview_build.errors_by_case,
+      })
+      await projectCandidateValidationUi({
+        model_run_store: services.model_run_store,
+        model_run_id: context.model_run_id,
+        model_dir: context.model_dir,
+        immutable_artifact_dir: validation_artifact_dir,
+        evidence_dir,
+        revision: candidate.value.manifest.revision,
+        projection,
+        signal,
       })
       if (result.passed) {
         const result_path = join(candidate.value.artifact_dir, "validation", "validation-results.json")

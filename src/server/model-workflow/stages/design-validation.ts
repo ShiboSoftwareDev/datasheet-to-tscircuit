@@ -88,6 +88,7 @@ export const designValidationStage = defineModelStage({
         const plan = parseValidationPlan(raw, {
           model_interface: contract.interface,
           model_requirements: contract.characterization.requirements,
+          model_family: contract.characterization.family,
         })
         await assertPlanEvidencePaths(workspace, plan)
         await assertValidationPlanSensitiveToDut({

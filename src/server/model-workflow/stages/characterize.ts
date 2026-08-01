@@ -17,6 +17,7 @@ import {
   writeModelContract,
 } from "../../modeling"
 import { appendModelLog, modelArtifact, readJson, updateModelProgress, writeJson } from "../stage-helpers"
+import { materializeModelEvidencePages } from "../model-evidence-pages"
 import { defineModelStage } from "./stage-factory"
 
 async function assertReferencedImagesExist(workspace: string, characterization: ModelCharacterization) {
@@ -83,7 +84,7 @@ export const characterizeStage = defineModelStage({
         directories: ["evidence"],
       },
       validate: async (workspace) => {
-        const characterization = parseModelCharacterization(
+        const parsed_characterization = parseModelCharacterization(
           await readBoundedJsonArtifact({
             path: join(workspace, "model-characterization.json"),
             max_bytes: 4 * 1024 * 1024,
@@ -95,6 +96,15 @@ export const characterizeStage = defineModelStage({
             reject_unknown_fields: true,
           },
         )
+        const characterization = await materializeModelEvidencePages({
+          workspace,
+          datasheet_path: join(context.model_dir, "datasheet.pdf"),
+          characterization: parsed_characterization,
+          process_runner: services.process_runner,
+          signal,
+          on_output: (stream, message) =>
+            appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+        })
         services.strategy_registry.require(characterization.strategy, characterization.family)
         await assertReferencedImagesExist(workspace, characterization)
         const evidence_dir = join(workspace, "evidence")
@@ -102,7 +112,7 @@ export const characterizeStage = defineModelStage({
           await validateStageDirectory({
             root: evidence_dir,
             max_files: 64,
-            max_total_bytes: 32 * 1024 * 1024,
+            max_total_bytes: 64 * 1024 * 1024,
             validate_file: validatePngArtifact,
           })
         }
@@ -121,7 +131,7 @@ export const characterizeStage = defineModelStage({
           destination_root: attempt_dir,
           required: false,
           max_files: 64,
-          max_total_bytes: 32 * 1024 * 1024,
+          max_total_bytes: 64 * 1024 * 1024,
           validate_file: validatePngArtifact,
           signal: promotion_signal,
         })

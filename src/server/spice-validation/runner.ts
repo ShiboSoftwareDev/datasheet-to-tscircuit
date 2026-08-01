@@ -55,7 +55,10 @@ async function appendLog(
   }
 }
 
-function simulatorFailure(output: string, exit_code: number): ValidationExecutionError | undefined {
+export function classifyNgspiceFailure(
+  output: string,
+  exit_code: number,
+): ValidationExecutionError | undefined {
   const convergence_pattern =
     /timestep too small|singular matrix|converg(?:e|ence|ing)|iteration limit|source stepping failed/i
   if (convergence_pattern.test(output)) {
@@ -169,7 +172,7 @@ async function runCase(input: {
     await input.artifact_store.writeCaseResult(paths, result)
     return result
   }
-  const process_failure = simulatorFailure(
+  const process_failure = classifyNgspiceFailure(
     `${execution.stdout}\n${execution.stderr}`.trim(),
     execution.exit_code,
   )
@@ -270,6 +273,7 @@ export async function runSpiceValidation(input: RunSpiceValidationInput): Promis
       manifest: input.manifest,
       model_source: input.model_source,
       model_requirements: input.model_contract.characterization.requirements,
+      model_family: input.model_contract.characterization.family,
     })
   } catch (error) {
     const errors =

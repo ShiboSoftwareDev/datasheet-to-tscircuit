@@ -441,6 +441,50 @@ test("a committed pointer recovers one authoritative pair before store and root 
   expect(retained?.reference_preview).toBeUndefined()
   expect(retained?.preview_options).toEqual([])
 
+  // A fully persisted candidate projection remains inspectable after restart,
+  // while the accepted model/download identity stays authoritative.
+  const preview_generation = `candidate-${newer_invocation_id}-${accepted.manifest.revision}`
+  const candidate_ui = structuredClone(prepared.projection)
+  candidate_ui.validation.artifact_state = "candidate"
+  candidate_ui.validation.model_revision = "candidate-r2"
+  candidate_ui.validation.preview_generation = preview_generation
+  const candidate_preview_dir = join(workspace.model_dir, "current-previews", preview_generation)
+  await mkdir(candidate_preview_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(candidate_preview_dir, "model-ui.json"), `${JSON.stringify(candidate_ui)}\n`),
+    Bun.write(
+      join(workspace.model_dir, "current-preview.json"),
+      `${JSON.stringify({
+        version: 1,
+        model_run_id: "model_publication",
+        invocation_id: newer_invocation_id,
+        revision: "candidate-r2",
+        preview_generation,
+      })}\n`,
+    ),
+  ])
+  const restored_candidate = await restoreModelDirectory({
+    job_id: "job_publication",
+    model_dir: workspace.model_dir,
+    model_run_store: new ModelRunStore(),
+  })
+  expect(restored_candidate).toMatchObject({
+    status: "failed",
+    model_source: accepted.source,
+    manifest: { revision: accepted.manifest.revision },
+    validation: {
+      artifact_state: "candidate",
+      model_revision: "candidate-r2",
+      preview_generation,
+    },
+    preview_options: [{ benchmark_id: "output_voltage" }],
+    circuit_preview: { source_file: "validation/cases/output_voltage.circuit.tsx" },
+  })
+  await Promise.all([
+    rm(join(workspace.model_dir, "current-preview.json"), { force: true }),
+    rm(join(workspace.model_dir, "current-previews"), { recursive: true, force: true }),
+  ])
+
   // A compatibility checkpoint cannot promote a newer invocation merely by
   // claiming completion; only the pointer-owning invocation crossed commit.
   model_store.updateModelRun("model_publication", {

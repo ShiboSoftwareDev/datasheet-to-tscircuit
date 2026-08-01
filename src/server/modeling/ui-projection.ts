@@ -1,4 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
+import { isCircuitJson } from "../component-circuit-json"
 import type {
   ModelCircuitPreview,
   ModelManifest,
@@ -21,6 +22,7 @@ import type {
   ValidationSeriesPoint,
   ValidationSeriesResult,
 } from "../spice-validation"
+import type { ModelContract } from "./types"
 
 const MAX_PREVIEW_POINTS = 600
 
@@ -32,6 +34,10 @@ export interface ModelUiProjectionInput {
   model_card: string
   updated_at: string
   circuit_json_by_case?: Readonly<Record<string, AnyCircuitElement[] | undefined>>
+  circuit_build_errors_by_case?: Readonly<Record<string, string | undefined>>
+  contract?: ModelContract
+  validation_artifact_state?: "candidate" | "accepted"
+  preview_generation?: string
 }
 
 export interface ModelUiProjection {
@@ -76,6 +82,7 @@ function errorMessage(errors: Array<{ message: string }>): string | undefined {
 export function projectModelValidationSummary(
   plan: ValidationPlan,
   result: ValidationRunResult,
+  contract?: ModelContract,
 ): ModelValidationSummary {
   const result_by_case = new Map(
     result.cases.map((validation_case) => [validation_case.case_id, validation_case]),
@@ -124,7 +131,102 @@ export function projectModelValidationSummary(
   const maximums = benchmarks.flatMap(({ normalized_max_error }) =>
     normalized_max_error !== undefined && Number.isFinite(normalized_max_error) ? [normalized_max_error] : [],
   )
+  const curve_metrics = plan.cases.flatMap((validation_case) => {
+    const case_result = result_by_case.get(validation_case.id)
+    const series_by_id = new Map(case_result?.series.map((series) => [series.observation_id, series]) ?? [])
+    return validation_case.observations.flatMap((observation) => {
+      if (observation.reference.type !== "curve") return []
+      const series = series_by_id.get(observation.id)
+      const normalized_rmse = series?.metrics.normalized_rmse
+      if (
+        !series ||
+        series.points.length === 0 ||
+        normalized_rmse === undefined ||
+        !Number.isFinite(normalized_rmse)
+      ) {
+        return []
+      }
+      const sample_count = Math.max(1, series.metrics.sample_count)
+      return [
+        {
+          normalized_rmse,
+          normalized_max_error:
+            series.metrics.normalized_max_error !== undefined &&
+            Number.isFinite(series.metrics.normalized_max_error)
+              ? series.metrics.normalized_max_error
+              : normalized_rmse,
+          sample_count,
+        },
+      ]
+    })
+  })
+  const curve_sample_count = curve_metrics.reduce((sum, metric) => sum + metric.sample_count, 0)
+  const curve_score =
+    curve_sample_count > 0
+      ? curve_metrics.reduce((sum, metric) => sum + metric.normalized_rmse * metric.sample_count, 0) /
+        curve_sample_count
+      : undefined
+  const curve_worst_normalized_error =
+    curve_metrics.length > 0
+      ? Math.max(...curve_metrics.map(({ normalized_max_error }) => normalized_max_error))
+      : undefined
   const passing_count = benchmarks.filter(({ passed }) => passed).length
+  const scope = contract
+    ? (() => {
+        const modeled = contract.characterization.requirements.filter(
+          ({ support }) => support.status === "modeled",
+        )
+        const documented_only = contract.characterization.requirements.flatMap((requirement) =>
+          requirement.support.status === "documented_only"
+            ? [
+                {
+                  requirement_id: requirement.requirement_id,
+                  title: requirement.title,
+                  reason: requirement.support.reason,
+                },
+              ]
+            : [],
+        )
+        const curve_observation_count = plan.cases.reduce(
+          (count, validation_case) =>
+            count + validation_case.observations.filter(({ reference }) => reference.type === "curve").length,
+          0,
+        )
+        const scalar_observation_count =
+          plan.cases.reduce((count, validation_case) => count + validation_case.observations.length, 0) -
+          curve_observation_count
+        const validated_sample_count = result.cases.reduce(
+          (count, validation_case) =>
+            count +
+            validation_case.series.reduce((series_count, series) => series_count + series.points.length, 0),
+          0,
+        )
+        const swept_case_count = plan.cases.filter(
+          ({ analysis }) => analysis.type === "dc_sweep" || analysis.type === "transient",
+        ).length
+        return {
+          total_requirement_count: contract.characterization.requirements.length,
+          modeled_requirement_count: modeled.length,
+          documented_only_requirement_count: documented_only.length,
+          validated_sample_count,
+          scalar_observation_count,
+          curve_observation_count,
+          compared_curve_observation_count: curve_metrics.length,
+          curve_sample_count,
+          swept_case_count,
+          quality:
+            curve_metrics.length > 0
+              ? ("curve_validated" as const)
+              : curve_observation_count > 0
+                ? ("curve_attempted" as const)
+                : swept_case_count > 0 || validated_sample_count > scalar_observation_count
+                  ? ("range_checked" as const)
+                  : ("scalar_only" as const),
+          documented_only_requirements: documented_only,
+          limitations: [...contract.characterization.limitations],
+        }
+      })()
+    : undefined
   return {
     benchmark_count: benchmarks.length,
     passing_count,
@@ -132,9 +234,12 @@ export function projectModelValidationSummary(
     critical_passing_count: passing_count,
     score: scored.length > 0 ? scored.reduce((sum, value) => sum + value, 0) / scored.length : undefined,
     worst_normalized_error: maximums.length > 0 ? Math.max(...maximums) : undefined,
+    curve_score,
+    curve_worst_normalized_error,
     all_critical_passed: result.passed && benchmarks.length > 0 && passing_count === benchmarks.length,
     all_passed: result.passed && benchmarks.length > 0 && passing_count === benchmarks.length,
     benchmarks,
+    ...(scope ? { scope } : {}),
   }
 }
 
@@ -476,20 +581,32 @@ export function projectModelCircuitPreview(input: {
   model_card: string
   updated_at: string
   circuit_json?: AnyCircuitElement[]
+  circuit_build_error?: string
 }): ModelCircuitPreview {
   const projection_issue = analogProjectionIssue(input.validation_case)
-  const circuit_json = projection_issue ? undefined : input.circuit_json
+  // Unsupported in-browser analog analysis must not suppress a valid
+  // schematic/Code snapshot. Server ngspice results remain authoritative.
+  const circuit_json = input.circuit_build_error
+    ? undefined
+    : isCircuitJson(input.circuit_json)
+      ? input.circuit_json
+      : undefined
+  const build_error = input.circuit_build_error?.trim()
   return {
     source_file: `validation/cases/${input.validation_case.id}.circuit.tsx`,
     code: renderValidationCaseTsx(input),
-    build_status: circuit_json ? "ready" : "source_ready",
+    build_status: build_error ? "failed" : circuit_json ? "ready" : "source_ready",
     updated_at: input.updated_at,
     circuit_json,
     snapshot_origin: circuit_json ? "server_validation" : undefined,
     is_stale: false,
-    error_message: projection_issue
-      ? `Analog preview is source-only: ${projection_issue}. The server validation result remains authoritative.`
-      : undefined,
+    error_message: build_error
+      ? `Circuit preview build failed: ${build_error}`
+      : projection_issue
+        ? `Analog preview is source-only: ${projection_issue}. The server validation result remains authoritative.`
+        : input.circuit_json
+          ? "Circuit preview build produced no renderable Circuit JSON; benchmark TSX remains available."
+          : undefined,
   }
 }
 
@@ -521,6 +638,7 @@ export function projectModelUi(input: ModelUiProjectionInput): ModelUiProjection
           model_card: input.model_card,
           updated_at: input.updated_at,
           circuit_json: input.circuit_json_by_case?.[validation_case.id],
+          circuit_build_error: input.circuit_build_errors_by_case?.[validation_case.id],
         }),
         reference_preview: projectModelReferencePreview({
           validation_case,
@@ -531,7 +649,12 @@ export function projectModelUi(input: ModelUiProjectionInput): ModelUiProjection
     ]),
   )
   return {
-    validation: projectModelValidationSummary(input.plan, input.result),
+    validation: {
+      ...projectModelValidationSummary(input.plan, input.result, input.contract),
+      artifact_state: input.validation_artifact_state ?? "candidate",
+      model_revision: input.manifest.revision,
+      ...(input.preview_generation ? { preview_generation: input.preview_generation } : {}),
+    },
     preview_options: projectModelPreviewOptions(input.plan, input.result),
     selected_previews,
   }

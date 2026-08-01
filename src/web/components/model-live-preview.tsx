@@ -262,7 +262,7 @@ export function getGraphAxisLayout(
   return { min, max, ticks }
 }
 
-function curvePath(input: {
+interface CurveGeometryInput {
   points: ModelCurvePoint[]
   x_scale: "linear" | "log"
   y_scale: "linear" | "log"
@@ -270,19 +270,24 @@ function curvePath(input: {
   x_max: number
   y_min: number
   y_max: number
-}): string {
+}
+
+function curveCoordinates(input: CurveGeometryInput): Array<{ x: number; y: number }> {
   const width = GRAPH_RIGHT - GRAPH_LEFT
   const height = GRAPH_BOTTOM - GRAPH_TOP
-  return input.points
-    .flatMap((point) => {
-      const scaled_x = scaledValue(point.x, input.x_scale)
-      const scaled_y = scaledValue(point.y, input.y_scale)
-      if (scaled_x === undefined || scaled_y === undefined) return []
-      const x = GRAPH_LEFT + ((scaled_x - input.x_min) / Math.max(1e-12, input.x_max - input.x_min)) * width
-      const y =
-        GRAPH_TOP + (1 - (scaled_y - input.y_min) / Math.max(1e-12, input.y_max - input.y_min)) * height
-      return [`${x.toFixed(2)},${y.toFixed(2)}`]
-    })
+  return input.points.flatMap((point) => {
+    const scaled_x = scaledValue(point.x, input.x_scale)
+    const scaled_y = scaledValue(point.y, input.y_scale)
+    if (scaled_x === undefined || scaled_y === undefined) return []
+    const x = GRAPH_LEFT + ((scaled_x - input.x_min) / Math.max(1e-12, input.x_max - input.x_min)) * width
+    const y = GRAPH_TOP + (1 - (scaled_y - input.y_min) / Math.max(1e-12, input.y_max - input.y_min)) * height
+    return [{ x, y }]
+  })
+}
+
+function curvePath(input: CurveGeometryInput): string {
+  return curveCoordinates(input)
+    .map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`)
     .join(" ")
 }
 
@@ -411,6 +416,26 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
         y_max: y_axis.max,
       })
     : undefined
+  const reference_markers = curveCoordinates({
+    points: preview.reference_points,
+    x_scale: preview.x_scale,
+    y_scale: preview.y_scale,
+    x_min: x_axis.min,
+    x_max: x_axis.max,
+    y_min: y_axis.min,
+    y_max: y_axis.max,
+  })
+  const result_markers = preview.result_points
+    ? curveCoordinates({
+        points: preview.result_points,
+        x_scale: preview.x_scale,
+        y_scale: preview.y_scale,
+        x_min: x_axis.min,
+        x_max: x_axis.max,
+        y_min: y_axis.min,
+        y_max: y_axis.max,
+      })
+    : []
   const comparison_is_deprecated = preview.result_status === "deprecated" || preview.is_stale
   const comparison_is_unverified = preview.result_status === "unverified"
   const comparison_is_failed = preview.result_status === "failed"
@@ -500,6 +525,22 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
               points={result_path}
             />
           )}
+          <g className="reference-point-markers">
+            {reference_markers.map(({ x, y }) => (
+              <circle className="reference-point" cx={x} cy={y} key={`reference-${x}-${y}`} r="4.5" />
+            ))}
+          </g>
+          <g className="result-point-markers">
+            {result_markers.map(({ x, y }) => (
+              <circle
+                className={`result-point${comparison_is_unverified ? " result-point-unverified" : ""}${comparison_is_failed || comparison_is_cancelled ? " result-point-failed" : ""}${preview.result_status === "partial" ? " result-point-partial" : ""}${comparison_is_deprecated ? " result-point-deprecated" : ""}`}
+                cx={x}
+                cy={y}
+                key={`result-${x}-${y}`}
+                r="2.8"
+              />
+            ))}
+          </g>
           <g className="reference-axis-ticks">
             {y_axis.ticks.map((tick) => (
               <text
@@ -637,8 +678,12 @@ function ModelDatasheetReferencePane({
 }) {
   const [image_failed, setImageFailed] = useState(false)
   const resolved_benchmark_id = preview?.benchmark_id ?? benchmark_id
-  const image_url =
+  const base_image_url =
     resolved_benchmark_id === "live" ? undefined : getModelReferenceImageUrl(job_id, resolved_benchmark_id)
+  const image_url =
+    base_image_url && preview?.updated_at
+      ? `${base_image_url}&generation=${encodeURIComponent(preview.updated_at)}`
+      : base_image_url
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: retry the image when its URL or preview revision changes
   useEffect(() => setImageFailed(false), [image_url, preview?.updated_at])
@@ -661,7 +706,7 @@ function ModelDatasheetReferencePane({
         ) : (
           <img
             className="model-datasheet-reference-image"
-            key={image_url}
+            key={`${image_url}:${preview?.updated_at ?? "pending"}`}
             src={image_url}
             alt={`Datasheet graph reference for ${preview?.title ?? resolved_benchmark_id}`}
             draggable={false}

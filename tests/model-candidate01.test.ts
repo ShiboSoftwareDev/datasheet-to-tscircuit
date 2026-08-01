@@ -4,10 +4,36 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { AgentClient } from "@/server/infrastructure/agent"
 import { generateModelCandidate } from "@/server/model-workflow/model-candidate"
-import type { ModelContract } from "@/server/modeling"
+import { assertNgspiceAcceptsModelCandidate } from "@/server/model-workflow/model-candidate-smoke"
+import { createModelManifest, type ModelContract } from "@/server/modeling"
 import { PipelineError } from "@/server/pipeline"
+import { executeLocalNgspice, type NgspiceExecutor } from "@/server/spice-validation"
 
 const temporary_directories: string[] = []
+const ngspice_path = Bun.which("ngspice")
+const testWithNgspice = ngspice_path ? test : test.skip
+
+const smoke_raw = `Title: candidate smoke
+Date: Fri Aug  1 00:00:00 2026
+Plotname: Operating Point
+Flags: real
+No. Variables: 1
+No. Points: 1
+Variables:
+  0 v(smoke_1) voltage
+Values:
+0 0
+`
+
+const accepting_ngspice: NgspiceExecutor = async ({ raw_path }) => {
+  await Bun.write(raw_path, smoke_raw)
+  return {
+    exit_code: 0,
+    stdout: "candidate accepted\n",
+    stderr: "",
+    cancelled: false,
+  }
+}
 
 afterEach(async () => {
   await Promise.all(temporary_directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
@@ -142,6 +168,8 @@ test("fresh candidates ignore stale model output and preserve accepted revisions
     signal: new AbortController().signal,
     use_openai: false,
     agent_client,
+    ngspice: accepting_ngspice,
+    ngspice_path: "ngspice-test",
     max_artifact_attempts: 1,
     debug_dir: join(model_dir, "debug"),
     on_output: () => undefined,
@@ -218,6 +246,8 @@ test("repair candidates receive the failed candidate but not private validation 
     signal: new AbortController().signal,
     use_openai: false,
     agent_client,
+    ngspice: accepting_ngspice,
+    ngspice_path: "ngspice-test",
     max_artifact_attempts: 1,
     debug_dir: join(model_dir, "debug"),
     on_output: () => undefined,
@@ -248,6 +278,8 @@ test("model candidate validation bounds agent-owned source before parsing it", a
         return { attempts: 1, duration_ms: 1, output_tail: "" }
       },
     },
+    ngspice: accepting_ngspice,
+    ngspice_path: "ngspice-test",
     max_artifact_attempts: 1,
     debug_dir: join(model_dir, "debug-bounded"),
     on_output: () => undefined,
@@ -257,4 +289,142 @@ test("model candidate validation bounds agent-owned source before parsing it", a
   expect((error as PipelineError).diagnostic.code).toBe("generate_model_artifact_invalid")
   expect((error as Error).message).toContain("unexpectedly large")
   expect(await Bun.file(join(model_dir, "candidates")).exists()).toBe(false)
+})
+
+test("ngspice syntax rejection is corrected inside candidate generation with a safe diagnostic", async () => {
+  const model_dir = await prepareModelDirectory()
+  const prompts: string[] = []
+  const system_output: string[] = []
+  let agent_attempt = 0
+  const result = await generateModelCandidate({
+    model_dir,
+    contract,
+    evidence_dir: join(model_dir, "evidence"),
+    strategy_guidance: "Use a dependent source.",
+    stage_id: "generate_model",
+    phase_label: "test syntax correction",
+    signal: new AbortController().signal,
+    use_openai: false,
+    agent_client: {
+      async run(input) {
+        prompts.push(input.prompt)
+        agent_attempt += 1
+        const source =
+          agent_attempt === 1
+            ? ".SUBCKT GAIN IN OUT\nB1 OUT 0 V=if(V(IN)>0,1,0)\n.ENDS GAIN\n"
+            : ".SUBCKT GAIN IN OUT\nE1 OUT 0 IN 0 2\n.ENDS GAIN\n"
+        await Promise.all([
+          Bun.write(join(input.workspace, "model.lib"), source),
+          Bun.write(join(input.workspace, "model-card.md"), "Candidate model.\n"),
+        ])
+        return { attempts: 1, duration_ms: 1, output_tail: "" }
+      },
+    },
+    ngspice: async ({ cwd, raw_path }) => {
+      const source = await Bun.file(join(cwd, "../model.lib")).text()
+      if (source.includes("if(")) {
+        return {
+          exit_code: 1,
+          stdout: "",
+          stderr: `Error: no such function 'if' at line 2\nfrom file\n  ${model_dir}/private/model.lib\nERROR: fatal error in ngspice, exit(1)\n`,
+          cancelled: false,
+        }
+      }
+      await Bun.write(raw_path, smoke_raw)
+      return { exit_code: 0, stdout: "accepted\n", stderr: "", cancelled: false }
+    },
+    ngspice_path: "ngspice-test",
+    max_artifact_attempts: 2,
+    debug_dir: join(model_dir, "debug-syntax"),
+    on_output: (stream, message) => {
+      if (stream === "system") system_output.push(message)
+    },
+  })
+
+  expect(agent_attempt).toBe(2)
+  expect(result.value.source).toContain("E1 OUT 0 IN 0 2")
+  expect(prompts[1]).toContain("no such function 'if' at line 2")
+  expect(prompts[1]).not.toContain(model_dir)
+  expect(system_output.join("\n")).toContain("candidate smoke validation")
+})
+
+testWithNgspice(
+  "real ngspice smoke rejects the unsupported if function before private validation",
+  async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "model-smoke-real-"))
+    temporary_directories.push(workspace)
+    const source = ".SUBCKT GAIN IN OUT\nB1 OUT 0 V=if(V(IN)>0,1,0)\n.ENDS GAIN\n"
+    await Bun.write(join(workspace, "model.lib"), source)
+    const manifest = createModelManifest({
+      model_interface: contract.interface,
+      model_source: source,
+      simulator: "ngspice",
+    })
+
+    const error = await assertNgspiceAcceptsModelCandidate({
+      workspace,
+      manifest,
+      ngspice: executeLocalNgspice,
+      ngspice_path: ngspice_path ?? "ngspice",
+      signal: new AbortController().signal,
+    }).catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain("no such function 'if' at line 2")
+    expect((error as Error).message).not.toContain(workspace)
+  },
+)
+
+test("candidate smoke rejects fatal output even when ngspice exits zero", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "model-smoke-zero-exit-fatal-"))
+  temporary_directories.push(workspace)
+  const source = ".SUBCKT GAIN IN OUT\nR1 IN OUT 1k\n.ENDS GAIN\n"
+  await Bun.write(join(workspace, "model.lib"), source)
+  const manifest = createModelManifest({
+    model_interface: contract.interface,
+    model_source: source,
+    simulator: "ngspice",
+  })
+
+  await expect(
+    assertNgspiceAcceptsModelCandidate({
+      workspace,
+      manifest,
+      ngspice: async () => ({
+        exit_code: 0,
+        stdout: "doAnalyses: run simulation(s) aborted",
+        stderr: "fatal error: analysis failed",
+        cancelled: false,
+      }),
+      ngspice_path: "ngspice-test",
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/fatal error: analysis failed/)
+})
+
+test("candidate smoke rejects a zero-exit run with no raw operating point", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "model-smoke-missing-raw-"))
+  temporary_directories.push(workspace)
+  const source = ".SUBCKT GAIN IN OUT\nR1 IN OUT 1k\n.ENDS GAIN\n"
+  await Bun.write(join(workspace, "model.lib"), source)
+  const manifest = createModelManifest({
+    model_interface: contract.interface,
+    model_source: source,
+    simulator: "ngspice",
+  })
+
+  await expect(
+    assertNgspiceAcceptsModelCandidate({
+      workspace,
+      manifest,
+      ngspice: async () => ({
+        exit_code: 0,
+        stdout: "completed without a raw file",
+        stderr: "",
+        cancelled: false,
+      }),
+      ngspice_path: "ngspice-test",
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/no valid operating-point result/)
 })

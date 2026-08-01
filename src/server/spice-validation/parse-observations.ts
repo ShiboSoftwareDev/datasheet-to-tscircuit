@@ -86,6 +86,49 @@ function referencesEqual(left: ReferenceContract, right: ReferenceContract): boo
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
+/**
+ * Evidence shown beside a validation result belongs to the immutable model
+ * requirement, not to the agent-authored electrical fixture. Keeping this
+ * binding here mirrors the server-owned reference binding above and prevents a
+ * plan from pointing an otherwise valid comparison at unrelated datasheet
+ * evidence.
+ */
+function canonicalRequirementEvidence(requirement: ModelRequirement): ValidationEvidence | undefined {
+  const curve_image = requirement.reference_curve?.image
+  const source =
+    (curve_image ? requirement.sources.find(({ image }) => image === curve_image) : undefined) ??
+    requirement.sources[0]
+  const image = curve_image ?? source?.image
+  const metadata: Record<string, string> = {}
+
+  if (source?.locator.trim()) metadata.figure = source.locator
+  if (requirement.reference_curve) {
+    metadata.x_quantity = requirement.reference_curve.x_quantity
+    metadata.x_unit = requirement.reference_curve.x_unit
+    metadata.y_quantity = requirement.reference_curve.y_quantity
+    metadata.y_unit = requirement.reference_curve.y_unit
+  }
+
+  const page = source && Number.isInteger(source.page) && source.page > 0 ? source.page : undefined
+  const has_metadata = Object.keys(metadata).length > 0
+  if (page === undefined && image === undefined && !has_metadata) return undefined
+
+  return {
+    ...(page === undefined ? {} : { page }),
+    ...(image === undefined ? {} : { image }),
+    ...(has_metadata ? { metadata } : {}),
+  }
+}
+
+function evidenceEqual(left: ValidationEvidence | undefined, right: ValidationEvidence | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right
+  if (left.page !== right.page || left.image !== right.image) return false
+  const left_metadata = left.metadata ?? {}
+  const right_metadata = right.metadata ?? {}
+  const keys = [...new Set([...Object.keys(left_metadata), ...Object.keys(right_metadata)])].sort()
+  return keys.every((key) => left_metadata[key] === right_metadata[key])
+}
+
 function parseEvidence(
   value: unknown,
   path: string,
@@ -208,7 +251,15 @@ export function parseObservation(
   if (scale_value && scale_value !== "linear" && scale_value !== "log") {
     collector.add(`${path}.scale`, "unsupported_scale", 'must be "linear" or "log"')
   }
-  const evidence = parseEvidence(record.evidence, `${path}.evidence`, collector)
+  const supplied_evidence = parseEvidence(record.evidence, `${path}.evidence`, collector)
+  const evidence = requirement ? canonicalRequirementEvidence(requirement) : supplied_evidence
+  if (requirement && record.evidence !== undefined && !evidenceEqual(evidence, supplied_evidence)) {
+    collector.add(
+      `${path}.evidence`,
+      "requirement_evidence_mismatch",
+      `must exactly match the server-owned evidence for requirement ${JSON.stringify(requirement_id)}`,
+    )
+  }
 
   if (type === "voltage") {
     collector.rejectUnknownKeys(

@@ -16,6 +16,10 @@ import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 const ngspice_path = Bun.which("ngspice")
 const testWithNgspice = ngspice_path ? test : test.skip
 const temporary_directories: string[] = []
+const png_bytes = Uint8Array.from(
+  atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
+  (character) => character.charCodeAt(0),
+)
 
 afterEach(async () => {
   await Promise.all(
@@ -156,6 +160,27 @@ class FakeWrapperBuildRunner implements ProcessRunner {
 
   async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
     this.calls.push(request)
+    if (request.command[0] === "pdftoppm") {
+      const output_prefix = request.command.at(-1)
+      if (!output_prefix) throw new Error("Fixture pdftoppm command omitted its output prefix")
+      await Bun.write(`${output_prefix}.png`, png_bytes)
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
+    if (
+      request.command[1] === "build" &&
+      request.command[2]?.endsWith(".circuit.tsx") &&
+      request.command[2] !== "component-with-model.circuit.tsx"
+    ) {
+      const output_stem = request.command[2].replace(/\.circuit\.tsx$/, "")
+      const output_directory = join(request.cwd, "dist", output_stem)
+      await mkdir(output_directory, { recursive: true })
+      await writeFile(
+        join(output_directory, "circuit.json"),
+        `${JSON.stringify([{ type: "source_component", source_component_id: `preview_${output_stem}` }])}\n`,
+        "utf8",
+      )
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
     if (request.command[1] !== "build" || request.command[2] !== "component-with-model.circuit.tsx") {
       throw new Error(`Unexpected process command: ${request.command.join(" ")}`)
     }
@@ -370,6 +395,7 @@ testWithNgspice(
       is_complete: true,
       has_errors: false,
       validation: { all_passed: true, all_critical_passed: true, passing_count: 1 },
+      circuit_preview: { build_status: "ready", circuit_json: [{ type: "source_component" }] },
       pipeline: { pipeline_id: "datasheet_model", status: "completed" },
     })
     expect(Object.values(run!.pipeline!.stage_results).map(({ status }) => status)).toEqual([
@@ -387,7 +413,7 @@ testWithNgspice(
       "Validation-plan design",
       "SPICE model generation",
     ])
-    expect(process_runner.calls).toHaveLength(1)
+    expect(process_runner.calls).toHaveLength(3)
 
     const candidates = await readdir(join(model_dir, "candidates"))
     expect(candidates).toHaveLength(1)

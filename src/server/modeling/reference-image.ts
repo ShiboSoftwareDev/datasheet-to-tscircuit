@@ -151,11 +151,68 @@ function explicitPublishedImageCandidates(raw_path: string | undefined): string[
   return trimmed.startsWith("evidence/") ? [trimmed] : [`evidence/${trimmed}`]
 }
 
+async function resolveDirectoryReferenceImage(
+  root: string,
+  benchmark_id: string,
+): Promise<{ benchmark_found: boolean; image?: BenchmarkReferenceImage }> {
+  const benchmark = await readBenchmark(root, benchmark_id)
+  if (!benchmark) return { benchmark_found: false }
+  const evidence_dir = resolve(root, "evidence")
+  for (const raw_path of benchmark.sources.map((source) => source.image)) {
+    const file_path = await resolveExplicitImage(root, evidence_dir, raw_path)
+    if (!file_path) continue
+    const content_type = IMAGE_CONTENT_TYPES[extname(file_path).toLowerCase()]
+    if (content_type) {
+      return {
+        benchmark_found: true,
+        image: { file_path, file_name: basename(file_path), content_type },
+      }
+    }
+  }
+  const image_files = (await listFiles(evidence_dir)).filter(
+    (file_path) => IMAGE_CONTENT_TYPES[extname(file_path).toLowerCase()],
+  )
+  const file_path =
+    benchmark.sources
+      .map((source) => findFigureImage(image_files, source.figure))
+      .find((match) => match !== undefined) ??
+    benchmark.sources
+      .map((source) => findPageImage(image_files, source.page))
+      .find((match) => match !== undefined)
+  if (!file_path) return { benchmark_found: true }
+  const content_type = IMAGE_CONTENT_TYPES[extname(file_path).toLowerCase()]
+  return {
+    benchmark_found: true,
+    ...(content_type
+      ? { image: { file_path, file_name: basename(file_path), content_type } as BenchmarkReferenceImage }
+      : {}),
+  }
+}
+
 export async function resolveBenchmarkReferenceImage(input: {
   job_id: string
   model_dir: string
   benchmark_id: string
+  prefer_current_preview?: boolean
+  current_preview_generation?: string
 }): Promise<BenchmarkReferenceImage | undefined> {
+  if (input.current_preview_generation) {
+    if (!/^[a-zA-Z0-9_-]{16,200}$/.test(input.current_preview_generation)) return undefined
+    const current = await resolveDirectoryReferenceImage(
+      join(input.model_dir, "current-previews", input.current_preview_generation),
+      input.benchmark_id,
+    )
+    return current.image
+  }
+  if (input.prefer_current_preview) {
+    const current = await resolveDirectoryReferenceImage(
+      join(input.model_dir, "current-preview"),
+      input.benchmark_id,
+    )
+    // A matching current benchmark owns its evidence state. Falling back to an
+    // older accepted image would present unrelated proof for this candidate.
+    if (current.benchmark_found) return current.image
+  }
   const publication = await resolveAcceptedModelPublication(input.model_dir, input.job_id)
   if (publication) {
     const plan_bytes = await readVerifiedPublicationArtifact({
@@ -196,31 +253,8 @@ export async function resolveBenchmarkReferenceImage(input: {
       content_type,
     }
   }
-  const model_dir = input.model_dir
-  const benchmark = await readBenchmark(model_dir, input.benchmark_id)
-  if (!benchmark) return undefined
-
-  const evidence_dir = resolve(model_dir, "evidence")
-  const explicit_paths = benchmark.sources.map((source) => source.image)
-  for (const raw_path of explicit_paths) {
-    const file_path = await resolveExplicitImage(model_dir, evidence_dir, raw_path)
-    if (file_path) {
-      const content_type = IMAGE_CONTENT_TYPES[extname(file_path).toLowerCase()]
-      if (content_type) return { file_path, file_name: basename(file_path), content_type }
-    }
-  }
-
-  const image_files = (await listFiles(evidence_dir)).filter(
-    (file_path) => IMAGE_CONTENT_TYPES[extname(file_path).toLowerCase()],
-  )
-  const file_path =
-    benchmark.sources
-      .map((source) => findFigureImage(image_files, source.figure))
-      .find((match) => match !== undefined) ??
-    benchmark.sources
-      .map((source) => findPageImage(image_files, source.page))
-      .find((match) => match !== undefined)
-  if (!file_path) return undefined
-  const content_type = IMAGE_CONTENT_TYPES[extname(file_path).toLowerCase()]
-  return content_type ? { file_path, file_name: basename(file_path), content_type } : undefined
+  const root = await resolveDirectoryReferenceImage(input.model_dir, input.benchmark_id)
+  if (root.benchmark_found) return root.image
+  return (await resolveDirectoryReferenceImage(join(input.model_dir, "current-preview"), input.benchmark_id))
+    .image
 }

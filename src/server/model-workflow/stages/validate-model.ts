@@ -6,10 +6,12 @@ import {
   appendModelLog,
   modelArtifact,
   persistCandidateValidationUi,
+  projectCandidateValidationUi,
   readJson,
   updateModelProgress,
 } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
+import { buildValidationCircuitPreviews } from "../validation-circuit-previews"
 
 export const validateModelStage = defineModelStage({
   id: "validate_model",
@@ -51,11 +53,35 @@ export const validateModelStage = defineModelStage({
       append: (stream, message) =>
         appendModelLog(services.model_run_store, context.model_run_id, stream, message),
     })
-    await persistCandidateValidationUi({
+    const preview_build = await buildValidationCircuitPreviews({
+      model_dir: context.model_dir,
+      plan,
+      generated,
+      tsci_bin: services.tsci_bin,
+      process_runner: services.process_runner,
+      signal,
+      append: (stream, message) =>
+        appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+    })
+    const projection = await persistCandidateValidationUi({
       plan,
       result,
       generated,
+      contract,
       immutable_artifact_dir: validation_artifact_dir,
+      preview_generation: `${context.invocation_id}-${generated.manifest.revision}`,
+      circuit_json_by_case: preview_build.circuit_json_by_case,
+      circuit_build_errors_by_case: preview_build.errors_by_case,
+    })
+    await projectCandidateValidationUi({
+      model_run_store: services.model_run_store,
+      model_run_id: context.model_run_id,
+      model_dir: context.model_dir,
+      immutable_artifact_dir: validation_artifact_dir,
+      evidence_dir,
+      revision: generated.manifest.revision,
+      projection,
+      signal,
     })
     const failing_case_ids = result.cases
       .filter(({ status }) => status !== "passed")

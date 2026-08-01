@@ -54,6 +54,41 @@ function publicationIntegrityMessage(error: unknown): string {
   return detail.length > 1_000 ? `${detail.slice(0, 997)}...` : detail
 }
 
+async function readCurrentCandidateProjection(input: {
+  model_dir: string
+  model_run_id?: string
+  invocation_id?: string
+}): Promise<Record<string, unknown> | undefined> {
+  if (!input.model_run_id || !input.invocation_id) return undefined
+  const marker_value = await readJson(join(input.model_dir, "current-preview.json"))
+  if (
+    !isRecord(marker_value) ||
+    marker_value.version !== 1 ||
+    marker_value.model_run_id !== input.model_run_id ||
+    marker_value.invocation_id !== input.invocation_id ||
+    typeof marker_value.revision !== "string" ||
+    typeof marker_value.preview_generation !== "string" ||
+    !/^[a-zA-Z0-9_-]{16,200}$/.test(marker_value.preview_generation)
+  ) {
+    return undefined
+  }
+  const ui_value = await readJson(
+    join(input.model_dir, "current-previews", marker_value.preview_generation, "model-ui.json"),
+  )
+  if (!isRecord(ui_value) || !isRecord(ui_value.validation)) return undefined
+  const validation = ui_value.validation
+  if (
+    validation.artifact_state !== "candidate" ||
+    validation.model_revision !== marker_value.revision ||
+    validation.preview_generation !== marker_value.preview_generation ||
+    !Array.isArray(ui_value.preview_options) ||
+    !isRecord(ui_value.selected_previews)
+  ) {
+    return undefined
+  }
+  return ui_value
+}
+
 function restorePublicationIntegrityFailure(input: {
   job_id: string
   model_dir: string
@@ -309,12 +344,23 @@ export async function restoreModelDirectory(input: {
     typeof checkpoint?.effort_multiplier === "number" && checkpoint.effort_multiplier > 0
       ? checkpoint.effort_multiplier
       : 1
-  const selected_previews = isRecord(ui?.selected_previews) ? ui.selected_previews : undefined
+  const candidate_ui =
+    !invalid_completion && !recovered_publication && status !== "complete" && !checkpoint_identity_conflict
+      ? await readCurrentCandidateProjection({
+          model_dir: input.model_dir,
+          model_run_id: saved_model_run_id,
+          invocation_id: saved_invocation_id,
+        })
+      : undefined
+  const display_ui = candidate_ui ?? ui
+  const selected_previews = isRecord(display_ui?.selected_previews) ? display_ui.selected_previews : undefined
   const first_selected = selected_previews ? selectedPreview(Object.values(selected_previews)[0]) : undefined
   const error_message = recovered_publication
     ? undefined
     : uncommitted_completion
-      ? "The latest model invocation claimed completion without committing the accepted publication pointer. Its uncommitted metrics were discarded."
+      ? candidate_ui
+        ? "The latest model invocation did not commit the accepted publication pointer. Its candidate validation remains inspectable but is not accepted."
+        : "The latest model invocation claimed completion without committing the accepted publication pointer. Its uncommitted metrics were discarded."
       : interrupted
         ? "The server restarted before this model pipeline finished. Retry to start a new trace; completed artifacts were preserved."
         : invalid_completion
@@ -395,13 +441,15 @@ export async function restoreModelDirectory(input: {
           : ((isRecord(checkpoint?.manifest) ? checkpoint.manifest : manifest) as ModelManifest | undefined),
     validation: invalid_completion
       ? undefined
-      : ((publication
-          ? status === "complete"
-            ? ui?.validation
-            : undefined
-          : isRecord(checkpoint?.validation)
-            ? checkpoint.validation
-            : ui?.validation) as ModelValidationSummary | undefined),
+      : ((candidate_ui
+          ? candidate_ui.validation
+          : publication
+            ? status === "complete"
+              ? ui?.validation
+              : undefined
+            : isRecord(checkpoint?.validation)
+              ? checkpoint.validation
+              : ui?.validation) as ModelValidationSummary | undefined),
     model_card: invalid_completion
       ? undefined
       : publication
@@ -415,33 +463,39 @@ export async function restoreModelDirectory(input: {
       : [],
     circuit_preview: invalid_completion
       ? undefined
-      : publication
-        ? status === "complete"
-          ? first_selected?.circuit_preview
-          : undefined
-        : isModelCircuitPreview(checkpoint?.circuit_preview)
-          ? checkpoint.circuit_preview
-          : first_selected?.circuit_preview,
+      : candidate_ui
+        ? first_selected?.circuit_preview
+        : publication
+          ? status === "complete"
+            ? first_selected?.circuit_preview
+            : undefined
+          : isModelCircuitPreview(checkpoint?.circuit_preview)
+            ? checkpoint.circuit_preview
+            : first_selected?.circuit_preview,
     reference_preview: invalid_completion
       ? undefined
-      : publication
-        ? status === "complete"
-          ? first_selected?.reference_preview
-          : undefined
-        : isModelReferencePreview(checkpoint?.reference_preview)
-          ? checkpoint.reference_preview
-          : first_selected?.reference_preview,
+      : candidate_ui
+        ? first_selected?.reference_preview
+        : publication
+          ? status === "complete"
+            ? first_selected?.reference_preview
+            : undefined
+          : isModelReferencePreview(checkpoint?.reference_preview)
+            ? checkpoint.reference_preview
+            : first_selected?.reference_preview,
     preview_options: invalid_completion
       ? []
-      : publication
-        ? status === "complete" && Array.isArray(ui?.preview_options)
-          ? (ui.preview_options as ModelRun["preview_options"])
-          : []
-        : Array.isArray(checkpoint?.preview_options)
-          ? (checkpoint.preview_options as ModelRun["preview_options"])
-          : Array.isArray(ui?.preview_options)
+      : candidate_ui
+        ? (candidate_ui.preview_options as ModelRun["preview_options"])
+        : publication
+          ? status === "complete" && Array.isArray(ui?.preview_options)
             ? (ui.preview_options as ModelRun["preview_options"])
-            : [],
+            : []
+          : Array.isArray(checkpoint?.preview_options)
+            ? (checkpoint.preview_options as ModelRun["preview_options"])
+            : Array.isArray(ui?.preview_options)
+              ? (ui.preview_options as ModelRun["preview_options"])
+              : [],
     pipeline: parsePublicPipelineSnapshot(checkpoint?.pipeline),
   }
   return input.model_run_store.restoreModelRun({ model_dir: input.model_dir, model_run, logs })

@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog"
 import * as Popover from "@radix-ui/react-popover"
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   Clock3,
@@ -39,6 +40,13 @@ const STATUS_COPY: Record<ModelRunStatus, string> = {
 function getStatusCopy(model_run: ModelRun): string {
   if (model_run.status === "complete" && (model_run.warnings?.length ?? 0) > 0) {
     return "Available with warnings"
+  }
+  if (
+    model_run.status === "complete" &&
+    (model_run.validation?.scope?.quality === "scalar_only" ||
+      (model_run.validation?.scope?.documented_only_requirement_count ?? 0) > 0)
+  ) {
+    return "Validated · limited scope"
   }
   if (model_run.status === "timed_out" && model_run.error_message?.toLowerCase().includes("no output")) {
     return "Timed out"
@@ -107,14 +115,21 @@ export function getModelMatchMetrics(model_run: ModelRun): {
   match_score?: number
   normalized_rmse?: number
 } {
-  const has_retained_accepted_metrics = (model_run.warnings ?? []).some(isRetainedAcceptedWarning)
-  const normalized_rmse = has_retained_accepted_metrics
-    ? undefined
-    : model_run.validation?.score !== undefined
-      ? model_run.validation.score
-      : model_run.is_complete
-        ? undefined
-        : model_run.progress?.champion?.score
+  const has_retained_accepted_metrics =
+    model_run.validation?.artifact_state !== "candidate" &&
+    (model_run.warnings ?? []).some(isRetainedAcceptedWarning)
+  const has_scoped_validation_without_curve_metrics =
+    model_run.validation?.scope !== undefined && model_run.validation.curve_score === undefined
+  const normalized_rmse =
+    has_retained_accepted_metrics || has_scoped_validation_without_curve_metrics
+      ? undefined
+      : model_run.validation?.curve_score !== undefined
+        ? model_run.validation.curve_score
+        : model_run.validation?.score !== undefined
+          ? model_run.validation.score
+          : model_run.is_complete
+            ? undefined
+            : model_run.progress?.champion?.score
   return {
     normalized_rmse,
     match_score: normalized_rmse === undefined ? undefined : Math.max(0, Math.min(1, 1 - normalized_rmse)),
@@ -124,7 +139,141 @@ export function getModelMatchMetrics(model_run: ModelRun): {
 function formatModelMetric(value: number | undefined, model_run: ModelRun): string {
   if (value !== undefined) return `${(value * 100).toFixed(1)}%`
   if (model_run.is_complete && (model_run.warnings?.length ?? 0) > 0) return "Unverified"
+  if (model_run.is_complete) return "N/A"
   return model_run.has_errors ? "Unavailable" : "Pending"
+}
+
+export function getModelHeaderStats(model_run: ModelRun): Array<{
+  label: string
+  value: string
+  title: string
+  class_name: string
+}> {
+  const scope = model_run.validation?.scope
+  if (scope && model_run.validation?.curve_score === undefined) {
+    return [
+      {
+        label: "Checks",
+        value: `${model_run.validation?.passing_count ?? 0}/${model_run.validation?.benchmark_count ?? 0}`,
+        title: "Server-owned validation cases that passed",
+        class_name: "model-match-stat",
+      },
+      {
+        label: "Samples",
+        value: String(scope.validated_sample_count),
+        title: "Numeric simulator samples checked; no reference curve was validated",
+        class_name: "model-error-stat",
+      },
+    ]
+  }
+
+  const metrics = getModelMatchMetrics(model_run)
+  return [
+    {
+      label: "Match",
+      value: formatModelMetric(metrics.match_score, model_run),
+      title: "Derived as 100% minus the weighted normalized RMSE",
+      class_name: "model-match-stat",
+    },
+    {
+      label: "NRMSE",
+      value: formatModelMetric(metrics.normalized_rmse, model_run),
+      title: "Weighted normalized root mean square error",
+      class_name: "model-error-stat",
+    },
+  ]
+}
+
+const SCOPE_QUALITY_COPY = {
+  scalar_only: {
+    label: "Scalar operating points only",
+    description:
+      "No datasheet reference curve was compared. Passing checks do not prove behavior across a range.",
+  },
+  range_checked: {
+    label: "Operating range checked",
+    description: "The model was sampled across a DC or time range, without a point-by-point reference curve.",
+  },
+  curve_attempted: {
+    label: "Reference comparison unavailable",
+    description: "A reference curve was declared, but the simulator produced no finite comparison samples.",
+  },
+  curve_validated: {
+    label: "Reference curves validated",
+    description: "Simulation samples were compared against server-bound datasheet reference curves.",
+  },
+} as const
+
+export function ModelValidationScope({ model_run }: { model_run: ModelRun }) {
+  const validation = model_run.validation
+  const scope = validation?.scope
+  if (!validation || !scope) return null
+
+  const quality = SCOPE_QUALITY_COPY[scope.quality]
+  return (
+    <section
+      className={`model-validation-scope model-validation-scope-${scope.quality}`}
+      aria-label="Model validation scope"
+    >
+      <header>
+        <div>
+          <span>Validation scope</span>
+          <strong>{quality.label}</strong>
+          <small>{quality.description}</small>
+        </div>
+        <dl>
+          <div>
+            <dt>Requirements modeled</dt>
+            <dd>
+              {scope.modeled_requirement_count}/{scope.total_requirement_count}
+            </dd>
+          </div>
+          <div>
+            <dt>Checks passed</dt>
+            <dd>
+              {validation.passing_count}/{validation.benchmark_count}
+            </dd>
+          </div>
+          <div>
+            <dt>Numeric samples</dt>
+            <dd>{scope.validated_sample_count}</dd>
+          </div>
+          <div>
+            <dt>Curve comparisons</dt>
+            <dd>{scope.curve_observation_count}</dd>
+          </div>
+        </dl>
+      </header>
+
+      {(scope.documented_only_requirements.length > 0 || scope.limitations.length > 0) && (
+        <div className="model-validation-scope-details">
+          {scope.documented_only_requirements.length > 0 && (
+            <div>
+              <strong>Not implemented in SPICE</strong>
+              <ul>
+                {scope.documented_only_requirements.map((requirement) => (
+                  <li key={requirement.requirement_id}>
+                    <span>{requirement.title}</span>
+                    <small>{requirement.reason}</small>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {scope.limitations.length > 0 && (
+            <div>
+              <strong>Declared limitations</strong>
+              <ul>
+                {scope.limitations.map((limitation) => (
+                  <li key={limitation}>{limitation}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
 }
 
 function PreviousTasks({ model_run, current_task }: { model_run: ModelRun; current_task: string }) {
@@ -178,11 +327,17 @@ function PreviousTasks({ model_run, current_task }: { model_run: ModelRun; curre
 }
 
 function ModelSourceDialog({ model_run }: { model_run: ModelRun }) {
+  const is_showing_candidate = model_run.validation?.artifact_state === "candidate"
   return (
     <Dialog.Root>
       <Dialog.Trigger asChild>
         <button type="button" disabled={!model_run.model_source}>
-          <FileCode2 size={14} /> {model_run.model_source ? "View model" : "Model pending"}
+          <FileCode2 size={14} />{" "}
+          {model_run.model_source
+            ? is_showing_candidate
+              ? "View accepted model"
+              : "View model"
+            : "Model pending"}
         </button>
       </Dialog.Trigger>
       <Dialog.Portal>
@@ -190,7 +345,7 @@ function ModelSourceDialog({ model_run }: { model_run: ModelRun }) {
         <Dialog.Content className="model-dialog-content">
           <header>
             <div>
-              <Dialog.Title>SPICE model</Dialog.Title>
+              <Dialog.Title>{is_showing_candidate ? "Accepted SPICE model" : "SPICE model"}</Dialog.Title>
               <Dialog.Description>
                 model.lib{model_run.manifest?.dialect ? ` · ${model_run.manifest.dialect}` : ""}
               </Dialog.Description>
@@ -212,6 +367,28 @@ function ModelSourceDialog({ model_run }: { model_run: ModelRun }) {
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  )
+}
+
+export function ModelCandidateProvenance({ model_run }: { model_run: ModelRun }) {
+  const validation = model_run.validation
+  if (validation?.artifact_state !== "candidate") return null
+  const candidate_revision = validation.model_revision ?? "unknown revision"
+  const accepted_revision = model_run.manifest?.revision
+  return (
+    <section className="model-candidate-provenance" role="status">
+      <AlertTriangle size={16} />
+      <div>
+        <strong>Unaccepted candidate validation</strong>
+        <p>
+          The TSX, reference evidence, graphs, and checks below belong to candidate{" "}
+          <code>{candidate_revision}</code>.{" "}
+          {accepted_revision
+            ? `View accepted model and downloads still refer to accepted revision ${accepted_revision}.`
+            : "No SPICE model has been accepted or attached yet."}
+        </p>
+      </div>
+    </section>
   )
 }
 
@@ -376,7 +553,7 @@ export function ModelPanel({
   const is_running = !model_run.is_complete
   const is_waiting = model_run.status === "queued" || model_run.status === "waiting_for_component"
   const current_task = model_run.error_message ?? model_run.progress?.message ?? getStatusCopy(model_run)
-  const match_metrics = getModelMatchMetrics(model_run)
+  const header_stats = getModelHeaderStats(model_run)
 
   return (
     <div className="model-workspace">
@@ -398,17 +575,12 @@ export function ModelPanel({
         </div>
 
         <section className="model-header-stats" aria-label="Current model statistics">
-          <div
-            className="model-header-stat model-match-stat"
-            title="Derived as 100% minus the weighted normalized RMSE"
-          >
-            <span>Match</span>
-            <strong>{formatModelMetric(match_metrics.match_score, model_run)}</strong>
-          </div>
-          <div className="model-header-stat model-error-stat">
-            <span>NRMSE</span>
-            <strong>{formatModelMetric(match_metrics.normalized_rmse, model_run)}</strong>
-          </div>
+          {header_stats.map((stat) => (
+            <div className={`model-header-stat ${stat.class_name}`} title={stat.title} key={stat.label}>
+              <span>{stat.label}</span>
+              <strong>{stat.value}</strong>
+            </div>
+          ))}
           <PreviousTasks model_run={model_run} current_task={current_task} />
         </section>
 
@@ -466,6 +638,10 @@ export function ModelPanel({
           {error_message}
         </p>
       )}
+
+      <ModelCandidateProvenance model_run={model_run} />
+
+      <ModelValidationScope model_run={model_run} />
 
       <PipelineTrace pipeline={model_run.pipeline} title="Model execution trace" />
 

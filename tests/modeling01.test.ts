@@ -402,6 +402,141 @@ describe("model characterization contract", () => {
     )
   })
 
+  test("permits honest scalar regulator bounds when a datasheet has no reference curve", () => {
+    const scalarRequirement = {
+      requirement_id: "output_voltage",
+      title: "Output voltage",
+      behavior: "Regulate the output at the nominal operating point",
+      analysis: "operating_point",
+      support: { status: "modeled" },
+      conditions: { input_voltage: 12, load_current: 1 },
+      expected: { unit: "V", target: 5, tolerance: 0.1 },
+      sources: [
+        {
+          page: 7,
+          locator: "Electrical characteristics",
+          statement: "The nominal output voltage is 5 V.",
+        },
+      ],
+    }
+    const rangeRequirement = {
+      requirement_id: "load_regulation",
+      title: "Load regulation",
+      behavior: "Track the documented output voltage over load current",
+      analysis: "dc_sweep",
+      support: { status: "modeled" },
+      conditions: { input_voltage: 12 },
+      expected: { unit: "V", min: 4.8, max: 5.2 },
+      reference_curve: {
+        x_quantity: "load current",
+        x_unit: "A",
+        y_quantity: "output voltage",
+        y_unit: "V",
+        tolerance: 0.02,
+        points: [
+          { x: 0, y: 5.02 },
+          { x: 0.25, y: 5.01 },
+          { x: 0.5, y: 5 },
+          { x: 0.75, y: 4.99 },
+          { x: 1, y: 4.98 },
+        ],
+      },
+      sources: [
+        {
+          page: 9,
+          locator: "Figure 12, output voltage vs load current",
+          statement: "The output-voltage curve is specified over the load range.",
+        },
+      ],
+    }
+
+    for (const family of ["regulator", "power_converter"] as const) {
+      const scalarOnly = {
+        version: 1,
+        family,
+        strategy: "behavioral",
+        requirements: [scalarRequirement],
+        assumptions: [],
+        limitations: [],
+      }
+
+      expect(() => parseModelCharacterization(scalarOnly)).not.toThrow()
+      expect(() => parseModelCharacterization(scalarOnly, { policy: "fresh" })).not.toThrow()
+      expect(() =>
+        parseModelCharacterization(
+          { ...scalarOnly, requirements: [scalarRequirement, rangeRequirement] },
+          { policy: "fresh" },
+        ),
+      ).not.toThrow()
+    }
+  })
+
+  test("curve-free dynamic bounds remain valid but documented-only claims do not count as modeled", () => {
+    const dynamicRequirement = {
+      requirement_id: "startup",
+      title: "Startup",
+      behavior: "Start the converter after enable",
+      analysis: "transient",
+      support: { status: "modeled" },
+      conditions: { input_voltage: 12 },
+      expected: { unit: "V", min: 4.8, max: 5.2 },
+      sources: [{ page: 9, locator: "Startup", statement: "Startup behavior is documented." }],
+    }
+    const base = {
+      version: 1,
+      family: "power_converter",
+      strategy: "behavioral",
+      assumptions: [],
+      limitations: [],
+    }
+    const transientReferenceCurve = {
+      x_quantity: "time",
+      x_unit: "s",
+      y_quantity: "output voltage",
+      y_unit: "V",
+      points: [
+        { x: 0, y: 0 },
+        { x: 0.001, y: 1 },
+        { x: 0.002, y: 3 },
+        { x: 0.003, y: 4.5 },
+        { x: 0.004, y: 5 },
+      ],
+    }
+
+    expect(() =>
+      parseModelCharacterization({ ...base, requirements: [dynamicRequirement] }, { policy: "fresh" }),
+    ).not.toThrow()
+    expect(() =>
+      parseModelCharacterization(
+        {
+          ...base,
+          requirements: [{ ...dynamicRequirement, reference_curve: transientReferenceCurve }],
+        },
+        { policy: "fresh" },
+      ),
+    ).not.toThrow()
+    expect(() =>
+      parseModelCharacterization(
+        {
+          ...base,
+          requirements: [
+            {
+              ...dynamicRequirement,
+              support: {
+                status: "documented_only",
+                reason: "The public pins do not expose the internal startup state.",
+              },
+              reference_curve: transientReferenceCurve,
+            },
+          ],
+        },
+        { policy: "fresh" },
+      ),
+    ).toThrow(/must contain at least one modeled requirement/)
+    expect(buildCharacterizationPrompt()).toContain("tabular scalar bounds remain valid")
+    expect(buildCharacterizationPrompt()).toContain("validation plan can strengthen them")
+  })
+
   test("fresh characterization reports unsupported fields instead of dropping typos", () => {
     const characterization = {
       version: 1,

@@ -27,7 +27,14 @@ export async function getSelectedPreview(request_url: URL, context: ModelRunApiC
   }
   let preview: Awaited<ReturnType<typeof loadStoredModelPreview>>
   try {
-    preview = await loadStoredModelPreview({ job_id, model_dir, case_id: benchmark_id })
+    const model_run = context.model_run_store.getModelRun(model_run_id)
+    preview = await loadStoredModelPreview({
+      job_id,
+      model_dir,
+      case_id: benchmark_id,
+      prefer_current_preview: model_run?.validation?.artifact_state === "candidate",
+      current_preview_generation: model_run?.validation?.preview_generation,
+    })
   } catch (error) {
     return acceptedPublicationErrorResponse({
       job_id,

@@ -57,6 +57,15 @@ digitize a modest set of monotonically ordered points into reference_curve and
 retain its exact crop under evidence/.
 Every modeled reference_curve must contain at least five points so the server
 can reserve interior samples for independent validation.
+For a regulator or power_converter, capture evidence that supports meaningful
+range validation of regulation, transfer, load, line, startup, or another public
+pin behavior. Prefer a datasheet-cited reference_curve when one exists. Honest
+tabular scalar bounds remain valid when the datasheet has no curve; record their
+operating conditions explicitly so the validation plan can strengthen them
+across a DC or transient range.
+The server deterministically renders every cited modeled-requirement PDF page
+and binds that trusted page image into validation/UI evidence; an optional crop
+is only a digitization aid and never replaces the cited page.
 Scalar specifications are equally valid; do not force every device into a
 transient graph workflow.
 
@@ -72,6 +81,9 @@ export function buildValidationPlanPrompt(input: { contract: ModelContract; feed
   const modeled_ids = input.contract.characterization.requirements
     .filter(({ support }) => support.status === "modeled")
     .map(({ requirement_id }) => requirement_id)
+  const requires_range_case =
+    input.contract.characterization.family === "regulator" ||
+    input.contract.characterization.family === "power_converter"
   return `Design a declarative electrical validation plan for the supplied model contract.
 
 Read AGENTS.md, model-contract.json, model-interface.json,
@@ -95,8 +107,12 @@ element and compare against a target+tolerance, bounds, or sampled reference
 curve after the server binds it to the linked requirement.
 
 Cover each modeled requirement at least once: ${modeled_ids.join(", ")}.
-Do not create cases for documented_only requirements. Use operating-point and DC
-sweeps for static limits, transient only for actual dynamics, and sufficiently
+${requires_range_case ? "This device family requires at least one meaningful DC sweep or transient case; isolated operating points will be rejected.\n" : ""}
+Do not create cases for documented_only requirements. All observations grouped
+into one case must cite the
+same canonical datasheet page/image; split requirements with different evidence
+into separate cases. Use operating-point and DC sweeps for static limits,
+transient only for actual dynamics, and sufficiently
 broad ranges to expose interpolation or operating-region errors. A DC sweep may
 strengthen an operating-point check when the same scalar target/bounds apply at
 every sample. If the expected value changes across a DC or transient domain, the

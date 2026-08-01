@@ -42,7 +42,14 @@ export async function getBenchmarkReferenceImage(
 
   let image: Awaited<ReturnType<typeof resolveBenchmarkReferenceImage>>
   try {
-    image = await resolveBenchmarkReferenceImage({ job_id, model_dir, benchmark_id })
+    const model_run = context.model_run_store.getModelRun(model_run_id)
+    image = await resolveBenchmarkReferenceImage({
+      job_id,
+      model_dir,
+      benchmark_id,
+      prefer_current_preview: model_run?.validation?.artifact_state === "candidate",
+      current_preview_generation: model_run?.validation?.preview_generation,
+    })
   } catch (error) {
     return acceptedPublicationErrorResponse({
       job_id,

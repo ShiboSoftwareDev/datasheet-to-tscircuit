@@ -396,6 +396,28 @@ export class ModelRunStore {
     })
   }
 
+  /**
+   * Atomically projects a fully persisted, non-accepted candidate validation
+   * bundle into the live view. Accepted model fields remain untouched until the
+   * publication commit barrier is crossed.
+   */
+  projectCandidateValidation(
+    model_run_id: string,
+    input: {
+      validation: NonNullable<ModelRun["validation"]>
+      preview_options: ModelPreviewOption[]
+      previews: Pick<ModelRun, "circuit_preview" | "reference_preview">
+    },
+  ): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.validation = input.validation
+      candidate.preview_options = input.preview_options
+      candidate.circuit_preview = input.previews.circuit_preview
+      candidate.reference_preview = input.previews.reference_preview
+    })
+  }
+
   extendModelRun(model_run_id: string, additional_effort: number): ExtendModelRunResult {
     const record = this.run_map.get(model_run_id)
     if (!record) return { status: "not_found" }

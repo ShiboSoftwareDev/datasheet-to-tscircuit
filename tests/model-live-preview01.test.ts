@@ -167,6 +167,58 @@ test("reference graphs render minimum and maximum bound geometry", () => {
   expect(html).toContain("Datasheet bounds")
 })
 
+test("singleton reference and result values render visible point markers", () => {
+  const html = renderToStaticMarkup(
+    createElement(ReferenceGraph, {
+      preview: {
+        title: "Quiescent current operating point",
+        source_file: "validation-plan.json",
+        x_axis_label: "Operating point",
+        y_axis_label: "Current",
+        y_axis_unit: "A",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [{ x: 0, y: 0.00064 }],
+        result_points: [{ x: 0, y: 0.00063 }],
+        result_status: "verified",
+        updated_at: "2026-08-01T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html).toContain('class="reference-point-markers"')
+  expect(html).toContain('class="reference-point"')
+  expect(html).toContain('class="result-point-markers"')
+  expect(html).toContain('class="result-point"')
+  expect(html.match(/<circle/g)).toHaveLength(2)
+})
+
+test("a singleton result remains visible when the reference is expressed as bounds", () => {
+  const html = renderToStaticMarkup(
+    createElement(ReferenceGraph, {
+      preview: {
+        title: "Input loading operating point",
+        source_file: "validation-plan.json",
+        x_axis_label: "Operating point",
+        y_axis_label: "Current",
+        y_axis_unit: "A",
+        x_scale: "linear",
+        y_scale: "linear",
+        reference_points: [],
+        reference_bounds: { min: 0, max: 0.0001 },
+        result_points: [{ x: 0, y: 0.000085 }],
+        result_status: "verified",
+        updated_at: "2026-08-01T00:00:00.000Z",
+      },
+    }),
+  )
+
+  expect(html).toContain('class="result-point"')
+  expect(html.match(/<circle/g)).toHaveLength(1)
+  expect(html).toContain('class="reference-bound reference-bound-min"')
+  expect(html).toContain('class="reference-bound reference-bound-max"')
+})
+
 test("failed and cancelled server cases are never labelled as verified", () => {
   const failed_html = renderToStaticMarkup(
     createElement(ReferenceGraph, {
@@ -374,6 +426,7 @@ test("the datasheet image stays visible above a separate reference graph strip",
   )
 
   expect(html).toContain('<img class="model-datasheet-reference-image"')
+  expect(html).toContain("generation=2026-07-22T00%3A00%3A00.000Z")
   expect(html).not.toContain('<a class="model-datasheet-reference-image"')
   expect(html).not.toContain("Open the full datasheet graph reference")
   expect(html).not.toContain('class="reference-view-tabs"')

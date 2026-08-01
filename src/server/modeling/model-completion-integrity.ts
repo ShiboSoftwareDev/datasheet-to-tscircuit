@@ -293,6 +293,7 @@ export function validateModelCompletionIntegrity(
       manifest,
       model_source: input.model_source,
       model_requirements: contract.characterization.requirements,
+      model_family: contract.characterization.family,
     })
     const result = parsePassedResult(input.result, plan)
     const mismatches = (Object.keys(current_hashes) as Array<keyof ValidationInputHashes>).filter(

@@ -1,4 +1,4 @@
-import type { ModelInterface, ModelRequirement } from "@/server/modeling/types"
+import type { ModelFamily, ModelInterface, ModelRequirement } from "@/server/modeling/types"
 import type { ModelManifest } from "@/shared/job-types"
 
 export type SpiceEndpoint = "gnd" | `dut.${string}` | `net.${string}`
@@ -249,6 +249,7 @@ export type ValidationAppendLogger = (
 interface ValidationContextBase {
   model_requirements: readonly ModelRequirement[]
   model_source?: string
+  model_family?: ModelFamily
 }
 
 export type ValidationContext = ValidationContextBase &

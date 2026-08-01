@@ -225,6 +225,47 @@ describe("ValidationPlan contract", () => {
     ])
   })
 
+  test("regulator and power-converter plans must exercise a real operating range", () => {
+    const scalar_requirement: ModelRequirement = {
+      requirement_id: "output_voltage",
+      title: "Output voltage",
+      behavior: "Keep output voltage inside datasheet bounds",
+      analysis: "operating_point",
+      support: { status: "modeled" },
+      conditions: { input_voltage_range: "4.5 V to 18 V" },
+      expected: { unit: "V", min: 4.8, max: 5.2 },
+      sources: [{ page: 3, locator: "Electrical characteristics", statement: "Output bounds" }],
+    }
+    const swept_plan = structuredClone(validPlan())
+    const validation_case = swept_plan.cases[0]!
+    validation_case.requirement_ids = ["output_voltage"]
+    validation_case.observations = [
+      {
+        ...validation_case.observations[0]!,
+        requirement_id: "output_voltage",
+        reference: { type: "bounds", min: 4.8, max: 5.2 },
+      },
+    ]
+    swept_plan.cases = [validation_case]
+    const isolated_plan = structuredClone(swept_plan)
+    isolated_plan.cases[0]!.analysis = { type: "operating_point" }
+
+    expect(() =>
+      parseValidationPlan(isolated_plan, {
+        model_interface,
+        model_requirements: [scalar_requirement],
+        model_family: "power_converter",
+      }),
+    ).toThrow(/insufficient_operating_range_coverage/)
+    expect(() =>
+      parseValidationPlan(swept_plan, {
+        model_interface,
+        model_requirements: [scalar_requirement],
+        model_family: "power_converter",
+      }),
+    ).not.toThrow()
+  })
+
   test("materializes references from the model contract and rejects agent-authored changes", () => {
     const raw_plan = structuredClone(validPlan())
     const observation = raw_plan.cases[0]?.observations[0]
@@ -275,6 +316,115 @@ describe("ValidationPlan contract", () => {
         "requirement_analysis_mismatch",
       )
     }
+  })
+
+  test("binds observation evidence and curve axes to the immutable requirement", () => {
+    const requirements = structuredClone(model_requirements)
+    const curve_requirement = requirements[0]
+    const scalar_requirement = requirements[1]
+    if (!curve_requirement?.reference_curve || !scalar_requirement) {
+      throw new Error("Expected curve and scalar requirements")
+    }
+    curve_requirement.reference_curve.image = "evidence/figures/dc-gain.png"
+    curve_requirement.sources = [
+      {
+        page: 8,
+        locator: "Figure 4",
+        statement: "DC transfer characteristic",
+        image: "evidence/figures/dc-gain.png",
+      },
+    ]
+    scalar_requirement.sources = [
+      {
+        page: 11,
+        locator: "Electrical characteristics",
+        statement: "Transient output range",
+        image: "evidence/tables/output-range.png",
+      },
+    ]
+
+    const parsed = parseValidationPlan(validPlan(), {
+      model_interface,
+      model_source,
+      model_requirements: requirements,
+    })
+    expect(parsed.cases[0]?.observations[0]?.evidence).toEqual({
+      page: 8,
+      image: "evidence/figures/dc-gain.png",
+      metadata: {
+        figure: "Figure 4",
+        x_quantity: "input voltage",
+        x_unit: "V",
+        y_quantity: "output voltage",
+        y_unit: "V",
+      },
+    })
+    expect(parsed.cases[1]?.observations[0]?.evidence).toEqual({
+      page: 11,
+      image: "evidence/tables/output-range.png",
+      metadata: { figure: "Electrical characteristics" },
+    })
+
+    const exactly_bound_plan = validPlan()
+    const exactly_bound_observation = exactly_bound_plan.cases[0]?.observations[0]
+    if (!exactly_bound_observation) throw new Error("Expected a DC observation")
+    exactly_bound_observation.evidence = parsed.cases[0]?.observations[0]?.evidence
+    expect(
+      parseValidationPlan(exactly_bound_plan, {
+        model_interface,
+        model_source,
+        model_requirements: requirements,
+      }).cases[0]?.observations[0]?.evidence,
+    ).toEqual(parsed.cases[0]?.observations[0]?.evidence)
+
+    const tampered_plan = structuredClone(exactly_bound_plan)
+    const tampered_observation = tampered_plan.cases[0]?.observations[0]
+    if (!tampered_observation?.evidence) throw new Error("Expected bound evidence")
+    tampered_observation.evidence.page = 99
+    try {
+      parseValidationPlan(tampered_plan, {
+        model_interface,
+        model_source,
+        model_requirements: requirements,
+      })
+      throw new Error("Expected ValidationPlanError")
+    } catch (error) {
+      expect((error as ValidationPlanError).errors).toContainEqual({
+        path: "cases[0].observations[0].evidence",
+        code: "requirement_evidence_mismatch",
+        message: 'must exactly match the server-owned evidence for requirement "dc_gain"',
+      })
+    }
+  })
+
+  test("requires each case to use one canonical datasheet evidence page", () => {
+    const first_requirement: ModelRequirement = {
+      ...structuredClone(model_requirements[0]!),
+      sources: [{ page: 4, locator: "Figure 1", statement: "Primary transfer curve" }],
+    }
+    const second_requirement: ModelRequirement = {
+      ...structuredClone(first_requirement),
+      requirement_id: "secondary_gain",
+      title: "Secondary gain",
+      sources: [{ page: 9, locator: "Figure 8", statement: "Secondary transfer curve" }],
+    }
+    const raw_plan = structuredClone(validPlan())
+    const validation_case = raw_plan.cases[0]!
+    validation_case.requirement_ids = ["dc_gain", "secondary_gain"]
+    validation_case.observations.push({
+      ...structuredClone(validation_case.observations[0]!),
+      id: "secondary_output_voltage",
+      requirement_id: "secondary_gain",
+    })
+    raw_plan.cases = [validation_case]
+
+    expect(() =>
+      parseValidationPlan(raw_plan, {
+        model_interface,
+        model_source,
+        model_requirements: [first_requirement, second_requirement],
+      }),
+    ).toThrow(/mixed_case_evidence/)
   })
 
   test("intersects an INA-like typical-current band with its hard maximum", () => {

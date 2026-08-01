@@ -3,8 +3,16 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ModelRunStore } from "@/server/model-run-store"
-import { persistCandidateValidationUi } from "@/server/model-workflow/stage-helpers"
-import { createModelManifest, type GeneratedModel, type ModelContract } from "@/server/modeling"
+import {
+  persistCandidateValidationUi,
+  projectCandidateValidationUi,
+} from "@/server/model-workflow/stage-helpers"
+import {
+  createModelManifest,
+  loadStoredModelPreview,
+  type GeneratedModel,
+  type ModelContract,
+} from "@/server/modeling"
 import {
   hashValidationInputs,
   type ValidationPlan,
@@ -171,7 +179,9 @@ test("even passing validation stays candidate-private until integrated publicati
     plan,
     result: resultFor(failed, true),
     generated: failed,
+    contract,
     immutable_artifact_dir,
+    preview_generation: `fixture-${failed.manifest.revision}`,
   })
 
   expect(await readFile(join(model_dir, "model.lib"), "utf8")).toBe(accepted_source)
@@ -185,9 +195,100 @@ test("even passing validation stays candidate-private until integrated publicati
   ).toMatchObject({
     passed: true,
   })
+  expect(await Bun.file(join(immutable_artifact_dir, "cases", "output.preview.json")).exists()).toBe(true)
+  expect(await Bun.file(join(immutable_artifact_dir, "cases", "output.circuit.tsx")).exists()).toBe(true)
   expect(store.getModelRun("accepted_model")).toMatchObject({
     model_source: accepted_source,
     model_card: accepted_card,
     manifest: accepted_manifest,
   })
+})
+
+test("a failed candidate bundle is atomically projected into the live run without accepting it", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "live-candidate-artifacts-"))
+  temporary_directories.push(model_dir)
+  const immutable_artifact_dir = join(model_dir, "candidates", "failed", "validation")
+  const evidence_dir = join(model_dir, "attempts", "run", "evidence")
+  await Promise.all([
+    mkdir(immutable_artifact_dir, { recursive: true }),
+    mkdir(evidence_dir, { recursive: true }),
+  ])
+  const failed_source = ".SUBCKT ACCEPTED OUT\nR1 OUT 0 1k\n.ENDS ACCEPTED\n"
+  const failed: GeneratedModel = {
+    source: failed_source,
+    card: "Failed candidate card\n",
+    manifest: createModelManifest({
+      model_interface: contract.interface,
+      model_source: failed_source,
+      simulator: "ngspice",
+    }),
+  }
+  const store = new ModelRunStore()
+  store.createModelRun({
+    model_run_id: "live_model",
+    job_id: "live_job",
+    model_dir,
+    effort_multiplier: 1,
+  })
+  const projection = await persistCandidateValidationUi({
+    plan,
+    result: resultFor(failed, false),
+    generated: failed,
+    contract,
+    immutable_artifact_dir,
+    preview_generation: `fixture-${failed.manifest.revision}`,
+  })
+  await mkdir(join(immutable_artifact_dir, "output"), { recursive: true })
+  await Bun.write(join(immutable_artifact_dir, "output", "result.raw"), "large private simulator trace")
+  await projectCandidateValidationUi({
+    model_run_store: store,
+    model_run_id: "live_model",
+    model_dir,
+    immutable_artifact_dir,
+    evidence_dir,
+    revision: failed.manifest.revision,
+    projection,
+    signal: new AbortController().signal,
+  })
+
+  expect(store.getModelRun("live_model")).toMatchObject({
+    preview_options: [{ benchmark_id: "output" }],
+    validation: {
+      benchmark_count: 1,
+      passing_count: 0,
+      all_passed: false,
+      scope: {
+        total_requirement_count: 1,
+        modeled_requirement_count: 1,
+        documented_only_requirement_count: 0,
+        validated_sample_count: 1,
+        scalar_observation_count: 1,
+        curve_observation_count: 0,
+        quality: "scalar_only",
+      },
+    },
+    circuit_preview: { source_file: "validation/cases/output.circuit.tsx" },
+    reference_preview: { benchmark_id: "output", result_status: "failed" },
+  })
+  expect(
+    await loadStoredModelPreview({
+      job_id: "live_job",
+      model_dir,
+      case_id: "output",
+      prefer_current_preview: true,
+      current_preview_generation: `fixture-${failed.manifest.revision}`,
+    }),
+  ).toMatchObject({ reference_preview: { result_status: "failed" } })
+  expect(await Bun.file(join(model_dir, "model.lib")).exists()).toBe(false)
+  expect(await Bun.file(join(model_dir, "current-preview.json")).exists()).toBe(true)
+  expect(
+    await Bun.file(
+      join(model_dir, "current-previews", `fixture-${failed.manifest.revision}`, "candidate-preview.json"),
+    ).exists(),
+  ).toBe(true)
+  expect(
+    await Bun.file(
+      join(model_dir, "current-previews", `fixture-${failed.manifest.revision}`, "output", "result.raw"),
+    ).exists(),
+  ).toBe(false)
 })

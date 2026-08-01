@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { isCircuitJson } from "../../component-circuit-json"
 import { createStageWorkspace } from "../../infrastructure/artifacts"
 import { buildTscircuitSource } from "../../infrastructure/tscircuit"
 import {
@@ -55,6 +56,17 @@ export const publishModelStage = defineModelStage({
     }
     const plan = completion_integrity.plan
     const result = completion_integrity.result
+    const candidate_ui = (await readJson(
+      join(dirname(dependency_outputs.repair_model.result_path), "model-ui.json"),
+    ).catch(() => ({}))) as {
+      selected_previews?: Record<string, { circuit_preview?: { circuit_json?: unknown } }>
+    }
+    const circuit_json_by_case = Object.fromEntries(
+      plan.cases.flatMap(({ id }) => {
+        const circuit_json = candidate_ui.selected_previews?.[id]?.circuit_preview?.circuit_json
+        return isCircuitJson(circuit_json) ? [[id, circuit_json]] : []
+      }),
+    )
 
     let prepared_for_cleanup: Awaited<ReturnType<typeof prepareModelPublication>> | undefined
     let publication_committed = false
@@ -107,6 +119,7 @@ export const publishModelStage = defineModelStage({
             evidence_dir: dependency_outputs.repair_model.evidence_dir,
             wrapper_source,
             circuit_json: build.circuit_json,
+            circuit_json_by_case,
             signal,
           })
           prepared_for_cleanup = prepared

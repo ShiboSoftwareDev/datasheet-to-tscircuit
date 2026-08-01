@@ -36,25 +36,34 @@ function retainedAcceptedWarnings(input: {
       : input.state === "failed"
         ? "because the latest replacement attempt failed"
         : "because the latest replacement attempt was stopped"
+  const candidate_is_visible = input.state !== "running" && current.validation?.artifact_state === "candidate"
+  const visibility_copy = candidate_is_visible
+    ? "the validation below belongs to the unaccepted candidate, while accepted downloads remain available"
+    : "its downloads remain available, but its metrics are hidden so they are not attributed to the new attempt"
   return [
     ...retained,
-    `${RETAINED_ACCEPTED_WARNING_PREFIX} ${revision} ${attempt_state}; its downloads remain available, but its metrics are hidden so they are not attributed to the new attempt.`,
+    `${RETAINED_ACCEPTED_WARNING_PREFIX} ${revision} ${attempt_state}; ${visibility_copy}.`,
   ]
 }
 
-function markAcceptedArtifactsAsRetained(input: {
+export function markAcceptedArtifactsAsRetained(input: {
   context: ModelRunnerContext
   model_run_id: string
   state: "running" | "failed" | "cancelled"
 }): string[] | undefined {
   const warnings = retainedAcceptedWarnings(input)
   if (!warnings) return undefined
+  const current = input.context.model_run_store.getModelRun(input.model_run_id)
+  const preserve_candidate_projection =
+    input.state !== "running" && current?.validation?.artifact_state === "candidate"
   input.context.model_run_store.updateModelRun(input.model_run_id, {
     warnings,
-    validation: undefined,
+    ...(preserve_candidate_projection ? {} : { validation: undefined }),
   })
-  input.context.model_run_store.updatePreviewOptions(input.model_run_id, [])
-  input.context.model_run_store.updatePreviews(input.model_run_id, {})
+  if (!preserve_candidate_projection) {
+    input.context.model_run_store.updatePreviewOptions(input.model_run_id, [])
+    input.context.model_run_store.updatePreviews(input.model_run_id, {})
+  }
   return warnings
 }
 

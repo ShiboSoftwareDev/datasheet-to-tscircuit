@@ -636,6 +636,105 @@ test("model API serves the saved datasheet image for each benchmark", async () =
   await rm(job_dir, { recursive: true, force: true })
 })
 
+test("model preview APIs bind candidate generations exactly and never mistake queued accepted state", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-preview-generation-api-"))
+  const model_dir = join(job_dir, "spice")
+  const generation_a = "candidate-generation-a1"
+  const generation_b = "candidate-generation-b2"
+  const writePreviewBundle = async (root: string, label: string, image_byte: number) => {
+    await Promise.all([
+      mkdir(join(root, "cases"), { recursive: true }),
+      mkdir(join(root, "evidence"), { recursive: true }),
+    ])
+    await Promise.all([
+      Bun.write(
+        join(root, "cases", "output.preview.json"),
+        JSON.stringify({ reference_preview: { title: label } }),
+      ),
+      Bun.write(
+        join(root, "validation-plan.json"),
+        JSON.stringify({
+          cases: [
+            {
+              id: "output",
+              observations: [{ evidence: { image: "evidence/source-page-1.png", page: 1 } }],
+            },
+          ],
+        }),
+      ),
+      Bun.write(join(root, "evidence", "source-page-1.png"), new Uint8Array([137, 80, 78, 71, image_byte])),
+    ])
+  }
+  await Promise.all([
+    writePreviewBundle(join(model_dir, "current-previews", generation_a), "generation a", 1),
+    writePreviewBundle(join(model_dir, "current-previews", generation_b), "generation b", 2),
+  ])
+
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  job_store.createJob({ job_id: "job_generation", job_dir, file_name: "part.pdf" })
+  model_run_store.createModelRun({
+    model_run_id: "model_generation",
+    job_id: "job_generation",
+    model_dir,
+    effort_multiplier: 1,
+  })
+  const validationSummary = (artifact_state: "candidate" | "accepted", preview_generation?: string) => ({
+    artifact_state,
+    model_revision: artifact_state === "candidate" ? "candidate-r2" : "accepted-r1",
+    ...(preview_generation ? { preview_generation } : {}),
+    benchmark_count: 1,
+    passing_count: 0,
+    critical_count: 1,
+    critical_passing_count: 0,
+    all_critical_passed: false,
+    all_passed: false,
+    benchmarks: [],
+  })
+  model_run_store.updateModelRun("model_generation", {
+    status: "validating",
+    validation: validationSummary("candidate", generation_a),
+  })
+  const handle = createModelRunApiHandler({
+    job_store,
+    model_run_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+  })
+
+  const candidate_preview = await handle(
+    new Request("http://localhost/api/model-run/preview?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(await candidate_preview?.json()).toMatchObject({ reference_preview: { title: "generation a" } })
+  const candidate_image = await handle(
+    new Request("http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(new Uint8Array(await candidate_image!.arrayBuffer())).toEqual(new Uint8Array([137, 80, 78, 71, 1]))
+
+  await Promise.all([
+    writePreviewBundle(join(model_dir, "validation"), "accepted root", 3),
+    writePreviewBundle(model_dir, "accepted root", 3),
+    writePreviewBundle(join(model_dir, "current-preview"), "stale mutable preview", 4),
+  ])
+  model_run_store.updateModelRun("model_generation", {
+    status: "complete",
+    is_complete: true,
+    validation: validationSummary("accepted"),
+  })
+  expect(model_run_store.extendModelRun("model_generation", 1).status).toBe("extended")
+  expect(model_run_store.getModelRun("model_generation")?.status).toBe("queued")
+
+  const queued_preview = await handle(
+    new Request("http://localhost/api/model-run/preview?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(await queued_preview?.json()).toMatchObject({ reference_preview: { title: "accepted root" } })
+  const queued_image = await handle(
+    new Request("http://localhost/api/model-run/reference-image?job_id=job_generation&benchmark_id=output"),
+  )
+  expect(new Uint8Array(await queued_image!.arrayBuffer())).toEqual(new Uint8Array([137, 80, 78, 71, 3]))
+  await rm(job_dir, { recursive: true, force: true })
+})
+
 test("model artifact endpoints report a corrupt accepted publication", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-api-corrupt-publication-"))
   const model_dir = join(job_dir, "spice")

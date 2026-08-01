@@ -178,6 +178,21 @@ function parseCase(
       new Set(requirement_ids),
     ),
   )
+  const evidence_sources = new Set(
+    observations.map((observation) =>
+      JSON.stringify({
+        page: observation.evidence?.page,
+        image: observation.evidence?.image,
+      }),
+    ),
+  )
+  if (evidence_sources.size > 1) {
+    collector.add(
+      `${path}.observations`,
+      "mixed_case_evidence",
+      "all observations in one case must use the same datasheet page/image; split differently sourced requirements into separate cases",
+    )
+  }
   const observed_requirement_ids = new Set(observations.map(({ requirement_id }) => requirement_id))
   requirement_ids.forEach((requirement_id, requirement_index) => {
     if (!observed_requirement_ids.has(requirement_id)) {
@@ -264,6 +279,16 @@ export function parseValidationPlan(value: unknown, context: ValidationContext):
         collector,
       ),
     )
+  if (
+    (context.model_family === "regulator" || context.model_family === "power_converter") &&
+    !cases.some(({ analysis }) => analysis.type === "dc_sweep" || analysis.type === "transient")
+  ) {
+    collector.add(
+      "cases",
+      "insufficient_operating_range_coverage",
+      `${context.model_family} validation must exercise at least one modeled behavior with a DC sweep or transient analysis; isolated operating points are insufficient`,
+    )
+  }
   const first_case_index = new Map<string, number>()
   cases.forEach((validation_case, index) => {
     const existing = first_case_index.get(validation_case.id)

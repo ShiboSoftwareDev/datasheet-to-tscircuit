@@ -25,6 +25,6 @@ export {
   MissingRawVectorError,
   selectAnalysisPlot,
 } from "./raw-series"
-export { type RunSpiceValidationInput, runSpiceValidation } from "./runner"
+export { classifyNgspiceFailure, type RunSpiceValidationInput, runSpiceValidation } from "./runner"
 export { scoreObservation } from "./scoring"
 export type * from "./types"
