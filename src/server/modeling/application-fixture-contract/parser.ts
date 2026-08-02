@@ -14,6 +14,7 @@ import {
 import {
   ApplicationFixtureContractError,
   type ApplicationFixtureContract,
+  type ApplicationNonExecutableComponent,
   type ApplicationFixtureNodeEndpoint,
   type ApplicationFixtureNodeGroup,
   type ApplicationPassiveFixture,
@@ -61,6 +62,26 @@ function parseSourceTerminals(value: unknown, path: string): [string, string] {
     throw new ApplicationFixtureContractError(`${path} terminals must be distinct`)
   }
   return [first, second]
+}
+
+function parseNonExecutableComponent(value: unknown, path: string): ApplicationNonExecutableComponent {
+  const component = record(value, path)
+  exactKeys(component, ["reference", "kind", "source_terminals", "reason"], path)
+  if (component.reason !== "unsupported_component_kind" && component.reason !== "missing_positive_si_value") {
+    throw new ApplicationFixtureContractError(
+      `${path}.reason must be unsupported_component_kind or missing_positive_si_value`,
+    )
+  }
+  const source_terminals = parseStringArray(component.source_terminals, `${path}.source_terminals`)
+  if (source_terminals.length === 0) {
+    throw new ApplicationFixtureContractError(`${path}.source_terminals must not be empty`)
+  }
+  return {
+    reference: requiredString(component.reference, `${path}.reference`),
+    kind: requiredString(component.kind, `${path}.kind`),
+    source_terminals,
+    reason: component.reason,
+  }
 }
 
 function parsePassiveFixture(value: unknown, path: string): ApplicationPassiveFixture {
@@ -131,7 +152,8 @@ function assertParsedContractTopology(contract: ApplicationFixtureContract, path
     if (
       contract.ground_node_group_id !== null ||
       contract.node_groups.length !== 0 ||
-      contract.fixtures.length !== 0
+      contract.fixtures.length !== 0 ||
+      (contract.non_executable_components?.length ?? 0) !== 0
     ) {
       throw new ApplicationFixtureContractError(
         `${path} not_present contract must have null ground and empty topology`,
@@ -160,6 +182,16 @@ function assertParsedContractTopology(contract: ApplicationFixtureContract, path
   const fixture_ids = contract.fixtures.map(({ id }) => id)
   if (new Set(fixture_ids).size !== fixture_ids.length) {
     throw new ApplicationFixtureContractError(`${path}.fixtures ids must be unique`)
+  }
+  const non_executable_components = contract.non_executable_components ?? []
+  const projected_references = [
+    ...contract.fixtures.map(({ reference }) => reference.toLowerCase()),
+    ...non_executable_components.map(({ reference }) => reference.toLowerCase()),
+  ]
+  if (new Set(projected_references).size !== projected_references.length) {
+    throw new ApplicationFixtureContractError(
+      `${path} component references must appear in exactly one executable or non-executable projection`,
+    )
   }
 
   const source_endpoint_to_node = new Map<string, ApplicationFixtureNodeEndpoint>()
@@ -224,9 +256,33 @@ function assertParsedContractTopology(contract: ApplicationFixtureContract, path
       fixture_source_endpoints.push(source_terminal.toLowerCase())
     }
   }
-  if (stableLowercase(non_u1_source_endpoints) !== stableLowercase(fixture_source_endpoints)) {
+  const non_executable_source_endpoints: string[] = []
+  for (const component of non_executable_components) {
+    for (const source_terminal of component.source_terminals) {
+      const parsed_terminal = componentEndpoint(source_terminal)
+      if (!parsed_terminal || parsed_terminal.reference.toLowerCase() !== component.reference.toLowerCase()) {
+        throw new ApplicationFixtureContractError(
+          `${path}.non_executable_components.${component.reference}.source_terminals must belong to ${component.reference}`,
+        )
+      }
+      const expected_node = source_endpoint_to_node.get(source_terminal.toLowerCase())
+      if (!expected_node) {
+        throw new ApplicationFixtureContractError(
+          `${path}.non_executable_components.${component.reference} references source terminal ${source_terminal} outside the application node groups`,
+        )
+      }
+      non_executable_source_endpoints.push(source_terminal.toLowerCase())
+    }
+  }
+  const projected_source_endpoints = [...fixture_source_endpoints, ...non_executable_source_endpoints]
+  if (new Set(projected_source_endpoints).size !== projected_source_endpoints.length) {
     throw new ApplicationFixtureContractError(
-      `${path}.fixtures must cover every non-U1 component terminal exactly once`,
+      `${path} non-U1 source terminals must appear in exactly one executable or non-executable projection`,
+    )
+  }
+  if (stableLowercase(non_u1_source_endpoints) !== stableLowercase(projected_source_endpoints)) {
+    throw new ApplicationFixtureContractError(
+      `${path} executable and non-executable projections must cover every non-U1 component terminal exactly once`,
     )
   }
 }
@@ -254,6 +310,7 @@ export function parseApplicationFixtureContract(
       "ground_node_group_id",
       "node_groups",
       "fixtures",
+      "non_executable_components",
       "contract_sha256",
     ],
     path,
@@ -267,6 +324,12 @@ export function parseApplicationFixtureContract(
   }
   if (!Array.isArray(contract.node_groups) || !Array.isArray(contract.fixtures)) {
     throw new ApplicationFixtureContractError(`${path}.node_groups and fixtures must be arrays`)
+  }
+  if (
+    contract.non_executable_components !== undefined &&
+    !Array.isArray(contract.non_executable_components)
+  ) {
+    throw new ApplicationFixtureContractError(`${path}.non_executable_components must be an array`)
   }
   const parsed: ApplicationFixtureContract = {
     version: 1,
@@ -284,6 +347,13 @@ export function parseApplicationFixtureContract(
     fixtures: contract.fixtures.map((fixture, index) =>
       parsePassiveFixture(fixture, `${path}.fixtures[${index}]`),
     ),
+    ...(contract.non_executable_components === undefined
+      ? {}
+      : {
+          non_executable_components: contract.non_executable_components.map((component, index) =>
+            parseNonExecutableComponent(component, `${path}.non_executable_components[${index}]`),
+          ),
+        }),
     contract_sha256: requiredSha256(contract.contract_sha256, `${path}.contract_sha256`),
   }
   assertParsedContractTopology(parsed, path)

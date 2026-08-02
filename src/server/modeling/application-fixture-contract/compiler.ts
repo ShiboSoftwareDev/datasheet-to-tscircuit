@@ -8,6 +8,7 @@ import {
   ApplicationFixtureContractError,
   type ApplicationFixtureContract,
   type ApplicationFixtureContractPayload,
+  type ApplicationNonExecutableComponent,
   type ApplicationFixtureNodeEndpoint,
   type ApplicationFixtureNodeGroup,
   type ApplicationPassiveFixture,
@@ -116,9 +117,7 @@ function compilePassiveFixture(input: {
 }): ApplicationPassiveFixture {
   const type = passiveType(input.component.kind)
   if (!type) {
-    throw new ApplicationFixtureContractError(
-      `typical application component ${input.component.reference} has unsupported executable kind ${JSON.stringify(input.component.kind)}`,
-    )
+    throw new ApplicationFixtureContractError("compilePassiveFixture requires a supported passive kind")
   }
   if (input.endpoints.length !== 2) {
     throw new ApplicationFixtureContractError(
@@ -173,24 +172,62 @@ interface UnclassifiedNodeGroup extends Omit<ApplicationFixtureNodeGroup, "is_gr
 }
 
 function classifyGroundNodeGroups(groups: UnclassifiedNodeGroup[]): ApplicationFixtureNodeGroup[] {
-  const explicit = groups.filter(({ has_explicit_ground_terminal }) => has_explicit_ground_terminal)
-  const candidates =
-    explicit.length > 0 ? explicit : groups.filter(({ has_ground_net_name }) => has_ground_net_name)
-  if (candidates.length !== 1) {
+  const candidates = groups.filter(
+    ({ has_explicit_ground_terminal, has_ground_net_name }) =>
+      has_explicit_ground_terminal || has_ground_net_name,
+  )
+  if (candidates.length === 0) {
     throw new ApplicationFixtureContractError(
-      `documented typical application must identify exactly one external ground node group; found ${candidates.length}`,
+      "documented typical application must identify an external or authoritative DUT ground node group",
     )
   }
-  const ground_id = candidates[0]!.id
-  return groups.map(({ has_explicit_ground_terminal: _explicit, has_ground_net_name: _named, ...group }) => ({
-    ...group,
-    is_ground: group.id === ground_id,
-  }))
+  const primary = candidates[0]!
+  const ground_ids = new Set(candidates.map(({ id }) => id))
+  const merged_ground: UnclassifiedNodeGroup = {
+    id: primary.id,
+    source_net: primary.source_net,
+    source_endpoints: candidates.flatMap(({ source_endpoints }) => source_endpoints),
+    dut_endpoints: candidates.flatMap(({ dut_endpoints }) => dut_endpoints),
+    external_terminals: candidates.flatMap(({ external_terminals }) => external_terminals),
+    has_explicit_ground_terminal: candidates.some(
+      ({ has_explicit_ground_terminal }) => has_explicit_ground_terminal,
+    ),
+    has_ground_net_name: candidates.some(({ has_ground_net_name }) => has_ground_net_name),
+  }
+  return groups.flatMap((group) => {
+    if (group.id !== primary.id && ground_ids.has(group.id)) return []
+    const selected = group.id === primary.id ? merged_ground : group
+    const { has_explicit_ground_terminal: _explicit, has_ground_net_name: _named, ...node_group } = selected
+    return [{ ...node_group, is_ground: selected.id === primary.id }]
+  })
+}
+
+function compileNonExecutableComponent(input: {
+  component: TypicalApplicationPlan["components"][number]
+  endpoints: Array<{ source_endpoint: string; terminal: string }>
+  reason: ApplicationNonExecutableComponent["reason"]
+}): ApplicationNonExecutableComponent {
+  if (input.endpoints.length === 0) {
+    throw new ApplicationFixtureContractError(
+      `typical application component ${input.component.reference} has no connected terminals`,
+    )
+  }
+  return {
+    reference: input.component.reference,
+    kind: input.component.kind,
+    source_terminals: [...input.endpoints]
+      .sort((left, right) => naturalTerminalCompare(left.terminal, right.terminal))
+      .map(({ source_endpoint }) => source_endpoint),
+    reason: input.reason,
+  }
 }
 
 /**
  * Compiles only canonical v4 input into an immutable, deterministic electrical contract.
- * It refuses incomplete U1 coverage, unsupported components, ambiguous ground, and guessed values.
+ * It refuses incomplete U1 coverage and guessed electrical behavior. Printed
+ * ground aliases are merged into the one SPICE reference node. Components that
+ * cannot be represented by the supported passive subset remain explicit as
+ * non-executable source components instead of aborting model preparation.
  */
 export function compileApplicationFixtureContract(input: {
   plan: TypicalApplicationPlan
@@ -295,12 +332,38 @@ export function compileApplicationFixtureContract(input: {
   const external_components = input.plan.components.filter(
     ({ reference }) => componentKey(reference) !== "u1",
   )
-  const fixtures = external_components.map((component) =>
-    compilePassiveFixture({
-      component,
-      endpoints: terminal_occurrences.get(componentKey(component.reference)) ?? [],
-    }),
-  )
+  const fixtures: ApplicationPassiveFixture[] = []
+  const non_executable_components: ApplicationNonExecutableComponent[] = []
+  for (const component of external_components) {
+    const endpoints = terminal_occurrences.get(componentKey(component.reference)) ?? []
+    const type = passiveType(component.kind)
+    if (!type) {
+      non_executable_components.push(
+        compileNonExecutableComponent({
+          component,
+          endpoints,
+          reason: "unsupported_component_kind",
+        }),
+      )
+      continue
+    }
+    if (endpoints.length !== 2) {
+      throw new ApplicationFixtureContractError(
+        `typical application ${type} ${component.reference} must have exactly two connected terminals; found ${endpoints.length}`,
+      )
+    }
+    if (type !== "diode" && parseApplicationEngineeringValue(component.value) === undefined) {
+      non_executable_components.push(
+        compileNonExecutableComponent({
+          component,
+          endpoints,
+          reason: "missing_positive_si_value",
+        }),
+      )
+      continue
+    }
+    fixtures.push(compilePassiveFixture({ component, endpoints }))
+  }
   if (new Set(fixtures.map(({ id }) => id)).size !== fixtures.length) {
     throw new ApplicationFixtureContractError(
       "typical application component references produce duplicate fixture identifiers",
@@ -315,6 +378,7 @@ export function compileApplicationFixtureContract(input: {
     ground_node_group_id: ground_group.id,
     node_groups,
     fixtures,
+    ...(non_executable_components.length > 0 ? { non_executable_components } : {}),
   }
   return { ...payload, contract_sha256: hashApplicationFixtureContract(payload) }
 }

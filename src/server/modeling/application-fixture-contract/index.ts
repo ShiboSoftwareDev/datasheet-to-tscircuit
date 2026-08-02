@@ -16,6 +16,8 @@ export {
   type ApplicationFixtureContract,
   type ApplicationFixtureNodeEndpoint,
   type ApplicationFixtureNodeGroup,
+  type ApplicationNonExecutableComponent,
+  type ApplicationNonExecutableReason,
   type ApplicationPassiveFixture,
   type ResolvedApplicationFixture,
   type ResolvedApplicationNodeGroup,

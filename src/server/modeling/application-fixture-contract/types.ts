@@ -46,6 +46,20 @@ export type ApplicationPassiveFixture =
       cathode: ApplicationFixtureNodeEndpoint
     })
 
+export type ApplicationNonExecutableReason = "unsupported_component_kind" | "missing_positive_si_value"
+
+/**
+ * A source-documented application component whose connectivity remains bound by
+ * the source-plan hash, but which cannot be projected into the supported passive
+ * SPICE subset without inventing behavior or a value.
+ */
+export interface ApplicationNonExecutableComponent {
+  reference: string
+  kind: string
+  source_terminals: string[]
+  reason: ApplicationNonExecutableReason
+}
+
 export interface ApplicationFixtureContractPayload {
   version: typeof APPLICATION_FIXTURE_CONTRACT_VERSION
   availability: TypicalApplicationPlan["availability"]
@@ -55,6 +69,7 @@ export interface ApplicationFixtureContractPayload {
   ground_node_group_id: string | null
   node_groups: ApplicationFixtureNodeGroup[]
   fixtures: ApplicationPassiveFixture[]
+  non_executable_components?: ApplicationNonExecutableComponent[]
 }
 
 /**

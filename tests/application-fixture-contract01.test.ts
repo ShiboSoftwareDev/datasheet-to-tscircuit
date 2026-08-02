@@ -11,6 +11,7 @@ import { buildValidationCircuitPreviews } from "@/server/model-workflow/validati
 import {
   ApplicationConditionConflictError,
   compileApplicationFixtureContract,
+  hashApplicationFixtureContract,
   parseApplicationFixtureContract,
   recompileApplicationFixtureContractFromSources,
   resolveApplicationFixtureForBinding,
@@ -117,6 +118,151 @@ test("server-owned application fixture contract derives ground from an authorita
     source_pdf_sha256: PDF_SHA256,
   })
   expect(contract.node_groups.find(({ is_ground }) => is_ground)?.source_net).toBe("RETURN")
+})
+
+test("server-owned application fixture contract merges printed GND and AGND aliases", () => {
+  const plan = run93Plan()
+  const ground = plan.connections.find(({ net }) => net === "GND")!
+  ground.pins = ground.pins.filter((endpoint) => endpoint !== "U1.AGND" && endpoint !== "R2.2")
+  plan.connections.push({ net: "AGND", pins: ["U1.AGND", "R2.2", "AGND"] })
+
+  const contract = compileApplicationFixtureContract({
+    plan,
+    model_interface: interface10Pin,
+    source_plan_sha256: PLAN_SHA256,
+    source_pdf_sha256: PDF_SHA256,
+  })
+
+  const ground_group = contract.node_groups.find(({ is_ground }) => is_ground)!
+  expect(contract.node_groups).toHaveLength(7)
+  expect(ground_group.source_net).toBe("GND")
+  expect(ground_group.external_terminals).toEqual(["GND", "AGND"])
+  expect(ground_group.dut_endpoints).toEqual(["dut.MODE", "dut.GND", "dut.AGND"])
+  expect(contract.fixtures.find(({ reference }) => reference === "R2")).toMatchObject({
+    negative: "gnd",
+  })
+  expect(parseApplicationFixtureContract(contract)).toEqual(contract)
+})
+
+test("server-owned application fixture contract retains documentary apparatus without inventing SPICE behavior", () => {
+  const model_interface: ModelInterface = {
+    version: 1,
+    part_number: "INA237",
+    entry_name: "INA237",
+    pins: [
+      ["1", "VS", "power_input"],
+      ["2", "GND", "ground"],
+      ["3", "A0", "input"],
+      ["4", "A1", "input"],
+      ["5", "VBUS", "input"],
+      ["6", "IN+", "input"],
+      ["7", "IN-", "input"],
+      ["8", "SCL", "input"],
+      ["9", "SDA", "input"],
+      ["10", "ALERT", "output"],
+    ].map(([physical_pin, label, role], index) => ({
+      physical_pin: physical_pin!,
+      component_pin: `pin${physical_pin}`,
+      source_port_id: `source_port_${index}`,
+      spice_node: label === "IN+" ? "IN" : label === "IN-" ? "IN_2" : label!,
+      labels: [label!],
+      role: role!,
+    })),
+  }
+  const plan = parseTypicalApplicationPlan(
+    {
+      version: 4,
+      availability: "documented",
+      pcb_implementation: "schematic_only",
+      title: "INA237 high-side sensing application",
+      description: "The printed application includes source, selector, load, and charger apparatus.",
+      source_references: [
+        {
+          page: 32,
+          figure: "High-Side Sensing Application Diagram",
+          method: "pdf_visual",
+          confidence: "high",
+          image: "visual-reference/typical-application.png",
+          render_dpi: 200,
+        },
+      ],
+      components: [
+        { reference: "U1", kind: "integrated_circuit", value: "INA237" },
+        { reference: "C1", kind: "capacitor", value: "100 nF" },
+        { reference: "R1", kind: "resistor", value: "10 kOhm" },
+        { reference: "R2", kind: "resistor", value: "10 kOhm" },
+        { reference: "R3", kind: "resistor", value: "10 kOhm" },
+        { reference: "B1", kind: "battery", value: "48V" },
+        { reference: "RSHUNT", kind: "resistor" },
+        { reference: "S1", kind: "switch" },
+        { reference: "L1", kind: "load", value: "LOAD" },
+        { reference: "CH1", kind: "charger", value: "CHARGER" },
+      ],
+      connections: [
+        { net: "VS", pins: ["U1.VS", "C1.1", "R1.1", "R2.1", "R3.1", "VS"] },
+        {
+          net: "GND",
+          pins: ["U1.GND", "U1.A0", "U1.A1", "C1.2", "B1.2", "L1.2", "CH1.2", "GND"],
+        },
+        { net: "48V_BATT", pins: ["B1.1", "U1.VBUS", "U1.IN+", "RSHUNT.1", "48V_BATT"] },
+        { net: "SENSE_RETURN", pins: ["U1.IN-", "RSHUNT.2", "S1.1", "S1.3", "CH1.1"] },
+        { net: "LOAD", pins: ["S1.2", "L1.1"] },
+        { net: "I2C_SCL", pins: ["U1.SCL", "R1.2"] },
+        { net: "I2C_SDA", pins: ["U1.SDA", "R2.2"] },
+        { net: "ALERT", pins: ["U1.ALERT", "R3.2"] },
+      ],
+    },
+    { part_number: "INA237" },
+  )
+
+  const contract = compileApplicationFixtureContract({
+    plan,
+    model_interface,
+    source_plan_sha256: PLAN_SHA256,
+    source_pdf_sha256: PDF_SHA256,
+  })
+
+  expect(contract.fixtures.map(({ reference }) => reference)).toEqual(["C1", "R1", "R2", "R3"])
+  expect(contract.non_executable_components).toEqual([
+    {
+      reference: "B1",
+      kind: "battery",
+      source_terminals: ["B1.1", "B1.2"],
+      reason: "unsupported_component_kind",
+    },
+    {
+      reference: "RSHUNT",
+      kind: "resistor",
+      source_terminals: ["RSHUNT.1", "RSHUNT.2"],
+      reason: "missing_positive_si_value",
+    },
+    {
+      reference: "S1",
+      kind: "switch",
+      source_terminals: ["S1.1", "S1.2", "S1.3"],
+      reason: "unsupported_component_kind",
+    },
+    {
+      reference: "L1",
+      kind: "load",
+      source_terminals: ["L1.1", "L1.2"],
+      reason: "unsupported_component_kind",
+    },
+    {
+      reference: "CH1",
+      kind: "charger",
+      source_terminals: ["CH1.1", "CH1.2"],
+      reason: "unsupported_component_kind",
+    },
+  ])
+  expect(parseApplicationFixtureContract(contract)).toEqual(contract)
+
+  const silently_dropped = structuredClone(contract)
+  silently_dropped.non_executable_components!.shift()
+  silently_dropped.contract_sha256 = hashApplicationFixtureContract(silently_dropped)
+  expect(() => parseApplicationFixtureContract(silently_dropped)).toThrow(
+    "must cover every non-U1 component terminal exactly once",
+  )
 })
 
 function run93Plan() {

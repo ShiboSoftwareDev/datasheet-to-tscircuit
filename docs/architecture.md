@@ -397,6 +397,17 @@ contract remains authoritative for scoring and publication. A regression model
 that matches every visible sample but misses a held-out sample fails full server
 scoring.
 
+The server compiles the documented typical application into an immutable
+application-fixture contract before characterization. Printed ground aliases
+such as GND, AGND, and PGND are merged into the one simulator reference node
+while their original source endpoints remain recorded. Only supported passives
+with a positive SI value become executable fixtures. Batteries, switches,
+loads, chargers, and valueless passives remain explicitly listed as
+`non_executable_components`; they are hash-bound to the retained source plan but
+are never assigned invented SPICE behavior. A graph that depends on an omitted
+value or apparatus must supply a supported, source-proven electrical binding or
+remain documented-only.
+
 Fresh executable characterization is intentionally narrower than the generic
 persisted schema: a modeled requirement must be a public-pin transient response
 with elapsed time in seconds, a digitized voltage reference curve, and the exact
