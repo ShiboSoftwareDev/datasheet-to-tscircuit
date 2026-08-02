@@ -630,6 +630,69 @@ test("evidence correction repairs a retained agent-71-shaped candidate without r
   ).toHaveLength(1)
 })
 
+test("evidence correction catches incomplete U1 coverage before model preparation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "datasheet-component-pipeline-pin-coverage-"))
+  temporary_directories.push(root)
+  const job_dir = join(root, "job")
+  await mkdir(job_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.4\n% deterministic fixture\n"),
+    Bun.write(join(job_dir, "package.json"), '{"private":true}\n'),
+    Bun.write(join(job_dir, "tsconfig.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.ts"), "export default {}\n"),
+  ])
+  const job_store = new JobStore()
+  job_store.createJob({
+    job_id: "component_pin_coverage",
+    job_dir,
+    file_name: "generic-2.pdf",
+  })
+  const agent_calls: string[] = []
+  const base_agent = deterministicAgent(agent_calls)
+  let extraction_attempt = 0
+  const correction_agent: AgentClient = {
+    async run(input) {
+      if (input.phase_label !== "Datasheet evidence extraction") return base_agent.run(input)
+      extraction_attempt += 1
+      const result = await base_agent.run(input)
+      if (extraction_attempt === 1) {
+        const incomplete_plan = structuredClone(application_plan)
+        incomplete_plan.connections[1]!.pins = incomplete_plan.connections[1]!.pins.filter(
+          (endpoint) => endpoint !== "U1.RETURN",
+        )
+        await Bun.write(
+          join(input.workspace, "typical-application-plan.json"),
+          `${JSON.stringify(incomplete_plan, null, 2)}\n`,
+        )
+      } else {
+        expect(input.prompt).toContain("Extracted application omits documented U1 pin 2 (RETURN)")
+      }
+      return result
+    },
+  }
+
+  await runJob(
+    { job_id: "component_pin_coverage" },
+    {
+      job_store,
+      agent_bin: "unused-agent",
+      tsci_bin: "fixture-tsci",
+      agent_client: correction_agent,
+      process_runner: new FakeTscircuitRunner(),
+    },
+  )
+
+  expect(job_store.getJob("component_pin_coverage")).toMatchObject({
+    display_status: "complete",
+    validation: { evidence: "passed" },
+  })
+  expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(2)
+  expect(
+    agent_calls.filter((phase) => phase === "Independent application connectivity verification"),
+  ).toHaveLength(1)
+})
+
 test("evidence correction reuses immutable reviewer observations across semantic repairs", async () => {
   const root = await mkdtemp(join(tmpdir(), "datasheet-component-pipeline-reviewer-reuse-"))
   temporary_directories.push(root)

@@ -20,6 +20,7 @@ import { applicationTargetIdentityFromEvidence, parseTypicalApplicationPlan } fr
 import {
   APPLICATION_CONNECTIVITY_OBSERVER_CONTRACT_SHA256,
   applyApplicationConnectivityObservation,
+  getApplicationTargetPinCoverageErrors,
   type ApplicationConnectivityObservation,
   installApplicationConnectivityObservation,
   observeApplicationConnectivity,
@@ -191,6 +192,12 @@ export const extractEvidenceStage = defineComponentStage({
           const blocking = [
             ...getComponentEvidenceBlockingReasons(component_evidence),
             ...getFootprintEvidenceErrors(component_evidence, footprint_plan),
+            ...getApplicationTargetPinCoverageErrors({
+              availability: application_plan.availability,
+              connections: application_plan.connections,
+              evidence: component_evidence,
+              subject: "Extracted application",
+            }),
           ]
           if (blocking.length > 0) throw new AggregateError(blocking, "Evidence is unresolved")
           await validateStageDirectory({

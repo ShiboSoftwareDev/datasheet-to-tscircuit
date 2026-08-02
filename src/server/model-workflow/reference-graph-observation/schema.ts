@@ -21,6 +21,7 @@ import type {
 
 export const MIN_TRACE_POINTS = 8
 export const MAX_TRACE_POINTS = 48
+const MAX_HORIZONTAL_PIXELS_PER_TRACE_POINT = 14
 export const AXIS_CALIBRATION_TOLERANCE = 0.015
 export const MIN_X_COVERAGE_RATIO = 0.98
 export const MAX_NORMALIZED_RMSE = 0.05
@@ -193,7 +194,10 @@ function parseDigitizedCurve(
   }
   if (!Array.isArray(value.points)) throw new Error(`${path}.points must be an array`)
   const x_pixel_span = Math.abs(x_axis.second.pixel - x_axis.first.pixel)
-  const minimum_points = Math.min(MAX_TRACE_POINTS, Math.max(MIN_TRACE_POINTS, Math.ceil(x_pixel_span / 12)))
+  const minimum_points = Math.min(
+    MAX_TRACE_POINTS,
+    Math.max(MIN_TRACE_POINTS, Math.ceil(x_pixel_span / MAX_HORIZONTAL_PIXELS_PER_TRACE_POINT)),
+  )
   if (value.points.length < minimum_points || value.points.length > MAX_TRACE_POINTS) {
     throw new Error(
       `${path}.points must contain ${minimum_points} through ${MAX_TRACE_POINTS} distributed traced points`,
@@ -203,11 +207,13 @@ function parseDigitizedCurve(
     const point_path = `${path}.points[${index}]`
     if (!isRecord(point)) throw new Error(`${point_path} must be an object`)
     rejectUnknownKeys(point, ["pixel_x", "pixel_y", "x", "y"], point_path)
+    const supplied_x = finiteNumber(point.x, `${point_path}.x`)
+    const supplied_y = finiteNumber(point.y, `${point_path}.y`)
     const parsed = {
       pixel_x: finiteNumber(point.pixel_x, `${point_path}.pixel_x`),
       pixel_y: finiteNumber(point.pixel_y, `${point_path}.pixel_y`),
-      x: finiteNumber(point.x, `${point_path}.x`),
-      y: finiteNumber(point.y, `${point_path}.y`),
+      x: supplied_x,
+      y: supplied_y,
     }
     if (
       parsed.pixel_x < 0 ||
@@ -217,13 +223,14 @@ function parseDigitizedCurve(
     ) {
       throw new Error(`${point_path} pixel coordinates must be inside the exact graph crop`)
     }
-    if (!valuesAgree(parsed.x, valueAtPixel(x_axis, parsed.pixel_x), x_range.max - x_range.min)) {
-      throw new Error(`${point_path}.x is inconsistent with its pixel-axis calibration`)
+    // x/y are derived receipt fields, not independent source claims. Keep the
+    // agent boundary finite and typed, then compute the canonical values from
+    // the independently pixel-verified coordinates and axis anchors.
+    return {
+      ...parsed,
+      x: valueAtPixel(x_axis, parsed.pixel_x),
+      y: valueAtPixel(y_axis, parsed.pixel_y),
     }
-    if (!valuesAgree(parsed.y, valueAtPixel(y_axis, parsed.pixel_y), y_range.max - y_range.min)) {
-      throw new Error(`${point_path}.y is inconsistent with its pixel-axis calibration`)
-    }
-    return parsed
   })
   const x_pixel_direction = Math.sign(x_axis.second.pixel - x_axis.first.pixel)
   const normalized_x_positions = points.map(

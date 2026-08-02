@@ -14,19 +14,26 @@ function normalizedElectricalSignal(value: string): string {
   return value.replace(/[^a-z0-9]/gi, "").toUpperCase()
 }
 
+const OUTPUT_VOLTAGE_SIGNAL_ALIASES = new Set(["VO", "VOUT", "OUT", "OUTPUT", "OUTPUTVOLTAGE"])
+const INPUT_VOLTAGE_SIGNAL_ALIASES = new Set(["VI", "VIN", "INPUT", "INPUTVOLTAGE"])
+
 function matchingPublicPins(model_interface: ModelInterface, signal: string): ModelInterface["pins"] {
   const normalized_signal = normalizedElectricalSignal(signal)
+  const semantic_aliases = OUTPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
+    ? OUTPUT_VOLTAGE_SIGNAL_ALIASES
+    : INPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
+      ? INPUT_VOLTAGE_SIGNAL_ALIASES
+      : new Set([normalized_signal])
   const exact = model_interface.pins.filter(({ spice_node, labels }) =>
-    [spice_node, ...labels].some((label) => normalizedElectricalSignal(label) === normalized_signal),
+    [spice_node, ...labels].some((label) => semantic_aliases.has(normalizedElectricalSignal(label))),
   )
   if (exact.length > 0) return exact
 
-  const preferred_roles =
-    normalized_signal === "VO" || normalized_signal === "VOUT" || normalized_signal === "OUTPUTVOLTAGE"
-      ? ["power_output", "output"]
-      : normalized_signal === "VI" || normalized_signal === "INPUTVOLTAGE"
-        ? ["power_input", "input"]
-        : undefined
+  const preferred_roles = OUTPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
+    ? ["power_output", "output"]
+    : INPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
+      ? ["power_input", "input"]
+      : undefined
   if (!preferred_roles) return []
   for (const preferred_role of preferred_roles) {
     const matches = model_interface.pins.filter(({ role }) => role === preferred_role)

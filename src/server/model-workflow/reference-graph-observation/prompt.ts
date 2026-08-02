@@ -89,11 +89,12 @@ graphs may omit digitized_curve; current/other graphs must omit it. digitized_cu
   Put the minimum-value anchor first and maximum-value anchor second. Use two visible,
   widely separated tick/grid positions on each axis.
 - trace_color as integer RGB plus tolerance from 4 through 120
-- points[] with pixel_x,pixel_y,x,y. Each numeric x/y must be the value obtained from
-  those exact pixel coordinates and the two axis anchors, converted to seconds/volts.
+- points[] with pixel_x,pixel_y,x,y. Supply finite x/y values; the server owns and
+  canonicalizes them from the exact pixel coordinates and two axis anchors in
+  seconds/volts, so pixel_x/pixel_y and the visible anchors are authoritative.
 
 Trace the visible response centerline from the left edge through the right edge. Supply
-at least min(48,max(8,ceil(horizontal_axis_pixel_span/12))) and at most 48 points,
+at least min(48,max(8,ceil(horizontal_axis_pixel_span/14))) and at most 48 points,
 strictly progressing across time, covering at least 90% of the calibrated axis, with
 no gap over 20%. Do not trace labels, axes, stimulus channels, or an invented smooth
 curve. The server independently recomputes every numeric value from the pixel-axis

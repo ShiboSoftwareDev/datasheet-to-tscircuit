@@ -222,6 +222,9 @@ bare external terminal per outgoing signal (for example SCL, SDA, and ALERT), an
 never reuse the same bare endpoint on different nodes. Inventory every visible
 switch contact. An SPDT symbol has one common and two throws on three distinct
 nodes; open contacts do not merge the load and charger branches.
+Before returning a documented plan, cross-check the complete datasheet pin table
+and account for every physical U1 pin exactly once in connections. A plan that
+omits a target pin cannot form a complete downstream SPICE application fixture.
 Preserve printed reference designators. When the
 figure omits them, assign conventional references by kind in deterministic visual
 order: top-to-bottom, then left-to-right; the datasheet target is always U1. Use

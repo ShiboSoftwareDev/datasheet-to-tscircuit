@@ -363,6 +363,47 @@ export function canonicalizeApplicationGraph(input: {
   return graph.sort((left, right) => compareText(JSON.stringify(left), JSON.stringify(right)))
 }
 
+export function getApplicationTargetPinCoverageErrors(input: {
+  availability: TypicalApplicationPlan["availability"]
+  connections: readonly { readonly pins: readonly string[] }[]
+  evidence: ComponentEvidence
+  subject: string
+}): string[] {
+  if (input.availability !== "documented") return []
+  const aliases = targetPortAliases(input.evidence)
+  const physical_pins = targetPhysicalPins(input.evidence)
+  const covered = new Set<string>()
+  for (const { pins } of input.connections) {
+    for (const endpoint of pins) {
+      const separator = endpoint.indexOf(".")
+      if (separator < 0 || normalizedReference(endpoint.slice(0, separator)) !== "U1") continue
+      try {
+        covered.add(
+          canonicalEndpoint({
+            endpoint,
+            aliases,
+            physical_pins,
+            kinds: new Map(),
+          }).identity,
+        )
+      } catch {
+        // Canonical graph validation reports malformed or ambiguous aliases.
+      }
+    }
+  }
+  const missing = input.evidence.pinout.pins.filter(
+    ({ number }) => !covered.has(`U1.pin:${normalizePin(number)}`),
+  )
+  if (missing.length === 0) return []
+  return [
+    `${input.subject} omits documented U1 ${missing.length === 1 ? "pin" : "pins"} ${missing
+      .map(({ number, labels }) => `${number} (${labels.join("/")})`)
+      .join(
+        ", ",
+      )}. Every documented public U1 pin must appear exactly once so the downstream SPICE application fixture is complete.`,
+  ]
+}
+
 function multisetDifference(left: readonly string[][], right: readonly string[][]): string[][] {
   const remaining = new Map<string, number>()
   for (const node of right) {
@@ -527,6 +568,20 @@ export function compareApplicationGraphs(input: {
     evidence: input.evidence,
   })
   errors.push(...component_errors)
+  errors.push(
+    ...getApplicationTargetPinCoverageErrors({
+      availability: input.plan.availability,
+      connections: input.plan.connections,
+      evidence: input.evidence,
+      subject: "Extracted application",
+    }),
+    ...getApplicationTargetPinCoverageErrors({
+      availability: input.review.availability,
+      connections: input.review.connections,
+      evidence: input.evidence,
+      subject: "Independent application review",
+    }),
+  )
 
   let extractor_graph: string[][] | undefined
   let verifier_graph: string[][] | undefined
@@ -838,6 +893,11 @@ is a component. Inventory every visible contact: an SPDT switch has one common a
 two throws, represented by three distinct component terminals on three nodes. An
 open contact is not a junction; never merge the load and charger branches across it.
 
+Before returning a documented review, cross-check the complete datasheet pin table
+and account for every physical U1 pin exactly once in connections. Do not infer that
+two polarity pins are interchangeable or omit a pin merely because another pin has
+a nearby label.
+
 When no documented application exists after independently searching the PDF,
 write:
 
@@ -936,6 +996,15 @@ export async function observeApplicationConnectivity(
       })
       if (!isDeepStrictEqual(raw_review, parsed_review)) {
         throw new Error("application-connectivity-review.json must contain only the canonical review fields")
+      }
+      const coverage_errors = getApplicationTargetPinCoverageErrors({
+        availability: parsed_review.availability,
+        connections: parsed_review.availability === "documented" ? parsed_review.connections : [],
+        evidence: input.evidence,
+        subject: "Independent application review",
+      })
+      if (coverage_errors.length > 0) {
+        throw aggregateError("Application connectivity review is incomplete", coverage_errors)
       }
       return parsed_review
     },

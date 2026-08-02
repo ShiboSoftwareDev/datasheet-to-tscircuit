@@ -522,6 +522,63 @@ test("source-proof failures identify every agent-claimed eligible graph before c
   ])
 })
 
+test("no-eligible diagnostics prioritize public voltage graphs over unrelated switching plots", () => {
+  const graph = (input: {
+    graph_id: string
+    response_quantity: "voltage" | "other"
+    public_pin_observable: boolean
+    reason: string
+  }): ReferenceGraphObservation["graphs"][number] => ({
+    ...input,
+    page: 1,
+    locator: input.graph_id,
+    x_axis: "time",
+    time_axis_evidence: "1 ms/div",
+    fixture_reproducible: false,
+    crop: { ...observer_crop, page: 1 },
+  })
+  const observation: ReferenceGraphObservation = {
+    version: 1,
+    source_pdf_sha256,
+    reviewed_hints: [],
+    graphs: [
+      graph({
+        graph_id: "switching_1",
+        response_quantity: "other",
+        public_pin_observable: true,
+        reason: "unrelated switching graph one",
+      }),
+      graph({
+        graph_id: "switching_2",
+        response_quantity: "other",
+        public_pin_observable: true,
+        reason: "unrelated switching graph two",
+      }),
+      graph({
+        graph_id: "switching_3",
+        response_quantity: "other",
+        public_pin_observable: true,
+        reason: "unrelated switching graph three",
+      }),
+      graph({
+        graph_id: "switching_4",
+        response_quantity: "other",
+        public_pin_observable: true,
+        reason: "unrelated switching graph four",
+      }),
+      graph({
+        graph_id: "load_transient",
+        response_quantity: "voltage",
+        public_pin_observable: true,
+        reason: "critical public voltage demotion reason",
+      }),
+    ],
+  }
+  expect(() => assertObserverFoundEligibleTimeDomainGraph(observation)).toThrow(
+    /critical public voltage demotion reason/,
+  )
+})
+
 test("reference observer feedback aggregates electrical errors across every claimed graph", () => {
   const multi_discovery = structuredClone(discovery)
   multi_discovery.hints[1] = {
@@ -830,11 +887,35 @@ describe("independent reference-graph observation", () => {
       { type: "logic_state", endpoint: "dut.MODE", reference: "gnd", state: "low" },
     ]
 
+    const switching_node_interface: ModelInterface = {
+      ...structuredClone(model_interface),
+      pins: [
+        ...structuredClone(model_interface.pins),
+        {
+          physical_pin: "11",
+          component_pin: "pin11",
+          source_port_id: "source_port_11",
+          spice_node: "L2",
+          labels: ["L2"],
+          role: "power_output",
+        },
+        {
+          physical_pin: "12",
+          component_pin: "pin12",
+          source_port_id: "source_port_12",
+          spice_node: "L1",
+          labels: ["L1"],
+          role: "power_input",
+        },
+      ],
+    }
     expect(
-      eligibleObservedGraphs(parseReferenceGraphObservation(observed, load_discovery, model_interface)),
+      eligibleObservedGraphs(
+        parseReferenceGraphObservation(observed, load_discovery, switching_node_interface),
+      ),
     ).toHaveLength(1)
     observed.graphs[0]!.electrical_binding.stimulus.pulse.high = 0.9
-    expect(() => parseReferenceGraphObservation(observed, load_discovery, model_interface)).toThrow(
+    expect(() => parseReferenceGraphObservation(observed, load_discovery, switching_node_interface)).toThrow(
       /must exactly match the server-extracted printed response nominal, stimulus, and every auxiliary fixture/,
     )
   })
@@ -1702,10 +1783,12 @@ describe("independent reference-graph observation", () => {
     )
 
     const uncalibrated_point = validObservationValue()
+    const canonical_y = uncalibrated_point.graphs[0]!.digitized_curve.points[6]!.y
     uncalibrated_point.graphs[0]!.digitized_curve.points[6]!.y += 0.2
-    expect(() => parseReferenceGraphObservation(uncalibrated_point, discovery, model_interface)).toThrow(
-      /points\[6\]\.y is inconsistent with its pixel-axis calibration/,
-    )
+    expect(
+      parseReferenceGraphObservation(uncalibrated_point, discovery, model_interface).graphs[0]
+        ?.digitized_curve?.points[6]?.y,
+    ).toBeCloseTo(canonical_y)
 
     const sparse_trace = validObservationValue()
     sparse_trace.graphs[0]!.digitized_curve.points = sparse_trace.graphs[0]!.digitized_curve.points.slice(
@@ -1713,7 +1796,7 @@ describe("independent reference-graph observation", () => {
       8,
     )
     expect(() => parseReferenceGraphObservation(sparse_trace, discovery, model_interface)).toThrow(
-      /points must contain 15 through 48/,
+      /points must contain 13 through 48/,
     )
 
     const missing_binding = validObservationValue()

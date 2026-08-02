@@ -32,9 +32,19 @@ export function assertHasEligibleTimeDomainGraph(characterization: ModelCharacte
 export function assertObserverFoundEligibleTimeDomainGraph(observation: ReferenceGraphObservation): void {
   if (eligibleObservedGraphs(observation).length > 0) return
   throw noEligibleTimeDomainGraphError(
-    observation.graphs.map(
-      ({ page, locator, reason }) =>
-        `PDF page ${page} ${boundedDiagnosticText(locator, 80)}: ${boundedDiagnosticText(reason, 240)}`,
-    ),
+    [...observation.graphs]
+      .sort((left, right) => {
+        const priority = (graph: (typeof observation.graphs)[number]) =>
+          graph.response_quantity === "voltage" && graph.public_pin_observable
+            ? 0
+            : graph.response_quantity === "voltage"
+              ? 1
+              : 2
+        return priority(left) - priority(right)
+      })
+      .map(
+        ({ page, locator, reason }) =>
+          `PDF page ${page} ${boundedDiagnosticText(locator, 80)}: ${boundedDiagnosticText(reason, 240)}`,
+      ),
   )
 }

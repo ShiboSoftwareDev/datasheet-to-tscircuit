@@ -8,6 +8,7 @@ import {
   applyApplicationConnectivityObservation,
   canonicalizeApplicationGraph,
   compareApplicationGraphs,
+  getApplicationTargetPinCoverageErrors,
   installApplicationConnectivityObservation,
   observeApplicationConnectivity,
   parseApplicationConnectivityReview,
@@ -143,6 +144,7 @@ test("independent inventory treats a drawn lamp and load as the same visible com
       ],
       connections: [
         { net: "OUTPUT", pins: ["U1.VOUT", "L1.1"] },
+        { net: "FEEDBACK", pins: ["U1.FB", "FB"] },
         { net: "GROUND", pins: ["U1.GND", "L1.2"] },
       ],
     },
@@ -154,7 +156,11 @@ test("independent inventory treats a drawn lamp and load as the same visible com
   const verified = compareApplicationGraphs({
     plan: load_plan,
     evidence,
-    review: review([{ pins: ["U1.1", "L1.1"] }, { pins: ["U1.3", "L1.2"] }], load_plan, reviewed_components),
+    review: review(
+      [{ pins: ["U1.1", "L1.1"] }, { pins: ["U1.2", "FB"] }, { pins: ["U1.3", "L1.2"] }],
+      load_plan,
+      reviewed_components,
+    ),
   })
   expect(verified.status).toBe("verified")
 })
@@ -171,6 +177,45 @@ test("independent graph agreement rejects the agent-71 misplaced resistor endpoi
       ]),
     }),
   ).toThrow("Independent application connectivity does not match")
+})
+
+test("matching extractor and reviewer omissions cannot hide a missing public U1 pin", () => {
+  const incomplete_plan = structuredClone(plan)
+  incomplete_plan.connections = incomplete_plan.connections.map((connection) => ({
+    ...connection,
+    pins: connection.pins.filter((endpoint) => endpoint !== "U1.FB"),
+  }))
+  const incomplete_review = review(
+    incomplete_plan.connections.map(({ pins }) => ({ pins })),
+    incomplete_plan,
+  )
+
+  expect(() =>
+    compareApplicationGraphs({ plan: incomplete_plan, evidence, review: incomplete_review }),
+  ).toThrow(/Extracted application omits documented U1 pin 2 \(FB\)/)
+  expect(() =>
+    compareApplicationGraphs({ plan: incomplete_plan, evidence, review: incomplete_review }),
+  ).toThrow(/Independent application review omits documented U1 pin 2 \(FB\)/)
+})
+
+test("model-99-shaped INA237 polarity aliases cannot hide an omitted IN- pin", () => {
+  const ina237_evidence = structuredClone(evidence)
+  ina237_evidence.pinout.pins = [
+    { ...ina237_evidence.pinout.pins[0]!, number: "9", labels: ["IN-", "INNEG"], role: "input" },
+    { ...ina237_evidence.pinout.pins[1]!, number: "10", labels: ["IN+", "INPOS"], role: "input" },
+    ina237_evidence.pinout.pins[2]!,
+  ]
+
+  expect(
+    getApplicationTargetPinCoverageErrors({
+      availability: "documented",
+      connections: [{ pins: ["U1.IN+", "RSHUNT.1"] }, { pins: ["U1.GND", "GND"] }],
+      evidence: ina237_evidence,
+      subject: "Extracted application",
+    }),
+  ).toEqual([
+    "Extracted application omits documented U1 pin 9 (IN-/INNEG). Every documented public U1 pin must appear exactly once so the downstream SPICE application fixture is complete.",
+  ])
 })
 
 test("independent graph agreement rejects the agent-72 R3 pull-up moved from VIN to VOUT", () => {
@@ -780,13 +825,17 @@ test("generic capacitors remain polarity-preserving unless explicitly nonpolariz
         ],
         connections: [
           { net: "SUPPLY", pins: ["U1.VOUT", "C1.1"] },
+          { net: "FEEDBACK", pins: ["U1.FB", "FB"] },
           { net: "GROUND", pins: ["U1.GND", "C1.2", "GND"] },
         ],
       },
       "REGULATOR",
     )
   const swappedReview = (application_plan: ReturnType<typeof capacitorPlan>) =>
-    review([{ pins: ["U1.1", "C1.2"] }, { pins: ["U1.3", "C1.1", "GND"] }], application_plan)
+    review(
+      [{ pins: ["U1.1", "C1.2"] }, { pins: ["U1.2", "FB"] }, { pins: ["U1.3", "C1.1", "GND"] }],
+      application_plan,
+    )
 
   const generic = capacitorPlan("capacitor")
   expect(() => compareApplicationGraphs({ plan: generic, evidence, review: swappedReview(generic) })).toThrow(
@@ -1063,6 +1112,58 @@ test("one typed independent observation can be applied to multiple repaired oute
       verifier_agent_duration_ms: 13,
     })
     expect(agent_calls).toBe(1)
+  } finally {
+    await rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("independent reviewer retries when its graph omits a documented public U1 pin", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "application-connectivity-coverage-"))
+  try {
+    await Bun.write(join(workspace, "datasheet.pdf"), "datasheet fixture")
+    const prompts: string[] = []
+    const agent_client: AgentClient = {
+      async run(input) {
+        prompts.push(input.prompt)
+        const connections = [
+          { pins: ["R2.2", "U1.3"] },
+          { pins: ["R2.1", "R1.2", ...(prompts.length === 1 ? [] : ["U1.2"])] },
+          { pins: ["R1.1", "U1.1"] },
+        ]
+        await Bun.write(
+          join(input.workspace, "application-connectivity-review.json"),
+          `${JSON.stringify({
+            version: 1,
+            availability: "documented",
+            source: {
+              page: 17,
+              figure: "Typical application",
+              method: "pdf_visual",
+              confidence: "high",
+            },
+            components: visibleComponents(plan),
+            connections,
+          })}\n`,
+        )
+        return { attempts: 1, duration_ms: 3, output_tail: "" }
+      },
+    }
+
+    const observation = await observeApplicationConnectivity({
+      workspace,
+      plan,
+      evidence,
+      outer_attempt: 1,
+      debug_dir: join(workspace, "debug"),
+      signal: new AbortController().signal,
+      use_openai: false,
+      agent_client,
+      image_extension: "test-image-extension.ts",
+      on_output: () => undefined,
+    })
+    expect(observation.verifier_attempts).toBe(2)
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]).toContain("Independent application review omits documented U1 pin 2 (FB)")
   } finally {
     await rm(workspace, { recursive: true, force: true })
   }
