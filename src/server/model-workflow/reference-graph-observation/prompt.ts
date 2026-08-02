@@ -1,5 +1,5 @@
-export function buildReferenceGraphObserverPrompt(): string {
-  return `Independently inventory elapsed-time graphs in the complete datasheet.
+export function buildReferenceGraphObserverPrompt(feedback?: string): string {
+  const base = `Independently inventory elapsed-time graphs in the complete datasheet.
 
 Read datasheet.pdf from first page to last page, model-interface.json,
 application-fixture-contract.json, and time-graph-hints.json. Do not infer anything from another agent's characterization;
@@ -141,4 +141,7 @@ a not_time_graph disposition must omit graph_id. Add electrical_binding and
 digitized_curve to an eligible graph using the exact nested property names described
 above. On a correction attempt, delete every field named as unsupported in the server
 feedback; do not replace it with a guessed synonym.`
+  return feedback
+    ? `${base}\n\nCorrect every retained-candidate error below before returning the artifact:\n${feedback}`
+    : base
 }

@@ -94,7 +94,7 @@ export const extractEvidenceStage = defineComponentStage({
       attempt = await runAgentArtifactStage<ExtractedEvidence>({
         stage_id: "extract_evidence",
         phase_label: "Datasheet evidence extraction",
-        max_artifact_attempts: 3,
+        max_artifact_attempts: 4,
         signal,
         use_openai: context.use_openai,
         agent_client: services.agent_client,

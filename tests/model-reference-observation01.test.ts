@@ -31,7 +31,10 @@ import {
   verifyCharacterizationGraphEvidence,
   verifyReferenceGraphObservationPixels,
 } from "../src/server/model-workflow/reference-graph-observation"
-import { sourceProofRejectionDiagnostics } from "../src/server/model-workflow/characterization/source-inventory"
+import {
+  inventoryReferenceGraphs,
+  sourceProofRejectionDiagnostics,
+} from "../src/server/model-workflow/characterization/source-inventory"
 import { canonicalizeCharacterizationReferenceCrops } from "../src/server/model-workflow/reference-graph-crop-proof"
 import {
   assertObserverFoundEligibleTimeDomainGraph,
@@ -376,6 +379,11 @@ test("reference observer contract publishes exact graph keys and actionable unkn
   expect(prompt).toContain('"locator": "Figure 10-21. Load Transient"')
   expect(prompt).toContain("Do not invent aliases such as pdf_page, figure")
   expect(prompt).toContain("Every reviewed_hints[] entry requires reason")
+  const correction_prompt = buildReferenceGraphObserverPrompt(
+    "load_transient: 14/16 calibrated points are off trace",
+  )
+  expect(correction_prompt).toContain("Correct every retained-candidate error below")
+  expect(correction_prompt).toContain("load_transient: 14/16 calibrated points are off trace")
 
   const invalid = validObservationValue()
   const graph = invalid.graphs[0] as Record<string, unknown>
@@ -384,6 +392,110 @@ test("reference observer contract publishes exact graph keys and actionable unkn
   expect(() => parseReferenceGraphObservation(invalid, discovery, model_interface)).toThrow(
     /unsupported fields: pdf_page\. Allowed fields: graph_id, page, locator/,
   )
+})
+
+test("reference graph inventory sends retained validation errors to every correction attempt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "model-reference-feedback-test-"))
+  temporary_directories.push(root)
+  const model_dir = join(root, "model")
+  const attempt_dir = join(model_dir, "attempt")
+  const debug_dir = join(model_dir, "debug")
+  await Promise.all([mkdir(attempt_dir, { recursive: true }), mkdir(debug_dir, { recursive: true })])
+  const datasheet = "%PDF feedback fixture\n"
+  const pdf_sha256 = createHash("sha256").update(datasheet).digest("hex")
+  const application_fixture = compileApplicationFixtureContract({
+    plan: {
+      version: 4,
+      availability: "not_present",
+      title: "No documented application",
+      description: "The complete fixture has no documented application.",
+      source_references: [{ page: 1 }],
+      searched_sections: ["application information"],
+      components: [],
+      connections: [],
+    },
+    model_interface,
+    source_plan_sha256: "1".repeat(64),
+    source_pdf_sha256: pdf_sha256,
+  })
+  await Promise.all([
+    Bun.write(join(model_dir, "AGENTS.md"), "# Test instructions\n"),
+    Bun.write(join(model_dir, "datasheet.pdf"), datasheet),
+    Bun.write(join(model_dir, "model-interface.json"), `${JSON.stringify(model_interface)}\n`),
+    Bun.write(
+      join(model_dir, "application-fixture-contract.json"),
+      `${JSON.stringify(application_fixture)}\n`,
+    ),
+  ])
+
+  const prompts: string[] = []
+  const agent_client: AgentClient = {
+    async run(input) {
+      prompts.push(input.prompt)
+      const hints = (await Bun.file(join(input.workspace, "time-graph-hints.json")).json()) as {
+        source_pdf_sha256: string
+      }
+      await Bun.write(
+        join(input.workspace, "model-reference-observation.json"),
+        `${JSON.stringify({ version: 1, source_pdf_sha256: hints.source_pdf_sha256 })}\n`,
+      )
+      return { attempts: 1, duration_ms: 1, output_tail: "" }
+    },
+  }
+  const process_runner: ProcessRunner = {
+    async run(request) {
+      const output_path = request.command.at(-1)
+      if (request.command[0] !== "pdftotext" || !output_path) {
+        throw new Error(`Unexpected feedback fixture command: ${request.command.join(" ")}`)
+      }
+      await Bun.write(output_path, "No elapsed-time figures.\f")
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    },
+  }
+  const model_run_store = new ModelRunStore()
+  model_run_store.createModelRun({
+    model_run_id: "model_reference_feedback",
+    job_id: "job_reference_feedback",
+    model_dir,
+    effort_multiplier: 1,
+  })
+
+  await expect(
+    inventoryReferenceGraphs({
+      context: {
+        model_run_id: "model_reference_feedback",
+        job_id: "job_reference_feedback",
+        job_dir: root,
+        model_dir,
+        use_openai: false,
+        max_repair_attempts: 1,
+        invocation_id: "reference_feedback",
+      },
+      services: {
+        job_store: new JobStore(),
+        model_run_store,
+        agent_client,
+        process_runner,
+        strategy_registry: new ModelStrategyRegistry(),
+        tsci_bin: "unused-tsci",
+        ngspice_bin: "unused-ngspice",
+        ngspice_executor: async () => {
+          throw new Error("Feedback fixture must not invoke ngspice")
+        },
+      },
+      attempt_dir,
+      debug_dir,
+      signal: new AbortController().signal,
+      model_interface,
+      application_fixture,
+    }),
+  ).rejects.toThrow("model-reference-observation.json.graphs must be an array")
+  expect(prompts).toHaveLength(4)
+  expect(prompts[0]).not.toContain("Correct every retained-candidate error below")
+  expect(prompts[1]).toContain("Correct every retained-candidate error below")
+  expect(prompts[1]).toContain("model-reference-observation.json.graphs must be an array")
+  expect(prompts[2]).toContain("model-reference-observation.json.graphs must be an array")
+  expect(prompts[3]).toContain("model-reference-observation.json.graphs must be an array")
 })
 
 test("source-proof failures identify every agent-claimed eligible graph before characterization", () => {
@@ -1455,15 +1567,51 @@ describe("independent reference-graph observation", () => {
 
   test("rejects calibrated points that miss the rendered response trace", async () => {
     const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
-
-    await expect(
-      verifyReferenceGraphObservationPixels({
+    let failure: unknown
+    try {
+      await verifyReferenceGraphObservationPixels({
         observation,
         datasheet_path: await createPixelProofDatasheet(),
         process_runner: new ReferenceGraphCropRunner("flat"),
         signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow(/does not follow the rendered datasheet waveform/)
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(Error)
+    const message = failure instanceof Error ? failure.message : ""
+    expect(message).toContain("does not follow the rendered datasheet waveform")
+    expect(message).toContain("calibrated points are off trace; at most")
+    expect(message).toContain("Declared trace color is RGB(20, 80, 180) with tolerance 24")
+    expect(message).toContain("First failing crop-local points: #0 (10, 90)")
+  })
+
+  test("pixel-proof feedback reports every failing eligible graph in one correction", async () => {
+    const observation: ReferenceGraphObservation = structuredClone(
+      parseReferenceGraphObservation(validObservationValue(), discovery, model_interface),
+    )
+    observation.graphs.push({
+      ...structuredClone(observation.graphs[0]!),
+      graph_id: "second_load_transient",
+      locator: "Figure 8-19. Second load transient",
+    })
+
+    let failure: unknown
+    try {
+      await verifyReferenceGraphObservationPixels({
+        observation,
+        datasheet_path: await createPixelProofDatasheet(),
+        process_runner: new ReferenceGraphCropRunner("flat"),
+        signal: new AbortController().signal,
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(Error)
+    const message = failure instanceof Error ? failure.message : ""
+    expect(message).toContain("rejected 2 graphs")
+    expect(message).toContain("independent graph load_transient")
+    expect(message).toContain("independent graph second_load_transient")
   })
 
   test("rejects disconnected matching pixels that do not form the claimed waveform", async () => {

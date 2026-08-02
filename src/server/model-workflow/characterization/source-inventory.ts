@@ -103,7 +103,7 @@ export async function inventoryReferenceGraphs(input: {
   }>({
     stage_id: "verify_model_reference_graphs",
     phase_label: "Independent datasheet graph inventory",
-    max_artifact_attempts: 3,
+    max_artifact_attempts: 4,
     signal,
     use_openai: context.use_openai,
     agent_client: services.agent_client,
@@ -119,7 +119,7 @@ export async function inventoryReferenceGraphs(input: {
           { source: time_graph_hints_path },
         ],
       }),
-    build_prompt: () => buildReferenceGraphObserverPrompt(),
+    build_prompt: (feedback) => buildReferenceGraphObserverPrompt(feedback),
     heartbeat_paths: (workspace) => [join(workspace, "model-reference-observation.json")],
     on_output: logOutput,
     rejection_debug: {

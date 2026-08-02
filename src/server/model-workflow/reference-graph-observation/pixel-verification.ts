@@ -55,6 +55,82 @@ function pointTouchesTrace(input: {
   return false
 }
 
+interface OffTracePointDiagnostic {
+  point_index: number
+  pixel_x: number
+  pixel_y: number
+  nearest_color_distance: number
+  nearest_matching_pixel?: {
+    pixel_x: number
+    pixel_y: number
+    distance_px: number
+  }
+}
+
+function diagnoseOffTracePoint(input: {
+  width: number
+  height: number
+  rgbAt(x: number, y: number): [number, number, number]
+  point_index: number
+  pixel_x: number
+  pixel_y: number
+  color: ReferenceGraphTraceColor
+  validation_radius: number
+  diagnostic_radius: number
+}): OffTracePointDiagnostic {
+  const center_x = Math.round(input.pixel_x)
+  const center_y = Math.round(input.pixel_y)
+  let nearest_color_distance = Number.POSITIVE_INFINITY
+  let nearest_matching_pixel: OffTracePointDiagnostic["nearest_matching_pixel"]
+  for (
+    let y = Math.max(0, center_y - input.diagnostic_radius);
+    y <= Math.min(input.height - 1, center_y + input.diagnostic_radius);
+    y += 1
+  ) {
+    for (
+      let x = Math.max(0, center_x - input.diagnostic_radius);
+      x <= Math.min(input.width - 1, center_x + input.diagnostic_radius);
+      x += 1
+    ) {
+      const distance_px = Math.hypot(x - input.pixel_x, y - input.pixel_y)
+      const distance_from_color = colorDistance(input.rgbAt(x, y), input.color)
+      if (
+        Math.abs(x - center_x) <= input.validation_radius &&
+        Math.abs(y - center_y) <= input.validation_radius
+      ) {
+        nearest_color_distance = Math.min(nearest_color_distance, distance_from_color)
+      }
+      if (
+        distance_from_color <= input.color.tolerance &&
+        distance_px > input.validation_radius &&
+        (!nearest_matching_pixel || distance_px < nearest_matching_pixel.distance_px)
+      ) {
+        nearest_matching_pixel = { pixel_x: x, pixel_y: y, distance_px }
+      }
+    }
+  }
+  return {
+    point_index: input.point_index,
+    pixel_x: input.pixel_x,
+    pixel_y: input.pixel_y,
+    nearest_color_distance,
+    ...(nearest_matching_pixel ? { nearest_matching_pixel } : {}),
+  }
+}
+
+function formatPixelCoordinate(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+}
+
+function formatOffTracePointDiagnostic(diagnostic: OffTracePointDiagnostic): string {
+  const location = `#${diagnostic.point_index} (${formatPixelCoordinate(diagnostic.pixel_x)}, ${formatPixelCoordinate(diagnostic.pixel_y)})`
+  if (diagnostic.nearest_matching_pixel) {
+    const nearest = diagnostic.nearest_matching_pixel
+    return `${location}: nearest declared-color pixel is (${nearest.pixel_x}, ${nearest.pixel_y}), ${nearest.distance_px.toFixed(1)}px away`
+  }
+  return `${location}: no declared-color pixel within 24px; closest validation-area color distance is ${diagnostic.nearest_color_distance.toFixed(1)}`
+}
+
 interface PixelTraceMeasurement {
   source_image_sha256: string
   verified_point_count: number
@@ -91,18 +167,35 @@ async function measureReferenceGraphTracePixels(input: {
       `Independent pixel-trace proof for ${input.error_subject} contains a calibrated point outside the exact canonical crop`,
     )
   }
-  const off_trace_count = transformed_points.filter(
-    ({ pixel_x, pixel_y }) =>
-      !pointTouchesTrace({
-        ...decoded,
-        pixel_x,
-        pixel_y,
-        color: input.graph.digitized_curve.trace_color,
-      }),
-  ).length
-  if (off_trace_count > Math.max(1, Math.floor(transformed_points.length * 0.05))) {
+  const validation_radius = 4
+  const off_trace_points = transformed_points.flatMap(({ pixel_x, pixel_y }, point_index) =>
+    pointTouchesTrace({
+      ...decoded,
+      pixel_x,
+      pixel_y,
+      color: input.graph.digitized_curve.trace_color,
+      search_radius: validation_radius,
+    })
+      ? []
+      : [
+          diagnoseOffTracePoint({
+            ...decoded,
+            point_index,
+            pixel_x,
+            pixel_y,
+            color: input.graph.digitized_curve.trace_color,
+            validation_radius,
+            diagnostic_radius: 24,
+          }),
+        ],
+  )
+  const off_trace_count = off_trace_points.length
+  const allowed_off_trace_count = Math.max(1, Math.floor(transformed_points.length * 0.05))
+  if (off_trace_count > allowed_off_trace_count) {
+    const color = input.graph.digitized_curve.trace_color
+    const examples = off_trace_points.slice(0, 8).map(formatOffTracePointDiagnostic).join("; ")
     throw new Error(
-      `Independent pixel-trace proof for ${input.error_subject} does not follow the rendered datasheet waveform`,
+      `Independent pixel-trace proof for ${input.error_subject} does not follow the rendered datasheet waveform: ${off_trace_count}/${transformed_points.length} calibrated points are off trace; at most ${allowed_off_trace_count} are allowed. Declared trace color is RGB(${color.r}, ${color.g}, ${color.b}) with tolerance ${color.tolerance}; validation radius is ${validation_radius}px. First failing crop-local points: ${examples}`,
     )
   }
   let segment_sample_count = 0
@@ -228,14 +321,25 @@ export async function verifyReferenceGraphObservationPixels(input: {
       max_total_bytes: 64 * 1024 * 1024,
       validate_file: validatePngArtifact,
     })
+    const failures: string[] = []
     for (const graph of eligible) {
-      await measureReferenceGraphTracePixels({
-        graph,
-        image_path: join(figures_dir, `${graph.graph_id}.png`),
-        expected_width: graph.crop.width_px,
-        expected_height: graph.crop.height_px,
-        error_subject: `independent graph ${graph.graph_id}`,
-      })
+      try {
+        await measureReferenceGraphTracePixels({
+          graph,
+          image_path: join(figures_dir, `${graph.graph_id}.png`),
+          expected_width: graph.crop.width_px,
+          expected_height: graph.crop.height_px,
+          error_subject: `independent graph ${graph.graph_id}`,
+        })
+      } catch (error) {
+        input.signal.throwIfAborted()
+        failures.push(error instanceof Error ? error.message : String(error))
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `Independent pixel-trace validation rejected ${failures.length} graph${failures.length === 1 ? "" : "s"}:\n${failures.map((failure) => `- ${failure}`).join("\n")}`,
+      )
     }
   } finally {
     await workspace.dispose().catch(() => undefined)

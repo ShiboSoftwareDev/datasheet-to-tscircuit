@@ -128,6 +128,37 @@ test("independent graph agreement ignores net names, ordering, and U1 pin aliase
   expect(verified.graph_sha256).toMatch(/^[a-f0-9]{64}$/)
 })
 
+test("independent inventory treats a drawn lamp and load as the same visible component kind", () => {
+  const load_plan = parseTypicalApplicationPlan(
+    {
+      version: 4,
+      availability: "documented",
+      pcb_implementation: "schematic_only",
+      title: "Switched load",
+      description: "A documented load branch.",
+      source_references: [{ page: 17, figure: "Typical application" }],
+      components: [
+        { reference: "U1", kind: "integrated_circuit", value: "REGULATOR" },
+        { reference: "L1", kind: "load" },
+      ],
+      connections: [
+        { net: "OUTPUT", pins: ["U1.VOUT", "L1.1"] },
+        { net: "GROUND", pins: ["U1.GND", "L1.2"] },
+      ],
+    },
+    "REGULATOR",
+  )
+  const reviewed_components = visibleComponents(load_plan).map((component) =>
+    component.reference === "L1" ? { ...component, kind: "lamp" } : component,
+  )
+  const verified = compareApplicationGraphs({
+    plan: load_plan,
+    evidence,
+    review: review([{ pins: ["U1.1", "L1.1"] }, { pins: ["U1.3", "L1.2"] }], load_plan, reviewed_components),
+  })
+  expect(verified.status).toBe("verified")
+})
+
 test("independent graph agreement rejects the agent-71 misplaced resistor endpoint", () => {
   expect(() =>
     compareApplicationGraphs({
@@ -1069,6 +1100,9 @@ test("verifier workspace exposes no extractor hints, crop, inventory, or graph",
         ).toBe(false)
         expect(input.prompt).not.toContain("target_pin_naming_hints")
         expect(input.prompt).not.toContain("verification-request.json")
+        expect(await Bun.file(join(input.workspace, "APPLICATION-CONNECTIVITY-SCHEMA.md")).text()).toContain(
+          "an SPDT switch has one common",
+        )
         await Bun.write(
           join(input.workspace, "application-connectivity-review.json"),
           `${JSON.stringify(raw_review)}\n`,

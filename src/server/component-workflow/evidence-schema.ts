@@ -216,6 +216,12 @@ component.port endpoint. A bare endpoint is the semantic identity of a real
 external terminal such as INPUT, OUTPUT, or GND. Do not turn it into a component
 or discard it as a net label. External terminal labels are one JSON token: replace
 printed whitespace with underscores (for example "48V BATT" becomes "48V_BATT").
+Arrows, bus wedges, braces, interface labels, and annotations such as "To MCU"
+are not components and do not short distinct outgoing signals together. Use one
+bare external terminal per outgoing signal (for example SCL, SDA, and ALERT), and
+never reuse the same bare endpoint on different nodes. Inventory every visible
+switch contact. An SPDT symbol has one common and two throws on three distinct
+nodes; open contacts do not merge the load and charger branches.
 Preserve printed reference designators. When the
 figure omits them, assign conventional references by kind in deterministic visual
 order: top-to-bottom, then left-to-right; the datasheet target is always U1. Use

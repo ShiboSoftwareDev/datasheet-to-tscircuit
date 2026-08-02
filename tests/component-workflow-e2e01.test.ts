@@ -876,7 +876,7 @@ test("evidence extraction rejects an invalid server-rendered PNG before publicat
   })
   expect(job_store.getJob("component_invalid_reference_png")?.evidence_available).toBeFalsy()
   expect(job_store.getJob("component_invalid_reference_png")?.validation?.evidence).toBe("failed")
-  expect(agent_calls).toEqual(Array(3).fill("Datasheet evidence extraction"))
+  expect(agent_calls).toEqual(Array(4).fill("Datasheet evidence extraction"))
   expect(await Bun.file(join(job_dir, "component-evidence.json")).exists()).toBe(false)
   expect(await Bun.file(join(job_dir, "visual-reference")).exists()).toBe(false)
   expect(await Bun.file(join(job_dir, "evidence-commit.json")).exists()).toBe(false)

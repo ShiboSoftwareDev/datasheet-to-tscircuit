@@ -446,4 +446,7 @@ test("agent-facing evidence guide is generated with the exact parser representat
   expect(COMPONENT_EVIDENCE_GUIDE).toContain("part_number is the base device/family printed throughout")
   expect(COMPONENT_EVIDENCE_GUIDE).toContain("Never write footprint_source_references\n  at the plan root")
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"48V BATT" becomes "48V_BATT"')
+  expect(COMPONENT_EVIDENCE_GUIDE).toContain('annotations such as "To MCU"')
+  expect(COMPONENT_EVIDENCE_GUIDE).toContain("bare external terminal per outgoing signal")
+  expect(COMPONENT_EVIDENCE_GUIDE).toContain("An SPDT symbol has one common and two throws")
 })

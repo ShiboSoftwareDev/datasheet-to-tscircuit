@@ -148,6 +148,7 @@ function canonicalInventoryKind(value: string): string {
   if (/fuse/.test(kind)) return "fuse"
   if (/crystal|resonator/.test(kind)) return "crystal"
   if (/switch|pushbutton|button/.test(kind)) return "switch"
+  if (/^(?:lamp|lightbulb|load)$/.test(kind)) return "load"
   if (
     /^(?:ic|chip|integratedcircuit)$/.test(kind) ||
     /controller|converter|regulator|monitor|amplifier|opamp|driver|processor|microcontroller|sensor|transceiver/.test(
@@ -829,6 +830,14 @@ must be retained. Represent whitespace in a printed external label with undersco
 when the image labels them. Inspect every junction dot and keep wire crossings
 without a junction in separate nodes.
 
+Arrows, bus wedges, braces, interface labels, and text such as "To MCU" describe
+where wires leave the figure; they are not components and do not electrically join
+different signals. Give each outgoing signal its own bare terminal identity, such as
+SCL, SDA, and ALERT, and never reuse one bare terminal on two nodes. A drawn switch
+is a component. Inventory every visible contact: an SPDT switch has one common and
+two throws, represented by three distinct component terminals on three nodes. An
+open contact is not a junction; never merge the load and charger branches across it.
+
 When no documented application exists after independently searching the PDF,
 write:
 
@@ -884,7 +893,7 @@ export async function observeApplicationConnectivity(
   const review = await runAgentArtifactStage<ApplicationConnectivityReview>({
     stage_id: "verify_application_connectivity",
     phase_label: "Independent application connectivity verification",
-    max_artifact_attempts: 2,
+    max_artifact_attempts: 3,
     signal: input.signal,
     use_openai: input.use_openai,
     agent_client: input.agent_client,
