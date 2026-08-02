@@ -25,6 +25,7 @@ import type {
 import {
   buildReferenceGraphObserverPrompt,
   eligibleObservedGraphs,
+  parseCanonicalReferenceGraphObservation,
   parseReferenceGraphObservation,
   projectReferenceGraphObservationForCharacterizer,
   type ReferenceGraphObservation,
@@ -330,8 +331,6 @@ function digitizedVoltageCurve() {
       return {
         pixel_x: 10 + ratio * 180,
         pixel_y: 90 - ratio * 80,
-        x: ratio * 0.0015,
-        y: 3 + ratio * 0.6,
       }
     }),
   }
@@ -375,8 +374,9 @@ function validObservationValue() {
 
 test("reference observer contract publishes exact graph keys and actionable unknown-field errors", () => {
   const prompt = buildReferenceGraphObserverPrompt()
-  expect(prompt).toContain('"page": 25')
-  expect(prompt).toContain('"locator": "Figure 10-21. Load Transient"')
+  expect(prompt).toContain('"page": 12')
+  expect(prompt).toContain('"locator": "Figure 4. Transient Response"')
+  expect(prompt).not.toContain("figure_10_21")
   expect(prompt).toContain("Do not invent aliases such as pdf_page, figure")
   expect(prompt).toContain("Every reviewed_hints[] entry requires reason")
   const correction_prompt = buildReferenceGraphObserverPrompt(
@@ -1388,7 +1388,7 @@ describe("independent reference-graph observation", () => {
       )
     }
     expect(
-      parseReferenceGraphObservation(
+      parseCanonicalReferenceGraphObservation(
         JSON.parse(JSON.stringify(observation)),
         run94_discovery,
         model_interface,
@@ -1782,13 +1782,36 @@ describe("independent reference-graph observation", () => {
       /x_axis must be time/,
     )
 
-    const uncalibrated_point = validObservationValue()
-    const canonical_y = uncalibrated_point.graphs[0]!.digitized_curve.points[6]!.y
-    uncalibrated_point.graphs[0]!.digitized_curve.points[6]!.y += 0.2
-    expect(
-      parseReferenceGraphObservation(uncalibrated_point, discovery, model_interface).graphs[0]
-        ?.digitized_curve?.points[6]?.y,
-    ).toBeCloseTo(canonical_y)
+    const agent_authored_numeric_point = validObservationValue()
+    Object.assign(agent_authored_numeric_point.graphs[0]!.digitized_curve.points[6]!, {
+      x: 0.123,
+      y: 999,
+    })
+    expect(() =>
+      parseReferenceGraphObservation(agent_authored_numeric_point, discovery, model_interface),
+    ).toThrow(/unsupported fields: x, y/)
+
+    const canonical_point = parseReferenceGraphObservation(
+      validObservationValue(),
+      discovery,
+      model_interface,
+    ).graphs[0]!.digitized_curve!.points[6]!
+    expect(canonical_point.y).toBeCloseTo(3 + (6 / 15) * 0.6)
+
+    const forged_canonical_observation = structuredClone(
+      parseReferenceGraphObservation(validObservationValue(), discovery, model_interface),
+    )
+    forged_canonical_observation.graphs[0]!.digitized_curve!.points[6]!.y += 0.2
+    expect(() =>
+      parseCanonicalReferenceGraphObservation(forged_canonical_observation, discovery, model_interface),
+    ).toThrow(/x\/y must match the server-derived pixel-axis calibration/)
+
+    const point_outside_crop = validObservationValue()
+    point_outside_crop.graphs[0]!.digitized_curve.points[6]!.pixel_x =
+      point_outside_crop.graphs[0]!.crop.width_px
+    expect(() => parseReferenceGraphObservation(point_outside_crop, discovery, model_interface)).toThrow(
+      /pixel coordinates must be inside the exact graph crop/,
+    )
 
     const sparse_trace = validObservationValue()
     sparse_trace.graphs[0]!.digitized_curve.points = sparse_trace.graphs[0]!.digitized_curve.points.slice(

@@ -6,6 +6,7 @@ import type { ModelInterface, ModelReferenceElectricalBinding } from "../../mode
 import type { TimeGraphDiscovery, TimeGraphTransientFixtureEvidence } from "../time-graph-hints"
 import {
   assertBindingMatchesPrintedFixture,
+  FixtureEndpointResolutionError,
   reconcileGraphPassiveConstraints,
 } from "./fixture-reconciliation"
 import type { ObservedReferenceGraph, ObservedVoltageTimeCurve } from "./types"
@@ -94,13 +95,12 @@ export function canonicalizeObservedGraphSource(input: {
       model_interface,
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (/printed signal .+ resolves to \d+ public model pins|cannot map uniquely/i.test(message)) {
+    if (error instanceof FixtureEndpointResolutionError) {
       const { electrical_binding: _unmappable_binding, ...without_binding } = graph
       return {
         ...without_binding,
         fixture_reproducible: false,
-        reason: `Server-owned printed conditions cannot map uniquely to public endpoints and fixture language: ${message}`,
+        reason: `Server-owned printed conditions cannot map uniquely to public endpoints and fixture language: ${error.message}`,
       }
     }
     throw error

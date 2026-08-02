@@ -337,7 +337,7 @@ test("target canonicalization separates visible family identity from the selecte
   })
 })
 
-test("legacy exact-only evidence accepts a specific application-visible family prefix", () => {
+test("exact-only evidence never guesses a family boundary from a package-looking suffix", () => {
   const plan = documentedPlan()
   plan.components[0] = {
     reference: "U1",
@@ -349,30 +349,12 @@ test("legacy exact-only evidence accepts a specific application-visible family p
     { net: "GND", pins: ["U1.GND", "C1.2"] },
   ]
 
-  const legacy_target = {
-    part_number: "TPS63802DLAR",
-    legacy_package_identifiers: ["DLA"],
-  }
-  expect(parseTypicalApplicationPlan(plan, legacy_target).components[0]).toMatchObject({
-    reference: "U1",
-    value: "TPS63802",
-    manufacturer_part_number: "TPS63802DLAR",
-  })
-
-  requiredItem(plan.components, 0).manufacturer_part_number = "TPS63802"
-  expect(parseTypicalApplicationPlan(plan, legacy_target).components[0]).toMatchObject({
-    value: "TPS63802",
-    manufacturer_part_number: "TPS63802DLAR",
-  })
-
-  requiredItem(plan.components, 0).value = "TPS63803"
-  expect(() => parseTypicalApplicationPlan(plan, legacy_target)).toThrow(
+  expect(() => parseTypicalApplicationPlan(plan, { part_number: "TPS63802DLAR" })).toThrow(
     "must resolve exactly one target component to U1",
   )
 
-  requiredItem(plan.components, 0).value = "TPS63802DLA"
-  requiredItem(plan.components, 0).manufacturer_part_number = undefined
-  expect(() => parseTypicalApplicationPlan(plan, legacy_target)).toThrow(
+  requiredItem(plan.components, 0).manufacturer_part_number = "TPS63802"
+  expect(() => parseTypicalApplicationPlan(plan, { part_number: "TPS63802DLAR" })).toThrow(
     "must resolve exactly one target component to U1",
   )
 })

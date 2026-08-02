@@ -36,8 +36,8 @@ interface ScoredTimeGraphCandidate {
 
 /**
  * Pull only the text belonging to this figure on its physical pdftotext line.
- * TI tables put titles before `Figure N`; graph captions put them after it and
- * two-column pages can contain another figure on the same line.
+ * Summary tables can put titles before `Figure N`; graph captions usually put
+ * them after it, and multi-column pages can contain another figure on the line.
  */
 function lineCaptionParts(
   page_text: string,
@@ -91,6 +91,9 @@ function sourceContextsForFigure(input: {
 }): { operating: string; fixture: string } {
   const operating_contexts: string[] = []
   const fixture_contexts: string[] = []
+  // Operating-state prose may introduce a figure on the preceding page, but
+  // executable graph-local fixture evidence comes only from the figure page.
+  // Summary tables are extracted and compared through their own typed receipt.
   for (const page_index of [input.page_index - 1, input.page_index]) {
     const page = input.pages[page_index]
     if (!page) continue
@@ -103,15 +106,20 @@ function sourceContextsForFigure(input: {
       const column = offset - line_start
       const lines = page.split("\n")
       const page_width = Math.max(1, ...lines.map((line) => line.length))
-      const figure_columns_on_line = [...(lines[line_index] ?? "").matchAll(FIGURE_PATTERN)]
-        .map((figure_match) => figure_match.index ?? 0)
-        .sort((left, right) => left - right)
-      const page_has_two_figure_columns = lines.some((line) => [...line.matchAll(FIGURE_PATTERN)].length >= 2)
-      const column_boundary = !page_has_two_figure_columns
-        ? page_width
-        : figure_columns_on_line.length >= 2
-          ? Math.max(1, figure_columns_on_line[1]! - 5)
-          : Math.floor(page_width * 0.44)
+      const inferred_column_boundaries = lines.flatMap((line) => {
+        const positions = [...line.matchAll(FIGURE_PATTERN)]
+          .map((figure_match) => figure_match.index ?? 0)
+          .sort((left, right) => left - right)
+        if (positions.length < 2) return []
+        const second_column_start = positions[1]!
+        const inter_column_whitespace = line.slice(0, second_column_start).match(/\s+$/)?.[0].length ?? 0
+        return [second_column_start - Math.ceil(inter_column_whitespace / 2)]
+      })
+      inferred_column_boundaries.sort((left, right) => left - right)
+      const column_boundary =
+        inferred_column_boundaries.length === 0
+          ? page_width
+          : inferred_column_boundaries[Math.floor(inferred_column_boundaries.length / 2)]!
       const column_start = column >= column_boundary ? column_boundary : 0
       const column_end = column >= column_boundary ? page_width : column_boundary
       let section_start_row = 0
@@ -144,7 +152,7 @@ function sourceContextsForFigure(input: {
           )
         }
       }
-      fixture_contexts.push(column_context)
+      if (page_index === input.page_index) fixture_contexts.push(column_context)
       operating_contexts.push(
         page.slice(Math.max(0, offset - 700), offset + 1_400),
         column_context,

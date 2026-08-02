@@ -19,6 +19,8 @@ import type {
   ReferenceGraphTraceColor,
 } from "./types"
 
+export type ReferencePointFieldPolicy = "pixels_only" | "canonical"
+
 export const MIN_TRACE_POINTS = 8
 export const MAX_TRACE_POINTS = 48
 const MAX_HORIZONTAL_PIXELS_PER_TRACE_POINT = 14
@@ -28,6 +30,16 @@ export const MAX_NORMALIZED_RMSE = 0.05
 export const MAX_NORMALIZED_ERROR = 0.1
 export const MAX_OBSERVED_GRAPHS = 64
 export const MAX_ELIGIBLE_GRAPHS = 32
+
+export function minimumTracePointCount(horizontal_axis_pixel_span: number): number {
+  return Math.min(
+    MAX_TRACE_POINTS,
+    Math.max(
+      MIN_TRACE_POINTS,
+      Math.ceil(Math.abs(horizontal_axis_pixel_span) / MAX_HORIZONTAL_PIXELS_PER_TRACE_POINT),
+    ),
+  )
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -141,6 +153,7 @@ function parseDigitizedCurve(
   value: unknown,
   path: string,
   crop: ModelReferenceCropRegion,
+  point_field_policy: ReferencePointFieldPolicy,
 ): ObservedVoltageTimeCurve {
   if (!isRecord(value)) throw new Error(`${path} must be an object`)
   rejectUnknownKeys(
@@ -194,10 +207,7 @@ function parseDigitizedCurve(
   }
   if (!Array.isArray(value.points)) throw new Error(`${path}.points must be an array`)
   const x_pixel_span = Math.abs(x_axis.second.pixel - x_axis.first.pixel)
-  const minimum_points = Math.min(
-    MAX_TRACE_POINTS,
-    Math.max(MIN_TRACE_POINTS, Math.ceil(x_pixel_span / MAX_HORIZONTAL_PIXELS_PER_TRACE_POINT)),
-  )
+  const minimum_points = minimumTracePointCount(x_pixel_span)
   if (value.points.length < minimum_points || value.points.length > MAX_TRACE_POINTS) {
     throw new Error(
       `${path}.points must contain ${minimum_points} through ${MAX_TRACE_POINTS} distributed traced points`,
@@ -206,14 +216,14 @@ function parseDigitizedCurve(
   const points = value.points.map((point, index): ObservedReferencePoint => {
     const point_path = `${path}.points[${index}]`
     if (!isRecord(point)) throw new Error(`${point_path} must be an object`)
-    rejectUnknownKeys(point, ["pixel_x", "pixel_y", "x", "y"], point_path)
-    const supplied_x = finiteNumber(point.x, `${point_path}.x`)
-    const supplied_y = finiteNumber(point.y, `${point_path}.y`)
+    rejectUnknownKeys(
+      point,
+      point_field_policy === "pixels_only" ? ["pixel_x", "pixel_y"] : ["pixel_x", "pixel_y", "x", "y"],
+      point_path,
+    )
     const parsed = {
       pixel_x: finiteNumber(point.pixel_x, `${point_path}.pixel_x`),
       pixel_y: finiteNumber(point.pixel_y, `${point_path}.pixel_y`),
-      x: supplied_x,
-      y: supplied_y,
     }
     if (
       parsed.pixel_x < 0 ||
@@ -223,13 +233,22 @@ function parseDigitizedCurve(
     ) {
       throw new Error(`${point_path} pixel coordinates must be inside the exact graph crop`)
     }
-    // x/y are derived receipt fields, not independent source claims. Keep the
-    // agent boundary finite and typed, then compute the canonical values from
-    // the independently pixel-verified coordinates and axis anchors.
+    const x = valueAtPixel(x_axis, parsed.pixel_x)
+    const y = valueAtPixel(y_axis, parsed.pixel_y)
+    if (point_field_policy === "canonical") {
+      const supplied_x = finiteNumber(point.x, `${point_path}.x`)
+      const supplied_y = finiteNumber(point.y, `${point_path}.y`)
+      if (
+        !valuesAgree(supplied_x, x, x_range.max - x_range.min) ||
+        !valuesAgree(supplied_y, y, y_range.max - y_range.min)
+      ) {
+        throw new Error(`${point_path}.x/y must match the server-derived pixel-axis calibration`)
+      }
+    }
     return {
       ...parsed,
-      x: valueAtPixel(x_axis, parsed.pixel_x),
-      y: valueAtPixel(y_axis, parsed.pixel_y),
+      x,
+      y,
     }
   })
   const x_pixel_direction = Math.sign(x_axis.second.pixel - x_axis.first.pixel)
@@ -297,6 +316,7 @@ export function parseGraph(
   value: unknown,
   index: number,
   model_interface: ModelInterface,
+  point_field_policy: ReferencePointFieldPolicy,
 ): ObservedReferenceGraph {
   const path = `model-reference-observation.json.graphs[${index}]`
   if (!isRecord(value)) throw new Error(`${path} must be an object`)
@@ -340,7 +360,7 @@ export function parseGraph(
   const digitized_curve =
     value.digitized_curve === undefined
       ? undefined
-      : parseDigitizedCurve(value.digitized_curve, `${path}.digitized_curve`, crop)
+      : parseDigitizedCurve(value.digitized_curve, `${path}.digitized_curve`, crop, point_field_policy)
   const is_eligible =
     response_quantity === "voltage" && value.public_pin_observable && value.fixture_reproducible
   if (is_eligible && !digitized_curve) {

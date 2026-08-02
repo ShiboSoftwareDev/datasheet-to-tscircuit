@@ -332,12 +332,10 @@ function readRequirement(
           )
         : []
       if (points.length < 2) reader.errors.push(`${path}.reference_curve.points needs at least two points`)
-      const fresh_point_minimum = crop
-        ? Math.min(48, Math.max(8, Math.ceil(crop.width_px / 12)))
-        : Math.max(8, MIN_FRESH_REFERENCE_CURVE_POINTS)
+      const fresh_point_minimum = MIN_FRESH_REFERENCE_CURVE_POINTS
       if (enforce_fresh_policy && support.status === "modeled" && points.length < fresh_point_minimum) {
         reader.errors.push(
-          `${path}.reference_curve.points needs at least ${fresh_point_minimum} points for this graph crop so server validation can withhold interior samples from model generation`,
+          `${path}.reference_curve.points needs at least ${fresh_point_minimum} points so server validation can withhold interior samples from model generation`,
         )
       }
       if (

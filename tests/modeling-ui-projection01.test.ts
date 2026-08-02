@@ -1425,3 +1425,35 @@ test("TSX comments cannot be terminated by model-card text", () => {
   expect(source).toContain("Model card: title * / injected")
   expect(source.match(/\*\//g)).toHaveLength(1)
 })
+
+test("validation TSX reserves SPICE ground identity for explicit fixture topology", () => {
+  const ground_manifest: ModelManifest = {
+    ...manifest,
+    pins: [...manifest.pins, { component_pin: "pin3", spice_node: "GND" }],
+  }
+  const validation_case: ValidationPlan["cases"][number] = {
+    ...plan.cases[0]!,
+    analysis: { type: "transient", step: 0.001, stop: 0.002 },
+    fixtures: [
+      ...plan.cases[0]!.fixtures,
+      {
+        id: "ground_ref",
+        type: "voltage_source",
+        positive: "dut.GND",
+        negative: "gnd",
+        dc_volts: 0,
+      },
+    ],
+  }
+  const source = renderValidationCaseTsx({
+    validation_case,
+    manifest: ground_manifest,
+    model_source: ".SUBCKT GENERIC_2PIN IN OUT GND\n.ENDS\n",
+    model_card: "# Explicit ground fixture",
+  })
+
+  expect(source).toContain('"pin3": "DUT_GND"')
+  expect(source).toContain('"GND": "pin3"')
+  expect(source).toContain('<voltagesource name="ground_ref" voltage="0V" />')
+  expect(source).toContain('<trace from=".ground_ref > .pin1" to=".DUT > .pin3" />')
+})

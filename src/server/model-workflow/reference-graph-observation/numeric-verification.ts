@@ -9,8 +9,8 @@ import {
   MAX_TRACE_POINTS,
   MAX_NORMALIZED_ERROR,
   MAX_NORMALIZED_RMSE,
-  MIN_TRACE_POINTS,
   MIN_X_COVERAGE_RATIO,
+  minimumTracePointCount,
 } from "./schema"
 import type { ModelReferenceNumericVerification, ReferenceGraphObservation } from "./types"
 
@@ -37,7 +37,10 @@ function interpolateLinear(points: readonly ModelReferencePoint[], x: number): n
   return left.y + ratio * (right.y - left.y)
 }
 
-function parseCandidateCurve(requirement: ModelRequirement): {
+function parseCandidateCurve(
+  requirement: ModelRequirement,
+  minimum_points: number,
+): {
   points: ModelReferencePoint[]
   digest: string
 } {
@@ -59,10 +62,6 @@ function parseCandidateCurve(requirement: ModelRequirement): {
       `Modeled requirement ${requirement.requirement_id} must use a time (s) to voltage (V) reference curve`,
     )
   }
-  const minimum_points = Math.min(
-    MAX_TRACE_POINTS,
-    Math.max(MIN_TRACE_POINTS, Math.ceil((curve.crop?.width_px ?? 0) / 12)),
-  )
   if (curve.points.length < minimum_points || curve.points.length > MAX_TRACE_POINTS) {
     throw new Error(
       `Modeled requirement ${requirement.requirement_id} must contain ${minimum_points} through ${MAX_TRACE_POINTS} distributed curve points`,
@@ -94,8 +93,11 @@ function compareCurveFidelity(input: {
   requirement: ModelRequirement
   graph: EligibleObservedReferenceGraph
 }): ModelReferenceNumericVerification["matches"][number]["curve_fidelity"] {
-  const candidate = parseCandidateCurve(input.requirement)
   const observer_curve = input.graph.digitized_curve
+  const candidate = parseCandidateCurve(
+    input.requirement,
+    minimumTracePointCount(observer_curve.x_axis.second.pixel - observer_curve.x_axis.first.pixel),
+  )
   const observer_points = observer_curve.points.map(({ x, y }) => ({ x, y }))
   const observer_start = observer_points[0]!.x
   const observer_end = observer_points.at(-1)!.x

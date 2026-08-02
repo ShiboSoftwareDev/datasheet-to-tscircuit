@@ -372,36 +372,64 @@ export function getApplicationTargetPinCoverageErrors(input: {
   if (input.availability !== "documented") return []
   const aliases = targetPortAliases(input.evidence)
   const physical_pins = targetPhysicalPins(input.evidence)
-  const covered = new Set<string>()
+  const coverage = new Map<string, { count: number; endpoints: string[] }>()
   for (const { pins } of input.connections) {
     for (const endpoint of pins) {
       const separator = endpoint.indexOf(".")
       if (separator < 0 || normalizedReference(endpoint.slice(0, separator)) !== "U1") continue
       try {
-        covered.add(
-          canonicalEndpoint({
-            endpoint,
-            aliases,
-            physical_pins,
-            kinds: new Map(),
-          }).identity,
-        )
+        const identity = canonicalEndpoint({
+          endpoint,
+          aliases,
+          physical_pins,
+          kinds: new Map(),
+        }).identity
+        const current = coverage.get(identity) ?? { count: 0, endpoints: [] }
+        current.count += 1
+        current.endpoints.push(endpoint)
+        coverage.set(identity, current)
       } catch {
         // Canonical graph validation reports malformed or ambiguous aliases.
       }
     }
   }
-  const missing = input.evidence.pinout.pins.filter(
-    ({ number }) => !covered.has(`U1.pin:${normalizePin(number)}`),
+  const connectable_pins = input.evidence.pinout.pins.filter(({ role }) => role !== "no_connect")
+  const no_connect_pins = input.evidence.pinout.pins.filter(({ role }) => role === "no_connect")
+  const missing = connectable_pins.filter(({ number }) => !coverage.has(`U1.pin:${normalizePin(number)}`))
+  const duplicates = connectable_pins.flatMap((pin) => {
+    const matched = coverage.get(`U1.pin:${normalizePin(pin.number)}`)
+    return matched && matched.count > 1 ? [{ pin, endpoints: matched.endpoints }] : []
+  })
+  const connected_no_connects = no_connect_pins.filter(({ number }) =>
+    coverage.has(`U1.pin:${normalizePin(number)}`),
   )
-  if (missing.length === 0) return []
-  return [
-    `${input.subject} omits documented U1 ${missing.length === 1 ? "pin" : "pins"} ${missing
-      .map(({ number, labels }) => `${number} (${labels.join("/")})`)
-      .join(
-        ", ",
-      )}. Every documented public U1 pin must appear exactly once so the downstream SPICE application fixture is complete.`,
-  ]
+  const errors: string[] = []
+  if (missing.length > 0) {
+    errors.push(
+      `${input.subject} omits documented U1 ${missing.length === 1 ? "pin" : "pins"} ${missing
+        .map(({ number, labels }) => `${number} (${labels.join("/")})`)
+        .join(
+          ", ",
+        )}. Every electrically connectable U1 pin must appear exactly once so the downstream SPICE application fixture is complete.`,
+    )
+  }
+  if (duplicates.length > 0) {
+    errors.push(
+      `${input.subject} repeats documented U1 ${duplicates.length === 1 ? "pin" : "pins"} ${duplicates
+        .map(({ pin, endpoints }) => `${pin.number} (${pin.labels.join("/")}) as ${endpoints.join(" and ")}`)
+        .join(", ")}. Every electrically connectable U1 pin must appear exactly once.`,
+    )
+  }
+  if (connected_no_connects.length > 0) {
+    errors.push(
+      `${input.subject} connects U1 ${connected_no_connects.length === 1 ? "pin" : "pins"} ${connected_no_connects
+        .map(({ number, labels }) => `${number} (${labels.join("/")})`)
+        .join(
+          ", ",
+        )}, but the datasheet marks ${connected_no_connects.length === 1 ? "it" : "them"} no-connect.`,
+    )
+  }
+  return errors
 }
 
 function multisetDifference(left: readonly string[][], right: readonly string[][]): string[][] {
@@ -893,10 +921,10 @@ is a component. Inventory every visible contact: an SPDT switch has one common a
 two throws, represented by three distinct component terminals on three nodes. An
 open contact is not a junction; never merge the load and charger branches across it.
 
-Before returning a documented review, cross-check the complete datasheet pin table
-and account for every physical U1 pin exactly once in connections. Do not infer that
-two polarity pins are interchangeable or omit a pin merely because another pin has
-a nearby label.
+Before returning a documented review, cross-check the complete datasheet pin table.
+Account for every electrically connectable U1 pin exactly once in connections and
+leave pins explicitly marked no-connect unwired. Do not infer that two polarity pins
+are interchangeable or omit a pin merely because another pin has a nearby label.
 
 When no documented application exists after independently searching the PDF,
 write:

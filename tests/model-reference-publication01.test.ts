@@ -597,8 +597,6 @@ async function writeReferenceProof(
             return {
               pixel_x: 35 + ratio * 105,
               pixel_y: 60 - Math.sin(ratio * Math.PI * 2) * 10,
-              x: ratio * 0.0007,
-              y: 1 + Math.sin(ratio * Math.PI * 2) * 0.05,
             }
           }),
         },
@@ -632,6 +630,10 @@ async function writeReferenceProof(
     throw new Error(`Fixture source proof failed: ${JSON.stringify(source_proof.results[0])}`)
   }
   const source_observation = applyReferenceGraphSourceEligibility({ observation, proof: source_proof })
+  await Bun.write(
+    join(input.model_dir, "attempt", "model-reference-observation.json"),
+    `${JSON.stringify(source_observation)}\n`,
+  )
   const numeric_verification = verifyCharacterizationGraphEvidence({
     characterization: contract.characterization,
     observation: source_observation,

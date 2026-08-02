@@ -77,9 +77,9 @@ width and height, be at least 96x64 pixels, and exclude unrelated page content; 
 rejected. Do not set reference_curve.image: the server renders the cited source
 page and materializes the canonical crop as
 evidence/figures/<requirement_id>.png.
-Digitize at least min(48, max(8, ceil(width_px / 12))) points distributed across
-the graph's full elapsed-time range. This is never fewer than eight points and
-lets the server reserve meaningful interior samples for independent validation.
+Digitize 8 through 48 points distributed across the graph's full elapsed-time
+range. The server applies the exact density requirement using the independently
+observed horizontal-axis span and reserves interior samples for validation.
 
 Tables, headline specifications, calculated values, operating points, DC curves,
 and prose-only limits are not executable evidence in this workflow. Record them

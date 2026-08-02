@@ -3,7 +3,10 @@
  * Parsing, fixture reconciliation, eligibility, verification, and prompting
  * live in cohesive modules under `reference-graph-observation/`.
  */
-export { parseReferenceGraphObservation } from "./reference-graph-observation/artifact"
+export {
+  parseCanonicalReferenceGraphObservation,
+  parseReferenceGraphObservation,
+} from "./reference-graph-observation/artifact"
 export {
   eligibleObservedGraphs,
   projectReferenceGraphObservationForCharacterizer,

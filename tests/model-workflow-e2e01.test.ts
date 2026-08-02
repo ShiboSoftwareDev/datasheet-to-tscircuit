@@ -7,8 +7,14 @@ import { deflateSync } from "node:zlib"
 import type { AnyCircuitElement } from "circuit-json"
 import type { AgentClient } from "@/server/infrastructure/agent"
 import { atomicWriteJsonSync } from "@/server/infrastructure/persistence/atomic-write"
-import type { ProcessRunner, ProcessRunRequest, ProcessRunResult } from "@/server/infrastructure/process"
+import {
+  BunProcessRunner,
+  type ProcessRunner,
+  type ProcessRunRequest,
+  type ProcessRunResult,
+} from "@/server/infrastructure/process"
 import { restorePersistedJobs } from "@/server/job-restorer"
+import { ensureJobTscircuitRuntimeConfig } from "@/server/job-scaffold"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import { resolveBenchmarkReferenceImage } from "@/server/modeling/reference-image"
@@ -16,7 +22,8 @@ import { runModel } from "@/server/model-workflow"
 import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const ngspice_path = Bun.which("ngspice")
-const testWithNgspice = ngspice_path ? test : test.skip
+const tsci_path = Bun.which("tsci")
+const testWithProductionSimulation = ngspice_path && tsci_path ? test : test.skip
 const temporary_directories: string[] = []
 
 const crc32_table = Uint32Array.from({ length: 256 }, (_, value) => {
@@ -107,7 +114,7 @@ const characterization = {
         x_unit: "s",
         y_quantity: "voltage",
         y_unit: "V",
-        tolerance: 1e-6,
+        tolerance: 0.02,
         points: [
           { x: 0, y: 0 },
           { x: 0.00025, y: 0.5 },
@@ -318,8 +325,6 @@ function deterministicAgent(calls: string[]): AgentClient {
                       return {
                         pixel_x: 8 + (x / 0.003) * 80,
                         pixel_y: 56 - (y / 2) * 48,
-                        x,
-                        y,
                       }
                     }),
                   },
@@ -375,8 +380,12 @@ function deterministicAgent(calls: string[]): AgentClient {
   }
 }
 
-class FakeWrapperBuildRunner implements ProcessRunner {
+/** Deterministic PDF/component boundaries with the installed tsci runtime for validation previews. */
+class ModelWorkflowBoundaryRunner implements ProcessRunner {
   readonly calls: ProcessRunRequest[] = []
+  private readonly production_runner = new BunProcessRunner()
+
+  constructor(private readonly production_tsci_bin: string) {}
 
   async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
     this.calls.push(request)
@@ -427,189 +436,10 @@ class FakeWrapperBuildRunner implements ProcessRunner {
       request.command[2]?.endsWith(".circuit.tsx") &&
       request.command[2] !== "component-with-model.circuit.tsx"
     ) {
-      const output_stem = request.command[2].replace(/\.circuit\.tsx$/, "")
-      const output_directory = join(request.cwd, "dist", output_stem)
-      await mkdir(output_directory, { recursive: true })
-      await writeFile(
-        join(output_directory, "circuit.json"),
-        `${JSON.stringify([
-          {
-            type: "source_component",
-            source_component_id: "preview_dut",
-            name: "DUT",
-            manufacturer_part_number: "TEST-GAIN",
-          },
-          ...[
-            ["IN", "pin1", "preview_port_in"],
-            ["OUT", "pin2", "preview_port_out"],
-            ["GND", "pin3", "preview_port_gnd"],
-          ].map(([spice_node, component_pin, source_port_id]) => ({
-            type: "source_port",
-            source_port_id,
-            source_component_id: "preview_dut",
-            name: spice_node,
-            port_hints: [spice_node, component_pin],
-          })),
-          {
-            type: "simulation_spice_subcircuit",
-            simulation_spice_subcircuit_id: "preview_model",
-            source_component_id: "preview_dut",
-            spice_pin_to_source_port_map: {
-              IN: "preview_port_in",
-              OUT: "preview_port_out",
-              GND: "preview_port_gnd",
-            },
-            subcircuit_source: model_source,
-          },
-          {
-            type: "source_component",
-            source_component_id: "preview_vin",
-            name: "vin",
-            ftype: "simple_chip",
-          },
-          {
-            type: "source_port",
-            source_port_id: "preview_vin_pos",
-            source_component_id: "preview_vin",
-            name: "POS",
-            port_hints: ["POS", "pin1"],
-          },
-          {
-            type: "source_port",
-            source_port_id: "preview_vin_neg",
-            source_component_id: "preview_vin",
-            name: "NEG",
-            port_hints: ["NEG", "pin2"],
-          },
-          {
-            type: "source_net",
-            source_net_id: "preview_gnd",
-            name: "GND",
-            member_source_group_ids: [],
-            is_ground: true,
-          },
-          {
-            type: "source_trace",
-            source_trace_id: "preview_vin_positive_trace",
-            connected_source_port_ids: ["preview_vin_pos", "preview_port_in"],
-            connected_source_net_ids: [],
-          },
-          {
-            type: "source_trace",
-            source_trace_id: "preview_vin_negative_trace",
-            connected_source_port_ids: ["preview_vin_neg"],
-            connected_source_net_ids: ["preview_gnd"],
-          },
-          {
-            type: "simulation_spice_subcircuit",
-            simulation_spice_subcircuit_id: "preview_vin_model",
-            source_component_id: "preview_vin",
-            spice_pin_to_source_port_map: {
-              POS: "preview_vin_pos",
-              NEG: "preview_vin_neg",
-            },
-            subcircuit_source:
-              ".SUBCKT VALIDATION_VIN POS NEG\n" +
-              "VDRIVE POS NEG DC 0 PULSE(0 1 0 0.001 0.001 0.003 0.006)\n" +
-              ".ENDS VALIDATION_VIN\n",
-          },
-          {
-            type: "source_component",
-            source_component_id: "preview_load",
-            name: "load",
-            ftype: "simple_resistor",
-            resistance: 10_000,
-          },
-          {
-            type: "source_port",
-            source_port_id: "preview_load_pin1",
-            source_component_id: "preview_load",
-            name: "pin1",
-            port_hints: ["pin1", "1"],
-          },
-          {
-            type: "source_port",
-            source_port_id: "preview_load_pin2",
-            source_component_id: "preview_load",
-            name: "pin2",
-            port_hints: ["pin2", "2"],
-          },
-          {
-            type: "source_trace",
-            source_trace_id: "preview_load_positive_trace",
-            connected_source_port_ids: ["preview_load_pin1", "preview_port_out"],
-            connected_source_net_ids: [],
-          },
-          {
-            type: "source_trace",
-            source_trace_id: "preview_load_negative_trace",
-            connected_source_port_ids: ["preview_load_pin2"],
-            connected_source_net_ids: ["preview_gnd"],
-          },
-          {
-            type: "source_component",
-            source_component_id: "preview_ground_ref",
-            name: "ground_ref",
-            ftype: "simple_voltage_source",
-            voltage: 0,
-          },
-          {
-            type: "source_port",
-            source_port_id: "preview_ground_ref_pin1",
-            source_component_id: "preview_ground_ref",
-            name: "pin1",
-            port_hints: ["pin1", "1"],
-          },
-          {
-            type: "source_port",
-            source_port_id: "preview_ground_ref_pin2",
-            source_component_id: "preview_ground_ref",
-            name: "pin2",
-            port_hints: ["pin2", "2"],
-          },
-          {
-            type: "source_trace",
-            source_trace_id: "preview_ground_ref_positive_trace",
-            connected_source_port_ids: ["preview_ground_ref_pin1", "preview_port_gnd"],
-            connected_source_net_ids: [],
-          },
-          {
-            type: "source_trace",
-            source_trace_id: "preview_ground_ref_negative_trace",
-            connected_source_port_ids: ["preview_ground_ref_pin2"],
-            connected_source_net_ids: ["preview_gnd"],
-          },
-          {
-            type: "simulation_experiment",
-            simulation_experiment_id: `experiment_${output_stem}`,
-            name: "validation",
-            experiment_type: "spice_transient_analysis",
-            time_per_step: 0.25,
-            start_time_ms: 0,
-            end_time_ms: 3,
-          },
-          {
-            type: "simulation_voltage_probe",
-            simulation_voltage_probe_id: "probe_output_voltage",
-            name: "probe_output_voltage",
-            signal_input_source_port_id: "preview_port_out",
-          },
-          {
-            type: "simulation_transient_voltage_graph",
-            simulation_transient_voltage_graph_id: "graph_output_voltage",
-            simulation_experiment_id: `experiment_${output_stem}`,
-            source_probe_id: "probe_output_voltage",
-            name: "probe_output_voltage",
-            timestamps_ms: Array.from({ length: 13 }, (_, index) => index * 0.25),
-            voltage_levels: Array.from({ length: 13 }, (_, index) => Math.min(2, index * 0.5)),
-            time_per_step: 0.25,
-            start_time_ms: 0,
-            end_time_ms: 3,
-          },
-        ])}\n`,
-        "utf8",
-      )
-      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+      if (request.command[0] === this.production_tsci_bin) {
+        return this.production_runner.run(request)
+      }
+      throw new Error(`Validation build did not use the installed tsci runtime: ${request.command[0]}`)
     }
     if (request.command[1] !== "build" || request.command[2] !== "component-with-model.circuit.tsx") {
       throw new Error(`Unexpected process command: ${request.command.join(" ")}`)
@@ -653,7 +483,7 @@ class FakeWrapperBuildRunner implements ProcessRunner {
   }
 }
 
-testWithNgspice(
+testWithProductionSimulation(
   "MODEL_PIPELINE keeps committed publication authoritative when later checkpoints fail",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "datasheet-model-pipeline-e2e-"))
@@ -759,6 +589,7 @@ testWithNgspice(
       Bun.write(join(job_dir, "component.circuit.tsx"), component_source),
       Bun.write(join(job_dir, "index.circuit.tsx"), component_source),
       Bun.write(join(job_dir, "component.circuit.json"), `${JSON.stringify(component_circuit, null, 2)}\n`),
+      ensureJobTscircuitRuntimeConfig(job_dir),
     ])
     await publishCommittedEvidenceFixture({
       job_dir,
@@ -802,7 +633,7 @@ testWithNgspice(
       effort_multiplier: 1,
     })
     const agent_calls: string[] = []
-    const process_runner = new FakeWrapperBuildRunner()
+    const process_runner = new ModelWorkflowBoundaryRunner(tsci_path!)
 
     await runModel(
       { model_run_id: "model_e2e" },
@@ -810,7 +641,7 @@ testWithNgspice(
         job_store,
         model_run_store,
         agent_bin: "unused-agent",
-        tsci_bin: "fixture-tsci",
+        tsci_bin: tsci_path!,
         ngspice_bin: ngspice_path!,
         agent_client: deterministicAgent(agent_calls),
         process_runner,
@@ -917,7 +748,7 @@ testWithNgspice(
       },
       reference: {
         type: "curve",
-        tolerance: 1e-6,
+        tolerance: 0.02,
         points: characterization.requirements[0]?.reference_curve?.points,
       },
     })

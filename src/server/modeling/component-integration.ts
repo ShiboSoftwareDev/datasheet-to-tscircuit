@@ -130,8 +130,7 @@ export function assertValidationCircuitEmbedsModel(
       return (
         port.source_component_id === dut_id &&
         Array.isArray(port.port_hints) &&
-        port.port_hints.includes(component_pin) &&
-        port.port_hints.includes(spice_node)
+        port.port_hints.includes(component_pin)
       )
     })
   if (

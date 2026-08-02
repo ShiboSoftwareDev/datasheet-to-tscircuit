@@ -1,3 +1,4 @@
+import { classifyElectricalSignal, electricalSignalMatches } from "../electrical-signal"
 import type {
   TimeGraphAuxiliaryCondition,
   TimeGraphConditionConflict,
@@ -181,9 +182,10 @@ type ParsedConditionFact =
 
 function canonicalConditionSignal(value: string): string {
   const normalized = normalizedSignalLabel(value)
-  if (normalized === "LOAD" || normalized === "LOADCURRENT" || normalized === "ILOAD") return "IO"
-  if (normalized === "OUTPUTVOLTAGE" || normalized === "VOUT") return "VO"
-  if (normalized === "INPUTVOLTAGE" || normalized === "VIN") return "VI"
+  const kind = classifyElectricalSignal(normalized)
+  if (kind === "load_current") return "IO"
+  if (kind === "output_voltage") return "VO"
+  if (kind === "input_voltage") return "VI"
   return normalized
 }
 
@@ -391,7 +393,7 @@ export function deriveTimeGraphPrintedExperiment(input: {
   const all_facts = new Map([...summary_facts, ...graph_facts].map((fact) => [fact.key, fact]))
   all_facts.set(stimulus_fact.key, stimulus_fact)
   const response_candidates = [...all_facts.values()].filter(
-    (fact) => fact.kind === "dc_voltage" && /^(?:VO|VOUT|OUTPUTVOLTAGE)$/.test(fact.signal),
+    (fact) => fact.kind === "dc_voltage" && electricalSignalMatches(fact.signal, "output_voltage"),
   ) as Array<ParsedConditionFact & { kind: "dc_voltage"; value: number }>
   if (response_candidates.length !== 1) return { evidence: null, condition_conflicts: [] }
   const response = response_candidates[0]!

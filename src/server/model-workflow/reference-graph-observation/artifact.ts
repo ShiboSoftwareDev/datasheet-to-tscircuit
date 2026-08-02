@@ -8,6 +8,7 @@ import {
   MAX_OBSERVED_GRAPHS,
   nonEmptyString,
   parseGraph,
+  type ReferencePointFieldPolicy,
   rejectUnknownKeys,
 } from "./schema"
 import { canonicalizeObservedGraphSource } from "./source-canonicalization"
@@ -18,6 +19,37 @@ export function parseReferenceGraphObservation(
   discovery: TimeGraphDiscovery,
   model_interface: ModelInterface,
   application_fixture?: ApplicationFixtureContract,
+): ReferenceGraphObservation {
+  return parseReferenceGraphObservationWithPointPolicy(
+    value,
+    discovery,
+    model_interface,
+    application_fixture,
+    "pixels_only",
+  )
+}
+
+export function parseCanonicalReferenceGraphObservation(
+  value: unknown,
+  discovery: TimeGraphDiscovery,
+  model_interface: ModelInterface,
+  application_fixture?: ApplicationFixtureContract,
+): ReferenceGraphObservation {
+  return parseReferenceGraphObservationWithPointPolicy(
+    value,
+    discovery,
+    model_interface,
+    application_fixture,
+    "canonical",
+  )
+}
+
+function parseReferenceGraphObservationWithPointPolicy(
+  value: unknown,
+  discovery: TimeGraphDiscovery,
+  model_interface: ModelInterface,
+  application_fixture: ApplicationFixtureContract | undefined,
+  point_field_policy: ReferencePointFieldPolicy,
 ): ReferenceGraphObservation {
   if (!isRecord(value)) throw new Error("model-reference-observation.json must be an object")
   rejectUnknownKeys(
@@ -39,7 +71,9 @@ export function parseReferenceGraphObservation(
       `model-reference-observation.json.graphs cannot contain more than ${MAX_OBSERVED_GRAPHS} entries`,
     )
   }
-  const graphs = value.graphs.map((graph, index) => parseGraph(graph, index, model_interface))
+  const graphs = value.graphs.map((graph, index) =>
+    parseGraph(graph, index, model_interface, point_field_policy),
+  )
   const graph_by_id = new Map(graphs.map((graph) => [graph.graph_id, graph]))
   if (graph_by_id.size !== graphs.length)
     throw new Error("model-reference-observation.json graph ids must be unique")

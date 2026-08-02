@@ -15,6 +15,13 @@ function endpointSelector(endpoint: SpiceEndpoint, manifest: ModelManifest): str
   return `.DUT > .${mapping.component_pin}`
 }
 
+function dutPinLabel(spice_node: string): string {
+  // circuit-json-to-spice treats a source port named exactly "GND" as node 0.
+  // Validation topology is explicit, so keep that reserved transport name out
+  // of the display label and bind the SPICE node through spicePinMapping below.
+  return spice_node.toLowerCase() === "gnd" ? `DUT_${spice_node}` : spice_node
+}
+
 function fixtureTerminals(fixture: FixtureElement): [SpiceEndpoint, SpiceEndpoint] {
   return fixture.type === "diode" ? [fixture.anode, fixture.cathode] : [fixture.positive, fixture.negative]
 }
@@ -105,7 +112,7 @@ export function renderValidationCaseTsx(input: {
   const analog_projection_issue = getAnalogProjectionIssue(validation_case)
   const analog_projection_supported = analog_projection_issue === undefined
   const pin_labels = Object.fromEntries(
-    manifest.pins.map(({ component_pin, spice_node }) => [component_pin, spice_node]),
+    manifest.pins.map(({ component_pin, spice_node }) => [component_pin, dutPinLabel(spice_node)]),
   )
   const spice_pin_mapping = Object.fromEntries(
     manifest.pins.map(({ component_pin, spice_node }) => [spice_node, component_pin]),

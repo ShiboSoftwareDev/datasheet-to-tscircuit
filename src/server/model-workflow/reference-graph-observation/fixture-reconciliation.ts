@@ -9,31 +9,40 @@ import type {
   TimeGraphTransientFixtureEvidence,
 } from "../time-graph-hints"
 import type { ObservedReferenceGraph, ObservedVoltageTimeCurve } from "./types"
+import {
+  classifyElectricalSignal,
+  electricalSignalMatches,
+  matchingElectricalSignalAliases,
+  normalizeElectricalSignal,
+} from "../electrical-signal"
 
-function normalizedElectricalSignal(value: string): string {
-  return value.replace(/[^a-z0-9]/gi, "").toUpperCase()
+export type FixtureEndpointResolutionErrorCode = "printed_signal_not_unique" | "input_supply_not_unique"
+
+export class FixtureEndpointResolutionError extends Error {
+  readonly code: FixtureEndpointResolutionErrorCode
+
+  constructor(code: FixtureEndpointResolutionErrorCode, message: string) {
+    super(message)
+    this.name = "FixtureEndpointResolutionError"
+    this.code = code
+  }
 }
 
-const OUTPUT_VOLTAGE_SIGNAL_ALIASES = new Set(["VO", "VOUT", "OUT", "OUTPUT", "OUTPUTVOLTAGE"])
-const INPUT_VOLTAGE_SIGNAL_ALIASES = new Set(["VI", "VIN", "INPUT", "INPUTVOLTAGE"])
-
 function matchingPublicPins(model_interface: ModelInterface, signal: string): ModelInterface["pins"] {
-  const normalized_signal = normalizedElectricalSignal(signal)
-  const semantic_aliases = OUTPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
-    ? OUTPUT_VOLTAGE_SIGNAL_ALIASES
-    : INPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
-      ? INPUT_VOLTAGE_SIGNAL_ALIASES
-      : new Set([normalized_signal])
+  const normalized_signal = normalizeElectricalSignal(signal)
+  const semantic_aliases = matchingElectricalSignalAliases(normalized_signal)
   const exact = model_interface.pins.filter(({ spice_node, labels }) =>
-    [spice_node, ...labels].some((label) => semantic_aliases.has(normalizedElectricalSignal(label))),
+    [spice_node, ...labels].some((label) => semantic_aliases.has(normalizeElectricalSignal(label))),
   )
   if (exact.length > 0) return exact
 
-  const preferred_roles = OUTPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
-    ? ["power_output", "output"]
-    : INPUT_VOLTAGE_SIGNAL_ALIASES.has(normalized_signal)
-      ? ["power_input", "input"]
-      : undefined
+  const signal_kind = classifyElectricalSignal(normalized_signal)
+  const preferred_roles =
+    signal_kind === "output_voltage"
+      ? ["power_output", "output"]
+      : signal_kind === "input_voltage"
+        ? ["power_input", "input"]
+        : undefined
   if (!preferred_roles) return []
   for (const preferred_role of preferred_roles) {
     const matches = model_interface.pins.filter(({ role }) => role === preferred_role)
@@ -49,7 +58,8 @@ function uniquePrintedSignalEndpoint(input: {
 }): `dut.${string}` {
   const matches = matchingPublicPins(input.model_interface, input.signal)
   if (matches.length !== 1) {
-    throw new Error(
+    throw new FixtureEndpointResolutionError(
+      "printed_signal_not_unique",
       `${input.path} printed signal ${input.signal} resolves to ${matches.length} public model pins; exactly one is required`,
     )
   }
@@ -73,7 +83,7 @@ export function assertBindingMatchesPrintedFixture(input: {
   })
   const stimulus_positive =
     evidence.stimulus.type === "current_step" &&
-    /^(?:IO|ILOAD|LOADCURRENT)$/i.test(normalizedElectricalSignal(evidence.stimulus.signal))
+    electricalSignalMatches(evidence.stimulus.signal, "load_current")
       ? response_positive
       : uniquePrintedSignalEndpoint({
           model_interface,
@@ -95,7 +105,7 @@ export function assertBindingMatchesPrintedFixture(input: {
       }
     }
     if (condition.kind === "dc_current") {
-      const positive = /^(?:IO|ILOAD|LOADCURRENT)$/i.test(normalizedElectricalSignal(condition.signal))
+      const positive = electricalSignalMatches(condition.signal, "load_current")
         ? response_positive
         : uniquePrintedSignalEndpoint({
             model_interface,
@@ -116,8 +126,7 @@ export function assertBindingMatchesPrintedFixture(input: {
     })
     const input_supply_endpoints = [
       ...evidence.auxiliary_conditions.flatMap((candidate) =>
-        candidate.kind === "dc_voltage" &&
-        /^(?:VI|VIN|INPUTVOLTAGE)$/i.test(normalizedElectricalSignal(candidate.signal))
+        candidate.kind === "dc_voltage" && electricalSignalMatches(candidate.signal, "input_voltage")
           ? [
               uniquePrintedSignalEndpoint({
                 model_interface,
@@ -128,13 +137,14 @@ export function assertBindingMatchesPrintedFixture(input: {
           : [],
       ),
       ...(evidence.stimulus.type === "voltage_step" &&
-      /^(?:VI|VIN|INPUTVOLTAGE)$/i.test(normalizedElectricalSignal(evidence.stimulus.signal))
+      electricalSignalMatches(evidence.stimulus.signal, "input_voltage")
         ? [stimulus_positive]
         : []),
     ]
     const unique_input_supply_endpoints = [...new Set(input_supply_endpoints)]
     if (condition.state === "high" && unique_input_supply_endpoints.length !== 1) {
-      throw new Error(
+      throw new FixtureEndpointResolutionError(
+        "input_supply_not_unique",
         `${condition_path} printed high state cannot map uniquely to one public input-supply endpoint`,
       )
     }
@@ -224,10 +234,7 @@ function applicationNodeMatchesSignal(input: {
   if (!input.endpoint.startsWith("net.")) return false
   const node_group = input.contract.node_groups.find(({ id }) => `net.${id}` === input.endpoint)
   if (!node_group) return false
-  const aliases =
-    input.signal === "input"
-      ? new Set(["VI", "VIN", "INPUT", "INPUTVOLTAGE"])
-      : new Set(["VO", "VOUT", "OUT", "OUTPUT", "OUTPUTVOLTAGE"])
+  const signal_kind = input.signal === "input" ? "input_voltage" : "output_voltage"
   const identities = [
     node_group.source_net,
     ...node_group.external_terminals,
@@ -235,8 +242,8 @@ function applicationNodeMatchesSignal(input: {
       const separator = endpoint.indexOf(".")
       return separator < 0 ? [endpoint] : [endpoint, endpoint.slice(separator + 1)]
     }),
-  ].map(normalizedApplicationIdentity)
-  return identities.some((identity) => aliases.has(identity))
+  ]
+  return identities.some((identity) => electricalSignalMatches(identity, signal_kind))
 }
 
 function applicationFixtureConnectsSignalToGround(input: {

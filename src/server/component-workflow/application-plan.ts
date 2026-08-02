@@ -65,7 +65,6 @@ export interface TypicalApplicationPlan {
 export interface ApplicationTargetIdentity {
   part_number: string
   ordering_code?: string
-  legacy_package_identifiers?: string[]
 }
 
 type ApplicationTargetIdentityInput = string | ApplicationTargetIdentity
@@ -76,28 +75,15 @@ interface NormalizedApplicationTargetIdentity {
   selected_part_number: string
   normalized_selected_part_number: string
   has_distinct_ordering_code: boolean
-  normalized_legacy_package_identifiers: string[]
 }
 
 export function applicationTargetIdentityFromEvidence(evidence: {
   part_number: { value: string }
   ordering_code?: { value: string }
-  package: { name: { value: string }; code?: { value: string } }
 }): ApplicationTargetIdentity {
-  const package_text = [evidence.package.code?.value, evidence.package.name.value]
-    .filter((value): value is string => Boolean(value))
-    .join(" ")
-  const legacy_package_identifiers = [
-    ...new Set(
-      (package_text.match(/[A-Za-z0-9]+/g) ?? [])
-        .map(normalizedIdentifier)
-        .filter((identifier) => identifier.length >= 3),
-    ),
-  ]
   return {
     part_number: evidence.part_number.value,
     ...(evidence.ordering_code ? { ordering_code: evidence.ordering_code.value } : {}),
-    ...(legacy_package_identifiers.length > 0 ? { legacy_package_identifiers } : {}),
   }
 }
 
@@ -115,8 +101,6 @@ function normalizeTargetIdentity(
   if (target === undefined) return undefined
   const part_number = (typeof target === "string" ? target : target.part_number).trim()
   const ordering_code = (typeof target === "string" ? undefined : target.ordering_code)?.trim()
-  const legacy_package_identifiers =
-    typeof target === "string" ? [] : (target.legacy_package_identifiers ?? [])
   const normalized_part_number = normalizedIdentifier(part_number)
   const normalized_ordering_code = normalizedIdentifier(ordering_code)
   if (!normalized_part_number) return undefined
@@ -136,23 +120,7 @@ function normalizeTargetIdentity(
     normalized_selected_part_number: normalized_ordering_code || normalized_part_number,
     has_distinct_ordering_code:
       Boolean(normalized_ordering_code) && normalized_ordering_code !== normalized_part_number,
-    normalized_legacy_package_identifiers: [
-      ...new Set(legacy_package_identifiers.map(normalizedIdentifier).filter(Boolean)),
-    ],
   }
-}
-
-function isSpecificVisibleFamilyOf(
-  value: string,
-  selected_part_number: string,
-  package_identifiers: readonly string[],
-): boolean {
-  if (value.length < 5 || value.length >= selected_part_number.length) return false
-  if (!selected_part_number.startsWith(value)) return false
-  const suffix = selected_part_number.slice(value.length)
-  return package_identifiers.some(
-    (identifier) => suffix.startsWith(identifier) && suffix.length - identifier.length <= 4,
-  )
 }
 
 function isTargetApplicationComponent(
@@ -164,17 +132,8 @@ function isTargetApplicationComponent(
   const reference = normalizedIdentifier(component.reference)
   const value = normalizedIdentifier(component.value)
 
-  // An application figure normally prints the device family while the selected
-  // purchasable variant includes package/carrier suffixes. Keep those identities
-  // separate: value identifies the visible family and manufacturer_part_number,
-  // when supplied, must identify the authoritative selected ordering code.
-  const legacy_visible_family = (identity: string) =>
-    !target.has_distinct_ordering_code &&
-    isSpecificVisibleFamilyOf(
-      identity,
-      target.normalized_selected_part_number,
-      target.normalized_legacy_package_identifiers,
-    )
+  // Family and orderable identities are separate evidence fields. Never infer
+  // their boundary from a shared string prefix or a package-code suffix.
   if (target.has_distinct_ordering_code) {
     if (manufacturer_part_number && manufacturer_part_number !== target.normalized_selected_part_number) {
       return false
@@ -194,26 +153,15 @@ function isTargetApplicationComponent(
   if (
     manufacturer_part_number &&
     manufacturer_part_number !== target.normalized_selected_part_number &&
-    manufacturer_part_number !== target.normalized_part_number &&
-    !legacy_visible_family(manufacturer_part_number)
+    manufacturer_part_number !== target.normalized_part_number
   ) {
     return false
   }
-
-  // Preserve compatibility with plans that predate the explicit family/orderable
-  // split. Older evidence sometimes stored an exact orderable in part_number
-  // while the application correctly printed only its sufficiently specific
-  // family prefix (TPS63802 versus TPS63802DLAR). The canonical output remains
-  // bound to the exact authoritative identity.
   if (manufacturer_part_number === target.normalized_selected_part_number) return true
   if (manufacturer_part_number) {
-    return !value || value === manufacturer_part_number || legacy_visible_family(value)
+    return !value || value === manufacturer_part_number
   }
-  return (
-    reference === target.normalized_part_number ||
-    value === target.normalized_part_number ||
-    legacy_visible_family(value)
-  )
+  return reference === target.normalized_part_number || value === target.normalized_part_number
 }
 
 function canonicalizeTypicalApplicationPlan(

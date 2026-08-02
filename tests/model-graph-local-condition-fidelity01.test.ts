@@ -165,8 +165,6 @@ function digitizedCurve() {
       return {
         pixel_x: 10 + ratio * 180,
         pixel_y: 90 - ratio * 80,
-        x: ratio * 0.0015,
-        y: 3 + ratio * 0.6,
       }
     }),
   }

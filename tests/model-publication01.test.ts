@@ -610,8 +610,6 @@ async function writeReferenceProof(input: { model_dir: string; evidence_dir: str
             return {
               pixel_x: 4 + ratio * 87,
               pixel_y: 58 - ratio * 53,
-              x: ratio * 0.0007,
-              y: ratio,
             }
           }),
         },
@@ -636,6 +634,10 @@ async function writeReferenceProof(input: { model_dir: string; evidence_dir: str
     signal: new AbortController().signal,
   })
   const source_observation = applyReferenceGraphSourceEligibility({ observation, proof: source_proof })
+  await Bun.write(
+    join(input.model_dir, "model-reference-observation.json"),
+    `${JSON.stringify(source_observation)}\n`,
+  )
   const numeric_verification = verifyCharacterizationGraphEvidence({
     characterization: contract.characterization,
     observation: source_observation,

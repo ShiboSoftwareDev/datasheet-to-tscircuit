@@ -121,6 +121,47 @@ export function resolvePlannedEndpoint(input: {
       ),
     }
   }
+  const dut_models = circuit_json.flatMap((element) => {
+    const record = asRecord(element)
+    return record.type === "simulation_spice_subcircuit" && record.source_component_id === dut_id
+      ? [record]
+      : []
+  })
+  if (dut_models.length > 0) {
+    if (dut_models.length !== 1) {
+      return {
+        error: simulatorError(
+          "viewer_probe_endpoint_unresolved",
+          `Planned endpoint ${endpoint} for ${subject} resolved to ${dut_models.length} embedded DUT models; exactly one is required`,
+          path,
+        ),
+      }
+    }
+    const mapping = dut_models[0]?.spice_pin_to_source_port_map
+    const mapped_port_id =
+      mapping && typeof mapping === "object" && !Array.isArray(mapping)
+        ? (mapping as Record<string, unknown>)[node]
+        : undefined
+    const mapped_ports = circuit_json.flatMap((element) => {
+      const record = asRecord(element)
+      return record.type === "source_port" &&
+        record.source_component_id === dut_id &&
+        record.source_port_id === mapped_port_id
+        ? [record]
+        : []
+    })
+    const id = mapped_ports[0]?.source_port_id
+    if (mapped_ports.length !== 1 || typeof id !== "string") {
+      return {
+        error: simulatorError(
+          "viewer_probe_endpoint_unresolved",
+          `Planned endpoint ${endpoint} for ${subject} is not bound to exactly one DUT source port by the embedded SPICE pin mapping`,
+          path,
+        ),
+      }
+    }
+    return { endpoint: { kind: "source_port", id, planned: endpoint } }
+  }
   const ports = circuit_json.flatMap((element) => {
     const record = asRecord(element)
     const hints = Array.isArray(record.port_hints) ? record.port_hints : []

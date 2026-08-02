@@ -214,8 +214,36 @@ test("model-99-shaped INA237 polarity aliases cannot hide an omitted IN- pin", (
       subject: "Extracted application",
     }),
   ).toEqual([
-    "Extracted application omits documented U1 pin 9 (IN-/INNEG). Every documented public U1 pin must appear exactly once so the downstream SPICE application fixture is complete.",
+    "Extracted application omits documented U1 pin 9 (IN-/INNEG). Every electrically connectable U1 pin must appear exactly once so the downstream SPICE application fixture is complete.",
   ])
+})
+
+test("pin coverage excludes documented no-connect pins and rejects wiring them", () => {
+  const evidence_with_nc = structuredClone(evidence)
+  evidence_with_nc.pinout.pins.push({
+    ...evidence_with_nc.pinout.pins[0]!,
+    number: "4",
+    labels: ["NC"],
+    role: "no_connect",
+  })
+
+  expect(
+    getApplicationTargetPinCoverageErrors({
+      availability: "documented",
+      connections: plan.connections,
+      evidence: evidence_with_nc,
+      subject: "Extracted application",
+    }),
+  ).toEqual([])
+
+  expect(
+    getApplicationTargetPinCoverageErrors({
+      availability: "documented",
+      connections: [...plan.connections, { pins: ["U1.NC", "NC_TEST_POINT"] }],
+      evidence: evidence_with_nc,
+      subject: "Extracted application",
+    }),
+  ).toEqual(["Extracted application connects U1 pin 4 (NC), but the datasheet marks it no-connect."])
 })
 
 test("independent graph agreement rejects the agent-72 R3 pull-up moved from VIN to VOUT", () => {
@@ -562,7 +590,8 @@ test("component fact comparison is canonical, optional when unseen, and strict w
 test("visible U1 families match authoritative orderable identities while external MPNs stay exact", () => {
   const exact_evidence = {
     ...evidence,
-    part_number: { ...evidence.part_number, value: "TPS63802DLAR" },
+    part_number: { ...evidence.part_number, value: "TPS63802" },
+    ordering_code: { ...evidence.part_number, value: "TPS63802DLAR" },
   }
   const exact_plan = parseTypicalApplicationPlan(
     {
@@ -579,7 +608,7 @@ test("visible U1 families match authoritative orderable identities while externa
             : component,
       ),
     },
-    { part_number: "TPS63802DLAR", legacy_package_identifiers: ["DLA"] },
+    { part_number: "TPS63802", ordering_code: "TPS63802DLAR" },
   )
   const family_components = visibleComponents(exact_plan).map((component) =>
     component.reference === "U1"

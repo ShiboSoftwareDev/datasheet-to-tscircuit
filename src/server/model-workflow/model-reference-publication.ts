@@ -11,7 +11,7 @@ import { BunProcessRunner, type ProcessRunner } from "../infrastructure/process"
 import type { ModelContract } from "../modeling/types"
 import { stableStringify } from "../spice-validation"
 import {
-  parseReferenceGraphObservation,
+  parseCanonicalReferenceGraphObservation,
   verifyCharacterizationGraphEvidence,
   verifyReferenceGraphTracePixels,
   type ModelReferenceVerification,
@@ -207,7 +207,7 @@ export async function revalidateModelReferencePublication(input: {
     ])
   input.signal?.throwIfAborted()
   const discovery = parseTimeGraphDiscovery(discovery_value, source_pdf_sha256)
-  const observation = parseReferenceGraphObservation(
+  const observation = parseCanonicalReferenceGraphObservation(
     observation_value,
     discovery,
     input.contract.interface,

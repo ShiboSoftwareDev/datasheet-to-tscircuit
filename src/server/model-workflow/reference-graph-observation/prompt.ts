@@ -89,9 +89,8 @@ graphs may omit digitized_curve; current/other graphs must omit it. digitized_cu
   Put the minimum-value anchor first and maximum-value anchor second. Use two visible,
   widely separated tick/grid positions on each axis.
 - trace_color as integer RGB plus tolerance from 4 through 120
-- points[] with pixel_x,pixel_y,x,y. Supply finite x/y values; the server owns and
-  canonicalizes them from the exact pixel coordinates and two axis anchors in
-  seconds/volts, so pixel_x/pixel_y and the visible anchors are authoritative.
+- points[] with pixel_x,pixel_y only. The server derives seconds and volts from
+  the exact pixel coordinates and the two visible axis anchors.
 
 Trace the visible response centerline from the left edge through the right edge. Supply
 at least min(48,max(8,ceil(horizontal_axis_pixel_span/14))) and at most 48 points,
@@ -110,23 +109,23 @@ figure_locator, or fixture_reproducible_reason. Use this canonical shape:
     {
       "hint_id": "time_graph_001",
       "disposition": "graph",
-      "graph_id": "figure_10_21",
+      "graph_id": "transient_response_1",
       "reason": "Visually confirmed the hinted elapsed-time graph."
     }
   ],
   "graphs": [
     {
-      "graph_id": "figure_10_21",
-      "page": 25,
-      "locator": "Figure 10-21. Load Transient",
+      "graph_id": "transient_response_1",
+      "page": 12,
+      "locator": "Figure 4. Transient Response",
       "x_axis": "time",
-      "time_axis_evidence": "100 us/div",
+      "time_axis_evidence": "50 us/div",
       "response_quantity": "voltage",
       "public_pin_observable": true,
       "fixture_reproducible": false,
       "reason": "State the source-backed eligibility decision.",
       "crop": {
-        "page": 25,
+        "page": 12,
         "render_dpi": 200,
         "x_px": 100,
         "y_px": 100,

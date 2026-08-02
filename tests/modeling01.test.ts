@@ -474,8 +474,8 @@ describe("model characterization contract", () => {
       parseModelCharacterization(sparse_curve_characterization, {
         policy: "fresh",
       }),
-    ).toThrow(/needs at least 8 points for this graph crop/)
-    expect(buildCharacterizationPrompt()).toContain("never fewer than eight points")
+    ).toThrow(/needs at least 8 points so server validation can withhold interior samples/)
+    expect(buildCharacterizationPrompt()).toContain("Digitize 8 through 48 points")
   })
 
   test("fresh modeled behavior cannot use operating-point or DC analysis", () => {

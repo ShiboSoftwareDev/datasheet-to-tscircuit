@@ -174,9 +174,9 @@ package-standard sources require a note.
 Part number, ordering code, package name/code/pin count, and every physical pin
 must each cite medium- or high-confidence pdf_text or pdf_visual evidence. Keep
 the identities distinct: part_number is the base device/family printed throughout
-the datasheet (for example TPS63802 or INA237), while ordering_code is the exact
-selected purchasable package/carrier variant (for example TPS63802DLAR or
-INA237AIDGSR). When present, ordering_code must be a distinct extension of the
+the datasheet (for example ABC123), while ordering_code is the exact selected
+purchasable package/carrier variant (for example ABC123QFNTR). When present,
+ordering_code must be a distinct extension of the
 base part_number after punctuation is removed. Omit it when both identities are
 identical.
 Calculated and package-standard sources cannot establish those facts. They are
@@ -222,9 +222,10 @@ bare external terminal per outgoing signal (for example SCL, SDA, and ALERT), an
 never reuse the same bare endpoint on different nodes. Inventory every visible
 switch contact. An SPDT symbol has one common and two throws on three distinct
 nodes; open contacts do not merge the load and charger branches.
-Before returning a documented plan, cross-check the complete datasheet pin table
-and account for every physical U1 pin exactly once in connections. A plan that
-omits a target pin cannot form a complete downstream SPICE application fixture.
+Before returning a documented plan, cross-check the complete datasheet pin table.
+Account for every electrically connectable U1 pin exactly once in connections and
+leave pins explicitly marked no-connect unwired. A plan that omits a connectable
+target pin cannot form a complete downstream SPICE application fixture.
 Preserve printed reference designators. When the
 figure omits them, assign conventional references by kind in deterministic visual
 order: top-to-bottom, then left-to-right; the datasheet target is always U1. Use
