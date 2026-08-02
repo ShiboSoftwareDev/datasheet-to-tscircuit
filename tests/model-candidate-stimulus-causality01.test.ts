@@ -280,6 +280,7 @@ VFIXED OUT GND DC 1
       category: "stimulus_insensitive",
       affected_cases: 1,
       affected_observations: 1,
+      recommended_actions: ["couple_response_to_public_stimulus"],
     })
   })
 

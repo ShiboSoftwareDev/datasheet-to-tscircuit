@@ -7,6 +7,73 @@ import type { ValidationPlan, ValidationRunResult } from "../../spice-validation
 import { writeViewerValidationArtifacts } from "../viewer-validation-artifacts"
 import { writeJson } from "./basic"
 
+function createCandidateDiagnostics(input: {
+  plan: ValidationPlan
+  result: ValidationRunResult
+  generated: GeneratedModel
+  preview_generation: string
+  projection: ReturnType<typeof projectModelUi>
+  circuit_build_errors_by_case?: Readonly<Record<string, string | undefined>>
+  viewer_errors_by_case?: Readonly<Record<string, string | undefined>>
+  circuit_json_by_case?: Parameters<typeof projectModelUi>[0]["circuit_json_by_case"]
+}) {
+  const result_by_case = new Map(input.result.cases.map((entry) => [entry.case_id, entry]))
+  return {
+    version: 1,
+    status: input.projection.validation.all_passed ? "passed" : "failed",
+    model_revision: input.generated.manifest.revision,
+    preview_generation: input.preview_generation,
+    errors: input.result.errors,
+    cases: input.plan.cases.map((validation_case) => {
+      const result = result_by_case.get(validation_case.id)
+      const preview = input.projection.selected_previews[validation_case.id]
+      return {
+        case_id: validation_case.id,
+        analysis: validation_case.analysis.type,
+        server_status: result?.status ?? "not_run",
+        circuit_build_status: preview?.circuit_preview?.build_status ?? "not_built",
+        viewer_status: preview?.circuit_preview?.analog_simulation_status ?? "not_available",
+        comparison_status: preview?.reference_preview?.result_status ?? "unverified",
+        diagnostics: [
+          ...(result?.errors ?? []).map((error) => ({ source: "server_validation", ...error })),
+          ...(result?.series.flatMap((series) =>
+            series.errors.map((error) => ({
+              source: "server_comparison",
+              observation_id: series.observation_id,
+              ...error,
+            })),
+          ) ?? []),
+          ...(input.circuit_build_errors_by_case?.[validation_case.id]
+            ? [
+                {
+                  source: "tscircuit_build",
+                  message: input.circuit_build_errors_by_case[validation_case.id],
+                },
+              ]
+            : []),
+          ...(input.viewer_errors_by_case?.[validation_case.id]
+            ? [
+                {
+                  source: "tscircuit_viewer",
+                  message: input.viewer_errors_by_case[validation_case.id],
+                },
+              ]
+            : []),
+        ],
+        artifacts: {
+          preview: `cases/${validation_case.id}.preview.json`,
+          tsx: `cases/${validation_case.id}.circuit.tsx`,
+          ...(input.circuit_json_by_case?.[validation_case.id]
+            ? { circuit_json: `cases/${validation_case.id}.circuit.json` }
+            : {}),
+          validation_results: "validation-results.json",
+          validation_plan: "validation-plan.json",
+        },
+      }
+    }),
+  }
+}
+
 export async function persistCandidateValidationUi(input: {
   plan: ValidationPlan
   result: ValidationRunResult
@@ -36,6 +103,16 @@ export async function persistCandidateValidationUi(input: {
     preview_generation: input.preview_generation,
   })
   const cases_dir = join(input.immutable_artifact_dir, "cases")
+  const diagnostics = createCandidateDiagnostics({
+    plan: input.plan,
+    result: input.result,
+    generated: input.generated,
+    preview_generation: input.preview_generation,
+    projection,
+    circuit_build_errors_by_case: input.circuit_build_errors_by_case,
+    viewer_errors_by_case: input.viewer_errors_by_case,
+    circuit_json_by_case: input.circuit_json_by_case,
+  })
   await Promise.all([
     mkdir(input.immutable_artifact_dir, { recursive: true }),
     mkdir(cases_dir, { recursive: true }),
@@ -44,6 +121,7 @@ export async function persistCandidateValidationUi(input: {
     writeJson(join(input.immutable_artifact_dir, "validation-results.json"), input.result),
     writeJson(join(input.immutable_artifact_dir, "validation-plan.json"), input.plan),
     writeJson(join(input.immutable_artifact_dir, "model-ui.json"), projection),
+    writeJson(join(input.immutable_artifact_dir, "candidate-diagnostics.json"), diagnostics),
     ...Object.entries(projection.selected_previews).flatMap(([case_id, preview]) => {
       const writes: Promise<unknown>[] = [writeJson(join(cases_dir, `${case_id}.preview.json`), preview)]
       if (preview.circuit_preview?.code) {
@@ -113,6 +191,10 @@ export async function projectCandidateValidationUi(input: {
       {
         source: join(input.immutable_artifact_dir, "viewer-validation.json"),
         destination: "bundle/viewer-validation.json",
+      },
+      {
+        source: join(input.immutable_artifact_dir, "candidate-diagnostics.json"),
+        destination: "bundle/candidate-diagnostics.json",
       },
     ],
     directories: [

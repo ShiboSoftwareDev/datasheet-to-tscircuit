@@ -15,6 +15,13 @@ import type { ValidationPlan } from "../spice-validation"
 
 const MAX_CONCURRENT_PREVIEW_BUILDS = 3
 
+function sanitizePreviewDiagnostic(message: string, workspace: string): string {
+  return message
+    .replaceAll(workspace, "<preview-workspace>")
+    .replaceAll(workspace.replace(/^\/private/, ""), "<preview-workspace>")
+    .slice(0, 8_000)
+}
+
 export interface ValidationCircuitPreviewBuild {
   circuit_json_by_case: Readonly<Record<string, AnyCircuitElement[] | undefined>>
   /** Only tsci/build failures that make the Circuit JSON unusable as a schematic. */
@@ -93,7 +100,8 @@ async function buildOnePreview(input: {
       ignored_error_types: ["source_pin_must_be_connected_error"],
       on_output: (stream, message) => input.append(stream, message),
     })
-    const error = build.errors.length > 0 ? build.errors.join("; ") : undefined
+    const error =
+      build.errors.length > 0 ? sanitizePreviewDiagnostic(build.errors.join("; "), workspace.path) : undefined
     if (error) await input.append("stderr", `Validation TSX preview ${case_id}: ${error}\n`)
     if (error) return { case_id, error, circuit_build_error: error }
     if (!isCircuitJson(build.circuit_json)) {
@@ -138,7 +146,10 @@ async function buildOnePreview(input: {
     return { case_id, circuit_json: build.circuit_json, viewer_validation }
   } catch (error) {
     input.signal.throwIfAborted()
-    const message = error instanceof Error ? error.message : String(error)
+    const message = sanitizePreviewDiagnostic(
+      error instanceof Error ? error.message : String(error),
+      workspace.path,
+    )
     await input.append("stderr", `Validation TSX preview ${case_id} could not be built: ${message}\n`)
     return { case_id, error: message, circuit_build_error: message }
   } finally {

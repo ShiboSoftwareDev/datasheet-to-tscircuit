@@ -192,6 +192,7 @@ export async function runAgentArtifactStage<Value>(input: {
   promote: (workspace: string, value: Value, signal: AbortSignal) => Promise<void>
   extensions?: readonly string[]
   tool_profile?: "model_candidate_files"
+  model_candidate_check?: { readonly ngspice_path: string }
   heartbeat_paths?: (workspace: string) => readonly string[]
   contract_id?: string
   contract_sha256?: string
@@ -249,6 +250,7 @@ export async function runAgentArtifactStage<Value>(input: {
         phase_label: input.phase_label,
         extensions: input.extensions,
         tool_profile: input.tool_profile,
+        model_candidate_check: input.model_candidate_check,
         heartbeat_paths: input.heartbeat_paths?.(workspace.path),
         on_output: (stream, message) => emitOutputBestEffort(input.on_output, stream, message),
       })

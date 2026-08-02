@@ -245,3 +245,43 @@ test("failed replacement UI distinguishes candidate results from the accepted mo
   expect(html).toContain("candidate-r2")
   expect(html).toContain("accepted revision accepted-r1")
 })
+
+test("failed candidate diagnostics are visible while repair is still running", () => {
+  const html = renderToStaticMarkup(
+    createElement(ModelValidationScope, {
+      model_run: {
+        validation: {
+          artifact_state: "candidate",
+          benchmark_count: 1,
+          passing_count: 0,
+          benchmarks: [
+            {
+              benchmark_id: "startup-waveform",
+              title: "Startup waveform",
+              passed: false,
+              error_message: "Viewer produced no completed transient waveform.",
+            },
+          ],
+          scope: {
+            total_requirement_count: 1,
+            modeled_requirement_count: 1,
+            documented_only_requirement_count: 0,
+            validated_sample_count: 0,
+            scalar_observation_count: 0,
+            curve_observation_count: 1,
+            compared_curve_observation_count: 0,
+            curve_sample_count: 0,
+            swept_case_count: 1,
+            quality: "curve_attempted",
+            documented_only_requirements: [],
+            limitations: [],
+          },
+        },
+      } as unknown as ModelRun,
+    }),
+  )
+
+  expect(html).toContain("Current candidate failures")
+  expect(html).toContain("Startup waveform")
+  expect(html).toContain("Viewer produced no completed transient waveform.")
+})

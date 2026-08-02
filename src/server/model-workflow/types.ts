@@ -18,10 +18,24 @@ export type ModelRepairFeedbackCategory =
   | "comparison_failure"
   | "validation_failure"
 
+export type ModelRepairAction =
+  | "recalibrate_continuous_transfer"
+  | "enforce_declared_output_limits"
+  | "retune_dynamic_response"
+  | "preserve_viewer_portability"
+  | "couple_response_to_public_stimulus"
+  | "guard_logarithmic_domain"
+  | "bound_internal_state"
+  | "improve_numerical_convergence"
+  | "replace_unsupported_ngspice_syntax"
+  | "review_model_equations"
+
 export type ModelRepairFeedbackIssue = {
   readonly category: ModelRepairFeedbackCategory
   readonly affected_cases: number
   readonly affected_observations: number
+  /** Closed, non-numeric guidance; never contains private fixture or sample information. */
+  readonly recommended_actions: readonly ModelRepairAction[]
 }
 
 export type ModelRepairFeedback = {
@@ -99,7 +113,7 @@ export type ModelPipelineOutputs = {
     passed: boolean
     case_count: number
     failing_case_ids: string[]
-    /** Redacted category/count-only feedback, including viewer-only curve mismatches. */
+    /** Redacted typed feedback with aggregate counts and closed-enum repair actions. */
     repair_feedback?: ModelRepairFeedback
     revision: string
   }

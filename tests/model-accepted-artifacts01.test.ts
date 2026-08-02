@@ -319,6 +319,29 @@ test("a failed candidate bundle is atomically projected into the live run withou
       join(model_dir, "current-previews", `fixture-${failed.manifest.revision}`, "candidate-preview.json"),
     ).exists(),
   ).toBe(true)
+  const diagnostic_path = join(
+    model_dir,
+    "current-previews",
+    `fixture-${failed.manifest.revision}`,
+    "candidate-diagnostics.json",
+  )
+  expect(JSON.parse(await readFile(diagnostic_path, "utf8"))).toMatchObject({
+    version: 1,
+    status: "failed",
+    model_revision: failed.manifest.revision,
+    preview_generation: `fixture-${failed.manifest.revision}`,
+    cases: [
+      {
+        case_id: "output",
+        server_status: "failed",
+        artifacts: {
+          preview: "cases/output.preview.json",
+          tsx: "cases/output.circuit.tsx",
+          validation_results: "validation-results.json",
+        },
+      },
+    ],
+  })
   expect(
     await Bun.file(
       join(model_dir, "current-previews", `fixture-${failed.manifest.revision}`, "output", "result.raw"),

@@ -210,6 +210,7 @@ export function ModelValidationScope({ model_run }: { model_run: ModelRun }) {
   if (!validation || !scope) return null
 
   const quality = SCOPE_QUALITY_COPY[scope.quality]
+  const failed_benchmarks = validation.benchmarks.filter(({ passed }) => !passed)
   return (
     <section
       className={`model-validation-scope model-validation-scope-${scope.quality}`}
@@ -245,8 +246,27 @@ export function ModelValidationScope({ model_run }: { model_run: ModelRun }) {
         </dl>
       </header>
 
-      {(scope.documented_only_requirements.length > 0 || scope.limitations.length > 0) && (
+      {(failed_benchmarks.length > 0 ||
+        scope.documented_only_requirements.length > 0 ||
+        scope.limitations.length > 0) && (
         <div className="model-validation-scope-details">
+          {failed_benchmarks.length > 0 && (
+            <div>
+              <strong>Current candidate failures</strong>
+              <ul>
+                {failed_benchmarks.map((benchmark) => (
+                  <li key={benchmark.benchmark_id}>
+                    <span>{benchmark.title}</span>
+                    <small>
+                      {benchmark.error_message ??
+                        benchmark.series?.find(({ passed }) => !passed)?.error_message ??
+                        "The server-owned comparison did not pass."}
+                    </small>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {scope.documented_only_requirements.length > 0 && (
             <div>
               <strong>Not implemented in SPICE</strong>

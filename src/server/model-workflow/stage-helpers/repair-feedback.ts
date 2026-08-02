@@ -1,7 +1,7 @@
 import type { ViewerSimulationValidation } from "../../modeling"
 import type { ValidationRunResult } from "../../spice-validation"
 import type { CandidateStimulusCausalityCheck } from "../candidate-stimulus-causality"
-import type { ModelRepairFeedback, ModelRepairFeedbackCategory } from "../types"
+import type { ModelRepairAction, ModelRepairFeedback, ModelRepairFeedbackCategory } from "../types"
 
 const REPAIR_FEEDBACK_CATEGORY_ORDER: readonly ModelRepairFeedbackCategory[] = [
   "target_mismatch",
@@ -32,6 +32,42 @@ const REPAIR_FEEDBACK_DESCRIPTIONS: Readonly<Record<ModelRepairFeedbackCategory,
   validation_failure: "server-owned validation did not pass",
 }
 
+const REPAIR_ACTIONS: Readonly<Record<ModelRepairFeedbackCategory, readonly ModelRepairAction[]>> = {
+  target_mismatch: ["recalibrate_continuous_transfer"],
+  bounds_violation: ["enforce_declared_output_limits", "bound_internal_state"],
+  curve_mismatch: ["retune_dynamic_response", "recalibrate_continuous_transfer"],
+  viewer_curve_mismatch: ["retune_dynamic_response", "preserve_viewer_portability"],
+  stimulus_insensitive: ["couple_response_to_public_stimulus"],
+  invalid_log_output: ["guard_logarithmic_domain", "bound_internal_state"],
+  non_finite_output: ["bound_internal_state", "improve_numerical_convergence"],
+  convergence_failure: ["improve_numerical_convergence", "bound_internal_state"],
+  simulator_rejected_model: ["replace_unsupported_ngspice_syntax"],
+  comparison_failure: ["review_model_equations"],
+  validation_failure: ["review_model_equations"],
+}
+
+const REPAIR_ACTION_DESCRIPTIONS: Readonly<Record<ModelRepairAction, string>> = {
+  recalibrate_continuous_transfer:
+    "recalibrate continuous gain, offset, or transfer equations against the visible training constraints",
+  enforce_declared_output_limits:
+    "add smooth limiting that respects the declared output range without hard-coding validation samples",
+  retune_dynamic_response:
+    "retune causal time constants, damping, or state equations across the visible transient range",
+  preserve_viewer_portability:
+    "keep the public response compatible with the portable ngspice constructs used by the tscircuit viewer",
+  couple_response_to_public_stimulus:
+    "derive the response and dynamic state from public-pin voltage or current instead of autonomous behavior",
+  guard_logarithmic_domain:
+    "keep logarithmic inputs and outputs finite and strictly inside their valid domain",
+  bound_internal_state: "bound internal equations and state so every simulated output remains finite",
+  improve_numerical_convergence:
+    "remove discontinuities and ideal singularities; add smooth transitions or finite stabilizing impedances",
+  replace_unsupported_ngspice_syntax:
+    "replace rejected syntax with portable ngspice-compatible primitives or behavioral expressions",
+  review_model_equations:
+    "review the model equations and public-pin behavior against every visible modeled requirement",
+}
+
 function repairFeedbackCategory(error: ValidationRunResult["errors"][number]): ModelRepairFeedbackCategory {
   if (error.kind === "convergence") return "convergence_failure"
   if (error.kind === "simulator" && error.code === "ngspice_failed") {
@@ -57,8 +93,8 @@ function repairFeedbackCategory(error: ValidationRunResult["errors"][number]): M
 /**
  * Builds the only validation information that may cross into an agent repair
  * workspace. The output is deliberately derived from a closed enum and
- * aggregate counts: simulator output, paths, fixture values, points, hashes,
- * metrics, and validation identifiers never enter this object.
+ * aggregate counts, and closed-enum actions: simulator output, paths, fixture
+ * values, points, hashes, metrics, and validation identifiers never enter it.
  */
 export function createModelRepairFeedback(
   result: ValidationRunResult,
@@ -136,6 +172,7 @@ export function createModelRepairFeedback(
               category,
               affected_cases: value.cases.size,
               affected_observations: value.observations.size,
+              recommended_actions: REPAIR_ACTIONS[category],
             },
           ]
         : []
@@ -147,9 +184,12 @@ export function formatModelRepairFeedback(feedback: ModelRepairFeedback): string
   return [
     "Server-owned redacted validation summary:",
     ...feedback.issues.map(
-      ({ category, affected_cases, affected_observations }) =>
+      ({ category, affected_cases, affected_observations, recommended_actions }) =>
         `- ${category}: ${REPAIR_FEEDBACK_DESCRIPTIONS[category]}. ` +
-        `Affected cases: ${affected_cases}; affected observations: ${affected_observations}.`,
+        `Affected cases: ${affected_cases}; affected observations: ${affected_observations}. ` +
+        `Recommended actions: ${recommended_actions
+          .map((action) => `${action} (${REPAIR_ACTION_DESCRIPTIONS[action]})`)
+          .join("; ")}.`,
     ),
   ].join("\n")
 }

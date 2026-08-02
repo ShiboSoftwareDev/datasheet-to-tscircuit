@@ -1,4 +1,4 @@
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { parseFreshModelContract } from "../../modeling"
 import { PipelineError } from "../../pipeline"
 import type { ValidationPlan, ValidationRunResult } from "../../spice-validation"
@@ -78,6 +78,10 @@ export const repairModelStage = defineModelStage({
       manifest_path: dependency_outputs.validate_model.manifest_path,
       result_path: dependency_outputs.validate_model.result_path,
       revision: dependency_outputs.validate_model.revision,
+      diagnostic_path: join(
+        dirname(dependency_outputs.validate_model.result_path),
+        "candidate-diagnostics.json",
+      ),
     }
     for (let repair_attempt = 1; repair_attempt <= currentRepairBudget(); repair_attempt += 1) {
       attempted_repairs = repair_attempt
@@ -139,7 +143,14 @@ export const repairModelStage = defineModelStage({
           appendModelLog(services.model_run_store, context.model_run_id, stream, message),
       })
       result = validation.result
-      const { infrastructure_failure, passed, preview_build, result_path, stimulus_causality } = validation
+      const {
+        diagnostic_path,
+        infrastructure_failure,
+        passed,
+        preview_build,
+        result_path,
+        stimulus_causality,
+      } = validation
       if (infrastructure_failure?.source === "server_validation") {
         throw new PipelineError({
           code: "model_validation_infrastructure_failed",
@@ -148,7 +159,7 @@ export const repairModelStage = defineModelStage({
             infrastructure_failure.errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
           stage_id: "repair_model",
           operation: "classify_validation_failure",
-          artifact_refs: [{ path: result_path }],
+          artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
           hint: "Inspect the simulator and validation trace; the failed TSX/reference preview was retained, but another model-generation attempt would not repair this failure.",
         })
       }
@@ -162,7 +173,7 @@ export const repairModelStage = defineModelStage({
               .join("; "),
           stage_id: "repair_model",
           operation: "validate_tscircuit_transient_graph",
-          artifact_refs: [{ path: result_path }],
+          artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
           hint: "Another model-only repair cannot fix a non-transient plan or broken TSX projection. Inspect the validation case and Circuit JSON trace.",
         })
       }
@@ -188,6 +199,12 @@ export const repairModelStage = defineModelStage({
               media_type: "application/json",
               role: "validation_result",
             }),
+            await modelArtifact({
+              id: "final_candidate_diagnostics",
+              path: diagnostic_path,
+              media_type: "application/json",
+              role: "debug",
+            }),
           ],
           metrics: { repair_attempts: repair_attempt },
         }
@@ -203,6 +220,7 @@ export const repairModelStage = defineModelStage({
         manifest_path: join(candidate.value.artifact_dir, "model-manifest.json"),
         result_path: join(candidate.value.artifact_dir, "validation", "validation-results.json"),
         revision: candidate.value.manifest.revision,
+        diagnostic_path,
       }
     }
 
@@ -213,7 +231,11 @@ export const repairModelStage = defineModelStage({
         formatModelRepairFeedback(repair_feedback),
       stage_id: "repair_model",
       operation: "repair_and_validate_model",
-      artifact_refs: [{ path: previous_candidate.result_path }, { path: previous_candidate.model_path }],
+      artifact_refs: [
+        { path: previous_candidate.result_path },
+        { path: previous_candidate.diagnostic_path },
+        { path: previous_candidate.model_path },
+      ],
       entity_refs: [{ entity_type: "model_revision", entity_id: previous_candidate.revision }],
       hint: "Inspect validation-results.json and the repair_model debug bundle. The validation plan was not changed during repair.",
     })

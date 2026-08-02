@@ -351,6 +351,38 @@ test("validate_model retains failed viewer UI but reports direct validation infr
         join(model_dir, "current-previews", expected_preview_generation, "evidence", "step-response.png"),
       ).exists(),
     ).toBe(true)
+    const diagnostic_path = join(
+      model_dir,
+      "current-previews",
+      expected_preview_generation,
+      "candidate-diagnostics.json",
+    )
+    const diagnostic_bundle = JSON.parse(await readFile(diagnostic_path, "utf8"))
+    expect(diagnostic_bundle).toMatchObject({
+      version: 1,
+      status: "failed",
+      cases: [
+        {
+          case_id: "step-response",
+          analysis: "transient",
+          circuit_build_status: "failed",
+          artifacts: {
+            preview: "cases/step-response.preview.json",
+            tsx: "cases/step-response.circuit.tsx",
+          },
+        },
+      ],
+    })
+    const build_diagnostic = diagnostic_bundle.cases[0].diagnostics.find(
+      ({ source }: { source: string }) => source === "tscircuit_build",
+    )
+    expect(build_diagnostic?.message).toContain("fixture tsci viewer build failed")
+    expect(build_diagnostic?.message).not.toContain(root)
+    expect(
+      (caught as { diagnostic?: { artifact_refs?: Array<{ path?: string }> } }).diagnostic?.artifact_refs,
+    ).toContainEqual({
+      path: join(candidate_dir, "validation", "candidate-diagnostics.json"),
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

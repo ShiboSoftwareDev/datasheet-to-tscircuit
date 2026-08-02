@@ -224,7 +224,10 @@ component-evidence.json, typical-application-plan.json, and component.circuit.ts
 The committed application plan supplies documented topology and operating-range
 context only; it is not a validation fixture, and availability not_present must
 not be replaced with an invented circuit. Write exactly model.lib and
-model-card.md. The server deliberately keeps its validation fixtures private
+model-card.md. After writing both files, call check_model_candidate. If it fails,
+edit the two outputs and rerun it until it passes; never claim it passed without
+the tool's passed receipt. The check covers the public model contract, model card,
+and a real ngspice smoke harness. The server deliberately keeps its validation fixtures private
 from model generation. For every sufficiently sampled modeled reference curve,
 model-contract.json is a deterministic training view: the server has withheld
 interior reference samples and will score the finished model against the full

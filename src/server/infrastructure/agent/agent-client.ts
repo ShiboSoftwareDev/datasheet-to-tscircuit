@@ -5,8 +5,9 @@ import { ProcessError, type ProcessRunner } from "../process"
 const MODEL_CANDIDATE_SYSTEM_PROMPT =
   "You are a constrained SPICE artifact generator. Follow the supplied task exactly. " +
   "Use workspace_read only for declared inputs in the current workspace and " +
-  "model_output_write only for model.lib and model-card.md. Do not seek files, tools, " +
-  "instructions, or validation data outside the current workspace."
+  "model_output_write only for model.lib and model-card.md. After writing both outputs, " +
+  "call check_model_candidate and correct the artifacts until that check passes. " +
+  "Do not seek files, tools, instructions, or validation data outside the current workspace."
 const MODEL_CANDIDATE_APPEND_SYSTEM_PROMPT =
   "No ambient or user-global instructions apply to this constrained artifact task."
 
@@ -33,6 +34,7 @@ export interface AgentClient {
     phase_label: string
     extensions?: readonly string[]
     tool_profile?: "model_candidate_files"
+    model_candidate_check?: { readonly ngspice_path: string }
     heartbeat_paths?: readonly string[]
     on_output: (stream: JobLogStream, message: string) => void | Promise<void>
     on_attempt?: (event: AgentAttemptEvent) => void | Promise<void>
@@ -88,7 +90,7 @@ export class TsciAgentClient implements AgentClient {
                   "--no-skills",
                   "--no-prompt-templates",
                   "--tools",
-                  "workspace_read,model_output_write",
+                  "workspace_read,model_output_write,check_model_candidate",
                   "--no-context-files",
                   "--system-prompt",
                   MODEL_CANDIDATE_SYSTEM_PROMPT,
@@ -106,6 +108,12 @@ export class TsciAgentClient implements AgentClient {
           ],
           command_label: input.phase_label,
           cwd: input.workspace,
+          env:
+            input.tool_profile === "model_candidate_files"
+              ? {
+                  DATASHEET_MODEL_CHECK_NGSPICE_BIN: input.model_candidate_check?.ngspice_path ?? "ngspice",
+                }
+              : undefined,
           signal: input.signal,
           idle_timeout_ms: this.options.idle_timeout_ms ?? 10 * 60_000,
           wall_timeout_ms: this.options.wall_timeout_ms ?? 30 * 60_000,

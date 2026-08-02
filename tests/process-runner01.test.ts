@@ -256,6 +256,7 @@ test("TsciAgentClient confines model candidates to scoped read/write tools", asy
     signal: new AbortController().signal,
     phase_label: "model generation",
     tool_profile: "model_candidate_files",
+    model_candidate_check: { ngspice_path: "/trusted/bin/ngspice" },
     on_output: () => undefined,
   })
 
@@ -267,7 +268,10 @@ test("TsciAgentClient confines model candidates to scoped read/write tools", asy
     expect(request.command).toContain("--no-context-files")
     expect(request.command).toContain("--system-prompt")
     expect(request.command).toContain("--append-system-prompt")
-    expect(request.command).toContain("workspace_read,model_output_write")
+    expect(request.command).toContain("workspace_read,model_output_write,check_model_candidate")
+    expect(request.env).toMatchObject({
+      DATASHEET_MODEL_CHECK_NGSPICE_BIN: "/trusted/bin/ngspice",
+    })
     const extension_index = request.command.indexOf("--extension")
     expect(request.command[extension_index + 1]).toEndWith("model-candidate-tools-extension.ts")
   }

@@ -60,6 +60,7 @@ export const validateModelStage = defineModelStage({
     })
     const {
       infrastructure_failure,
+      diagnostic_path,
       passed,
       preview_build,
       projection,
@@ -76,7 +77,7 @@ export const validateModelStage = defineModelStage({
           infrastructure_failure.errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
         stage_id: "validate_model",
         operation: "classify_validation_failure",
-        artifact_refs: [{ path: result_path }],
+        artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
         hint: "Inspect the simulator, raw-result, and validation-plan trace. The failed TSX/reference preview was retained, but model repair was not started for this infrastructure or contract error.",
       })
     }
@@ -88,7 +89,7 @@ export const validateModelStage = defineModelStage({
           infrastructure_failure.failures.map(({ case_id, message }) => `${case_id}: ${message}`).join("; "),
         stage_id: "validate_model",
         operation: "validate_tscircuit_transient_graph",
-        artifact_refs: [{ path: result_path }],
+        artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
         hint: "Inspect the named validation case and Circuit JSON trace. Only an elapsed-time reference curve backed by one completed tscircuit transient experiment is publishable.",
       })
     }
@@ -123,6 +124,12 @@ export const validateModelStage = defineModelStage({
           path: result_path,
           media_type: "application/json",
           role: "validation_result",
+        }),
+        await modelArtifact({
+          id: "initial_candidate_diagnostics",
+          path: diagnostic_path,
+          media_type: "application/json",
+          role: "debug",
         }),
       ],
       metrics: {

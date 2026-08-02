@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto"
 import { afterEach, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { AgentClient } from "@/server/infrastructure/agent"
 import { generateModelCandidate } from "@/server/model-workflow/model-candidate"
+import { MODEL_CANDIDATE_CHECK_RECEIPT_FILE } from "@/server/model-workflow/model-candidate-check"
 import { assertNgspiceAcceptsModelCandidate } from "@/server/model-workflow/model-candidate-smoke"
 import { createModelManifest, type ModelContract } from "@/server/modeling"
 import { PipelineError } from "@/server/pipeline"
@@ -33,6 +35,30 @@ const accepting_ngspice: NgspiceExecutor = async ({ raw_path }) => {
     stderr: "",
     cancelled: false,
   }
+}
+
+async function simulatePassedCandidateTool(input: {
+  workspace: string
+  source: string
+  card: string
+}): Promise<void> {
+  const manifest = createModelManifest({
+    model_interface: contract.interface,
+    model_source: input.source,
+    simulator: "ngspice",
+  })
+  await Bun.write(
+    join(input.workspace, MODEL_CANDIDATE_CHECK_RECEIPT_FILE),
+    `${JSON.stringify({
+      version: 1,
+      status: "passed",
+      checks: ["model_contract", "model_card", "ngspice_smoke"],
+      revision: manifest.revision,
+      entry_name: manifest.entry_name,
+      pin_count: manifest.pins.length,
+      model_card_sha256: createHash("sha256").update(input.card).digest("hex"),
+    })}\n`,
+  )
 }
 
 afterEach(async () => {
@@ -151,10 +177,12 @@ test("fresh candidates ignore stale model output and preserve accepted revisions
       )
       const source = sources.shift()
       if (!source) throw new Error("No test model remains")
+      const card = "Deterministic test model.\n"
       await Promise.all([
         Bun.write(join(input.workspace, "model.lib"), source),
-        Bun.write(join(input.workspace, "model-card.md"), "Deterministic test model.\n"),
+        Bun.write(join(input.workspace, "model-card.md"), card),
       ])
+      await simulatePassedCandidateTool({ workspace: input.workspace, source, card })
       return { attempts: 1, duration_ms: 1, output_tail: "" }
     },
   }
@@ -223,10 +251,13 @@ test("repair candidates receive the failed candidate but not private validation 
       repair_curve_x_values = JSON.parse(
         await Bun.file(join(input.workspace, "model-contract.json")).text(),
       ).characterization.requirements[0].reference_curve.points.map(({ x }: { x: number }) => x)
+      const source = ".SUBCKT GAIN IN OUT\nE1 OUT 0 IN 0 3\n.ENDS GAIN\n"
+      const card = "Repaired model.\n"
       await Promise.all([
-        Bun.write(join(input.workspace, "model.lib"), ".SUBCKT GAIN IN OUT\nE1 OUT 0 IN 0 3\n.ENDS GAIN\n"),
-        Bun.write(join(input.workspace, "model-card.md"), "Repaired model.\n"),
+        Bun.write(join(input.workspace, "model.lib"), source),
+        Bun.write(join(input.workspace, "model-card.md"), card),
       ])
+      await simulatePassedCandidateTool({ workspace: input.workspace, source, card })
       return { attempts: 1, duration_ms: 1, output_tail: "" }
     },
   }
@@ -291,6 +322,42 @@ test("model candidate validation bounds agent-owned source before parsing it", a
   expect(await Bun.file(join(model_dir, "candidates")).exists()).toBe(false)
 })
 
+test("candidate acceptance requires a passed self-check receipt for the final file contents", async () => {
+  const model_dir = await prepareModelDirectory()
+  const source = ".SUBCKT GAIN IN OUT\nE1 OUT 0 IN 0 1\n.ENDS GAIN\n"
+  const checked_card = "Checked card.\n"
+  const error = await generateModelCandidate({
+    model_dir,
+    contract,
+    evidence_dir: join(model_dir, "evidence"),
+    strategy_guidance: "Use a dependent source.",
+    stage_id: "generate_model",
+    phase_label: "test final self-check receipt",
+    signal: new AbortController().signal,
+    use_openai: false,
+    agent_client: {
+      async run(input) {
+        await Promise.all([
+          Bun.write(join(input.workspace, "model.lib"), source),
+          Bun.write(join(input.workspace, "model-card.md"), checked_card),
+        ])
+        await simulatePassedCandidateTool({ workspace: input.workspace, source, card: checked_card })
+        await Bun.write(join(input.workspace, "model-card.md"), "Changed after the check.\n")
+        return { attempts: 1, duration_ms: 1, output_tail: "" }
+      },
+    },
+    ngspice: accepting_ngspice,
+    ngspice_path: "ngspice-test",
+    max_artifact_attempts: 1,
+    debug_dir: join(model_dir, "debug-final-receipt"),
+    on_output: () => undefined,
+  }).catch((caught) => caught)
+
+  expect(error).toBeInstanceOf(PipelineError)
+  expect((error as Error).message).toContain("changed after check_model_candidate passed")
+  expect(await Bun.file(join(model_dir, "candidates")).exists()).toBe(false)
+})
+
 test("ngspice syntax rejection is corrected inside candidate generation with a safe diagnostic", async () => {
   const model_dir = await prepareModelDirectory()
   const prompts: string[] = []
@@ -313,10 +380,12 @@ test("ngspice syntax rejection is corrected inside candidate generation with a s
           agent_attempt === 1
             ? ".SUBCKT GAIN IN OUT\nB1 OUT 0 V=if(V(IN)>0,1,0)\n.ENDS GAIN\n"
             : ".SUBCKT GAIN IN OUT\nE1 OUT 0 IN 0 2\n.ENDS GAIN\n"
+        const card = "Candidate model.\n"
         await Promise.all([
           Bun.write(join(input.workspace, "model.lib"), source),
-          Bun.write(join(input.workspace, "model-card.md"), "Candidate model.\n"),
+          Bun.write(join(input.workspace, "model-card.md"), card),
         ])
+        await simulatePassedCandidateTool({ workspace: input.workspace, source, card })
         return { attempts: 1, duration_ms: 1, output_tail: "" }
       },
     },

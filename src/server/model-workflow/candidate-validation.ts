@@ -47,6 +47,7 @@ export interface CandidateValidationInput {
 export interface CandidateValidationResult {
   readonly result: ValidationRunResult
   readonly result_path: string
+  readonly diagnostic_path: string
   readonly stimulus_causality: CandidateStimulusCausalityCheck
   readonly preview_build: ValidationCircuitPreviewBuild
   readonly projection: Awaited<ReturnType<typeof persistCandidateValidationUi>>
@@ -127,6 +128,7 @@ export async function validateCandidate(input: CandidateValidationInput): Promis
   return {
     result,
     result_path: join(input.validation_artifact_dir, "validation-results.json"),
+    diagnostic_path: join(input.validation_artifact_dir, "candidate-diagnostics.json"),
     stimulus_causality,
     preview_build,
     projection,

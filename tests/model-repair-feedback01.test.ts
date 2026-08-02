@@ -69,14 +69,26 @@ test("model repair feedback exposes only typed aggregate failure categories", ()
     version: 1,
     status: "failed",
     issues: [
-      { category: "target_mismatch", affected_cases: 1, affected_observations: 1 },
-      { category: "convergence_failure", affected_cases: 1, affected_observations: 0 },
+      {
+        category: "target_mismatch",
+        affected_cases: 1,
+        affected_observations: 1,
+        recommended_actions: ["recalibrate_continuous_transfer"],
+      },
+      {
+        category: "convergence_failure",
+        affected_cases: 1,
+        affected_observations: 0,
+        recommended_actions: ["improve_numerical_convergence", "bound_internal_state"],
+      },
     ],
   })
 
   const feedback = validationFailureFeedback(result)
   expect(feedback).toContain("target_mismatch")
   expect(feedback).toContain("convergence_failure")
+  expect(feedback).toContain("recalibrate continuous gain, offset, or transfer equations")
+  expect(feedback).toContain("remove discontinuities and ideal singularities")
   for (const private_value of [
     "sample_count",
     "987",
@@ -118,7 +130,12 @@ test("unknown validation details collapse to a fixed generic category", () => {
   }
 
   expect(createModelRepairFeedback(result).issues).toEqual([
-    { category: "validation_failure", affected_cases: 0, affected_observations: 0 },
+    {
+      category: "validation_failure",
+      affected_cases: 0,
+      affected_observations: 0,
+      recommended_actions: ["review_model_equations"],
+    },
   ])
   expect(validationFailureFeedback(result)).not.toMatch(/private|123456789|fixture\.json/)
 })
@@ -182,7 +199,14 @@ test("viewer-only curve mismatches enter repair as category/count feedback", () 
   expect(createModelRepairFeedback(result, { private_viewer_case_987654: viewer_validation })).toEqual({
     version: 1,
     status: "failed",
-    issues: [{ category: "viewer_curve_mismatch", affected_cases: 1, affected_observations: 1 }],
+    issues: [
+      {
+        category: "viewer_curve_mismatch",
+        affected_cases: 1,
+        affected_observations: 1,
+        recommended_actions: ["retune_dynamic_response", "preserve_viewer_portability"],
+      },
+    ],
   })
   const feedback = validationFailureFeedback(result, {
     private_viewer_case_987654: viewer_validation,

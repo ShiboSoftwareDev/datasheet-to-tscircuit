@@ -7,10 +7,14 @@ import {
   createModelTrainingContract,
   type GeneratedModel,
   type ModelContract,
-  readGeneratedModel,
 } from "../modeling"
 import type { NgspiceExecutor } from "../spice-validation"
-import { assertNgspiceAcceptsModelCandidate } from "./model-candidate-smoke"
+import {
+  assertModelCandidateCheckReceiptMatches,
+  checkModelCandidate,
+  MODEL_CANDIDATE_CHECK_RECEIPT_FILE,
+  readModelCandidateCheckReceipt,
+} from "./model-candidate-check"
 
 export interface StoredGeneratedModel extends GeneratedModel {
   artifact_dir: string
@@ -53,6 +57,7 @@ export async function generateModelCandidate(input: {
     use_openai: input.use_openai,
     agent_client: input.agent_client,
     tool_profile: "model_candidate_files",
+    model_candidate_check: { ngspice_path: input.ngspice_path },
     create_workspace: async () => {
       const workspace = await createStageWorkspace({
         prefix: input.stage_id.replaceAll("_", "-"),
@@ -87,21 +92,19 @@ export async function generateModelCandidate(input: {
     on_output: input.on_output,
     rejection_debug: {
       debug_dir: input.debug_dir,
-      files: ["model.lib", "model-card.md"],
+      files: ["model.lib", "model-card.md", MODEL_CANDIDATE_CHECK_RECEIPT_FILE],
     },
     validate: async (workspace) => {
-      const generated = await readGeneratedModel({
-        model_dir: workspace,
-        model_interface: input.contract.interface,
-      })
-      if (!generated.card.trim()) throw new Error("model-card.md must not be empty")
-      await assertNgspiceAcceptsModelCandidate({
+      const checked = await checkModelCandidate({
         workspace,
-        manifest: generated.manifest,
+        model_interface: input.contract.interface,
         ngspice: input.ngspice,
         ngspice_path: input.ngspice_path,
         signal: input.signal,
       })
+      const agent_receipt = await readModelCandidateCheckReceipt(workspace)
+      assertModelCandidateCheckReceiptMatches(agent_receipt, checked)
+      const { generated } = checked
       return {
         ...generated,
         artifact_dir: join(
@@ -126,6 +129,13 @@ export async function generateModelCandidate(input: {
           source: "model-card.md",
           destination_root: generated.artifact_dir,
           max_bytes: 512 * 1024,
+          signal,
+        }),
+        promoteStageFile({
+          workspace,
+          source: MODEL_CANDIDATE_CHECK_RECEIPT_FILE,
+          destination_root: generated.artifact_dir,
+          max_bytes: 16 * 1024,
           signal,
         }),
       ])

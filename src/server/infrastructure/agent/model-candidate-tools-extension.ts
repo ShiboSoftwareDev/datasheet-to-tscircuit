@@ -1,17 +1,28 @@
 import { constants, realpathSync } from "node:fs"
 import { lstat, open, realpath } from "node:fs/promises"
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path"
+import { Type } from "@earendil-works/pi-ai"
 import {
   createReadToolDefinition,
   createWriteToolDefinition,
+  defineTool,
   type ExtensionAPI,
   type ReadOperations,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent"
+import { ProcessError } from "../process"
+import {
+  checkModelCandidate,
+  MODEL_CANDIDATE_CHECK_RECEIPT_FILE,
+  ModelCandidateCheckError,
+  type ModelCandidateCheckReceipt,
+} from "../../model-workflow/model-candidate-check"
+import { executeLocalNgspice } from "../../spice-validation"
 
 const ALLOWED_OUTPUTS = new Set(["model.lib", "model-card.md"])
 const MAX_DIRECT_IMAGE_BYTES = 3 * 1024 * 1024
 const MAX_DIRECT_TEXT_BYTES = 8 * 1024 * 1024
+const MAX_CHECK_DIAGNOSTIC_CHARACTERS = 4_000
 const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
   ".gif": "image/gif",
   ".jpeg": "image/jpeg",
@@ -142,7 +153,75 @@ async function writeOutputFile(root: string, requested_path: string, content: st
   }
 }
 
-export function createModelCandidateFileTools(workspace: string) {
+async function writeCheckReceipt(root: string, content: string): Promise<void> {
+  const candidate = resolve(root, MODEL_CANDIDATE_CHECK_RECEIPT_FILE)
+  const existing = await lstat(candidate).catch((error: unknown) => {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined
+    throw error
+  })
+  if (existing && (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1)) {
+    throw new Error("Candidate check receipt must be a regular file")
+  }
+  const handle = await open(candidate, constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+  try {
+    const opened = await handle.stat()
+    if (!opened.isFile() || opened.nlink !== 1) {
+      throw new Error("Candidate check receipt must be a single-link regular file")
+    }
+    await handle.truncate(0)
+    await handle.writeFile(content, "utf8")
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+export type ModelCandidateToolCheckResult =
+  | ModelCandidateCheckReceipt
+  | {
+      readonly version: 1
+      readonly status: "failed"
+      readonly code: string
+      readonly diagnostic: string
+      readonly retryable: boolean
+    }
+
+type ModelCandidateToolChecker = (input: {
+  workspace: string
+  ngspice_path: string
+  signal: AbortSignal
+}) => Promise<ModelCandidateCheckReceipt>
+
+function sanitizeCheckDiagnostic(error: unknown, workspace: string): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message
+    .replaceAll(workspace, "<candidate>")
+    .replace(/(?:\/[\w.@+-]+)+\/(model\.lib|model-card\.md|model-interface\.json)/g, "$1")
+    .slice(0, MAX_CHECK_DIAGNOSTIC_CHARACTERS)
+}
+
+async function runProductionCandidateCheck(input: {
+  workspace: string
+  ngspice_path: string
+  signal: AbortSignal
+}): Promise<ModelCandidateCheckReceipt> {
+  return (
+    await checkModelCandidate({
+      workspace: input.workspace,
+      ngspice: executeLocalNgspice,
+      ngspice_path: input.ngspice_path,
+      signal: input.signal,
+    })
+  ).receipt
+}
+
+export function createModelCandidateFileTools(
+  workspace: string,
+  options: {
+    ngspice_path?: string
+    check_candidate?: ModelCandidateToolChecker
+  } = {},
+) {
   const root = realpathSync(workspace)
   const read_operations: ReadOperations = {
     access: async (requested_path) => {
@@ -194,11 +273,54 @@ export function createModelCandidateFileTools(workspace: string) {
     promptSnippet: "Write model.lib or model-card.md in the isolated candidate workspace",
     promptGuidelines: ["Use model_output_write only for model.lib and model-card.md."],
   }
-  return [scoped_read_tool, scoped_write_tool] as const
+  const check_candidate = options.check_candidate ?? runProductionCandidateCheck
+  const candidate_check_tool = defineTool({
+    name: "check_model_candidate",
+    label: "check_model_candidate",
+    description:
+      "Validate the current model.lib and model-card.md against the public model interface and run the server's real ngspice candidate smoke harness. Takes no paths or commands and never reveals held-out validation data.",
+    promptSnippet: "Check the current model candidate with the production contract and ngspice smoke gate",
+    promptGuidelines: [
+      "After writing model.lib and model-card.md, call check_model_candidate and correct any failed diagnostic before finishing.",
+    ],
+    parameters: Type.Object({}, { additionalProperties: false }),
+    executionMode: "sequential",
+    async execute(_tool_call_id, _parameters, signal) {
+      const check_signal = signal ?? new AbortController().signal
+      let result: ModelCandidateToolCheckResult
+      try {
+        result = await check_candidate({
+          workspace: root,
+          ngspice_path: options.ngspice_path ?? process.env.DATASHEET_MODEL_CHECK_NGSPICE_BIN ?? "ngspice",
+          signal: check_signal,
+        })
+      } catch (error) {
+        result = {
+          version: 1,
+          status: "failed",
+          code:
+            error instanceof ModelCandidateCheckError
+              ? error.code
+              : error instanceof ProcessError
+                ? "candidate_check_unavailable"
+                : "candidate_check_failed",
+          diagnostic: sanitizeCheckDiagnostic(error, root),
+          retryable: !(error instanceof ProcessError),
+        }
+      }
+      await writeCheckReceipt(root, `${JSON.stringify(result, null, 2)}\n`)
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        details: result,
+      }
+    },
+  })
+  return [scoped_read_tool, scoped_write_tool, candidate_check_tool] as const
 }
 
 export default function registerModelCandidateTools(agent: ExtensionAPI): void {
-  const [read_tool, write_tool] = createModelCandidateFileTools(process.cwd())
+  const [read_tool, write_tool, check_tool] = createModelCandidateFileTools(process.cwd())
   agent.registerTool(read_tool)
   agent.registerTool(write_tool)
+  agent.registerTool(check_tool)
 }
