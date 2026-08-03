@@ -448,8 +448,18 @@ test("reference observation derives canonical ranges from axis anchors", () => {
   })
 })
 
+test("reference observation rejects traced pixels before the zero-time axis anchor", () => {
+  const value = validObservationValue()
+  const curve = value.graphs[0]!.digitized_curve
+  curve.x_axis.first.pixel = 20
+
+  expect(() => parseReferenceGraphObservation(value, discovery, model_interface)).toThrow(
+    /points cannot contain negative elapsed time derived from the pixel-axis calibration/,
+  )
+})
+
 testWithArchivedRun102Observation(
-  "replays the exact model-agent 102 graph inventory without spending a schema repair",
+  "rejects the exact model-agent 102 graph inventory whose trace starts before time zero",
   async () => {
     const [value, run_discovery, run_interface, run_application_fixture] = await Promise.all([
       Bun.file(archived_run102_observation).json(),
@@ -459,30 +469,14 @@ testWithArchivedRun102Observation(
       Bun.file(join(archived_run102_root, "model-interface.json")).json(),
       Bun.file(join(archived_run102_root, "application-fixture-contract.json")).json(),
     ])
-    const parsed = parseReferenceGraphObservation(
-      value,
-      run_discovery as TimeGraphDiscovery,
-      run_interface as ModelInterface,
-      run_application_fixture as ApplicationFixtureContract,
-    )
-    const eligible = eligibleObservedGraphs(parsed)
-
-    expect(eligible.map(({ graph_id }) => graph_id)).toEqual([
-      "datasheet_figure_10_21",
-      "datasheet_figure_10_22",
-      "datasheet_figure_10_24",
-      "datasheet_figure_10_25",
-    ])
-    for (const graph of eligible) {
-      expect(graph.digitized_curve.x_axis).toMatchObject({
-        first: { pixel: 37 },
-        second: { pixel: 574 },
-      })
-      expect(graph.digitized_curve.y_axis).toMatchObject({
-        first: { pixel: 300 },
-        second: { pixel: 18 },
-      })
-    }
+    expect(() =>
+      parseReferenceGraphObservation(
+        value,
+        run_discovery as TimeGraphDiscovery,
+        run_interface as ModelInterface,
+        run_application_fixture as ApplicationFixtureContract,
+      ),
+    ).toThrow(/points cannot contain negative elapsed time derived from the pixel-axis calibration/)
   },
 )
 

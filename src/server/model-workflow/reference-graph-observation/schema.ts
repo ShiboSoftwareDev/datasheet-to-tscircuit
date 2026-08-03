@@ -202,6 +202,11 @@ function parseDigitizedCurve(
   const y_axis = parseAxisCalibration(value.y_axis, `${path}.y_axis`, "y_axis")
   const x_range = rangeFromAxis(x_axis)
   const y_range = rangeFromAxis(y_axis)
+  if (x_range.min < 0) {
+    throw new Error(
+      `${path}.x_axis cannot contain negative elapsed time; translate pre-trigger time so the earliest calibrated time is 0 s`,
+    )
+  }
   if (!(x_axis.second.value > x_axis.first.value)) {
     throw new Error(`${path}.x_axis anchors must progress from minimum to maximum time`)
   }
@@ -267,6 +272,11 @@ function parseDigitizedCurve(
       y,
     }
   })
+  if (points.some(({ x }) => x < 0)) {
+    throw new Error(
+      `${path}.points cannot contain negative elapsed time derived from the pixel-axis calibration; move the zero-time anchor to or before the earliest traced point`,
+    )
+  }
   const x_pixel_direction = Math.sign(x_axis.second.pixel - x_axis.first.pixel)
   const normalized_x_positions = points.map(
     ({ pixel_x }) => ((pixel_x - x_axis.first.pixel) * x_pixel_direction) / x_pixel_span,

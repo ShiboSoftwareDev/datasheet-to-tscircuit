@@ -1,0 +1,626 @@
+{
+  "version": 1,
+  "source": "model-agent(105)",
+  "model_run_id": "bb51c363-4ddb-4e30-9fed-d6f6fabd2f74",
+  "failure": "derived_negative_elapsed_time",
+  "model_interface": {
+    "version": 1,
+    "part_number": "TPS63802",
+    "entry_name": "TPS63802",
+    "pins": [
+      {
+        "physical_pin": "1",
+        "component_pin": "pin1",
+        "source_port_id": "source_port_0",
+        "spice_node": "EN",
+        "labels": ["EN"],
+        "role": "input"
+      },
+      {
+        "physical_pin": "2",
+        "component_pin": "pin2",
+        "source_port_id": "source_port_1",
+        "spice_node": "MODE",
+        "labels": ["MODE"],
+        "role": "input"
+      },
+      {
+        "physical_pin": "3",
+        "component_pin": "pin3",
+        "source_port_id": "source_port_2",
+        "spice_node": "AGND",
+        "labels": ["AGND"],
+        "role": "ground"
+      },
+      {
+        "physical_pin": "4",
+        "component_pin": "pin4",
+        "source_port_id": "source_port_3",
+        "spice_node": "FB",
+        "labels": ["FB"],
+        "role": "input"
+      },
+      {
+        "physical_pin": "5",
+        "component_pin": "pin5",
+        "source_port_id": "source_port_4",
+        "spice_node": "PG",
+        "labels": ["PG"],
+        "role": "output"
+      },
+      {
+        "physical_pin": "6",
+        "component_pin": "pin6",
+        "source_port_id": "source_port_5",
+        "spice_node": "VOUT",
+        "labels": ["VOUT"],
+        "role": "power_output"
+      },
+      {
+        "physical_pin": "7",
+        "component_pin": "pin7",
+        "source_port_id": "source_port_6",
+        "spice_node": "L2",
+        "labels": ["L2"],
+        "role": "passive"
+      },
+      {
+        "physical_pin": "8",
+        "component_pin": "pin8",
+        "source_port_id": "source_port_7",
+        "spice_node": "GND",
+        "labels": ["GND"],
+        "role": "ground"
+      },
+      {
+        "physical_pin": "9",
+        "component_pin": "pin9",
+        "source_port_id": "source_port_8",
+        "spice_node": "L1",
+        "labels": ["L1"],
+        "role": "passive"
+      },
+      {
+        "physical_pin": "10",
+        "component_pin": "pin10",
+        "source_port_id": "source_port_9",
+        "spice_node": "VIN",
+        "labels": ["VIN"],
+        "role": "power_input"
+      }
+    ]
+  },
+  "application_fixture": {
+    "version": 1,
+    "availability": "documented",
+    "source_plan_sha256": "ad0c539e377f31459461eab85c564c33a41fe39b78d61230084e3fdb728aa927",
+    "source_pdf_sha256": "be07deca1231c5493957bc64c2dc1cad5543bff330e49ae41caf3286fd80dca6",
+    "target_component": "U1",
+    "ground_node_group_id": "app_net_007",
+    "node_groups": [
+      {
+        "id": "app_net_001",
+        "source_net": "VIN",
+        "source_endpoints": ["U1.VIN", "U1.EN", "C1.1", "R3.1", "VIN"],
+        "dut_endpoints": ["dut.VIN", "dut.EN"],
+        "external_terminals": ["VIN"],
+        "is_ground": false
+      },
+      {
+        "id": "app_net_002",
+        "source_net": "L1",
+        "source_endpoints": ["U1.L1", "L1.1"],
+        "dut_endpoints": ["dut.L1"],
+        "external_terminals": [],
+        "is_ground": false
+      },
+      {
+        "id": "app_net_003",
+        "source_net": "L2",
+        "source_endpoints": ["U1.L2", "L1.2"],
+        "dut_endpoints": ["dut.L2"],
+        "external_terminals": [],
+        "is_ground": false
+      },
+      {
+        "id": "app_net_004",
+        "source_net": "VOUT",
+        "source_endpoints": ["U1.VOUT", "C2.1", "R1.1", "VOUT"],
+        "dut_endpoints": ["dut.VOUT"],
+        "external_terminals": ["VOUT"],
+        "is_ground": false
+      },
+      {
+        "id": "app_net_005",
+        "source_net": "FB",
+        "source_endpoints": ["U1.FB", "R1.2", "R2.1"],
+        "dut_endpoints": ["dut.FB"],
+        "external_terminals": [],
+        "is_ground": false
+      },
+      {
+        "id": "app_net_006",
+        "source_net": "PG",
+        "source_endpoints": ["U1.PG", "R3.2"],
+        "dut_endpoints": ["dut.PG"],
+        "external_terminals": [],
+        "is_ground": false
+      },
+      {
+        "id": "app_net_007",
+        "source_net": "GND",
+        "source_endpoints": ["U1.MODE", "U1.GND", "U1.AGND", "C1.2", "C2.2", "R2.2", "GND"],
+        "dut_endpoints": ["dut.MODE", "dut.GND", "dut.AGND"],
+        "external_terminals": ["GND"],
+        "is_ground": true
+      }
+    ],
+    "fixtures": [
+      {
+        "id": "app_l1",
+        "reference": "L1",
+        "source_terminals": ["L1.1", "L1.2"],
+        "type": "inductor",
+        "positive": "net.app_net_002",
+        "negative": "net.app_net_003",
+        "inductance_henries": 4.7e-7
+      },
+      {
+        "id": "app_c1",
+        "reference": "C1",
+        "source_terminals": ["C1.1", "C1.2"],
+        "type": "capacitor",
+        "positive": "net.app_net_001",
+        "negative": "gnd",
+        "capacitance_farads": 0.00001
+      },
+      {
+        "id": "app_c2",
+        "reference": "C2",
+        "source_terminals": ["C2.1", "C2.2"],
+        "type": "capacitor",
+        "positive": "net.app_net_004",
+        "negative": "gnd",
+        "capacitance_farads": 0.000022
+      },
+      {
+        "id": "app_r1",
+        "reference": "R1",
+        "source_terminals": ["R1.1", "R1.2"],
+        "type": "resistor",
+        "positive": "net.app_net_004",
+        "negative": "net.app_net_005",
+        "resistance_ohms": 511000
+      },
+      {
+        "id": "app_r2",
+        "reference": "R2",
+        "source_terminals": ["R2.1", "R2.2"],
+        "type": "resistor",
+        "positive": "net.app_net_005",
+        "negative": "gnd",
+        "resistance_ohms": 91000
+      },
+      {
+        "id": "app_r3",
+        "reference": "R3",
+        "source_terminals": ["R3.1", "R3.2"],
+        "type": "resistor",
+        "positive": "net.app_net_001",
+        "negative": "net.app_net_006",
+        "resistance_ohms": 100000
+      }
+    ],
+    "contract_sha256": "c5e43dc00b0df47504041311b1056edf6296a84847b8ecc384d23eb4ea12fb43"
+  },
+  "discovery": {
+    "version": 1,
+    "source_pdf_sha256": "be07deca1231c5493957bc64c2dc1cad5543bff330e49ae41caf3286fd80dca6",
+    "page_count": 38,
+    "hints": [
+      {
+        "hint_id": "time_graph_007",
+        "page": 25,
+        "figure": "Figure 10-21",
+        "reason": "Figure 10-21. Load Transient, PFM/PWM Boost",
+        "operating_condition_evidence": "BER 2018 – REVISED JANUARY 2021 VI = 4.2 V, VO = 3.3 V MODE = Low IO = 2 A IO from 100 mA to VI = 2.5 V, VO = 3.3 1 A tr = 1 µs, tf = 1 MODE = Low V µs Figure 10-20. Switching Waveforms, PWM Buck Operation Figure 10-21. Load Transient, PFM/PWM Boost Operation IO from 100 mA to IO from 100 mA to VI = 3.3 V, VO = 3.3 V 1 A tr = 1 µs, tf = MODE = Low VI = 5 V, VO = 3.3 V 1 A tr = 1 µs, tf = MODE = Low 1 µs 1 µs Figure 10-22. Load Transient, PFM/PWM Buck- Figure 10-23. Load Transient, PFM/PWM Buck Boost Operation Operation IO from 100 mA to IO from 100 mA to VI = 2.5 V, VO = 3.3 V 1 A tr = 1 µs, tf = MODE = High VI = 3.3 V, VO = 3.3 V 1 A tr = 1 µs, tf = MODE = High 1 µs 1 µs Figure 10-24. Load Transient, PWM Boost Figure 10-25. Load Transient, PWM Buck-Boost Operation Operation Copyright © 2021 Texas Instruments Incorporated TPS63802 SLVSEU9D – NOVEMBER 2018 – REVISED JANUARY 2021 IO from 100 mA to VI = 2.5 V, VO = 3.3 1 A tr = 1 µs, tf = 1 MODE = Low V µs Figure 10-21. Load Transient, PFM/PWM Boost Operation IO from 100 mA to 1 A tr = 1 µs, tf = 1 MODE = Low µs",
+        "fixture_evidence_context": "TPS63802 SLVSEU9D – NOVEMBER 2018 – REVISED JANUARY 2021 IO from 100 mA to VI = 2.5 V, VO = 3.3 1 A tr = 1 µs, tf = 1 MODE = Low V µs Figure 10-21. Load Transient, PFM/PWM Boost Operation",
+        "summary_fixture_evidence_context": "Transient Performance VI = 2.5 V, VO = 3.3 V, Load = 100 mA to 1A, MODE = Load Transient, PFM/PWM Boost Operation Figure 10-21 Low",
+        "condition_conflicts": [],
+        "graph_local_conditions": {
+          "method": "graph_local_fixture_conditions_v1",
+          "conditions": []
+        },
+        "unsupported_fixture_conditions": [],
+        "transient_fixture_evidence": {
+          "method": "printed_experiment_conditions_v2",
+          "source_excerpts": [
+            {
+              "scope": "graph_caption",
+              "text": "TPS63802 SLVSEU9D – NOVEMBER 2018 – REVISED JANUARY 2021 IO from 100 mA to VI = 2.5 V, VO = 3.3 1 A tr = 1 µs, tf = 1 MODE = Low V µs"
+            },
+            {
+              "scope": "summary_row",
+              "text": "Transient Performance VI = 2.5 V, VO = 3.3 V, Load = 100 mA to 1A, MODE = Load Transient, PFM/PWM Boost Operation Figure 10-21 Low"
+            }
+          ],
+          "response": {
+            "signal": "VO",
+            "quantity": "voltage",
+            "nominal_volts": 3.3
+          },
+          "stimulus": {
+            "signal": "IO",
+            "type": "current_step",
+            "low": 0.1,
+            "high": 1,
+            "rise": 0.000001,
+            "fall": 0.000001
+          },
+          "auxiliary_conditions": [
+            {
+              "kind": "dc_voltage",
+              "signal": "VI",
+              "value": 2.5
+            },
+            {
+              "kind": "logic_state",
+              "signal": "MODE",
+              "state": "low"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "observation": {
+    "version": 1,
+    "source_pdf_sha256": "be07deca1231c5493957bc64c2dc1cad5543bff330e49ae41caf3286fd80dca6",
+    "reviewed_hints": [
+      {
+        "hint_id": "time_graph_007",
+        "disposition": "graph",
+        "graph_id": "load_transient_pfm_pwm_boost",
+        "reason": "Visually confirmed the hinted elapsed-time oscilloscope graph."
+      }
+    ],
+    "graphs": [
+      {
+        "graph_id": "load_transient_pfm_pwm_boost",
+        "page": 25,
+        "locator": "Figure 10-21. Load Transient, PFM/PWM Boost Operation",
+        "x_axis": "time",
+        "time_axis_evidence": "Horizontal 1 ms; 100 µs/div",
+        "response_quantity": "voltage",
+        "public_pin_observable": true,
+        "fixture_reproducible": true,
+        "reason": "The authoritative printed experiment evidence completely specifies the VOUT response, IO load step, VI supply, and MODE low state.",
+        "crop": {
+          "page": 25,
+          "render_dpi": 200,
+          "x_px": 865,
+          "y_px": 210,
+          "width_px": 660,
+          "height_px": 590
+        },
+        "electrical_binding": {
+          "response": {
+            "type": "voltage",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "nominal_volts": 3.3
+          },
+          "stimulus": {
+            "type": "current_step",
+            "positive": "dut.VOUT",
+            "negative": "gnd",
+            "pulse": {
+              "low": 0.1,
+              "high": 1,
+              "delay": 0.0001,
+              "rise": 0.000001,
+              "fall": 0.000001,
+              "width": 0.0004,
+              "period": 0.002
+            }
+          },
+          "auxiliary_fixtures": [
+            {
+              "type": "dc_voltage",
+              "positive": "dut.VIN",
+              "negative": "gnd",
+              "dc_volts": 2.5
+            },
+            {
+              "type": "logic_state",
+              "endpoint": "dut.MODE",
+              "reference": "gnd",
+              "state": "low"
+            }
+          ],
+          "application_fixture_sha256": "c5e43dc00b0df47504041311b1056edf6296a84847b8ecc384d23eb4ea12fb43",
+          "application_topology_sha256": "208f82797081a2228f6ea41e9f6545217d4db999e1a1604d82ff9424053b6150"
+        },
+        "digitized_curve": {
+          "method": "manual_pixel_trace",
+          "x_quantity": "time",
+          "x_unit": "s",
+          "y_quantity": "voltage",
+          "y_unit": "V",
+          "x_range": {
+            "min": 0,
+            "max": 0.0009
+          },
+          "y_range": {
+            "min": 2.6,
+            "max": 3.8
+          },
+          "x_axis": {
+            "scale": "linear",
+            "first": {
+              "pixel": 63,
+              "value": 0
+            },
+            "second": {
+              "pixel": 558,
+              "value": 0.0009
+            }
+          },
+          "y_axis": {
+            "scale": "linear",
+            "first": {
+              "pixel": 190,
+              "value": 2.6
+            },
+            "second": {
+              "pixel": 4,
+              "value": 3.8
+            }
+          },
+          "trace_color": {
+            "r": 45,
+            "g": 70,
+            "b": 255,
+            "tolerance": 70
+          },
+          "points": [
+            {
+              "pixel_x": 25,
+              "pixel_y": 77,
+              "x": -0.00006909090909090908,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 39,
+              "pixel_y": 77,
+              "x": -0.000043636363636363636,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 53,
+              "pixel_y": 77,
+              "x": -0.000018181818181818182,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 67,
+              "pixel_y": 77,
+              "x": 0.000007272727272727272,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 81,
+              "pixel_y": 77,
+              "x": 0.000032727272727272725,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 95,
+              "pixel_y": 77,
+              "x": 0.00005818181818181818,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 109,
+              "pixel_y": 77,
+              "x": 0.00008363636363636364,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 123,
+              "pixel_y": 77,
+              "x": 0.00010909090909090909,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 137,
+              "pixel_y": 128,
+              "x": 0.00013454545454545455,
+              "y": 3
+            },
+            {
+              "pixel_x": 151,
+              "pixel_y": 96,
+              "x": 0.00016,
+              "y": 3.206451612903226
+            },
+            {
+              "pixel_x": 165,
+              "pixel_y": 84,
+              "x": 0.00018545454545454545,
+              "y": 3.2838709677419353
+            },
+            {
+              "pixel_x": 179,
+              "pixel_y": 80,
+              "x": 0.00021090909090909092,
+              "y": 3.3096774193548386
+            },
+            {
+              "pixel_x": 193,
+              "pixel_y": 78,
+              "x": 0.0002363636363636364,
+              "y": 3.32258064516129
+            },
+            {
+              "pixel_x": 207,
+              "pixel_y": 77,
+              "x": 0.0002618181818181818,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 221,
+              "pixel_y": 77,
+              "x": 0.00028727272727272727,
+              "y": 3.329032258064516
+            },
+            {
+              "pixel_x": 235,
+              "pixel_y": 76,
+              "x": 0.00031272727272727273,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 249,
+              "pixel_y": 76,
+              "x": 0.00033818181818181815,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 263,
+              "pixel_y": 76,
+              "x": 0.0003636363636363636,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 277,
+              "pixel_y": 76,
+              "x": 0.0003890909090909091,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 291,
+              "pixel_y": 76,
+              "x": 0.00041454545454545455,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 305,
+              "pixel_y": 76,
+              "x": 0.00043999999999999996,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 319,
+              "pixel_y": 76,
+              "x": 0.00046545454545454543,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 333,
+              "pixel_y": 76,
+              "x": 0.0004909090909090909,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 347,
+              "pixel_y": 76,
+              "x": 0.0005163636363636364,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 361,
+              "pixel_y": 76,
+              "x": 0.0005418181818181818,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 375,
+              "pixel_y": 76,
+              "x": 0.0005672727272727272,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 389,
+              "pixel_y": 76,
+              "x": 0.0005927272727272728,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 403,
+              "pixel_y": 39,
+              "x": 0.0006181818181818182,
+              "y": 3.574193548387097
+            },
+            {
+              "pixel_x": 417,
+              "pixel_y": 64,
+              "x": 0.0006436363636363637,
+              "y": 3.4129032258064513
+            },
+            {
+              "pixel_x": 431,
+              "pixel_y": 73,
+              "x": 0.0006690909090909091,
+              "y": 3.354838709677419
+            },
+            {
+              "pixel_x": 445,
+              "pixel_y": 76,
+              "x": 0.0006945454545454545,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 459,
+              "pixel_y": 76,
+              "x": 0.00072,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 473,
+              "pixel_y": 76,
+              "x": 0.0007454545454545455,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 487,
+              "pixel_y": 76,
+              "x": 0.0007709090909090909,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 501,
+              "pixel_y": 76,
+              "x": 0.0007963636363636364,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 515,
+              "pixel_y": 76,
+              "x": 0.0008218181818181818,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 529,
+              "pixel_y": 76,
+              "x": 0.0008472727272727272,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 543,
+              "pixel_y": 76,
+              "x": 0.0008727272727272727,
+              "y": 3.335483870967742
+            },
+            {
+              "pixel_x": 557,
+              "pixel_y": 76,
+              "x": 0.0008981818181818182,
+              "y": 3.335483870967742
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
