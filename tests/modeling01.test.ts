@@ -320,12 +320,10 @@ describe("model characterization contract", () => {
     expect(validation_guide).toContain("[A-Za-z][A-Za-z0-9_]{0,63}")
     expect(validation_guide).toContain("Do not write `reference` or `evidence`")
     expect(validation_guide).not.toContain("scale,evidence?")
-    expect(buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })).toContain(
-      "typical-application-plan.json",
-    )
-    expect(buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })).toContain(
-      "server has withheld",
-    )
+    const model_prompt = buildModelGenerationPrompt({ contract, strategy_guidance: "Use equations." })
+    expect(model_prompt).toContain("model-training-plan.json")
+    expect(model_prompt).not.toContain("typical-application-plan.json")
+    expect(model_prompt).toContain("server has withheld")
     expect(() => parseFreshModelContract(contract)).toThrow(
       /analysis must be transient for fresh modeled requirements/,
     )

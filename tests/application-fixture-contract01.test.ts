@@ -120,6 +120,63 @@ test("server-owned application fixture contract derives ground from an authorita
   expect(contract.node_groups.find(({ is_ground }) => is_ground)?.source_net).toBe("RETURN")
 })
 
+test("application endpoints may use the datasheet physical pin number", () => {
+  const model_interface: ModelInterface = {
+    version: 1,
+    part_number: "PHYSICAL-PINS",
+    entry_name: "PHYSICAL_PINS",
+    pins: [
+      {
+        physical_pin: "6",
+        component_pin: "pin6",
+        source_port_id: "source_port_6",
+        spice_node: "VS",
+        labels: ["VS"],
+        role: "power_input",
+      },
+      {
+        physical_pin: "7",
+        component_pin: "pin7",
+        source_port_id: "source_port_7",
+        spice_node: "GND",
+        labels: ["GND"],
+        role: "ground",
+      },
+    ],
+  }
+  const plan = parseTypicalApplicationPlan(
+    {
+      version: 4,
+      availability: "documented",
+      pcb_implementation: "schematic_only",
+      title: "Numeric pin application",
+      description: "The source diagram labels U1 terminals by package number.",
+      source_references: [{ page: 1 }],
+      components: [
+        { reference: "U1", kind: "integrated_circuit", value: "PHYSICAL-PINS" },
+        { reference: "C1", kind: "capacitor", value: "100nF" },
+      ],
+      connections: [
+        { net: "VS", pins: ["U1.6", "C1.1", "VS"] },
+        { net: "GND", pins: ["U1.7", "C1.2", "GND"] },
+      ],
+    },
+    { part_number: "PHYSICAL-PINS" },
+  )
+
+  const contract = compileApplicationFixtureContract({
+    plan,
+    model_interface,
+    source_plan_sha256: PLAN_SHA256,
+    source_pdf_sha256: PDF_SHA256,
+  })
+
+  expect(contract.node_groups.flatMap(({ dut_endpoints }) => dut_endpoints).sort()).toEqual([
+    "dut.GND",
+    "dut.VS",
+  ])
+})
+
 test("server-owned application fixture contract merges printed GND and AGND aliases", () => {
   const plan = run93Plan()
   const ground = plan.connections.find(({ net }) => net === "GND")!

@@ -79,7 +79,6 @@ export async function generateModelCandidate(input: {
           { source: join(input.model_dir, "model-interface.json") },
           { source: join(input.model_dir, "component.circuit.tsx") },
           { source: join(input.model_dir, "component-evidence.json") },
-          { source: join(input.model_dir, "typical-application-plan.json") },
           { source: join(input.model_dir, "package.json"), required: false },
           { source: join(input.model_dir, "tsconfig.json"), required: false },
           { source: join(input.model_dir, "tscircuit.config.json"), required: false },

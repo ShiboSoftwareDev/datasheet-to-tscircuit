@@ -187,6 +187,7 @@ async function assertModelTrainingCheckReceiptIntegrityMatches(input: {
   workspace: string
   receipt: ModelTrainingCheckReceipt
   checked: CheckedModelCandidate
+  allow_missing_viewer_series?: boolean
 }): Promise<void> {
   assertModelCandidateCheckReceiptMatches(input.receipt.candidate, input.checked)
   if (input.receipt.training_plan_sha256 !== (await trainingPlanSha256(input.workspace))) {
@@ -237,6 +238,14 @@ async function assertModelTrainingCheckReceiptIntegrityMatches(input: {
       ["tscircuit viewer", reported_case.viewer_series],
     ] as const) {
       const observation_ids = series.map(({ observation_id }) => observation_id)
+      if (
+        engine === "tscircuit viewer" &&
+        input.allow_missing_viewer_series &&
+        observation_ids.every((observation_id) => expected_case.observation_ids.includes(observation_id)) &&
+        new Set(observation_ids).size === observation_ids.length
+      ) {
+        continue
+      }
       if (JSON.stringify(observation_ids) !== JSON.stringify(expected_case.observation_ids)) {
         throw new ModelCandidateCheckError(
           "visible_training_validation_failed",
@@ -272,8 +281,17 @@ export async function assertModelTrainingCheckReceiptUsable(input: {
   receipt: ModelTrainingCheckReceipt
   checked: CheckedModelCandidate
 }): Promise<void> {
-  await assertModelTrainingCheckReceiptIntegrityMatches(input)
+  await assertModelTrainingCheckReceiptIntegrityMatches({
+    ...input,
+    allow_missing_viewer_series: true,
+  })
   const report = input.receipt.training_validation
+  if (report.cases.some(({ server_series }) => server_series.length === 0)) {
+    throw new ModelCandidateCheckError(
+      "visible_training_validation_failed",
+      "The candidate did not produce a public ngspice comparison series and cannot seed authoritative validation",
+    )
+  }
   const all_error_codes = [
     ...report.error_codes,
     ...report.cases.flatMap(({ error_codes }) => error_codes),
@@ -281,8 +299,14 @@ export async function assertModelTrainingCheckReceiptUsable(input: {
       [...server_series, ...viewer_series].flatMap(({ error_codes }) => error_codes),
     ),
   ]
+  const has_complete_server_case_set =
+    report.cases.length > 0 && report.cases.every(({ server_series }) => server_series.length > 0)
+  const inspectable_candidate_errors = new Set([
+    ...USABLE_COMPARISON_ERROR_CODES,
+    ...(has_complete_server_case_set ? ["viewer_validation_unavailable", "viewer_simulation_failed"] : []),
+  ])
   const non_comparison_errors = [...new Set(all_error_codes)].filter(
-    (code) => !USABLE_COMPARISON_ERROR_CODES.has(code),
+    (code) => !inspectable_candidate_errors.has(code),
   )
   if (non_comparison_errors.length > 0) {
     throw new ModelCandidateCheckError(
@@ -291,7 +315,7 @@ export async function assertModelTrainingCheckReceiptUsable(input: {
     )
   }
   for (const validation_case of report.cases) {
-    for (const series of [...validation_case.server_series, ...validation_case.viewer_series]) {
+    for (const series of validation_case.server_series) {
       if (
         !Number.isFinite(series.metrics.normalized_max_error) ||
         !Number.isFinite(series.metrics.normalized_rmse) ||

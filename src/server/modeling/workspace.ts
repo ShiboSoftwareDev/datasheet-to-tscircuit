@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { isCircuitJson } from "../component-circuit-json"
 import { parseComponentEvidence } from "../component-evidence"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
+import { ensureJobTscircuitRuntimeConfig } from "../job-scaffold"
 import {
   applicationTargetIdentityFromEvidence,
   parseTypicalApplicationPlan,
@@ -100,6 +101,11 @@ export async function prepareModelWorkspace(input: {
   const component_source = (await Bun.file(preserved_component).exists())
     ? preserved_component
     : join(input.job_dir, "index.circuit.tsx")
+  // Runtime config is executable environment state, not an immutable job
+  // artifact. Refresh it on every model invocation so a job created in Docker
+  // can be retried on the host (and vice versa) without retaining an absolute
+  // import path from the previous runtime.
+  await ensureJobTscircuitRuntimeConfig(input.job_dir)
   await Promise.all([
     Bun.write(join(input.model_dir, "datasheet.pdf"), datasheet_bytes),
     copyCanonical(component_source, join(input.model_dir, "component.circuit.tsx")),

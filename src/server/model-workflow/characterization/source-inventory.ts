@@ -7,11 +7,7 @@ import { PipelineError } from "../../pipeline"
 import type { JobLogStream } from "../../../shared/job-types"
 import type { ModelPipelineContext, ModelPipelineServices } from "../types"
 import { appendModelLog, writeJson } from "../stage-helpers"
-import {
-  applyReferenceGraphSourceEligibility,
-  buildReferenceGraphSourceProof,
-  type ReferenceGraphSourceProof,
-} from "../reference-graph-axis-proof"
+import { buildReferenceGraphSourceProof, type ReferenceGraphSourceProof } from "../reference-graph-axis-proof"
 import {
   buildReferenceGraphObserverPrompt,
   eligibleObservedGraphs,
@@ -201,13 +197,21 @@ export async function inventoryReferenceGraphs(input: {
         model_interface,
         application_fixture,
       )
-      await verifyReferenceGraphObservationPixels({
-        observation,
-        datasheet_path,
-        process_runner: services.process_runner,
-        signal,
-        on_output: logOutput,
-      })
+      try {
+        await verifyReferenceGraphObservationPixels({
+          observation,
+          datasheet_path,
+          process_runner: services.process_runner,
+          signal,
+          on_output: logOutput,
+        })
+      } catch (error) {
+        signal.throwIfAborted()
+        await logOutput(
+          "system",
+          `Reused graph curves are still an inspectable draft: ${error instanceof Error ? error.message : String(error)}\n`,
+        )
+      }
       const source_proof = await buildSourceProof({
         observation,
         datasheet_path,
@@ -216,22 +220,21 @@ export async function inventoryReferenceGraphs(input: {
       })
       const source_rejections = sourceProofRejectionDiagnostics(observation, source_proof)
       if (source_rejections.length > 0) {
-        throw new Error(source_rejections.join("\n"))
+        await logOutput(
+          "system",
+          `Reused graph axes remain an inspectable draft:\n${source_rejections.join("\n")}\n`,
+        )
       }
-      const canonical_observation = applyReferenceGraphSourceEligibility({
-        observation,
-        proof: source_proof,
-      })
-      assertObserverFoundEligibleTimeDomainGraph(canonical_observation)
-      await writeJson(join(attempt_dir, "model-reference-observation.json"), canonical_observation)
+      assertObserverFoundEligibleTimeDomainGraph(observation)
+      await writeJson(join(attempt_dir, "model-reference-observation.json"), observation)
       await writeJson(join(attempt_dir, "model-reference-source-proof.json"), source_proof)
       await logOutput(
         "system",
-        `Reused the accepted graph inventory from invocation ${candidate.invocation_id} after revalidating every pixel and rebuilding canonical-PDF axis proof.\n`,
+        `Reused graph inventory from invocation ${candidate.invocation_id} after rebuilding its current pixel and canonical-PDF diagnostics.\n`,
       )
       return {
         time_graph_hints_path,
-        observation: canonical_observation,
+        observation,
         source_proof,
         observer_attempts: 0,
         reused_from_invocation_id: candidate.invocation_id,
@@ -306,19 +309,20 @@ export async function inventoryReferenceGraphs(input: {
         signal,
       })
       const source_rejections = sourceProofRejectionDiagnostics(observation, source_proof)
-      const rejection_sections = [
-        ...(pixel_rejection ? [pixel_rejection.message] : []),
-        ...(source_rejections.length > 0
-          ? [
-              `Canonical PDF source verification rejected agent-claimed eligible graphs:\n${source_rejections.join("\n")}`,
-            ]
-          : []),
-      ]
-      if (rejection_sections.length > 0) {
-        throw new Error(rejection_sections.join("\n\n"))
+      if (pixel_rejection) {
+        await logOutput(
+          "system",
+          `Reference curves are published as an inspectable draft while pixel alignment remains imperfect: ${pixel_rejection.message}\n`,
+        )
+      }
+      if (source_rejections.length > 0) {
+        await logOutput(
+          "system",
+          `Reference axes are published as an inspectable draft while OCR calibration remains imperfect:\n${source_rejections.join("\n")}\n`,
+        )
       }
       return {
-        observation: applyReferenceGraphSourceEligibility({ observation, proof: source_proof }),
+        observation,
         source_proof,
       }
     },

@@ -80,7 +80,7 @@ function fixtureId(reference: string): string {
 function interfacePinForLabel(label: string, model_interface: ModelInterface): ModelInterfacePin {
   const normalized = normalizeElectricalPinLabel(label)
   const matches = model_interface.pins.filter((pin) =>
-    [pin.component_pin, pin.spice_node, ...pin.labels].some(
+    [pin.physical_pin, pin.component_pin, pin.spice_node, ...pin.labels].some(
       (candidate) => normalizeElectricalPinLabel(candidate) === normalized,
     ),
   )

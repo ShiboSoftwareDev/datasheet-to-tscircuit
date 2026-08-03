@@ -236,11 +236,10 @@ export function buildModelGenerationPrompt(input: {
   return `Create the SPICE model described by model-contract.json.
 
 Read AGENTS.md, model-contract.json, model-training-plan.json, model-interface.json,
-component-evidence.json, typical-application-plan.json, and component.circuit.tsx.
-The committed application plan supplies documented topology and operating-range
-context only; it is not a validation fixture, and availability not_present must
-not be replaced with an invented circuit. Write exactly model.lib and
-model-card.md. After writing both files, call check_model_candidate. It runs the
+component-evidence.json, and component.circuit.tsx. The exact per-graph transient
+fixtures are already compiled into model-training-plan.json. Do not reproduce
+fixture passives or sources inside the DUT. Write exactly model.lib and model-card.md.
+After writing both files, call check_model_candidate. It runs the
 real agent-visible fixtures through ngspice and the tscircuit viewer, and reports
 numeric residuals only at samples already present in model-contract.json. If it
 fails, use those residuals to edit the two outputs and rerun it until it passes;

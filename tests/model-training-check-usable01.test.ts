@@ -81,7 +81,7 @@ test("a complete finite comparison failure remains a usable authoritative-valida
   ).resolves.toBeUndefined()
 })
 
-test("missing viewer output or execution errors cannot advance as usable", async () => {
+test("finite ngspice output may advance for inspectable viewer diagnosis", async () => {
   const directory = await workspace()
   const missing_viewer = await createModelTrainingCheckReceipt({
     workspace: directory,
@@ -94,7 +94,7 @@ test("missing viewer output or execution errors cannot advance as usable", async
       receipt: missing_viewer,
       checked,
     }),
-  ).rejects.toThrow("every tscircuit viewer series")
+  ).resolves.toBeUndefined()
 
   const unavailable = await createModelTrainingCheckReceipt({
     workspace: directory,
@@ -107,5 +107,18 @@ test("missing viewer output or execution errors cannot advance as usable", async
       receipt: unavailable,
       checked,
     }),
-  ).rejects.toThrow("viewer_validation_unavailable")
+  ).resolves.toBeUndefined()
+
+  const simulator_failure = await createModelTrainingCheckReceipt({
+    workspace: directory,
+    candidate,
+    training_validation: validation({ extra_error: "simulator_execution_failed" }),
+  })
+  await expect(
+    assertModelTrainingCheckReceiptUsable({
+      workspace: directory,
+      receipt: simulator_failure,
+      checked,
+    }),
+  ).rejects.toThrow("simulator_execution_failed")
 })

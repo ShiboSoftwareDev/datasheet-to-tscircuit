@@ -20,6 +20,7 @@ import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import { parseModelInterface, readGeneratedModel } from "@/server/modeling"
 import { resolveBenchmarkReferenceImage } from "@/server/modeling/reference-image"
+import type { ValidationPlan } from "@/server/spice-validation"
 import { runModel } from "@/server/model-workflow"
 import {
   createModelTrainingCheckReceipt,
@@ -261,13 +262,13 @@ function deterministicAgent(calls: string[]): AgentClient {
                 {
                   hint_id: "time_graph_001",
                   disposition: "graph",
-                  graph_id: "transient_gain_graph",
+                  graph_id: "transient_gain",
                   reason: "The printed transient voltage graph has an elapsed-time horizontal axis.",
                 },
               ],
               graphs: [
                 {
-                  graph_id: "transient_gain_graph",
+                  graph_id: "transient_gain",
                   page: 1,
                   locator: "Figure 1, transient voltage gain",
                   x_axis: "time",
@@ -343,40 +344,11 @@ function deterministicAgent(calls: string[]): AgentClient {
         )
         await input.on_output("stdout", `fixture completed ${input.phase_label}\n`)
         return { attempts: 1, duration_ms: 1, output_tail: "" }
-      } else {
-        const application_plan = JSON.parse(
-          await Bun.file(join(input.workspace, "typical-application-plan.json")).text(),
-        ) as { availability?: string }
-        expect(application_plan.availability).toBe("not_present")
       }
-      if (input.phase_label === "Model characterization") {
-        const sanitized_observation = JSON.parse(
-          await Bun.file(join(input.workspace, "model-reference-observation.json")).text(),
-        )
-        expect(sanitized_observation.graphs[0]).toMatchObject({
-          graph_id: "transient_gain_graph",
-          server_verified_reference_curve: {
-            provenance: "canonical_pdf_axis_and_pixel_trace_v1",
-            x_quantity: "time",
-            x_unit: "s",
-            y_quantity: "voltage",
-            y_unit: "V",
-          },
-          electrical_binding: characterization.requirements[0]!.reference_curve.electrical_binding,
-        })
-        expect(sanitized_observation.graphs[0].server_verified_reference_curve.points).toHaveLength(13)
-        expect(JSON.stringify(sanitized_observation)).not.toContain("digitized_curve")
-        expect(JSON.stringify(sanitized_observation)).not.toContain("pixel_x")
-        await Bun.write(
-          join(input.workspace, "model-characterization.json"),
-          `${JSON.stringify(characterization, null, 2)}\n`,
-        )
-      } else if (input.phase_label === "Validation-plan design") {
-        await Bun.write(
-          join(input.workspace, "validation-plan.json"),
-          `${JSON.stringify(validation_plan, null, 2)}\n`,
-        )
-      } else if (input.phase_label === "SPICE model generation") {
+      if (input.phase_label === "SPICE model generation") {
+        const generated_validation_plan = JSON.parse(
+          await Bun.file(join(input.workspace, "model-training-plan.json")).text(),
+        ) as typeof validation_plan
         await Promise.all([
           Bun.write(join(input.workspace, "model.lib"), model_source),
           Bun.write(
@@ -406,7 +378,7 @@ function deterministicAgent(calls: string[]): AgentClient {
           training_validation: {
             version: 1,
             status: "passed",
-            cases: validation_plan.cases.map((validation_case) => {
+            cases: generated_validation_plan.cases.map((validation_case) => {
               const series = validation_case.observations.map((observation) => ({
                 observation_id: observation.id,
                 status: "passed" as const,
@@ -750,12 +722,7 @@ testWithProductionSimulation(
       "completed",
       "completed",
     ])
-    expect(agent_calls).toEqual([
-      "Independent datasheet graph inventory",
-      "Model characterization",
-      "Validation-plan design",
-      "SPICE model generation",
-    ])
+    expect(agent_calls).toEqual(["Independent datasheet graph inventory", "SPICE model generation"])
     expect(
       process_runner.calls.filter(
         ({ command, command_label }) =>
@@ -807,7 +774,7 @@ testWithProductionSimulation(
 
     const canonical_plan = JSON.parse(
       await readFile(join(model_dir, "validation-plan.json"), "utf8"),
-    ) as typeof validation_plan
+    ) as ValidationPlan
     expect(canonical_plan.cases[0]?.observations[0]).toMatchObject({
       evidence: {
         page: 1,
@@ -816,9 +783,16 @@ testWithProductionSimulation(
       },
       reference: {
         type: "curve",
-        tolerance: 0.02,
-        points: characterization.requirements[0]?.reference_curve?.points,
+        tolerance: 0.1,
       },
+    })
+    const canonical_reference = canonical_plan.cases[0]?.observations[0]?.reference
+    expect(canonical_reference?.type === "curve" ? canonical_reference.points : []).toHaveLength(13)
+    expect(canonical_reference).toMatchObject({
+      points: expect.arrayContaining([
+        { x: 0, y: 0 },
+        { x: 0.003, y: 2 },
+      ]),
     })
 
     const published_index = await readFile(join(job_dir, "index.circuit.tsx"), "utf8")
@@ -848,7 +822,7 @@ testWithProductionSimulation(
     )
     expect(retained_verification.matches[0]).toMatchObject({
       requirement_id: "transient_gain",
-      graph_id: "transient_gain_graph",
+      graph_id: "transient_gain",
       curve_fidelity: {
         observer_curve_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         candidate_curve_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),

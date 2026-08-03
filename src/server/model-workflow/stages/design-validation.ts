@@ -1,11 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
-import { runAgentArtifactStage } from "../../infrastructure/agent"
-import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
-import { buildValidationPlanGuide, buildValidationPlanPrompt, parseFreshModelContract } from "../../modeling"
-import { parseAgentValidationPlan, type ValidationPlan } from "../../spice-validation"
+import { buildValidationPlanGuide, parseFreshModelContract } from "../../modeling"
 import {
-  appendModelLog,
   modelArtifact,
   modeledRequirementIds,
   readJson,
@@ -13,100 +9,52 @@ import {
   writeJson,
 } from "../stage-helpers"
 import { assertValidationPlanSensitiveToDut } from "../validation-sensitivity"
+import { buildGraphValidationPlan } from "../validation-plan-from-graphs"
+import { projectReferenceDraftUi } from "../reference-draft-ui"
 import { defineModelStage } from "./stage-factory"
-
-async function assertPlanEvidencePaths(workspace: string, plan: ValidationPlan): Promise<void> {
-  for (const validation_case of plan.cases) {
-    for (const observation of validation_case.observations) {
-      const image = observation.evidence?.image
-      if (!image) continue
-      if (!image.startsWith("evidence/") || image.split(/[\\/]/).includes("..")) {
-        throw new Error(`Observation ${observation.id} evidence image must stay under evidence/: ${image}`)
-      }
-      if (!(await Bun.file(join(workspace, image)).exists())) {
-        throw new Error(`Observation ${observation.id} references missing evidence image ${image}`)
-      }
-    }
-  }
-}
 
 export const designValidationStage = defineModelStage({
   id: "design_validation",
   depends_on: ["characterize"],
-  async execute({ context, services, dependency_outputs, signal, debug_dir }) {
+  async execute({ context, services, dependency_outputs, signal }) {
     updateModelProgress({
       store: services.model_run_store,
       model_run_id: context.model_run_id,
       phase: "designing_validation",
-      message: "Designing declarative validation fixtures from the model contract",
+      message: "Building one transient analog-simulation circuit for each reference graph",
     })
     const contract_path = dependency_outputs.characterize.contract_path
     const attempt_dir = dirname(contract_path)
     const evidence_dir = join(attempt_dir, "evidence")
     const contract = parseFreshModelContract(await readJson(contract_path))
     const requirement_ids = modeledRequirementIds(contract)
-    await Bun.write(join(attempt_dir, "validation-plan-guide.md"), buildValidationPlanGuide(contract))
-    const attempt = await runAgentArtifactStage({
-      stage_id: "design_validation",
-      phase_label: "Validation-plan design",
-      max_artifact_attempts: 3,
+    const plan = buildGraphValidationPlan(contract)
+    await Promise.all([
+      Bun.write(join(attempt_dir, "validation-plan-guide.md"), buildValidationPlanGuide(contract)),
+      writeJson(join(attempt_dir, "validation-plan.json"), plan),
+    ])
+
+    // Publish the graph screenshot and independently digitized curve before
+    // model generation starts. The circuit pane is explicitly pending until a
+    // real model candidate is available; later validation atomically replaces
+    // this draft with the TSX, Circuit JSON, and comparison waveform.
+    await projectReferenceDraftUi({
+      model_run_store: services.model_run_store,
+      model_run_id: context.model_run_id,
+      model_dir: context.model_dir,
+      plan,
+      evidence_dir,
       signal,
-      use_openai: context.use_openai,
-      agent_client: services.agent_client,
-      create_workspace: () =>
-        createStageWorkspace({
-          prefix: "model-validation-plan",
-          files: [
-            { source: join(context.model_dir, "AGENTS.md") },
-            { source: contract_path, destination: "model-contract.json" },
-            { source: join(context.model_dir, "model-interface.json") },
-            {
-              source: join(attempt_dir, "validation-plan-guide.md"),
-              destination: "validation-plan-guide.md",
-            },
-            { source: join(context.model_dir, "component.circuit.tsx") },
-            { source: join(context.model_dir, "component-evidence.json") },
-            { source: join(context.model_dir, "typical-application-plan.json") },
-            { source: join(context.model_dir, "application-fixture-contract.json") },
-          ],
-          directories: [{ source: evidence_dir, destination: "evidence", required: false }],
-        }),
-      build_prompt: (feedback) => buildValidationPlanPrompt({ contract, feedback }),
-      heartbeat_paths: (workspace) => [join(workspace, "validation-plan.json")],
-      on_output: (stream, message) =>
-        appendModelLog(services.model_run_store, context.model_run_id, stream, message),
-      rejection_debug: {
-        debug_dir,
-        files: ["validation-plan.json"],
-      },
-      validate: async (workspace) => {
-        const raw = await readBoundedJsonArtifact({
-          path: join(workspace, "validation-plan.json"),
-          max_bytes: 4 * 1024 * 1024,
-          max_depth: 64,
-          max_nodes: 100_000,
-        })
-        const plan = parseAgentValidationPlan(raw, {
-          model_interface: contract.interface,
-          model_requirements: contract.characterization.requirements,
-          model_family: contract.characterization.family,
-          application_fixture: contract.application_fixture,
-        })
-        await assertPlanEvidencePaths(workspace, plan)
-        await assertValidationPlanSensitiveToDut({
-          plan,
-          contract,
-          model_dir: context.model_dir,
-          artifact_directory: join(attempt_dir, "private-sensitivity", randomUUID()),
-          signal,
-          ngspice: services.ngspice_executor,
-          ngspice_path: services.ngspice_bin,
-        })
-        return plan
-      },
-      promote: async (_workspace, plan) => {
-        await writeJson(join(attempt_dir, "validation-plan.json"), plan)
-      },
+    })
+
+    await assertValidationPlanSensitiveToDut({
+      plan,
+      contract,
+      model_dir: context.model_dir,
+      artifact_directory: join(attempt_dir, "private-sensitivity", randomUUID()),
+      signal,
+      ngspice: services.ngspice_executor,
+      ngspice_path: services.ngspice_bin,
     })
     const plan_path = join(attempt_dir, "validation-plan.json")
     return {
@@ -115,7 +63,7 @@ export const designValidationStage = defineModelStage({
         plan_path,
         contract_path,
         evidence_dir,
-        case_count: attempt.value.cases.length,
+        case_count: plan.cases.length,
         requirement_ids,
       },
       artifacts: [
@@ -127,8 +75,8 @@ export const designValidationStage = defineModelStage({
         }),
       ],
       metrics: {
-        agent_attempts: attempt.attempts,
-        validation_cases: attempt.value.cases.length,
+        agent_attempts: 0,
+        validation_cases: plan.cases.length,
       },
     }
   },

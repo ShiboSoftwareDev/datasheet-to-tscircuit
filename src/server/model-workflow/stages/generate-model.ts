@@ -1,9 +1,68 @@
+import { readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { parseFreshModelContract } from "../../modeling"
+import {
+  createModelManifest,
+  type GeneratedModel,
+  parseFreshModelContract,
+  validateFreshModelSource,
+} from "../../modeling"
 import type { ValidationPlan } from "../../spice-validation"
 import { generateModelCandidate } from "../model-candidate"
 import { appendModelLog, modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
+
+async function retainedCandidateForRetry(input: {
+  model_dir: string
+  revision?: string
+  contract: ReturnType<typeof parseFreshModelContract>
+}): Promise<{ artifact_dir: string; generated: GeneratedModel } | undefined> {
+  if (!input.revision) return undefined
+  const candidates_root = join(input.model_dir, "candidates")
+  let entries
+  try {
+    entries = await readdir(candidates_root, { withFileTypes: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+  const matches = entries.filter(
+    (entry) => entry.isDirectory() && entry.name.startsWith(`${input.revision}-`),
+  )
+  if (matches.length !== 1) return undefined
+  const artifact_dir = join(candidates_root, matches[0]!.name)
+  try {
+    const [source, card, persisted_manifest] = await Promise.all([
+      readFile(join(artifact_dir, "model.lib"), "utf8"),
+      readFile(join(artifact_dir, "model-card.md"), "utf8"),
+      readFile(join(artifact_dir, "model-manifest.json"), "utf8").then(JSON.parse),
+    ])
+    if (!card.trim()) return undefined
+    validateFreshModelSource(source, input.contract)
+    const derived = createModelManifest({
+      model_interface: input.contract.interface,
+      model_source: source,
+      simulator: "ngspice",
+    })
+    if (
+      typeof persisted_manifest !== "object" ||
+      persisted_manifest === null ||
+      persisted_manifest.revision !== derived.revision ||
+      persisted_manifest.entry_name !== derived.entry_name ||
+      persisted_manifest.part_number !== derived.part_number ||
+      persisted_manifest.simulator !== derived.simulator ||
+      JSON.stringify(persisted_manifest.pins) !== JSON.stringify(derived.pins) ||
+      !Number.isFinite(Date.parse(persisted_manifest.generated_at))
+    ) {
+      return undefined
+    }
+    return {
+      artifact_dir,
+      generated: { source, card, manifest: persisted_manifest as GeneratedModel["manifest"] },
+    }
+  } catch {
+    return undefined
+  }
+}
 
 export const generateModelStage = defineModelStage({
   id: "generate_model",
@@ -22,25 +81,49 @@ export const generateModelStage = defineModelStage({
       contract.characterization.strategy,
       contract.characterization.family,
     )
-    const attempt = await generateModelCandidate({
+    const current_run = services.model_run_store.getModelRun(context.model_run_id)
+    signal.throwIfAborted()
+    const retained = await retainedCandidateForRetry({
       model_dir: context.model_dir,
+      revision:
+        current_run?.validation?.artifact_state === "candidate"
+          ? current_run.validation.model_revision
+          : undefined,
       contract,
-      validation_plan: plan_value as ValidationPlan,
-      evidence_dir,
-      strategy_guidance: strategy.guidance,
-      stage_id: "generate_model",
-      phase_label: "SPICE model generation",
-      signal,
-      use_openai: context.use_openai,
-      agent_client: services.agent_client,
-      ngspice: services.ngspice_executor,
-      ngspice_path: services.ngspice_bin,
-      tsci_path: services.tsci_bin,
-      max_artifact_attempts: 3,
-      debug_dir,
-      on_output: (stream, message) =>
-        appendModelLog(services.model_run_store, context.model_run_id, stream, message),
     })
+    signal.throwIfAborted()
+    const attempt = retained
+      ? {
+          value: { ...retained.generated, artifact_dir: retained.artifact_dir },
+          attempts: 0,
+        }
+      : await generateModelCandidate({
+          model_dir: context.model_dir,
+          contract,
+          validation_plan: plan_value as ValidationPlan,
+          evidence_dir,
+          strategy_guidance: strategy.guidance,
+          stage_id: "generate_model",
+          phase_label: "SPICE model generation",
+          signal,
+          use_openai: context.use_openai,
+          agent_client: services.agent_client,
+          ngspice: services.ngspice_executor,
+          ngspice_path: services.ngspice_bin,
+          tsci_path: services.tsci_bin,
+          max_artifact_attempts: 3,
+          debug_dir,
+          on_output: (stream, message) =>
+            appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+        })
+    if (retained) {
+      await appendModelLog(
+        services.model_run_store,
+        context.model_run_id,
+        "system",
+        `Reusing immutable candidate ${retained.generated.manifest.revision} for authoritative validation after an infrastructure retry.\n`,
+      )
+    }
     const model_path = join(attempt.value.artifact_dir, "model.lib")
     const model_card_path = join(attempt.value.artifact_dir, "model-card.md")
     const manifest_path = join(attempt.value.artifact_dir, "model-manifest.json")

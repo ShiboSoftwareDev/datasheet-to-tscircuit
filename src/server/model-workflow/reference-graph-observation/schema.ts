@@ -154,16 +154,10 @@ function valuesAgree(actual: number, expected: number, span: number): boolean {
   )
 }
 
-function assertAnchorRangeAgreement(input: {
-  range: ReferenceGraphAxisRange
-  axis: ReferenceGraphAxisCalibration
-  path: string
-}): void {
-  const anchor_min = Math.min(input.axis.first.value, input.axis.second.value)
-  const anchor_max = Math.max(input.axis.first.value, input.axis.second.value)
-  const span = input.range.max - input.range.min
-  if (!valuesAgree(anchor_min, input.range.min, span) || !valuesAgree(anchor_max, input.range.max, span)) {
-    throw new Error(`${input.path} must equal the calibrated axis-anchor range`)
+function rangeFromAxis(axis: ReferenceGraphAxisCalibration): ReferenceGraphAxisRange {
+  return {
+    min: Math.min(axis.first.value, axis.second.value),
+    max: Math.max(axis.first.value, axis.second.value),
   }
 }
 
@@ -198,18 +192,22 @@ function parseDigitizedCurve(
   if (value.x_unit !== "s") throw new Error(`${path}.x_unit must be s`)
   if (value.y_quantity !== "voltage") throw new Error(`${path}.y_quantity must be voltage`)
   if (value.y_unit !== "V") throw new Error(`${path}.y_unit must be V`)
-  const x_range = parseAxisRange(value.x_range, `${path}.x_range`)
-  const y_range = parseAxisRange(value.y_range, `${path}.y_range`)
+  // x_range/y_range are accepted as redundant observer hints. The calibrated
+  // anchors are the single source of truth, and the server derives canonical
+  // ranges from them instead of asking an agent to keep duplicate numbers in
+  // exact lockstep.
+  parseAxisRange(value.x_range, `${path}.x_range`)
+  parseAxisRange(value.y_range, `${path}.y_range`)
   const x_axis = parseAxisCalibration(value.x_axis, `${path}.x_axis`, "x_axis")
   const y_axis = parseAxisCalibration(value.y_axis, `${path}.y_axis`, "y_axis")
+  const x_range = rangeFromAxis(x_axis)
+  const y_range = rangeFromAxis(y_axis)
   if (!(x_axis.second.value > x_axis.first.value)) {
     throw new Error(`${path}.x_axis anchors must progress from minimum to maximum time`)
   }
   if (!(y_axis.second.value > y_axis.first.value)) {
     throw new Error(`${path}.y_axis anchors must progress from minimum to maximum voltage`)
   }
-  assertAnchorRangeAgreement({ range: x_range, axis: x_axis, path: `${path}.x_range` })
-  assertAnchorRangeAgreement({ range: y_range, axis: y_axis, path: `${path}.y_range` })
   for (const [axis_name, axis, limit] of [
     ["x_axis", x_axis, crop.width_px],
     ["y_axis", y_axis, crop.height_px],

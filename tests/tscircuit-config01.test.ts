@@ -55,7 +55,14 @@ test("generated job config keeps ngspice ready when CLI performance flags replac
   await mkdir(tmp_root, { recursive: true })
   const job_dir = await mkdtemp(join(tmp_root, "ngspice-job-config-"))
   try {
+    await Bun.write(
+      join(job_dir, "tscircuit.config.ts"),
+      'import "file:///stale-container/src/server/job-scaffold/local-ngspice-engine.ts"\n',
+    )
     await ensureJobTscircuitRuntimeConfig(job_dir)
+    expect(await Bun.file(join(job_dir, "tscircuit.config.ts")).text()).not.toContain(
+      "file:///stale-container/",
+    )
     const config_url = `${pathToFileURL(join(job_dir, "tscircuit.config.ts")).href}?test=${Date.now()}`
     const generated = (await import(config_url)).default as typeof config
     expect(typeof generated.platformConfig.spiceEngineMap.ngspice.simulate).toBe("function")

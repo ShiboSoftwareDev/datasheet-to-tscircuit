@@ -104,11 +104,11 @@ function projectReferenceSeries(input: {
 
 export function projectModelReferencePreview(input: {
   validation_case: ValidationCase
-  result: ValidationRunResult
+  result?: ValidationRunResult
   updated_at: string
   viewer_state?: ViewerCaseState
 }): ModelReferencePreview {
-  const case_result = input.result.cases.find(({ case_id }) => case_id === input.validation_case.id)
+  const case_result = input.result?.cases.find(({ case_id }) => case_id === input.validation_case.id)
   const viewer_required = requiresViewerWaveform(input.validation_case)
   const viewer_state = normalizeViewerCaseState(input.validation_case, input.viewer_state)
   const viewer_validation = completeViewerValidation(viewer_state)

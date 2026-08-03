@@ -435,6 +435,19 @@ test("reference observation deterministically normalizes coordinate-shaped axis 
   )
 })
 
+test("reference observation derives canonical ranges from axis anchors", () => {
+  const value = validObservationValue()
+  const curve = value.graphs[0]!.digitized_curve
+  curve.x_range = { min: -99, max: 99 }
+  curve.y_range = { min: -10, max: 10 }
+
+  const parsed = parseReferenceGraphObservation(value, discovery, model_interface)
+  expect(parsed.graphs[0]!.digitized_curve).toMatchObject({
+    x_range: { min: 0, max: 0.0015 },
+    y_range: { min: 3, max: 3.6 },
+  })
+})
+
 testWithArchivedRun102Observation(
   "replays the exact model-agent 102 graph inventory without spending a schema repair",
   async () => {

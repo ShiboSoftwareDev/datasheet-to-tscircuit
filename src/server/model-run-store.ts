@@ -396,6 +396,22 @@ export class ModelRunStore {
     })
   }
 
+  /** Publishes the source crop/curve while model generation is still pending. */
+  projectReferenceDraft(
+    model_run_id: string,
+    input: {
+      preview_options: ModelPreviewOption[]
+      reference_preview: NonNullable<ModelRun["reference_preview"]>
+    },
+  ): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.preview_options = input.preview_options
+      candidate.circuit_preview = undefined
+      candidate.reference_preview = input.reference_preview
+    })
+  }
+
   /**
    * Atomically projects a fully persisted, non-accepted candidate validation
    * bundle into the live view. Accepted model fields remain untouched until the

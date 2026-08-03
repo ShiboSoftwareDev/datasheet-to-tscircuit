@@ -193,14 +193,13 @@ test("fresh candidates ignore stale model output and preserve accepted revisions
     ".SUBCKT GAIN IN OUT\nE1 OUT 0 IN 0 2\n.ENDS GAIN\n",
   ]
   const stale_model_was_visible: boolean[] = []
-  const application_plan_was_visible: boolean[] = []
+  const application_plan_was_hidden: boolean[] = []
   const candidate_curve_x_values: number[][] = []
   const agent_client: AgentClient = {
     async run(input) {
       stale_model_was_visible.push(await Bun.file(join(input.workspace, "model.lib")).exists())
-      application_plan_was_visible.push(
-        JSON.parse(await Bun.file(join(input.workspace, "typical-application-plan.json")).text())
-          .availability === "not_present",
+      application_plan_was_hidden.push(
+        !(await Bun.file(join(input.workspace, "typical-application-plan.json")).exists()),
       )
       candidate_curve_x_values.push(
         JSON.parse(
@@ -242,7 +241,7 @@ test("fresh candidates ignore stale model output and preserve accepted revisions
   const second = await generateModelCandidate(common)
 
   expect(stale_model_was_visible).toEqual([false, false])
-  expect(application_plan_was_visible).toEqual([true, true])
+  expect(application_plan_was_hidden).toEqual([true, true])
   expect(candidate_curve_x_values).toEqual([
     [0, 1, 3, 5, 6],
     [0, 1, 3, 5, 6],
@@ -401,7 +400,7 @@ test("candidate acceptance requires a passed self-check receipt for the final fi
   expect(await Bun.file(join(model_dir, "candidates")).exists()).toBe(false)
 })
 
-test("candidate acceptance rejects a smoke-passed model whose public training execution is unavailable", async () => {
+test("candidate acceptance rejects a smoke-passed model with no public ngspice comparison", async () => {
   const model_dir = await prepareModelDirectory()
   const source = ".SUBCKT GAIN IN OUT\nE1 OUT 0 IN 0 1\n.ENDS GAIN\n"
   const card = "Smoke-valid but training-invalid model.\n"
@@ -444,7 +443,7 @@ test("candidate acceptance rejects a smoke-passed model whose public training ex
   }).catch((caught) => caught)
 
   expect(error).toBeInstanceOf(PipelineError)
-  expect((error as Error).message).toContain("failed public ngspice or tscircuit-viewer training validation")
+  expect((error as Error).message).toContain("viewer_validation_unavailable")
   expect(await Bun.file(join(model_dir, "candidates")).exists()).toBe(false)
 })
 
