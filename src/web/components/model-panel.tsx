@@ -22,7 +22,6 @@ import { getModelRunFileUrl } from "../api"
 import type { useModelRun } from "../use-model-run"
 import { AgentLogViewer } from "./agent-log-viewer"
 import { ModelLivePreview } from "./model-live-preview"
-import { PipelineTrace } from "./pipeline-trace"
 
 const STATUS_COPY: Record<ModelRunStatus, string> = {
   queued: "Queued",
@@ -662,8 +661,6 @@ export function ModelPanel({
       <ModelCandidateProvenance model_run={model_run} />
 
       <ModelValidationScope model_run={model_run} />
-
-      <PipelineTrace pipeline={model_run.pipeline} title="Model execution trace" />
 
       <ModelLivePreview
         job_id={job.job_id}

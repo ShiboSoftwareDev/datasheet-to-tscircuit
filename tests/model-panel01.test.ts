@@ -7,6 +7,7 @@ import {
   getModelHeaderStats,
   getModelMatchMetrics,
   ModelCandidateProvenance,
+  ModelPanel,
   ModelValidationScope,
 } from "@/web/components/model-panel"
 
@@ -284,4 +285,79 @@ test("failed candidate diagnostics are visible while repair is still running", (
   expect(html).toContain("Current candidate failures")
   expect(html).toContain("Startup waveform")
   expect(html).toContain("Viewer produced no completed transient waveform.")
+})
+
+test("model panel keeps compact progress without rendering the execution trace", () => {
+  const timestamp = "2026-08-04T00:00:00.000Z"
+  const html = renderToStaticMarkup(
+    createElement(ModelPanel, {
+      job: {
+        job_id: "job-model-progress",
+        file_name: "TPS63802.pdf",
+        created_at: timestamp,
+        display_status: "agent_running",
+        is_complete: false,
+        has_errors: false,
+        logs: [],
+      },
+      model_run_state: {
+        model_run: {
+          model_run_id: "model-progress",
+          job_id: "job-model-progress",
+          created_at: timestamp,
+          updated_at: timestamp,
+          status: "running",
+          is_complete: false,
+          has_errors: false,
+          effort_multiplier: 1,
+          elapsed_time_ms: 1_000,
+          iteration: 0,
+          logs: [],
+          progress: {
+            sequence: 1,
+            phase: "generating_model",
+            message: "Generating candidate",
+            updated_at: timestamp,
+          },
+          progress_history: [],
+          preview_options: [],
+          pipeline: {
+            pipeline_id: "datasheet_model",
+            status: "running",
+            sequence: 2,
+            started_at: timestamp,
+            updated_at: timestamp,
+            stage_results: {
+              prepare_workspace: {
+                stage_id: "prepare_workspace",
+                status: "completed",
+                debug_ref: "debug/prepare-workspace",
+                duration_ms: 100,
+              },
+              internal_only_stage: {
+                stage_id: "internal_only_stage",
+                status: "running",
+                debug_ref: "debug/internal-only-stage",
+              },
+            },
+          },
+        },
+        is_loading: false,
+        is_starting: false,
+        is_extending: false,
+        is_cancelling: false,
+        is_retrying: false,
+        error_message: undefined,
+        start: async () => undefined,
+        extend: async () => undefined,
+        cancel: async () => undefined,
+        retry: async () => undefined,
+      },
+    } as Parameters<typeof ModelPanel>[0]),
+  )
+
+  expect(html).toContain("Generating candidate")
+  expect(html).toContain("1/2 stages")
+  expect(html).not.toContain("Model execution trace")
+  expect(html).not.toContain("internal only stage")
 })

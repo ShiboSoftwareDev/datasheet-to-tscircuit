@@ -2,7 +2,6 @@ import { Boxes, FlaskConical, LoaderCircle, PanelLeftOpen, Terminal, WandSparkle
 import { useEffect, useState } from "react"
 import { AgentLogs } from "./components/agent-logs"
 import { CircuitPreview, type ComponentPreviewTab } from "./components/circuit-preview"
-import { ComponentPipelineTrace } from "./components/component-pipeline-trace"
 import { ModelAgentLogs, ModelPanel } from "./components/model-panel"
 import { TaskSidebar } from "./components/task-sidebar"
 import { UploadPanel } from "./components/upload-panel"
@@ -201,10 +200,7 @@ export default function App() {
             <div className="workspace-body">
               {workspace_tab === "component" ? (
                 <div className="workspace-grid">
-                  <div
-                    className={`preview-column ${Object.keys(job.pipeline?.stage_results ?? {}).length > 0 ? "has-pipeline-trace" : ""}`}
-                  >
-                    <ComponentPipelineTrace job={job} />
+                  <div className="preview-column">
                     <CircuitPreview
                       key={job.job_id}
                       job={job}

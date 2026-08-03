@@ -1654,15 +1654,6 @@ a {
   min-height: 0;
 }
 
-.component-page .preview-column.has-pipeline-trace {
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
-}
-
-.component-page .preview-column.has-pipeline-trace .preview-card {
-  height: auto;
-}
-
 .workspace-card {
   min-width: 0;
   overflow: hidden;
@@ -2717,117 +2708,6 @@ a {
   border-radius: inherit;
   background: linear-gradient(90deg, #2563eb, #60a5fa);
   transition: width 500ms linear;
-}
-
-.pipeline-trace {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
-  padding: 0.75rem 1rem;
-}
-
-.pipeline-trace summary {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  cursor: pointer;
-  font-size: 0.78rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.pipeline-trace summary small {
-  color: var(--muted);
-  font-size: 0.68rem;
-  font-weight: 550;
-  letter-spacing: normal;
-  text-transform: none;
-}
-
-.pipeline-trace summary code,
-.pipeline-stage-debug-ref code,
-.pipeline-stage-diagnostic code {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 0.92em;
-}
-
-.pipeline-trace ol {
-  display: grid;
-  gap: 0.45rem;
-  margin: 0.8rem 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.pipeline-trace li {
-  display: grid;
-  grid-template-columns: 9px minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 0.65rem;
-  font-size: 0.8rem;
-}
-
-.pipeline-trace li > i {
-  width: 8px;
-  height: 8px;
-  margin-top: 0.3rem;
-  border-radius: 999px;
-  background: #94a3b8;
-}
-
-.pipeline-trace li.pipeline-stage-completed > i {
-  background: #16a34a;
-}
-
-.pipeline-trace li.pipeline-stage-running > i {
-  background: #2563eb;
-}
-
-.pipeline-trace li.pipeline-stage-failed > i {
-  background: #dc2626;
-}
-
-.pipeline-trace li.pipeline-stage-cancelled > i {
-  background: #d97706;
-}
-
-.pipeline-trace li span {
-  display: grid;
-  min-width: 0;
-}
-
-.pipeline-trace li strong {
-  text-transform: capitalize;
-}
-
-.pipeline-trace li small {
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-
-.pipeline-trace li .pipeline-stage-diagnostic {
-  color: #a73227;
-}
-
-.pipeline-trace li .pipeline-stage-hint {
-  color: #7a5414;
-}
-
-.pipeline-trace li .pipeline-stage-debug-ref {
-  margin-top: 2px;
-  color: #66717f;
-}
-
-.pipeline-trace li time {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.component-pipeline-trace[open] {
-  max-height: min(42vh, 390px);
-  overflow: auto;
 }
 
 .model-grid {
