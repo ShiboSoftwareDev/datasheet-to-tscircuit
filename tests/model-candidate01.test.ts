@@ -530,7 +530,8 @@ testWithNgspice(
     }).catch((caught) => caught)
 
     expect(error).toBeInstanceOf(Error)
-    expect((error as Error).message).toContain("no such function 'if' at line 2")
+    expect((error as Error).message).toContain("ngspice rejected model.lib during candidate smoke validation")
+    expect((error as Error).message).toContain("no such function 'if'")
     expect((error as Error).message).not.toContain(workspace)
   },
 )

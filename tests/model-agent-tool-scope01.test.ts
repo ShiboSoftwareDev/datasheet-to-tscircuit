@@ -282,7 +282,7 @@ test("model candidate check restores the best complete candidate after a regress
 })
 
 test("model candidate check returns bounded diagnostics without leaking its workspace", async () => {
-  const workspace = await makeTemporaryDirectory("model-tools-workspace-")
+  const workspace = await realpath(await makeTemporaryDirectory("model-tools-workspace-"))
   const [, , check_tool] = createModelCandidateFileTools(workspace, {
     check_candidate: async () => {
       throw new ModelCandidateCheckError(

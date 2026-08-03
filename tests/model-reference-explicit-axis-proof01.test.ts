@@ -33,7 +33,7 @@ function explicitTickPdf(): Uint8Array {
     "1.2 w",
     "72 72 m 86.4 74.5 l 100.8 79 l 115.2 91 l 129.6 112 l 144 142 l 158.4 156 l 172.8 160 l 187.2 163 l 201.6 164 l 216 165.6 l S",
     "0 0 0 rg",
-    "BT /F1 10 Tf 63 45 Td (0 s) Tj ET",
+    "BT /F1 10 Tf 54 45 Td (0.0 ms) Tj ET",
     "BT /F1 10 Tf 204 45 Td (1 ms) Tj ET",
     "BT /F1 10 Tf 21 68 Td (0.0 V) Tj ET",
     "BT /F1 10 Tf 27 161.6 Td (2 V) Tj ET",

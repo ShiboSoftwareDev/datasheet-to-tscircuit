@@ -269,6 +269,7 @@ function sanitizeCheckDiagnostic(error: unknown, workspace: string): string {
   const message = error instanceof Error ? error.message : String(error)
   return message
     .replaceAll(workspace, "<candidate>")
+    .replace(/<candidate>[\\/](model\.lib|model-card\.md|model-interface\.json)/g, "$1")
     .replace(/(?:\/[\w.@+-]+)+\/(model\.lib|model-card\.md|model-interface\.json)/g, "$1")
     .slice(0, MAX_CHECK_DIAGNOSTIC_CHARACTERS)
 }
