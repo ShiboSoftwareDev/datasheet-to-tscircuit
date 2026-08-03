@@ -101,7 +101,12 @@ export const validateModelStage = defineModelStage({
     ]
     const repair_feedback = passed
       ? undefined
-      : createModelRepairFeedback(result, preview_build.viewer_validation_by_case, stimulus_causality)
+      : createModelRepairFeedback(
+          result,
+          preview_build.viewer_validation_by_case,
+          stimulus_causality,
+          preview_build.viewer_model_errors_by_case,
+        )
     return {
       status: "completed",
       output: {

@@ -4,6 +4,7 @@ import { validateViewerSimulation } from "@/server/modeling/viewer-simulation"
 import {
   getViewerInfrastructureFailures,
   getViewerPreviewFailures,
+  partitionViewerBuildErrors,
   type ValidationCircuitPreviewBuild,
 } from "@/server/model-workflow/validation-circuit-previews"
 import type { ValidationCase } from "@/server/spice-validation"
@@ -1006,6 +1007,7 @@ test("curve mismatches are repairable while missing authoritative viewer status 
     circuit_build_errors_by_case: {},
     errors_by_case: { startup: "viewer curve comparison failed" },
     viewer_validation_by_case: { startup: comparison_validation },
+    viewer_model_errors_by_case: {},
   }
   expect(getViewerPreviewFailures(comparison_build)).toHaveLength(1)
   expect(getViewerInfrastructureFailures(comparison_build)).toEqual([])
@@ -1018,4 +1020,32 @@ test("curve mismatches are repairable while missing authoritative viewer status 
   expect(getViewerInfrastructureFailures(provenance_build)).toEqual([
     { case_id: "startup", message: "viewer_model_provenance_failed" },
   ])
+
+  const model_simulation_build: ValidationCircuitPreviewBuild = {
+    ...comparison_build,
+    errors_by_case: { startup: "simulation_unknown_experiment_error" },
+    viewer_validation_by_case: { startup: undefined },
+    viewer_model_errors_by_case: { startup: "simulation_unknown_experiment_error" },
+  }
+  expect(getViewerInfrastructureFailures(model_simulation_build)).toEqual([])
+})
+
+test("viewer build error partition keeps model simulation failures out of infrastructure", () => {
+  const simulation_diagnostic =
+    "simulation_unknown_experiment_error: Local ngspice failed: timestep too small"
+  expect(
+    partitionViewerBuildErrors({
+      errors: [simulation_diagnostic, "build: TypeScript compilation failed"],
+      circuit_errors: [
+        {
+          type: "simulation_unknown_experiment_error",
+          message: "Local ngspice failed: timestep too small",
+          diagnostic: simulation_diagnostic,
+        },
+      ],
+    }),
+  ).toEqual({
+    infrastructure_errors: ["build: TypeScript compilation failed"],
+    model_simulation_errors: [simulation_diagnostic],
+  })
 })

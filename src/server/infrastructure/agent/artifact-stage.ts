@@ -192,7 +192,7 @@ export async function runAgentArtifactStage<Value>(input: {
   promote: (workspace: string, value: Value, signal: AbortSignal) => Promise<void>
   extensions?: readonly string[]
   tool_profile?: "model_candidate_files"
-  model_candidate_check?: { readonly ngspice_path: string }
+  model_candidate_check?: { readonly ngspice_path: string; readonly tsci_path?: string }
   heartbeat_paths?: (workspace: string) => readonly string[]
   contract_id?: string
   contract_sha256?: string

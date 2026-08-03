@@ -137,6 +137,29 @@ describe("BunProcessRunner", () => {
     expect(performance.now() - started_at).toBeLessThan(1_000)
   })
 
+  test("a descendant holding inherited pipes open cannot defeat the absolute deadline", async () => {
+    const started_at = performance.now()
+    const descendant_source = "setTimeout(() => {}, 5_000)"
+    const parent_source = [
+      "const { spawn } = require('node:child_process')",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(descendant_source)}], { detached: true, stdio: ['ignore', process.stdout, process.stderr] }).unref()`,
+      "setTimeout(() => {}, 5_000)",
+    ].join(";")
+    const error = await new BunProcessRunner()
+      .run({
+        command: [process.execPath, "-e", parent_source],
+        command_label: "inherited-pipe child",
+        cwd: process.cwd(),
+        signal: new AbortController().signal,
+        wall_timeout_ms: 150,
+      })
+      .catch((caught) => caught)
+
+    expect(error).toBeInstanceOf(ProcessError)
+    expect(error.code).toBe("process_wall_timeout")
+    expect(performance.now() - started_at).toBeLessThan(3_000)
+  })
+
   test("reports output sink failures separately from child-process failures", async () => {
     const sink_error = new Error("checkpoint volume is unavailable")
     const error = await new BunProcessRunner()
@@ -268,7 +291,9 @@ test("TsciAgentClient confines model candidates to scoped read/write tools", asy
     expect(request.command).toContain("--no-context-files")
     expect(request.command).toContain("--system-prompt")
     expect(request.command).toContain("--append-system-prompt")
-    expect(request.command).toContain("workspace_read,model_output_write,check_model_candidate")
+    expect(request.command).toContain(
+      "workspace_read,model_output_write,fit_model_parameters,check_model_candidate",
+    )
     expect(request.env).toMatchObject({
       DATASHEET_MODEL_CHECK_NGSPICE_BIN: "/trusted/bin/ngspice",
     })

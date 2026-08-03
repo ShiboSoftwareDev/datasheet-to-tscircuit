@@ -142,6 +142,15 @@ digitized_curve to an eligible graph using the exact nested property names descr
 above. On a correction attempt, delete every field named as unsupported in the server
 feedback; do not replace it with a guessed synonym.`
   return feedback
-    ? `${base}\n\nCorrect every retained-candidate error below before returning the artifact:\n${feedback}`
+    ? `${base}\n\nThis is a correction attempt. model-reference-observation.json is already seeded with the
+previous rejected candidate. Read that retained file first; do not repeat the full PDF inventory
+or replace the artifact. Make the smallest edit that resolves only the graph ids and fields named
+in the latest validation error. Preserve every unmentioned graph and every unmentioned field,
+including reviewed hints, crop rectangles, electrical bindings, trace points, trace colors, and axis
+values. A candidate graph omitted from
+the latest source-verification rejection already passed that verification and must not be changed.
+Server-recognized grid coordinates apply to the retained crop exactly: never move its x_px/y_px
+origin. Do not resize it unless feedback explicitly says a printed scale or panel is clipped; in that
+case extend only its right or bottom edge and keep every existing crop-local pixel coordinate fixed.\n\nCorrect every retained-candidate error below before returning the artifact:\n${feedback}`
     : base
 }

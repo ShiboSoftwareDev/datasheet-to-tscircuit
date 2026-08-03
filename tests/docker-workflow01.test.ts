@@ -3,13 +3,15 @@ import { ProcessError, type ProcessRunRequest, type ProcessRunner } from "@/serv
 import { getRuntimeSourceCommit } from "@/server/runtime-source-commit"
 
 test("Docker start rebuilds current source and injects its revision into the runtime", async () => {
-  const [package_json, compose, docker_helper, dockerfile, docker_smoke] = await Promise.all([
-    Bun.file("package.json").json() as Promise<{ scripts: Record<string, string> }>,
-    Bun.file("compose.yaml").text(),
-    Bun.file("scripts/docker-compose-with-source.sh").text(),
-    Bun.file("Dockerfile").text(),
-    Bun.file("scripts/docker-smoke-test.sh").text(),
-  ])
+  const [package_json, compose, docker_helper, dockerfile, docker_smoke, docker_entrypoint] =
+    await Promise.all([
+      Bun.file("package.json").json() as Promise<{ scripts: Record<string, string> }>,
+      Bun.file("compose.yaml").text(),
+      Bun.file("scripts/docker-compose-with-source.sh").text(),
+      Bun.file("Dockerfile").text(),
+      Bun.file("scripts/docker-smoke-test.sh").text(),
+      Bun.file("scripts/docker-entrypoint.sh").text(),
+    ])
 
   expect(package_json.scripts.start).toContain("up --build")
   expect(package_json.scripts.start).not.toContain("--no-build")
@@ -20,6 +22,9 @@ test("Docker start rebuilds current source and injects its revision into the run
   expect(docker_helper).toContain('export SOURCE_COMMIT="$source_commit"')
   expect(dockerfile).toContain("/app/bun.lock ./bun.lock")
   expect(docker_smoke).toContain("test -f /app/bun.lock")
+  expect(docker_entrypoint).not.toContain("chown -R bun:bun /app/.runtime")
+  expect(docker_entrypoint).toContain("-type f -perm /u+w")
+  expect(docker_entrypoint).toContain("gosu bun test -w /app/.runtime/jobs")
 })
 
 test("an injected Docker source revision wins over repository fallback", async () => {

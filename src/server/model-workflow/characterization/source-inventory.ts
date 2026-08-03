@@ -1,4 +1,5 @@
-import { join } from "node:path"
+import { readdir, stat } from "node:fs/promises"
+import { basename, join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
 import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
 import { type ApplicationFixtureContract, type ModelInterface } from "../../modeling"
@@ -14,6 +15,7 @@ import {
 import {
   buildReferenceGraphObserverPrompt,
   eligibleObservedGraphs,
+  parseCanonicalReferenceGraphObservation,
   parseReferenceGraphObservation,
   type ReferenceGraphObservation,
   verifyReferenceGraphObservationPixels,
@@ -26,6 +28,85 @@ export interface ReferenceGraphInventory {
   readonly observation: ReferenceGraphObservation
   readonly source_proof: ReferenceGraphSourceProof
   readonly observer_attempts: number
+  readonly reused_from_invocation_id?: string
+}
+
+interface PriorObservationCandidate {
+  invocation_id: string
+  observation_path: string
+  modified_at_ms: number
+}
+
+export async function findPriorReferenceObservationCandidates(input: {
+  model_dir: string
+  current_invocation_id: string
+}): Promise<PriorObservationCandidate[]> {
+  const attempts_dir = join(input.model_dir, "attempts")
+  let entries
+  try {
+    entries = await readdir(attempts_dir, { withFileTypes: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+  const candidates = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && entry.name !== input.current_invocation_id)
+      .map(async (entry): Promise<PriorObservationCandidate | undefined> => {
+        const observation_path = join(attempts_dir, entry.name, "model-reference-observation.json")
+        try {
+          const metadata = await stat(observation_path)
+          return {
+            invocation_id: entry.name,
+            observation_path,
+            modified_at_ms: metadata.mtimeMs,
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+          throw error
+        }
+      }),
+  )
+  return candidates
+    .filter((candidate): candidate is PriorObservationCandidate => candidate !== undefined)
+    .sort((left, right) => right.modified_at_ms - left.modified_at_ms)
+}
+
+function sourceProofCorrectionGuidance(missing_proofs: readonly string[]): string {
+  const missing_scale = missing_proofs.some((proof) =>
+    [
+      "oscilloscope_panels",
+      "unique_printed_time_per_division",
+      "unique_printed_voltage_per_division",
+    ].includes(proof),
+  )
+  if (missing_scale) {
+    return (
+      "The exact crop does not expose one unambiguous printed scope scale. Do not tune axis values " +
+      "to repair this. Keep crop.x_px and crop.y_px unchanged so every crop-local pixel remains valid; " +
+      "extend only crop.width_px toward the page right edge, and crop.height_px downward only if needed, " +
+      "until the complete Horizontal and Channel scale controls are visible. Preserve all trace points, " +
+      "axis pixels, bindings, and already verified graphs. Scale-match errors listed with a missing printed " +
+      "scale are downstream consequences and must not be edited yet."
+    )
+  }
+  const instructions: string[] = []
+  if (missing_proofs.some((proof) => proof.includes("grid_and_anchor_alignment"))) {
+    instructions.push(
+      "Change only the named axis anchor pixel coordinates to server-recognized grid lines; keep the crop origin and trace points fixed.",
+    )
+  }
+  if (missing_proofs.some((proof) => proof.includes("declared_time_scale_matches_source"))) {
+    instructions.push(
+      "Change the x-axis anchor values and x_range min/max together so they describe the printed time scale; do not change x-axis pixels.",
+    )
+  }
+  if (missing_proofs.some((proof) => proof.includes("declared_voltage_scale_matches_source"))) {
+    instructions.push(
+      "Change the y-axis anchor values and y_range min/max together so they describe the printed voltage scale; do not change y-axis pixels.",
+    )
+  }
+  return instructions.join(" ")
 }
 
 export function sourceProofRejectionDiagnostics(
@@ -38,7 +119,13 @@ export function sourceProofRejectionDiagnostics(
     if (result?.status === "verified") return []
     if (result?.status === "ineligible") {
       const missing = result.diagnostic.missing_proofs.join(", ")
-      return [`${graph.graph_id}: ${result.reason}${missing ? ` Missing source proofs: ${missing}` : ""}`]
+      const recognized = result.diagnostic.recognized_measurements.join("; ")
+      const guidance = sourceProofCorrectionGuidance(result.diagnostic.missing_proofs)
+      return [
+        `${graph.graph_id}: ${result.reason}${missing ? ` Missing source proofs: ${missing}.` : ""}${
+          recognized ? ` Server-recognized crop evidence: ${recognized}.` : ""
+        }${guidance ? ` ${guidance}` : ""} Do not demote a printed graph merely to bypass source verification.`,
+      ]
     }
     return [`${graph.graph_id}: no canonical PDF axis-calibration result was produced`]
   })
@@ -97,6 +184,67 @@ export async function inventoryReferenceGraphs(input: {
   const time_graph_hints_path = join(attempt_dir, "time-graph-hints.json")
   await writeJson(time_graph_hints_path, time_graph_discovery)
 
+  for (const candidate of await findPriorReferenceObservationCandidates({
+    model_dir: context.model_dir,
+    current_invocation_id: basename(attempt_dir),
+  })) {
+    signal.throwIfAborted()
+    try {
+      const observation = parseCanonicalReferenceGraphObservation(
+        await readBoundedJsonArtifact({
+          path: candidate.observation_path,
+          max_bytes: 2 * 1024 * 1024,
+          max_depth: 32,
+          max_nodes: 20_000,
+        }),
+        time_graph_discovery,
+        model_interface,
+        application_fixture,
+      )
+      await verifyReferenceGraphObservationPixels({
+        observation,
+        datasheet_path,
+        process_runner: services.process_runner,
+        signal,
+        on_output: logOutput,
+      })
+      const source_proof = await buildSourceProof({
+        observation,
+        datasheet_path,
+        services,
+        signal,
+      })
+      const source_rejections = sourceProofRejectionDiagnostics(observation, source_proof)
+      if (source_rejections.length > 0) {
+        throw new Error(source_rejections.join("\n"))
+      }
+      const canonical_observation = applyReferenceGraphSourceEligibility({
+        observation,
+        proof: source_proof,
+      })
+      assertObserverFoundEligibleTimeDomainGraph(canonical_observation)
+      await writeJson(join(attempt_dir, "model-reference-observation.json"), canonical_observation)
+      await writeJson(join(attempt_dir, "model-reference-source-proof.json"), source_proof)
+      await logOutput(
+        "system",
+        `Reused the accepted graph inventory from invocation ${candidate.invocation_id} after revalidating every pixel and rebuilding canonical-PDF axis proof.\n`,
+      )
+      return {
+        time_graph_hints_path,
+        observation: canonical_observation,
+        source_proof,
+        observer_attempts: 0,
+        reused_from_invocation_id: candidate.invocation_id,
+      }
+    } catch (error) {
+      signal.throwIfAborted()
+      await logOutput(
+        "system",
+        `Skipped prior graph inventory ${candidate.invocation_id}: ${error instanceof Error ? error.message : String(error)}\n`,
+      )
+    }
+  }
+
   const observer = await runAgentArtifactStage<{
     observation: ReferenceGraphObservation
     source_proof: ReferenceGraphSourceProof
@@ -138,13 +286,19 @@ export async function inventoryReferenceGraphs(input: {
         model_interface,
         application_fixture,
       )
-      await verifyReferenceGraphObservationPixels({
-        observation,
-        datasheet_path,
-        process_runner: services.process_runner,
-        signal,
-        on_output: logOutput,
-      })
+      let pixel_rejection: Error | undefined
+      try {
+        await verifyReferenceGraphObservationPixels({
+          observation,
+          datasheet_path,
+          process_runner: services.process_runner,
+          signal,
+          on_output: logOutput,
+        })
+      } catch (error) {
+        signal.throwIfAborted()
+        pixel_rejection = error instanceof Error ? error : new Error(String(error))
+      }
       const source_proof = await buildSourceProof({
         observation,
         datasheet_path,
@@ -152,10 +306,16 @@ export async function inventoryReferenceGraphs(input: {
         signal,
       })
       const source_rejections = sourceProofRejectionDiagnostics(observation, source_proof)
-      if (source_rejections.length > 0) {
-        throw new Error(
-          `Canonical PDF source verification rejected agent-claimed eligible graphs:\n${source_rejections.join("\n")}`,
-        )
+      const rejection_sections = [
+        ...(pixel_rejection ? [pixel_rejection.message] : []),
+        ...(source_rejections.length > 0
+          ? [
+              `Canonical PDF source verification rejected agent-claimed eligible graphs:\n${source_rejections.join("\n")}`,
+            ]
+          : []),
+      ]
+      if (rejection_sections.length > 0) {
+        throw new Error(rejection_sections.join("\n\n"))
       }
       return {
         observation: applyReferenceGraphSourceEligibility({ observation, proof: source_proof }),

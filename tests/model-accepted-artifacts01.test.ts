@@ -6,6 +6,7 @@ import { ModelRunStore } from "@/server/model-run-store"
 import {
   persistCandidateValidationUi,
   projectCandidateValidationUi,
+  restoreCandidateValidationUi,
 } from "@/server/model-workflow/stage-helpers"
 import {
   createModelManifest,
@@ -347,4 +348,107 @@ test("a failed candidate bundle is atomically projected into the live run withou
       join(model_dir, "current-previews", `fixture-${failed.manifest.revision}`, "output", "result.raw"),
     ).exists(),
   ).toBe(false)
+})
+
+test("a rejected repair restores the authoritative candidate preview", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "restored-candidate-artifacts-"))
+  temporary_directories.push(model_dir)
+  const evidence_dir = join(model_dir, "attempts", "run", "evidence")
+  const authoritative_dir = join(model_dir, "candidates", "authoritative", "validation")
+  const rejected_dir = join(model_dir, "candidates", "rejected", "validation")
+  await Promise.all([
+    mkdir(evidence_dir, { recursive: true }),
+    mkdir(authoritative_dir, { recursive: true }),
+    mkdir(rejected_dir, { recursive: true }),
+  ])
+  const createCandidate = (resistance: string): GeneratedModel => {
+    const source = `.SUBCKT ACCEPTED OUT\nR1 OUT 0 ${resistance}\n.ENDS ACCEPTED\n`
+    return {
+      source,
+      card: `${resistance} candidate card\n`,
+      manifest: createModelManifest({
+        model_interface: contract.interface,
+        model_source: source,
+        simulator: "ngspice",
+      }),
+    }
+  }
+  const authoritative = createCandidate("1k")
+  const rejected = createCandidate("2k")
+  const store = new ModelRunStore()
+  store.createModelRun({
+    model_run_id: "restored_model",
+    job_id: "restored_job",
+    model_dir,
+    effort_multiplier: 1,
+  })
+
+  const authoritative_projection = await persistCandidateValidationUi({
+    plan,
+    result: resultFor(authoritative, false),
+    generated: authoritative,
+    contract,
+    immutable_artifact_dir: authoritative_dir,
+    preview_generation: `fixture-${authoritative.manifest.revision}`,
+  })
+  const rejected_projection = await persistCandidateValidationUi({
+    plan,
+    result: resultFor(rejected, false),
+    generated: rejected,
+    contract,
+    immutable_artifact_dir: rejected_dir,
+    preview_generation: `fixture-${rejected.manifest.revision}`,
+  })
+  const signal = new AbortController().signal
+  await projectCandidateValidationUi({
+    model_run_store: store,
+    model_run_id: "restored_model",
+    model_dir,
+    immutable_artifact_dir: authoritative_dir,
+    evidence_dir,
+    revision: authoritative.manifest.revision,
+    projection: authoritative_projection,
+    signal,
+  })
+  await projectCandidateValidationUi({
+    model_run_store: store,
+    model_run_id: "restored_model",
+    model_dir,
+    immutable_artifact_dir: rejected_dir,
+    evidence_dir,
+    revision: rejected.manifest.revision,
+    projection: rejected_projection,
+    signal,
+  })
+  expect(store.getModelRun("restored_model")?.validation?.model_revision).toBe(rejected.manifest.revision)
+
+  await restoreCandidateValidationUi({
+    model_run_store: store,
+    model_run_id: "restored_model",
+    model_dir,
+    immutable_artifact_dir: authoritative_dir,
+    evidence_dir,
+    revision: authoritative.manifest.revision,
+    signal,
+  })
+
+  expect(store.getModelRun("restored_model")?.validation?.model_revision).toBe(
+    authoritative.manifest.revision,
+  )
+  expect(JSON.parse(await readFile(join(model_dir, "current-preview.json"), "utf8"))).toMatchObject({
+    revision: authoritative.manifest.revision,
+    preview_generation: `fixture-${authoritative.manifest.revision}`,
+  })
+  expect(
+    await loadStoredModelPreview({
+      job_id: "restored_job",
+      model_dir,
+      case_id: "output",
+      prefer_current_preview: true,
+      current_preview_generation: `fixture-${authoritative.manifest.revision}`,
+      current_model_revision: authoritative.manifest.revision,
+    }),
+  ).toMatchObject({
+    artifact_identity: { model_revision: authoritative.manifest.revision },
+  })
 })

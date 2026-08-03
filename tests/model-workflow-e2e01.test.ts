@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -17,8 +18,13 @@ import { restorePersistedJobs } from "@/server/job-restorer"
 import { ensureJobTscircuitRuntimeConfig } from "@/server/job-scaffold"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
+import { parseModelInterface, readGeneratedModel } from "@/server/modeling"
 import { resolveBenchmarkReferenceImage } from "@/server/modeling/reference-image"
 import { runModel } from "@/server/model-workflow"
+import {
+  createModelTrainingCheckReceipt,
+  MODEL_TRAINING_CHECK_RECEIPT_FILE,
+} from "@/server/model-workflow/model-training-check"
 import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const ngspice_path = Bun.which("ngspice")
@@ -349,9 +355,16 @@ function deterministicAgent(calls: string[]): AgentClient {
         )
         expect(sanitized_observation.graphs[0]).toMatchObject({
           graph_id: "transient_gain_graph",
-          numeric_curve_withheld: true,
+          server_verified_reference_curve: {
+            provenance: "canonical_pdf_axis_and_pixel_trace_v1",
+            x_quantity: "time",
+            x_unit: "s",
+            y_quantity: "voltage",
+            y_unit: "V",
+          },
           electrical_binding: characterization.requirements[0]!.reference_curve.electrical_binding,
         })
+        expect(sanitized_observation.graphs[0].server_verified_reference_curve.points).toHaveLength(13)
         expect(JSON.stringify(sanitized_observation)).not.toContain("digitized_curve")
         expect(JSON.stringify(sanitized_observation)).not.toContain("pixel_x")
         await Bun.write(
@@ -369,6 +382,61 @@ function deterministicAgent(calls: string[]): AgentClient {
           Bun.write(
             join(input.workspace, "model-card.md"),
             "# TEST-GAIN\n\nA deterministic two-times transient gain model.\n",
+          ),
+        ])
+        const model_interface = parseModelInterface(
+          JSON.parse(await Bun.file(join(input.workspace, "model-interface.json")).text()),
+        )
+        const generated = await readGeneratedModel({
+          model_dir: input.workspace,
+          model_interface,
+        })
+        const candidate_receipt = {
+          version: 1 as const,
+          status: "passed" as const,
+          checks: ["model_contract", "model_card", "ngspice_smoke"] as const,
+          revision: generated.manifest.revision,
+          entry_name: generated.manifest.entry_name,
+          pin_count: generated.manifest.pins.length,
+          model_card_sha256: createHash("sha256").update(generated.card).digest("hex"),
+        }
+        const training_receipt = await createModelTrainingCheckReceipt({
+          workspace: input.workspace,
+          candidate: candidate_receipt,
+          training_validation: {
+            version: 1,
+            status: "passed",
+            cases: validation_plan.cases.map((validation_case) => {
+              const series = validation_case.observations.map((observation) => ({
+                observation_id: observation.id,
+                status: "passed" as const,
+                metrics: {
+                  sample_count: 2,
+                  normalized_max_error: 0,
+                  normalized_rmse: 0,
+                },
+                samples: [
+                  { x: 0, reference_y: 0, simulated_y: 0, error: 0 },
+                  { x: 0.001, reference_y: 2, simulated_y: 2, error: 0 },
+                ],
+                error_codes: [],
+              }))
+              return {
+                case_id: validation_case.id,
+                status: "passed" as const,
+                server_series: series,
+                viewer_series: series,
+                error_codes: [],
+              }
+            }),
+            error_codes: [],
+          },
+        })
+        await Promise.all([
+          Bun.write(join(input.workspace, ".candidate-check.json"), `${JSON.stringify(candidate_receipt)}\n`),
+          Bun.write(
+            join(input.workspace, MODEL_TRAINING_CHECK_RECEIPT_FILE),
+            `${JSON.stringify(training_receipt)}\n`,
           ),
         ])
       } else {
@@ -853,4 +921,5 @@ testWithProductionSimulation(
         ?.circuit_json?.filter(({ type }) => type === "simulation_spice_subcircuit"),
     ).toHaveLength(1)
   },
+  30_000,
 )

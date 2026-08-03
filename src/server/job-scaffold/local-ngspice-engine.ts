@@ -30,6 +30,18 @@ interface TransientParameters {
 
 const NGSPICE_FAILURE_PATTERN = /fatal error:|doanalyses:.*(?:aborted|failed)|run simulation\(s\) aborted/i
 
+/**
+ * circuit-json-to-spice currently appends UIC to every generated transient
+ * analysis. Datasheet transient fixtures describe an established operating
+ * point before the printed load step, and our direct ngspice path therefore
+ * uses ngspice's normal DC operating-point solve. Remove only that generated,
+ * trailing UIC token so the tscircuit viewer and direct validation paths start
+ * from the same physical state.
+ */
+export function normalizeTscircuitTransientInitialization(spice_source: string): string {
+  return spice_source.replace(/^(\s*\.tran\b[^\r\n$]*?)\s+uic(\s*(?:\$[^\r\n]*)?)$/gim, "$1$2")
+}
+
 const SI_MULTIPLIERS: Record<string, number> = {
   t: 1e12,
   g: 1e9,
@@ -283,7 +295,9 @@ async function simulateWithLocalNgspice(spice_source: string): Promise<SpiceEngi
   const circuit_path = join(workspace, "circuit.cir")
   const raw_path = join(workspace, "result.raw")
   try {
-    const compatible_source = rewritePspiceCompatibilitySyntax(spice_source)
+    const compatible_source = normalizeTscircuitTransientInitialization(
+      rewritePspiceCompatibilitySyntax(spice_source),
+    )
     await Promise.all([
       Bun.write(circuit_path, compatible_source),
       Bun.write(join(workspace, ".spiceinit"), "set filetype=ascii\n"),

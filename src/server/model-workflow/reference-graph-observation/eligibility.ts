@@ -28,9 +28,10 @@ export function eligibleObservedGraphs(
 }
 
 /**
- * The characterization agent receives graph identity and geometry so it can
- * inspect the same source, but never receives the independent numeric trace,
- * axis ranges, calibration anchors, colors, or curve digest.
+ * Publish only the downstream facts established by the independent graph
+ * stage. Pixel coordinates, colors, and calibration internals stay private;
+ * the source-calibrated time/voltage curve becomes an immutable stage output
+ * so later agents do not re-digitize the same PDF.
  */
 export function projectReferenceGraphObservationForCharacterizer(
   observation: ReferenceGraphObservation,
@@ -39,10 +40,25 @@ export function projectReferenceGraphObservationForCharacterizer(
     version: 1,
     source_pdf_sha256: observation.source_pdf_sha256,
     reviewed_hints: observation.reviewed_hints.map((entry) => ({ ...entry })),
-    graphs: observation.graphs.map(({ digitized_curve: _withheld, ...graph }) => ({
+    graphs: observation.graphs.map(({ digitized_curve, ...graph }) => ({
       ...graph,
       crop: { ...graph.crop },
-      numeric_curve_withheld: true,
+      ...(graph.response_quantity === "voltage" &&
+      graph.public_pin_observable &&
+      graph.fixture_reproducible &&
+      graph.electrical_binding &&
+      digitized_curve
+        ? {
+            server_verified_reference_curve: {
+              provenance: "canonical_pdf_axis_and_pixel_trace_v1" as const,
+              x_quantity: "time" as const,
+              x_unit: "s" as const,
+              y_quantity: "voltage" as const,
+              y_unit: "V" as const,
+              points: digitized_curve.points.map(({ x, y }) => ({ x, y })),
+            },
+          }
+        : {}),
     })),
   }
 }

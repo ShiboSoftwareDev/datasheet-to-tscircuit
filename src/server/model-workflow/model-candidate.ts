@@ -9,12 +9,19 @@ import {
   type ModelContract,
 } from "../modeling"
 import type { NgspiceExecutor } from "../spice-validation"
+import type { ValidationPlan } from "../spice-validation"
 import {
   assertModelCandidateCheckReceiptMatches,
   checkModelCandidate,
   MODEL_CANDIDATE_CHECK_RECEIPT_FILE,
   readModelCandidateCheckReceipt,
 } from "./model-candidate-check"
+import { createModelTrainingValidationPlan } from "./model-training-validation"
+import {
+  assertModelTrainingCheckReceiptUsable,
+  MODEL_TRAINING_CHECK_RECEIPT_FILE,
+  readModelTrainingCheckReceipt,
+} from "./model-training-check"
 
 export interface StoredGeneratedModel extends GeneratedModel {
   artifact_dir: string
@@ -23,6 +30,7 @@ export interface StoredGeneratedModel extends GeneratedModel {
 export async function generateModelCandidate(input: {
   model_dir: string
   contract: ModelContract
+  validation_plan: ValidationPlan
   evidence_dir: string
   previous_candidate?: { model_path: string; model_card_path: string }
   strategy_guidance: string
@@ -34,6 +42,7 @@ export async function generateModelCandidate(input: {
   agent_client: AgentClient
   ngspice: NgspiceExecutor
   ngspice_path: string
+  tsci_path: string
   max_artifact_attempts: number
   debug_dir: string
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
@@ -49,6 +58,10 @@ export async function generateModelCandidate(input: {
         ]
       : []
   const training_contract = createModelTrainingContract(input.contract)
+  const training_plan = createModelTrainingValidationPlan({
+    plan: input.validation_plan,
+    training_contract,
+  })
   return runAgentArtifactStage({
     stage_id: input.stage_id,
     phase_label: input.phase_label,
@@ -57,7 +70,7 @@ export async function generateModelCandidate(input: {
     use_openai: input.use_openai,
     agent_client: input.agent_client,
     tool_profile: "model_candidate_files",
-    model_candidate_check: { ngspice_path: input.ngspice_path },
+    model_candidate_check: { ngspice_path: input.ngspice_path, tsci_path: input.tsci_path },
     create_workspace: async () => {
       const workspace = await createStageWorkspace({
         prefix: input.stage_id.replaceAll("_", "-"),
@@ -67,6 +80,10 @@ export async function generateModelCandidate(input: {
           { source: join(input.model_dir, "component.circuit.tsx") },
           { source: join(input.model_dir, "component-evidence.json") },
           { source: join(input.model_dir, "typical-application-plan.json") },
+          { source: join(input.model_dir, "package.json"), required: false },
+          { source: join(input.model_dir, "tsconfig.json"), required: false },
+          { source: join(input.model_dir, "tscircuit.config.json"), required: false },
+          { source: join(input.model_dir, "tscircuit.config.ts"), required: false },
           ...repair_inputs,
         ],
         directories: [{ source: input.evidence_dir, destination: "evidence", required: false }],
@@ -75,6 +92,10 @@ export async function generateModelCandidate(input: {
         await Bun.write(
           join(workspace.path, "model-contract.json"),
           `${JSON.stringify(training_contract, null, 2)}\n`,
+        )
+        await Bun.write(
+          join(workspace.path, "model-training-plan.json"),
+          `${JSON.stringify(training_plan, null, 2)}\n`,
         )
         return workspace
       } catch (error) {
@@ -92,18 +113,26 @@ export async function generateModelCandidate(input: {
     on_output: input.on_output,
     rejection_debug: {
       debug_dir: input.debug_dir,
-      files: ["model.lib", "model-card.md", MODEL_CANDIDATE_CHECK_RECEIPT_FILE],
+      files: [
+        "model.lib",
+        "model-card.md",
+        MODEL_CANDIDATE_CHECK_RECEIPT_FILE,
+        MODEL_TRAINING_CHECK_RECEIPT_FILE,
+      ],
     },
     validate: async (workspace) => {
       const checked = await checkModelCandidate({
         workspace,
         model_interface: input.contract.interface,
+        model_contract: input.contract,
         ngspice: input.ngspice,
         ngspice_path: input.ngspice_path,
         signal: input.signal,
       })
       const agent_receipt = await readModelCandidateCheckReceipt(workspace)
       assertModelCandidateCheckReceiptMatches(agent_receipt, checked)
+      const training_receipt = await readModelTrainingCheckReceipt(workspace)
+      await assertModelTrainingCheckReceiptUsable({ workspace, receipt: training_receipt, checked })
       const { generated } = checked
       return {
         ...generated,
@@ -136,6 +165,13 @@ export async function generateModelCandidate(input: {
           source: MODEL_CANDIDATE_CHECK_RECEIPT_FILE,
           destination_root: generated.artifact_dir,
           max_bytes: 16 * 1024,
+          signal,
+        }),
+        promoteStageFile({
+          workspace,
+          source: MODEL_TRAINING_CHECK_RECEIPT_FILE,
+          destination_root: generated.artifact_dir,
+          max_bytes: 512 * 1024,
           signal,
         }),
       ])

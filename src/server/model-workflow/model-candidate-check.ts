@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import type { ModelInterface } from "../modeling"
-import { parseModelInterface, readGeneratedModel, type GeneratedModel } from "../modeling"
+import type { ModelContract, ModelInterface } from "../modeling"
+import {
+  parseModelInterface,
+  readGeneratedModel,
+  validateFreshModelSource,
+  type GeneratedModel,
+} from "../modeling"
 import { ProcessError } from "../infrastructure/process"
 import type { NgspiceExecutor } from "../spice-validation"
 import { assertNgspiceAcceptsModelCandidate } from "./model-candidate-smoke"
@@ -12,6 +17,7 @@ export type ModelCandidateCheckCode =
   | "model_artifact_invalid"
   | "model_card_empty"
   | "ngspice_smoke_failed"
+  | "visible_training_validation_failed"
 
 export class ModelCandidateCheckError extends Error {
   readonly code: ModelCandidateCheckCode
@@ -52,24 +58,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-/** Reads the receipt emitted by the trusted check_model_candidate tool. */
-export async function readModelCandidateCheckReceipt(workspace: string): Promise<ModelCandidateCheckReceipt> {
-  let value: unknown
-  try {
-    const text = await readFile(join(workspace, MODEL_CANDIDATE_CHECK_RECEIPT_FILE), "utf8")
-    if (text.length > 16_000) throw new Error("receipt is unexpectedly large")
-    value = JSON.parse(text)
-  } catch (error) {
-    throw new ModelCandidateCheckError(
-      "model_artifact_invalid",
-      `check_model_candidate must be called after the final output edit: ${messageOf(error)}`,
-      { cause: error },
-    )
-  }
+export function parseModelCandidateCheckReceipt(value: unknown): ModelCandidateCheckReceipt {
   if (!isRecord(value) || value.version !== 1 || value.status !== "passed") {
     throw new ModelCandidateCheckError(
       "model_artifact_invalid",
-      "check_model_candidate must return a passed receipt after the final output edit",
+      "check_model_candidate must return a passed smoke receipt after the final output edit",
     )
   }
   const expected_keys = [
@@ -84,7 +77,7 @@ export async function readModelCandidateCheckReceipt(workspace: string): Promise
   if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expected_keys)) {
     throw new ModelCandidateCheckError(
       "model_artifact_invalid",
-      "check_model_candidate receipt has an invalid schema",
+      "check_model_candidate smoke receipt has an invalid schema",
     )
   }
   if (
@@ -101,10 +94,27 @@ export async function readModelCandidateCheckReceipt(workspace: string): Promise
   ) {
     throw new ModelCandidateCheckError(
       "model_artifact_invalid",
-      "check_model_candidate receipt has invalid fields",
+      "check_model_candidate smoke receipt has invalid fields",
     )
   }
   return value as unknown as ModelCandidateCheckReceipt
+}
+
+/** Reads the receipt emitted by the trusted check_model_candidate tool. */
+export async function readModelCandidateCheckReceipt(workspace: string): Promise<ModelCandidateCheckReceipt> {
+  let value: unknown
+  try {
+    const text = await readFile(join(workspace, MODEL_CANDIDATE_CHECK_RECEIPT_FILE), "utf8")
+    if (text.length > 16_000) throw new Error("receipt is unexpectedly large")
+    value = JSON.parse(text)
+  } catch (error) {
+    throw new ModelCandidateCheckError(
+      "model_artifact_invalid",
+      `check_model_candidate must be called after the final output edit: ${messageOf(error)}`,
+      { cause: error },
+    )
+  }
+  return parseModelCandidateCheckReceipt(value)
 }
 
 export function assertModelCandidateCheckReceiptMatches(
@@ -145,6 +155,7 @@ async function readCandidateInterface(workspace: string): Promise<ModelInterface
 export async function checkModelCandidate(input: {
   workspace: string
   model_interface?: ModelInterface
+  model_contract?: ModelContract
   ngspice: NgspiceExecutor
   ngspice_path: string
   signal: AbortSignal
@@ -157,6 +168,7 @@ export async function checkModelCandidate(input: {
       model_dir: input.workspace,
       model_interface,
     })
+    if (input.model_contract) validateFreshModelSource(generated.source, input.model_contract)
   } catch (error) {
     throw new ModelCandidateCheckError(
       "model_artifact_invalid",

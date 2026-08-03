@@ -37,6 +37,18 @@ const MAX_OBSERVATION_BYTES = 4 * 1024 * 1024
 const MAX_SOURCE_PROOF_BYTES = 8 * 1024 * 1024
 const MAX_VERIFICATION_BYTES = 4 * 1024 * 1024
 
+function stableDifferenceDiagnostic(left: unknown, right: unknown): string {
+  const left_text = stableStringify(left)
+  const right_text = stableStringify(right)
+  let index = 0
+  while (index < left_text.length && index < right_text.length && left_text[index] === right_text[index]) {
+    index += 1
+  }
+  const start = Math.max(0, index - 80)
+  const end = index + 160
+  return `first difference at canonical byte ${index}; stored=${JSON.stringify(left_text.slice(start, end))}; recomputed=${JSON.stringify(right_text.slice(start, end))}`
+}
+
 /**
  * Only clearly scalar-only modeled contracts are treated as legacy. Any
  * transient or elapsed-time/cropped modeled input takes the fail-closed path;
@@ -223,7 +235,7 @@ export async function revalidateModelReferencePublication(input: {
   })
   if (stableStringify(stored_source_proof) !== stableStringify(recomputed_source_proof)) {
     throw new Error(
-      "model-reference-source-proof.json is stale or tampered; it does not match canonical datasheet.pdf OCR axis calibration",
+      `model-reference-source-proof.json is stale or tampered; it does not match canonical datasheet.pdf OCR axis calibration (${stableDifferenceDiagnostic(stored_source_proof, recomputed_source_proof)})`,
     )
   }
   const source_observation = applyReferenceGraphSourceEligibility({

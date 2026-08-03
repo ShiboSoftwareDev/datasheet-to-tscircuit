@@ -23,23 +23,34 @@ async function findCircuitJson(directory: string): Promise<string | undefined> {
   return undefined
 }
 
-function circuitErrors(circuit_json: AnyCircuitElement[], ignored_types: ReadonlySet<string>): string[] {
-  const errors = new Set<string>()
+export interface CircuitElementError {
+  readonly type: string
+  readonly message: string
+  readonly diagnostic: string
+}
+
+function circuitErrors(
+  circuit_json: AnyCircuitElement[],
+  ignored_types: ReadonlySet<string>,
+): CircuitElementError[] {
+  const errors = new Map<string, CircuitElementError>()
   for (const element of circuit_json) {
     if (!element.type.endsWith("_error") || ignored_types.has(element.type)) continue
     const message =
       "message" in element && typeof element.message === "string"
         ? element.message.split(/\s+Details:\s+Props:/i)[0]!.trim()
         : element.type
-    errors.add(`${element.type}: ${message}`)
+    const diagnostic = `${element.type}: ${message}`
+    errors.set(diagnostic, { type: element.type, message, diagnostic })
   }
-  return [...errors]
+  return [...errors.values()]
 }
 
 export interface CircuitBuildResult {
   circuit_json: AnyCircuitElement[]
   circuit_json_path: string
   errors: string[]
+  circuit_errors: CircuitElementError[]
   renders: {
     pcb_png?: string
     schematic_svg?: string
@@ -140,7 +151,8 @@ export async function buildTscircuitSource(input: {
   if (!isCircuitJson(value)) {
     throw new Error(`tsci build ${input.source_file} produced malformed Circuit JSON`)
   }
-  errors.push(...circuitErrors(value, new Set(input.ignored_error_types ?? [])))
+  const circuit_errors = circuitErrors(value, new Set(input.ignored_error_types ?? []))
+  errors.push(...circuit_errors.map(({ diagnostic }) => diagnostic))
   if (input.build_args?.includes("--disable-pcb") && value.some(({ type }) => type.startsWith("pcb_"))) {
     errors.push("schematic-only build unexpectedly produced PCB Circuit JSON elements")
   }
@@ -180,6 +192,7 @@ export async function buildTscircuitSource(input: {
     circuit_json: value,
     circuit_json_path,
     errors: [...new Set(errors)],
+    circuit_errors,
     renders: {
       ...((await fileExists(pcb_png)) ? { pcb_png } : {}),
       ...((await fileExists(schematic_svg)) ? { schematic_svg } : {}),

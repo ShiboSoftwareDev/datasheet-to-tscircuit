@@ -4,6 +4,7 @@ import { isCircuitJson } from "../component-circuit-json"
 import { createStageWorkspace } from "../infrastructure/artifacts"
 import type { ProcessRunner } from "../infrastructure/process"
 import { buildTscircuitSource } from "../infrastructure/tscircuit"
+import type { CircuitBuildResult } from "../infrastructure/tscircuit"
 import {
   assertValidationCircuitEmbedsModel,
   getAnalogProjectionIssue,
@@ -29,6 +30,8 @@ export interface ValidationCircuitPreviewBuild {
   /** All viewer acceptance failures, including an out-of-tolerance runnable waveform. */
   errors_by_case: Readonly<Record<string, string | undefined>>
   viewer_validation_by_case: Readonly<Record<string, ViewerSimulationValidation | undefined>>
+  /** Viewer simulator failures caused by the candidate model, not TSX compilation or provenance. */
+  viewer_model_errors_by_case: Readonly<Record<string, string | undefined>>
 }
 
 export interface ViewerPreviewFailure {
@@ -46,9 +49,24 @@ export function getViewerInfrastructureFailures(
   build: ValidationCircuitPreviewBuild,
 ): ViewerPreviewFailure[] {
   return getViewerPreviewFailures(build).filter(({ case_id }) => {
+    if (build.viewer_model_errors_by_case[case_id]) return false
     const validation = build.viewer_validation_by_case[case_id]
     return !validation || validation.errors.some(({ kind }) => kind !== "comparison")
   })
+}
+
+export function partitionViewerBuildErrors(build: Pick<CircuitBuildResult, "errors" | "circuit_errors">): {
+  infrastructure_errors: string[]
+  model_simulation_errors: string[]
+} {
+  const model_simulation_errors = build.circuit_errors
+    .filter(({ type }) => type.startsWith("simulation_") && type.endsWith("_error"))
+    .map(({ diagnostic }) => diagnostic)
+  const model_error_set = new Set(model_simulation_errors)
+  return {
+    infrastructure_errors: build.errors.filter((diagnostic) => !model_error_set.has(diagnostic)),
+    model_simulation_errors,
+  }
 }
 
 async function buildOnePreview(input: {
@@ -65,6 +83,7 @@ async function buildOnePreview(input: {
   error?: string
   circuit_build_error?: string
   viewer_validation?: ViewerSimulationValidation
+  viewer_model_error?: string
 }> {
   const case_id = input.validation_case.id
   const workspace = await createStageWorkspace({
@@ -100,14 +119,30 @@ async function buildOnePreview(input: {
       ignored_error_types: ["source_pin_must_be_connected_error"],
       on_output: (stream, message) => input.append(stream, message),
     })
+    const { infrastructure_errors, model_simulation_errors } = partitionViewerBuildErrors(build)
     const error =
-      build.errors.length > 0 ? sanitizePreviewDiagnostic(build.errors.join("; "), workspace.path) : undefined
+      infrastructure_errors.length > 0
+        ? sanitizePreviewDiagnostic(infrastructure_errors.join("; "), workspace.path)
+        : undefined
     if (error) await input.append("stderr", `Validation TSX preview ${case_id}: ${error}\n`)
-    if (error) return { case_id, error, circuit_build_error: error }
+    if (error) return { case_id, circuit_json: build.circuit_json, error, circuit_build_error: error }
     if (!isCircuitJson(build.circuit_json)) {
       const empty_error = "tsci produced no renderable Circuit JSON"
       await input.append("stderr", `Validation TSX preview ${case_id}: ${empty_error}\n`)
       return { case_id, error: empty_error, circuit_build_error: empty_error }
+    }
+    if (model_simulation_errors.length > 0) {
+      const viewer_model_error = sanitizePreviewDiagnostic(model_simulation_errors.join("; "), workspace.path)
+      await input.append(
+        "stderr",
+        `Validation TSX preview ${case_id} model simulation failed: ${viewer_model_error}\n`,
+      )
+      return {
+        case_id,
+        circuit_json: build.circuit_json,
+        error: viewer_model_error,
+        viewer_model_error,
+      }
     }
     try {
       assertValidationCircuitEmbedsModel(build.circuit_json, input.generated.source, input.generated.manifest)
@@ -196,6 +231,9 @@ export async function buildValidationCircuitPreviews(input: {
     ),
     viewer_validation_by_case: Object.fromEntries(
       results.flatMap((result) => (result ? [[result.case_id, result.viewer_validation]] : [])),
+    ),
+    viewer_model_errors_by_case: Object.fromEntries(
+      results.flatMap((result) => (result ? [[result.case_id, result.viewer_model_error]] : [])),
     ),
   }
 }

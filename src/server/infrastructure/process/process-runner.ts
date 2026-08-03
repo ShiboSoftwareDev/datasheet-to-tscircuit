@@ -230,7 +230,40 @@ export class BunProcessRunner implements ProcessRunner {
     const process_tasks = [exit_task, stdout_task, stderr_task] as const
 
     try {
-      const [exit_code] = await Promise.all(process_tasks)
+      const completion = await Promise.race([
+        Promise.all(process_tasks).then((values) => ({ kind: "completed" as const, values })),
+        termination_started.then(() => ({ kind: "terminated" as const })),
+      ])
+      if (completion.kind === "terminated") {
+        await settleProcessTasks(process_tasks)
+        const exit_code = child.exitCode ?? undefined
+        if (termination === "cancelled" || request.signal.aborted) {
+          throw new ProcessError({
+            code: "process_cancelled",
+            command_label: request.command_label,
+            message: `${request.command_label} was cancelled`,
+            exit_code,
+            output_tail,
+          })
+        }
+        if (termination === "idle_timeout") {
+          throw new ProcessError({
+            code: "process_idle_timeout",
+            command_label: request.command_label,
+            message: `${request.command_label} produced no output or heartbeat before its idle timeout`,
+            exit_code,
+            output_tail,
+          })
+        }
+        throw new ProcessError({
+          code: "process_wall_timeout",
+          command_label: request.command_label,
+          message: `${request.command_label} exceeded its absolute time limit`,
+          exit_code,
+          output_tail,
+        })
+      }
+      const [exit_code] = completion.values
       const duration_ms = Math.round(performance.now() - started_at)
       if (termination === "cancelled" || request.signal.aborted) {
         throw new ProcessError({

@@ -10,6 +10,14 @@ function boundedFeedback(value: string): string {
 export function buildCharacterizationPrompt(feedback?: string): string {
   return `Analyze the supplied component for a useful, honest SPICE model.
 
+If model-characterization.json already exists, it is the exact retained candidate
+from the preceding rejected attempt. Read it first. Correct that file in place
+with the smallest edits required by the newest validation error. Preserve every
+modeled graph, binding, crop, source, and curve that the feedback does not name;
+do not restart the datasheet analysis or re-digitize already accepted curves.
+Older cumulative errors may already be fixed in the retained file, so verify
+them without reintroducing them.
+
 Read AGENTS.md, model-interface.json, component-evidence.json,
 typical-application-plan.json, application-fixture-contract.json,
 component.circuit.tsx, time-graph-hints.json,
@@ -58,14 +66,17 @@ model-reference-observation.json is a sanitized candidate-independent inventory
 produced from the canonical PDF. Create one modeled requirement for every eligible
 public-pin/reproducible voltage graph in that inventory. Each modeled requirement
 must match its graph by PDF page and figure locator, and its crop must
-substantially overlap the independently observed rectangle. The server has
-deliberately withheld that observer's axis calibration, pixel trace, numeric
-points, ranges, colors, and curve digest, but intentionally exposes its independently
-derived electrical_binding, including the exact PULSE and static fixtures required to reproduce the plot.
+substantially overlap the independently observed rectangle. For each eligible
+graph, server_verified_reference_curve is an immutable output of the preceding
+independent pixel-trace and canonical-PDF axis-proof stage. Copy its x/y quantity,
+units, and points exactly into reference_curve. The server still withholds pixel
+coordinates, colors, calibration internals, and curve digests. It also exposes
+the independently derived electrical_binding, including the exact PULSE and
+static fixtures required to reproduce the plot.
 Copy that binding exactly; never substitute another response pin, reference terminal,
-nominal, stimulus, auxiliary endpoint/value/state, pulse level, or timing. Digitize the source yourself from the
-complete PDF; do not try to infer private values from retry feedback. The server
-will compare your curve numerically against the withheld independent trace. Do
+nominal, stimulus, auxiliary endpoint/value/state, pulse level, or timing. Do not
+re-digitize or resample a server_verified_reference_curve. The server will compare
+the copied curve against its retained source-owned digest. Do
 not edit, ignore, or reinterpret the sanitized observation. time-graph-hints.json
 records the server's complete-PDF text scan; the independent observer has
 explicitly reviewed every hint.
@@ -78,8 +89,10 @@ rejected. Do not set reference_curve.image: the server renders the cited source
 page and materializes the canonical crop as
 evidence/figures/<requirement_id>.png.
 Digitize 8 through 48 points distributed across the graph's full elapsed-time
-range. The server applies the exact density requirement using the independently
-observed horizontal-axis span and reserves interior samples for validation.
+range only when no server_verified_reference_curve is supplied. When it is
+supplied, copy its points exactly even when it contains fewer than 48 points;
+the upstream verifier already enforced the graph-specific density. The server
+reserves interior samples for validation.
 
 Tables, headline specifications, calculated values, operating points, DC curves,
 and prose-only limits are not executable evidence in this workflow. Record them
@@ -93,13 +106,16 @@ For modeled requirements, convert numeric values to SI base units. expected.unit
 and reference_curve.y_unit must be exactly V. The installed tscircuit runtime
 does not currently emit transient current graphs, so current-only plots are
 documented_only. Express derived quantities as an observable voltage response
-under explicit conditions. expected must
-declare target, min, or max and may contain a positive absolute tolerance. A
+under explicit conditions. expected accepts only the keys unit, target, min,
+max, and tolerance; it must declare target, min, or max and may contain a
+positive absolute tolerance under the key tolerance. A
 target combined with min/max must lie inside those hard bounds. For modeled
 behavior, the tolerance cannot exceed half the largest declared expected
 magnitude, with a 1 mV floor for voltage or a 1 uA floor for current. A
 reference_curve may contain a positive normalized tolerance no greater than 0.1;
 the server uses five percent when omitted. Conditions are named scalar values.
+Every sources[] entry accepts exactly the keys page, locator, and statement: use
+locator (never figure, table, title, or section) for the printed source label.
 Every requirement cites exact PDF pages, figure/table locators, and a concise
 datasheet statement. Digitize the printed waveform faithfully; the server may
 withhold interior samples for independent validation. documented_only
@@ -219,21 +235,44 @@ export function buildModelGenerationPrompt(input: {
     .join(" ")}`
   return `Create the SPICE model described by model-contract.json.
 
-Read AGENTS.md, model-contract.json, model-interface.json,
+Read AGENTS.md, model-contract.json, model-training-plan.json, model-interface.json,
 component-evidence.json, typical-application-plan.json, and component.circuit.tsx.
 The committed application plan supplies documented topology and operating-range
 context only; it is not a validation fixture, and availability not_present must
 not be replaced with an invented circuit. Write exactly model.lib and
-model-card.md. After writing both files, call check_model_candidate. If it fails,
-edit the two outputs and rerun it until it passes; never claim it passed without
-the tool's passed receipt. The check covers the public model contract, model card,
-and a real ngspice smoke harness. The server deliberately keeps its validation fixtures private
-from model generation. For every sufficiently sampled modeled reference curve,
-model-contract.json is a deterministic training view: the server has withheld
-interior reference samples and will score the finished model against the full
-curve. Generalize continuously between the visible samples; do not create or
-infer a testbench, guess or enumerate hidden coordinates, or edit the contract,
-component source, or evidence. The required public header is:
+model-card.md. After writing both files, call check_model_candidate. It runs the
+real agent-visible fixtures through ngspice and the tscircuit viewer, and reports
+numeric residuals only at samples already present in model-contract.json. If it
+fails, use those residuals to edit the two outputs and rerun it until it passes;
+never claim it passed without the tool's passed result. A non-retryable tool
+availability failure is infrastructure, not a reason to distort the model.
+When a causal topology is structurally sound but numeric calibration would require
+manual guessing, put 1-6 tunable constants in individual lines of the
+form \`.param NAME=finite_numeric_literal\`. Use those names in the model equations,
+then call fit_model_parameters with physically defensible finite bounds and linear
+or positive log scale. It performs a bounded deterministic search using only the
+same public samples and real ngspice, updates model.lib to its best candidate, and
+returns the evaluated values and scores. Keep the parameter count small and the
+bounds meaningful; do not expose fixture coordinates, time breakpoints, or per-case
+lookup values as parameters. Always rerun check_model_candidate afterward because
+the fitter does not replace tscircuit-viewer validation or the integrity receipt.
+The tools enforce one shared budget across this agent session and retain the best
+complete direct-and-viewer candidate. Do not repeat the same fit with widened bounds,
+manually walk constants after a fit stagnates, or replace the retained candidate with
+a worse result. Evaluate a simple causal topology first. Make at most two subsequent
+topology revisions, and only when the reported residual shape identifies a missing
+physical state or condition dependence. A new topology must materially improve the
+complete result; otherwise return to the retained simpler candidate. Do not add
+undocumented startup/output thresholds, per-condition lookup branches, cubic error
+amplifiers, stacked tanh/polynomial shaping, or short-lived equalizer states merely to
+match visible samples. If a nonlinearity is physically required, tie its form and
+limit to cited component behavior in model-card.md.
+model-training-plan.json contains the exact public training fixtures and no
+withheld reference samples or private causality probe. The server has withheld
+alternating interior curve samples and will score the finished model against the
+full curve after submission. Generalize continuously between visible samples;
+do not guess or enumerate hidden coordinates, edit the plan or contract, or
+encode fixture coordinates as cases in model.lib. The required public header is:
 
 ${header}
 
@@ -252,6 +291,14 @@ TRRANDOM, or TRNOISE source inside model.lib. XSPICE A/code-model devices,
 scripted .IC/device IC state, and autonomous random/noise expressions are also
 disallowed; server-owned fixtures must establish every transient stimulus and
 the public pins must establish every dynamic state.
+Do not use DDT, IDT, or IDTMOD behavioral operators to cancel or reconstruct
+fixture dynamics. Every literal R, C, and L value must be positive; use explicit
+positive C/L/device state and finite positive damping for dynamic behavior.
+For portable viewer behavior, assume a transient engine may begin capacitor and
+inductor state at zero instead of first solving a DC operating point. Prefer
+zero-at-equilibrium deviation states, and make zero-state startup neutral at the
+public outputs. Do not hide startup with simulator time, scripted initial
+conditions, or an autonomous source.
 A pin or node literally named TIME remains an ordinary electrical node when read
 as V(TIME). Implement only requirements marked modeled; clearly describe
 documented_only behavior and all limitations in model-card.md. For each dynamic
@@ -259,8 +306,18 @@ behavior, model-card.md must name the public electrical stimulus and the physica
 or causal state that produces the response. Do not claim server validation
 yourself.
 
-The server—not this agent—owns the independent validation plan, compiles its
-fixtures, runs ngspice, compares all numeric series, and attaches the canonical
-wrapper. Finish with a usable model even if some behavior is approximate.
+The public training check is a development measurement, not the promotion gate.
+A candidate that is structurally valid and produces complete finite ngspice and
+tscircuit-viewer series may advance to authoritative validation even while its
+reported comparison tolerance still fails. When the bounded search cannot improve
+that retained runnable candidate, stop editing and finish honestly; validation will
+persist the reference graph, simulation overlay, TSX, and diagnostics for repair.
+It is never acceptable to claim a pass, and publication still requires the full
+independent gate.
+
+The server owns the final independent full-reference validation, private
+stimulus-causality probe, and canonical wrapper. The visible training check is a
+real development loop, not the acceptance decision. Finish with a usable model
+even if some behavior is approximate.
 ${input.feedback ? `\nThe last server run failed. Repair every relevant item below without changing the validation plan:\n${boundedFeedback(input.feedback)}\n` : ""}`
 }

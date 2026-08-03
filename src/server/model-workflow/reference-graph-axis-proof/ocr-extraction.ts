@@ -50,6 +50,11 @@ function parseDivisionScale(
     .replace(/¥/g, "v")
     .replace(/\s+/g, "")
     .replace(/division/i, "div")
+    // Scope UI anti-aliasing occasionally makes the V glyph OCR as both "v"
+    // and "¥" (for example "mV¥/div"). Both glyphs describe one unit.
+    .replace(/v{2,}/gi, "v")
+    // Another common anti-aliased V artifact is "m\V/div".
+    .replace(/\\(?=v)/gi, "")
   const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(p|n|u|µ|μ|m)?(s|v)\/?div$/i.exec(normalized)
   if (!match) return undefined
   const numeric = Number(match[1])

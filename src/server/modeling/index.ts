@@ -25,7 +25,13 @@ export {
   createIntegratedComponentSource,
   writeIntegratedComponent,
 } from "./component-integration"
-export { createModelManifest, readGeneratedModel, validateModelSource } from "./model-artifacts"
+export {
+  assertFreshModelTopologyIntegrity,
+  createModelManifest,
+  readGeneratedModel,
+  validateFreshModelSource,
+  validateModelSource,
+} from "./model-artifacts"
 export {
   type ModelCompletionIntegrity,
   type ModelCompletionIntegrityInput,

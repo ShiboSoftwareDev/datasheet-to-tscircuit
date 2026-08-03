@@ -136,6 +136,7 @@ export const characterizeStage = defineModelStage({
       metrics: {
         agent_attempts: result.attempts,
         reference_observer_attempts: inventory.observer_attempts,
+        reference_observer_reused: inventory.reused_from_invocation_id ? 1 : 0,
         modeled_requirements: modeled_requirement_ids.length,
         documented_only_requirements: characterization.requirements.length - modeled_requirement_ids.length,
         application_fixture_documented: application_fixture.availability === "documented" ? 1 : 0,

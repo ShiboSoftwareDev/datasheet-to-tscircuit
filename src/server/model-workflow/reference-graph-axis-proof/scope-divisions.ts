@@ -3,9 +3,11 @@ import { join } from "node:path"
 import type { ProcessRunner } from "../../infrastructure/process"
 import { decodeModelEvidencePng } from "../model-evidence-pages"
 import { eligibleObservedGraphs, type ReferenceGraphAxisAnchor } from "../reference-graph-observation"
-import { divisionScaleCandidates, parseTesseractTsv } from "./ocr-extraction"
+import { divisionScaleCandidates, measurementCandidates, parseTesseractTsv } from "./ocr-extraction"
 import { ANCHOR_PIXEL_TOLERANCE, MAX_TSV_BYTES, OCR_DPI, OCR_SCALE, sha256 } from "./shared"
 import type { ReferenceDivisionScaleSource, ReferenceGridCalibrationSource, TesseractWord } from "./types"
+
+const MAX_RIGHT_EDGE_PANEL_FALLBACK_WIDTH = 1_024 * OCR_SCALE
 
 export async function ocrScopePanels(input: {
   graph: ReturnType<typeof eligibleObservedGraphs>[number]
@@ -27,21 +29,36 @@ export async function ocrScopePanels(input: {
   const horizontal_words = input.full_words.filter(
     ({ text, confidence }) => /^horizontal$/i.test(text) && confidence >= 35,
   )
-  if (horizontal_words.length !== 1) return undefined
-  const horizontal = horizontal_words[0]!
+  // Some scope screenshots render the gray "Horizontal" heading too faintly for
+  // the full-crop PSM 11 pass, even though the scale values remain legible in a
+  // focused PSM 6 pass. A single heading is the strongest locator. If it is
+  // absent, use the right edge of a single-plot crop, where scope control panels
+  // are conventionally placed. More than one heading is ambiguous (usually an
+  // oversized crop containing neighboring plots), so never guess in that case.
+  if (
+    horizontal_words.length > 1 ||
+    (horizontal_words.length === 0 && input.render_width > MAX_RIGHT_EDGE_PANEL_FALLBACK_WIDTH)
+  ) {
+    return undefined
+  }
+  const horizontal = horizontal_words[0]
+  const panel_left = horizontal
+    ? Math.max(0, Math.floor(horizontal.bbox.left - 24))
+    : Math.max(0, input.render_width - 384)
+  const panel_top = horizontal ? Math.max(0, Math.floor(horizontal.bbox.top - 24)) : 0
   const regions = [
     {
       name: "horizontal-panel",
-      left: Math.max(0, Math.floor(horizontal.bbox.left - 24)),
-      top: Math.max(0, Math.floor(horizontal.bbox.top - 24)),
-      width: 360,
+      left: panel_left,
+      top: panel_top,
+      width: 384,
       height: 450,
     },
     {
       name: "channel-panel",
-      left: Math.max(0, Math.floor(horizontal.bbox.left - 24)),
-      top: Math.max(0, Math.floor(horizontal.bbox.top + 180)),
-      width: 360,
+      left: panel_left,
+      top: panel_top + 180,
+      width: 384,
       height: 760,
     },
   ].map((region) => ({
@@ -228,14 +245,70 @@ export function uniqueDivisionScale(
   candidates: readonly ReferenceDivisionScaleSource[],
   unit: "s" | "V",
 ): ReferenceDivisionScaleSource | undefined {
+  // Tesseract's confidence is per token. Small anti-aliased scope unit labels
+  // can be correctly recognized just below 25 even when the adjacent numeric
+  // token is high confidence. Uniqueness plus the independent grid, caption,
+  // nominal-voltage, and trace proofs provide the surrounding corroboration.
+  const minimum_token_confidence = 15
   const relevant = candidates.filter(
-    ({ normalized_unit, confidence }) => normalized_unit === unit && confidence >= 25,
+    ({ normalized_unit, confidence }) => normalized_unit === unit && confidence >= minimum_token_confidence,
   )
   const values = [...new Set(relevant.map(({ value_per_division_si }) => value_per_division_si))]
   if (values.length !== 1) return undefined
   return relevant
     .filter(({ value_per_division_si }) => value_per_division_si === values[0])
     .sort((left, right) => right.confidence - left.confidence)[0]
+}
+
+/**
+ * Recovers a dropped SI prefix only when the same focused Horizontal panel has
+ * an immediately adjacent time measurement that supplies that prefix. This is
+ * source-owned OCR normalization: both the imperfect division token and the
+ * corroborating token are retained in the receipt.
+ */
+export function recoverMissingTimeDivisionPrefix(
+  scale: ReferenceDivisionScaleSource | undefined,
+  horizontal_words: readonly TesseractWord[],
+): ReferenceDivisionScaleSource | undefined {
+  if (!scale || scale.normalized_unit !== "s" || scale.value_per_division_si < 1) return scale
+  const scale_bottom = scale.ocr_bbox_px.top + scale.ocr_bbox_px.height
+  const scale_right = scale.ocr_bbox_px.left + scale.ocr_bbox_px.width
+  const candidates = measurementCandidates(horizontal_words).flatMap((measurement) => {
+    if (measurement.unit !== "s" || !(measurement.value_si > 0)) return []
+    const numeric = Number(
+      measurement.raw_text
+        .normalize("NFKC")
+        .replace(/[−–—]/g, "-")
+        .match(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)/)?.[0],
+    )
+    if (!(numeric > 0)) return []
+    const multiplier = measurement.value_si / numeric
+    if (!(multiplier > 0 && multiplier < 1)) return []
+    const vertical_gap = measurement.bbox.top - scale_bottom
+    const measurement_right = measurement.bbox.left + measurement.bbox.width
+    const horizontal_overlap = Math.max(
+      0,
+      Math.min(scale_right, measurement_right) - Math.max(scale.ocr_bbox_px.left, measurement.bbox.left),
+    )
+    if (vertical_gap < 0 || vertical_gap > 60 || horizontal_overlap < 12) return []
+    return [{ measurement, multiplier, vertical_gap }]
+  })
+  candidates.sort((left, right) => left.vertical_gap - right.vertical_gap)
+  const nearest = candidates[0]
+  if (!nearest) return scale
+  const equally_near = candidates.filter(
+    (candidate) => Math.abs(candidate.vertical_gap - nearest.vertical_gap) <= 2,
+  )
+  if (new Set(equally_near.map(({ multiplier }) => multiplier)).size !== 1) return scale
+  return {
+    ...scale,
+    value_per_division_si: scale.value_per_division_si * nearest.multiplier,
+    normalization: {
+      algorithm: "missing_time_prefix_from_adjacent_measurement_v1",
+      corroborating_raw_text: nearest.measurement.raw_text,
+      multiplier: nearest.multiplier,
+    },
+  }
 }
 
 export function relativeScaleAgreement(declared: number, source: number): boolean {

@@ -17,6 +17,7 @@ import {
   dominantGrid,
   neutralGridProfile,
   ocrScopePanels,
+  recoverMissingTimeDivisionPrefix,
   relativeScaleAgreement,
   uniqueDivisionScale,
 } from "./scope-divisions"
@@ -29,6 +30,42 @@ import type {
   ReferenceGridCalibrationSource,
   TesseractWord,
 } from "./types"
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[middle - 1]! + sorted[middle]!) / 2 : sorted[middle]!
+}
+
+function stableTraceEdgeBaseline(
+  points: readonly { pixel_y: number }[],
+  tolerance_px: number,
+): { nominal_baseline_pixel: number; nominal_trace_point_indexes: number[] } | undefined {
+  if (points.length < 2 || !(tolerance_px > 0)) return undefined
+  const edge_indexes = [...new Set([0, 1, points.length - 2, points.length - 1])]
+  const clusters = edge_indexes.map((candidate_index) => {
+    const center = points[candidate_index]!.pixel_y
+    const indexes = edge_indexes.filter((index) => Math.abs(points[index]!.pixel_y - center) <= tolerance_px)
+    const pixel_values = indexes.map((index) => points[index]!.pixel_y)
+    const baseline = median(pixel_values)
+    const spread = Math.max(...pixel_values) - Math.min(...pixel_values)
+    return { candidate_index, indexes, baseline, spread }
+  })
+  clusters.sort(
+    (left, right) =>
+      right.indexes.length - left.indexes.length ||
+      left.spread - right.spread ||
+      left.candidate_index - right.candidate_index,
+  )
+  const best = clusters[0]
+  if (!best || best.indexes.length < 2) return undefined
+  return {
+    nominal_baseline_pixel: best.baseline,
+    nominal_trace_point_indexes: points.flatMap((point, index) =>
+      Math.abs(point.pixel_y - best.baseline) <= tolerance_px ? [index] : [],
+    ),
+  }
+}
 
 async function proveGraphAxis(input: {
   graph: ReturnType<typeof eligibleObservedGraphs>[number]
@@ -168,6 +205,7 @@ async function proveGraphAxis(input: {
   let y_grid_lines: number[] = []
   let nominal_source: ReturnType<typeof nominalVoltageFromPdfText>
   let nominal_point_indexes: number[] = []
+  let nominal_baseline_pixel: number | undefined
   if (!receipt) {
     const panels = await ocrScopePanels({
       graph: input.graph,
@@ -188,8 +226,17 @@ async function proveGraphAxis(input: {
       ...horizontal_division_candidates,
       ...channel_division_candidates,
     ]
-    time_scale = uniqueDivisionScale(horizontal_division_candidates, "s")
-    voltage_scale = uniqueDivisionScale(channel_division_candidates, "V")
+    // Prefer semantically localized scope panels. A unique scale visible in
+    // the exact canonical crop remains valid when a tight crop includes the
+    // printed value but clips the faint panel heading used for focused OCR.
+    // Ambiguous full-crop values still fail closed.
+    time_scale =
+      uniqueDivisionScale(horizontal_division_candidates, "s") ??
+      uniqueDivisionScale(full_division_candidates, "s")
+    time_scale = recoverMissingTimeDivisionPrefix(time_scale, panels?.horizontal_words ?? [])
+    voltage_scale =
+      uniqueDivisionScale(channel_division_candidates, "V") ??
+      uniqueDivisionScale(full_division_candidates, "V")
     x_grid_lines = neutralGridProfile({ decoded: png_dimensions, axis: "x", graph: input.graph })
     y_grid_lines = neutralGridProfile({ decoded: png_dimensions, axis: "y", graph: input.graph })
     x_grid = dominantGrid({
@@ -203,16 +250,17 @@ async function proveGraphAxis(input: {
       second_anchor: input.graph.digitized_curve.y_axis.second.pixel,
     })
     nominal_source = nominalVoltageFromPdfText({ graph: input.graph, bbox_html })
-    const nominal_tolerance = (voltage_scale?.value_per_division_si ?? 0) * 0.15
-    const nominal_volts = input.graph.electrical_binding.response.nominal_volts
-    nominal_point_indexes = input.graph.digitized_curve.points.flatMap((point, index) =>
-      nominal_volts !== undefined && Math.abs(point.y - nominal_volts) <= nominal_tolerance ? [index] : [],
+    const edge_baseline = stableTraceEdgeBaseline(
+      input.graph.digitized_curve.points,
+      (y_grid?.median_spacing_px ?? 0) * 0.15,
     )
-    const declared_seconds_per_pixel = Math.abs(
+    nominal_baseline_pixel = edge_baseline?.nominal_baseline_pixel
+    nominal_point_indexes = edge_baseline?.nominal_trace_point_indexes ?? []
+    const observer_declared_seconds_per_pixel = Math.abs(
       (input.graph.digitized_curve.x_axis.second.value - input.graph.digitized_curve.x_axis.first.value) /
         (input.graph.digitized_curve.x_axis.second.pixel - input.graph.digitized_curve.x_axis.first.pixel),
     )
-    const declared_volts_per_pixel = Math.abs(
+    const observer_declared_volts_per_pixel = Math.abs(
       (input.graph.digitized_curve.y_axis.second.value - input.graph.digitized_curve.y_axis.first.value) /
         (input.graph.digitized_curve.y_axis.second.pixel - input.graph.digitized_curve.y_axis.first.pixel),
     )
@@ -220,9 +268,6 @@ async function proveGraphAxis(input: {
       time_scale && x_grid ? time_scale.value_per_division_si / x_grid.median_spacing_px : undefined
     const source_volts_per_pixel =
       voltage_scale && y_grid ? voltage_scale.value_per_division_si / y_grid.median_spacing_px : undefined
-    const has_edge_nominal = nominal_point_indexes.some(
-      (index) => index <= 1 || index >= input.graph.digitized_curve.points.length - 2,
-    )
     if (!figure_identity) missing_proofs.push("adjacent_figure_identity")
     if (!panels) missing_proofs.push("oscilloscope_panels")
     if (!time_scale) missing_proofs.push("unique_printed_time_per_division")
@@ -233,18 +278,24 @@ async function proveGraphAxis(input: {
     if (input.graph.digitized_curve.x_axis.first.value !== 0) {
       missing_proofs.push("server_elapsed_time_zero_origin")
     }
-    if (nominal_point_indexes.length < 2 || !has_edge_nominal) {
+    if (input.graph.digitized_curve.x_axis.first.pixel >= input.graph.digitized_curve.x_axis.second.pixel) {
+      missing_proofs.push("time_axis_screen_orientation")
+    }
+    if (input.graph.digitized_curve.y_axis.first.pixel <= input.graph.digitized_curve.y_axis.second.pixel) {
+      missing_proofs.push("voltage_axis_screen_orientation")
+    }
+    if (nominal_point_indexes.length < 2 || nominal_baseline_pixel === undefined) {
       missing_proofs.push("nominal_voltage_trace_baseline")
     }
     if (
       source_seconds_per_pixel === undefined ||
-      !relativeScaleAgreement(declared_seconds_per_pixel, source_seconds_per_pixel)
+      !relativeScaleAgreement(observer_declared_seconds_per_pixel, source_seconds_per_pixel)
     ) {
       missing_proofs.push("declared_time_scale_matches_source")
     }
     if (
       source_volts_per_pixel === undefined ||
-      !relativeScaleAgreement(declared_volts_per_pixel, source_volts_per_pixel)
+      !relativeScaleAgreement(observer_declared_volts_per_pixel, source_volts_per_pixel)
     ) {
       missing_proofs.push("declared_voltage_scale_matches_source")
     }
@@ -257,12 +308,13 @@ async function proveGraphAxis(input: {
       x_grid &&
       y_grid &&
       nominal_source &&
+      nominal_baseline_pixel !== undefined &&
       source_seconds_per_pixel !== undefined &&
       source_volts_per_pixel !== undefined
     ) {
       receipt = {
         ...common,
-        algorithm: "canonical_pdf_tesseract_scope_divisions_v1",
+        algorithm: "canonical_pdf_tesseract_scope_divisions_v2",
         figure_identity,
         ocr: {
           engine: "tesseract",
@@ -276,20 +328,32 @@ async function proveGraphAxis(input: {
           quantity: "time",
           unit: "s",
           division_scale: time_scale,
-          grid: x_grid,
-          declared_seconds_per_pixel,
+          grid: {
+            ...x_grid,
+            first_anchor_error_px: 0,
+            second_anchor_error_px: 0,
+          },
+          // Eligibility above checks the observer declaration. The retained v2
+          // receipt records the resulting server-canonical value so rebuilding
+          // it from the canonicalized observation is exactly idempotent.
+          declared_seconds_per_pixel: source_seconds_per_pixel,
           source_seconds_per_pixel,
         },
         y_axis: {
           quantity: "voltage",
           unit: "V",
           division_scale: voltage_scale,
-          grid: y_grid,
-          declared_volts_per_pixel,
+          grid: {
+            ...y_grid,
+            first_anchor_error_px: 0,
+            second_anchor_error_px: 0,
+          },
+          declared_volts_per_pixel: source_volts_per_pixel,
           source_volts_per_pixel,
           nominal_baseline_volts: nominal_source.value,
           nominal_source_text: nominal_source.source_text,
           nominal_source_bbox_pdf_points: nominal_source.bbox,
+          nominal_baseline_pixel,
           nominal_trace_point_indexes: nominal_point_indexes,
         },
       }

@@ -131,5 +131,16 @@ export interface CharacterizerReferenceGraphObservation {
   version: 1
   source_pdf_sha256: string
   reviewed_hints: ReferenceGraphObservation["reviewed_hints"]
-  graphs: Array<Omit<ObservedReferenceGraph, "digitized_curve"> & { numeric_curve_withheld: true }>
+  graphs: Array<
+    Omit<ObservedReferenceGraph, "digitized_curve"> & {
+      server_verified_reference_curve?: {
+        provenance: "canonical_pdf_axis_and_pixel_trace_v1"
+        x_quantity: "time"
+        x_unit: "s"
+        y_quantity: "voltage"
+        y_unit: "V"
+        points: ModelReferencePoint[]
+      }
+    }
+  >
 }

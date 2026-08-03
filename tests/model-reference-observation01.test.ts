@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, utimes } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { deflateSync } from "node:zlib"
@@ -33,6 +33,7 @@ import {
   verifyReferenceGraphObservationPixels,
 } from "../src/server/model-workflow/reference-graph-observation"
 import {
+  findPriorReferenceObservationCandidates,
   inventoryReferenceGraphs,
   sourceProofRejectionDiagnostics,
 } from "../src/server/model-workflow/characterization/source-inventory"
@@ -383,6 +384,11 @@ test("reference observer contract publishes exact graph keys and actionable unkn
     "load_transient: 14/16 calibrated points are off trace",
   )
   expect(correction_prompt).toContain("Correct every retained-candidate error below")
+  expect(correction_prompt).toContain("Read that retained file first")
+  expect(correction_prompt).toContain("Make the smallest edit")
+  expect(correction_prompt).toContain("already passed that verification")
+  expect(correction_prompt).toContain("never move its x_px/y_px")
+  expect(correction_prompt).toContain("printed scale or panel is clipped")
   expect(correction_prompt).toContain("load_transient: 14/16 calibrated points are off trace")
 
   const invalid = validObservationValue()
@@ -498,6 +504,34 @@ test("reference graph inventory sends retained validation errors to every correc
   expect(prompts[3]).toContain("model-reference-observation.json.graphs must be an array")
 })
 
+test("reference graph inventory retry considers only prior promoted observations, newest first", async () => {
+  const root = await mkdtemp(join(tmpdir(), "model-reference-reuse-test-"))
+  temporary_directories.push(root)
+  const attempts_dir = join(root, "attempts")
+  await Promise.all(
+    ["older", "newer", "current", "unfinished"].map((invocation_id) =>
+      mkdir(join(attempts_dir, invocation_id), { recursive: true }),
+    ),
+  )
+  const older_path = join(attempts_dir, "older", "model-reference-observation.json")
+  const newer_path = join(attempts_dir, "newer", "model-reference-observation.json")
+  const current_path = join(attempts_dir, "current", "model-reference-observation.json")
+  await Promise.all([
+    Bun.write(older_path, "{}\n"),
+    Bun.write(newer_path, "{}\n"),
+    Bun.write(current_path, "{}\n"),
+  ])
+  await utimes(older_path, new Date(1_000), new Date(1_000))
+  await utimes(newer_path, new Date(2_000), new Date(2_000))
+
+  const candidates = await findPriorReferenceObservationCandidates({
+    model_dir: root,
+    current_invocation_id: "current",
+  })
+
+  expect(candidates.map(({ invocation_id }) => invocation_id)).toEqual(["newer", "older"])
+})
+
 test("source-proof failures identify every agent-claimed eligible graph before characterization", () => {
   const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
   expect(
@@ -518,8 +552,58 @@ test("source-proof failures identify every agent-claimed eligible graph before c
       ],
     }),
   ).toEqual([
-    "load_transient: The crop does not prove its printed time scale. Missing source proofs: time division scale, figure-local caption",
+    "load_transient: The crop does not prove its printed time scale. Missing source proofs: time division scale, figure-local caption. Do not demote a printed graph merely to bypass source verification.",
   ])
+})
+
+test("source-proof correction feedback preserves server-recognized calibration evidence", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  expect(
+    sourceProofRejectionDiagnostics(observation, {
+      version: 1,
+      source_pdf_sha256,
+      results: [
+        {
+          status: "ineligible",
+          graph_id: "load_transient",
+          code: "axis_calibration_unproven",
+          reason: "The crop axis is not yet calibrated.",
+          diagnostic: {
+            recognized_measurements: ["100 us/div", "100 mV/div", "y-grid:45.67,76.67,108.33,139.33"],
+            missing_proofs: ["voltage_grid_and_anchor_alignment"],
+          },
+        },
+      ],
+    }),
+  ).toEqual([
+    "load_transient: The crop axis is not yet calibrated. Missing source proofs: voltage_grid_and_anchor_alignment. Server-recognized crop evidence: 100 us/div; 100 mV/div; y-grid:45.67,76.67,108.33,139.33. Change only the named axis anchor pixel coordinates to server-recognized grid lines; keep the crop origin and trace points fixed. Do not demote a printed graph merely to bypass source verification.",
+  ])
+})
+
+test("source-proof correction feedback distinguishes clipped scope controls from bad axis values", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  const feedback = sourceProofRejectionDiagnostics(observation, {
+    version: 1,
+    source_pdf_sha256,
+    results: [
+      {
+        status: "ineligible",
+        graph_id: "load_transient",
+        code: "axis_calibration_unproven",
+        reason: "The exact crop does not prove its voltage scale.",
+        diagnostic: {
+          recognized_measurements: ["100 us/div", "100 mV/div"],
+          missing_proofs: ["unique_printed_voltage_per_division", "declared_voltage_scale_matches_source"],
+        },
+      },
+    ],
+  })[0]!
+
+  expect(feedback).toContain("Do not tune axis values")
+  expect(feedback).toContain("Keep crop.x_px and crop.y_px unchanged")
+  expect(feedback).toContain("extend only crop.width_px")
+  expect(feedback).toContain("Scale-match errors listed with a missing printed scale")
+  expect(feedback).not.toContain("Change the y-axis anchor values")
 })
 
 test("no-eligible diagnostics prioritize public voltage graphs over unrelated switching plots", () => {
@@ -1844,7 +1928,7 @@ describe("independent reference-graph observation", () => {
     )
   })
 
-  test("withholds independent numeric provenance from the characterization agent", () => {
+  test("publishes the verified numeric curve without leaking pixel-proof internals", () => {
     const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
     const projected = projectReferenceGraphObservationForCharacterizer(observation)
     const serialized = JSON.stringify(projected)
@@ -1853,7 +1937,14 @@ describe("independent reference-graph observation", () => {
       graph_id: "load_transient",
       crop: observer_crop,
       electrical_binding,
-      numeric_curve_withheld: true,
+      server_verified_reference_curve: {
+        provenance: "canonical_pdf_axis_and_pixel_trace_v1",
+        x_quantity: "time",
+        x_unit: "s",
+        y_quantity: "voltage",
+        y_unit: "V",
+        points: observation.graphs[0]!.digitized_curve!.points.map(({ x, y }) => ({ x, y })),
+      },
     })
     expect(serialized).not.toContain("digitized_curve")
     expect(serialized).not.toContain("trace_color")

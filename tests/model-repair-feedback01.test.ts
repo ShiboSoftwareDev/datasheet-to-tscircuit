@@ -212,5 +212,31 @@ test("viewer-only curve mismatches enter repair as category/count feedback", () 
     private_viewer_case_987654: viewer_validation,
   })
   expect(feedback).toContain("viewer_curve_mismatch")
+  expect(feedback).toContain("dynamic state begins at zero")
+  expect(feedback).toContain("pre-solved DC operating point")
   expect(feedback).not.toMatch(/private|secret|987\.654|43\.5|0\.012345|123\.456|234\.567/)
+})
+
+test("viewer model simulation failures enter repair as convergence feedback", () => {
+  const result: ValidationRunResult = {
+    version: 1,
+    passed: true,
+    hashes: {
+      plan_sha256: "a".repeat(64),
+      model_sha256: "b".repeat(64),
+      manifest_sha256: "c".repeat(64),
+    },
+    cases: [],
+    errors: [],
+  }
+  expect(
+    createModelRepairFeedback(result, undefined, undefined, {
+      public_transient: "simulation_unknown_experiment_error",
+    }).issues,
+  ).toContainEqual({
+    category: "convergence_failure",
+    affected_cases: 1,
+    affected_observations: 0,
+    recommended_actions: ["improve_numerical_convergence", "bound_internal_state"],
+  })
 })

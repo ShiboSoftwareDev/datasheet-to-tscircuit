@@ -71,6 +71,11 @@ export interface ReferenceDivisionScaleSource {
   value_per_division_si: number
   confidence: number
   ocr_bbox_px: OcrBoundingBox
+  normalization?: {
+    algorithm: "missing_time_prefix_from_adjacent_measurement_v1"
+    corroborating_raw_text: string
+    multiplier: number
+  }
 }
 
 export interface ReferenceGridCalibrationSource {
@@ -82,9 +87,8 @@ export interface ReferenceGridCalibrationSource {
   second_anchor_error_px: number
 }
 
-export interface ScopeDivisionReferenceGraphAxisCalibrationReceipt {
+interface ScopeDivisionReferenceGraphAxisCalibrationReceiptBase {
   version: 1
-  algorithm: "canonical_pdf_tesseract_scope_divisions_v1"
   graph_id: string
   source_pdf_sha256: string
   page: number
@@ -122,8 +126,28 @@ export interface ScopeDivisionReferenceGraphAxisCalibrationReceipt {
   }
 }
 
+/** Legacy receipt retained so completed jobs remain readable. */
+export interface LegacyScopeDivisionReferenceGraphAxisCalibrationReceipt
+  extends ScopeDivisionReferenceGraphAxisCalibrationReceiptBase {
+  algorithm: "canonical_pdf_tesseract_scope_divisions_v1"
+}
+
+/**
+ * Scope calibration whose absolute voltage offset is owned by the server. The
+ * printed nominal voltage is bound to a stable, independently pixel-verified
+ * trace edge; the observer supplies only pixel geometry and relative scale.
+ */
+export interface ScopeDivisionReferenceGraphAxisCalibrationReceipt
+  extends ScopeDivisionReferenceGraphAxisCalibrationReceiptBase {
+  algorithm: "canonical_pdf_tesseract_scope_divisions_v2"
+  y_axis: ScopeDivisionReferenceGraphAxisCalibrationReceiptBase["y_axis"] & {
+    nominal_baseline_pixel: number
+  }
+}
+
 export type ReferenceGraphAxisCalibrationReceipt =
   | ExplicitReferenceGraphAxisCalibrationReceipt
+  | LegacyScopeDivisionReferenceGraphAxisCalibrationReceipt
   | ScopeDivisionReferenceGraphAxisCalibrationReceipt
 
 export type ReferenceGraphAxisProofResult =

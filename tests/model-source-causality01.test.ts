@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { buildModelGenerationPrompt, type ModelContract, validateModelSource } from "@/server/modeling"
+import {
+  assertFreshModelTopologyIntegrity,
+  buildModelGenerationPrompt,
+  ModelStrategyRegistry,
+  type ModelContract,
+  validateModelSource,
+} from "@/server/modeling"
 
 const model_interface = {
   entry_name: "CAUSAL_TEST",
@@ -93,6 +99,23 @@ describe("generated model causality boundary", () => {
     )
   })
 
+  test("rejects fixture-cancelling derivative operators and non-positive passives", () => {
+    for (const derivative of [
+      "BCANCEL OUT GND I={-22u*DDT(V(OUT,GND))}",
+      "BSTATE OUT GND V={IDT(V(IN))}",
+      "BWRAP OUT GND V={IDTMOD(V(IN), 1, 0)}",
+    ]) {
+      expect(() => validateModelSource(source(derivative), model_interface)).toThrow(
+        /DDT\/IDT implicit derivative state/,
+      )
+    }
+    for (const passive of ["CNEG OUT GND -22u", "RZERO OUT GND 0", "LNEG OUT GND -1e-6"]) {
+      expect(() => validateModelSource(source(passive), model_interface)).toThrow(
+        /non-positive passive value/,
+      )
+    }
+  })
+
   test("allows a TIME pin and causal input-dependent equations and device state", () => {
     const causal_source = `.SUBCKT TIME_PIN_TEST TIME OUT GND
 * Words in comments are not executable: table(time, ...) and PULSE(...)
@@ -163,5 +186,154 @@ test("model-generation guidance makes the causal boundary and model-card disclos
   expect(prompt).toContain("ngspice's built-in time variable")
   expect(prompt).toContain("PWL, PULSE, SIN, EXP, SFFM, AM")
   expect(prompt).toContain("XSPICE A/code-model devices")
+  expect(prompt).toContain("Do not use DDT, IDT, or IDTMOD")
+  expect(prompt).toContain("Every literal R, C, and L value must be positive")
+  expect(prompt).toContain("zero-at-equilibrium deviation states")
+  expect(prompt).toContain("zero-state startup neutral")
   expect(prompt).toContain("model-card.md must name the public electrical stimulus")
+})
+
+describe("fresh power-converter topology integrity", () => {
+  const contract = {
+    version: 1,
+    interface: {
+      version: 1,
+      part_number: "CONVERTER-TEST",
+      entry_name: "CONVERTER_TEST",
+      pins: [
+        {
+          physical_pin: "1",
+          component_pin: "vin",
+          source_port_id: "source_port_1",
+          spice_node: "VIN",
+          labels: ["VIN"],
+          role: "power_input",
+        },
+        {
+          physical_pin: "2",
+          component_pin: "vout",
+          source_port_id: "source_port_2",
+          spice_node: "VOUT",
+          labels: ["VOUT"],
+          role: "power_output",
+        },
+        {
+          physical_pin: "3",
+          component_pin: "gnd",
+          source_port_id: "source_port_3",
+          spice_node: "GND",
+          labels: ["GND"],
+          role: "ground",
+        },
+      ],
+    },
+    characterization: {
+      version: 1,
+      family: "power_converter",
+      strategy: "behavioral",
+      requirements: [
+        {
+          requirement_id: "load_step",
+          title: "Load step",
+          behavior: "Regulate VOUT during a load step",
+          analysis: "transient",
+          support: { status: "modeled" },
+          conditions: {},
+          expected: { unit: "V" },
+          reference_curve: {
+            x_quantity: "time",
+            x_unit: "s",
+            y_quantity: "voltage",
+            y_unit: "V",
+            points: [
+              { x: 0, y: 3.3 },
+              { x: 1e-6, y: 3.2 },
+            ],
+            electrical_binding: {
+              response: { type: "voltage", positive: "dut.VOUT", negative: "gnd" },
+              stimulus: {
+                type: "current_step",
+                positive: "dut.VOUT",
+                negative: "gnd",
+                pulse: { low: 0.1, high: 1, delay: 1e-6, rise: 1e-7, fall: 1e-7, width: 5e-6, period: 20e-6 },
+              },
+            },
+          },
+          sources: [{ page: 1, locator: "Figure 1", statement: "Load transient" }],
+        },
+      ],
+      assumptions: [],
+      limitations: [],
+    },
+  } satisfies ModelContract
+
+  const valid = `.SUBCKT CONVERTER_TEST VIN VOUT GND
+BERR NERR GND I={3.3-V(VOUT,GND)}
+CCTRL NERR GND 1u
+RCTRL NERR GND 10k
+BDRIVE NREG GND V={3.3+V(NERR,GND)}
+ROUT NREG VOUT 100m
+.ENDS CONVERTER_TEST
+`
+
+  test("allows private error-driven controller state behind finite output impedance", () => {
+    expect(() => assertFreshModelTopologyIntegrity(valid, contract)).not.toThrow()
+  })
+
+  test("rejects direct and zero-volt-sensor output energy-storage mirrors", () => {
+    for (const body of [
+      "CFAST VOUT GND 1u",
+      "VCAP VOUT NCAP 0\nCSENSE NCAP GND 22u",
+      "VCAP VOUT NCAP DC 0\nLFAKE NCAP GND 1u",
+    ]) {
+      const candidate = `.SUBCKT CONVERTER_TEST VIN VOUT GND\n${body}\n.ENDS CONVERTER_TEST\n`
+      expect(() => assertFreshModelTopologyIntegrity(candidate, contract)).toThrow(
+        /energy storage to a modeled power-converter output/,
+      )
+    }
+  })
+
+  test("rejects a fixed independent current on the modeled output", () => {
+    const candidate = `.SUBCKT CONVERTER_TEST VIN VOUT GND
+IBIAS GND VOUT 0.1
+.ENDS CONVERTER_TEST
+`
+    expect(() => assertFreshModelTopologyIntegrity(candidate, contract)).toThrow(
+      /output current must arise from the causal regulator loop/,
+    )
+  })
+
+  test("rejects synthetic startup state in the modeled output driver", () => {
+    const candidate = `.SUBCKT CONVERTER_TEST VIN VOUT GND
+CSTART START GND 1u
+RSTART START GND 1G
+BSTARTSTATE GND START I={20*(V(VIN,GND)-V(START,GND))}
+BSTART GND NSTART I={(1-V(START,GND))*(3.3-V(VOUT,GND))}
+ROUT NSTART VOUT 10m
+.ENDS CONVERTER_TEST
+`
+    expect(() => assertFreshModelTopologyIntegrity(candidate, contract)).toThrow(
+      /private state start.*not driven by the measured output response/,
+    )
+  })
+
+  test("allows output drivers to depend on private state driven by output error", () => {
+    const candidate = `.SUBCKT CONVERTER_TEST VIN VOUT GND
+CCTRL CTRL GND 1u
+RCTRL CTRL GND 1G
+BERROR GND CTRL I={3.3-V(VOUT,GND)}
+BDRIVE GND NREG I={(3.3+V(CTRL,GND)-V(NREG,GND))/0.1}
+ROUT NREG VOUT 10m
+.ENDS CONVERTER_TEST
+`
+    expect(() => assertFreshModelTopologyIntegrity(candidate, contract)).not.toThrow()
+  })
+
+  test("gives power converters a causal averaged-regulator strategy", () => {
+    const guidance = new ModelStrategyRegistry().require("behavioral", "power_converter").guidance
+    expect(guidance).toContain("averaged closed-loop regulator")
+    expect(guidance).toContain("positive finite output resistance")
+    expect(guidance).toContain("server-owned application fixture")
+    expect(guidance).toContain("first reference sample")
+  })
 })

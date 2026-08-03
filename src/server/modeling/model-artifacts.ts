@@ -3,6 +3,7 @@ import { join } from "node:path"
 import type { ModelManifest } from "@/shared/job-types"
 import { readBoundedTextArtifact } from "../infrastructure/artifacts"
 import type { GeneratedModel, ModelInterface } from "./types"
+import type { ModelContract } from "./types"
 
 type ModelSourceInterface = Pick<ModelInterface, "entry_name"> & {
   pins: readonly Pick<ModelInterface["pins"][number], "spice_node">[]
@@ -15,6 +16,9 @@ interface LogicalSpiceLine {
 
 const INDEPENDENT_TRANSIENT_SOURCE_PATTERN = /\b(?:pwl|pulse|sin|exp|sffm|am|trrandom|trnoise)\b/i
 const AUTONOMOUS_RANDOM_EXPRESSION_PATTERN = /\b(?:white|unif|aunif|gauss|agauss|rand|random)\s*\(/i
+const IMPLICIT_DERIVATIVE_STATE_PATTERN = /\b(?:ddt|idt|idtmod)\s*\(/i
+const SPICE_LITERAL_PATTERN =
+  /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(?:t|g|meg|k|m|u|n|p|f|mil)?(?:[a-z]+)?$/i
 
 function stripInlineComment(line: string): string {
   // ngspice treats `$` as the start of an inline comment. Full-line `*`
@@ -39,6 +43,163 @@ function normalizedLines(source: string): LogicalSpiceLine[] {
     }
   }
   return logical
+}
+
+function modeledResponseNodes(contract: ModelContract): Set<string> {
+  const nodes = new Set<string>()
+  for (const requirement of contract.characterization.requirements) {
+    if (requirement.support.status !== "modeled") continue
+    const response = requirement.reference_curve?.electrical_binding?.response
+    if (!response) continue
+    for (const endpoint of [response.positive, response.negative]) {
+      if (!endpoint.toLowerCase().startsWith("dut.")) continue
+      nodes.add(endpoint.slice(4).toLowerCase())
+    }
+  }
+  return nodes
+}
+
+function zeroVoltageAliases(lines: readonly LogicalSpiceLine[]): Map<string, Set<string>> {
+  const aliases = new Map<string, Set<string>>()
+  const add = (left: string, right: string) => {
+    const left_key = left.toLowerCase()
+    const right_key = right.toLowerCase()
+    const left_aliases = aliases.get(left_key) ?? new Set([left_key])
+    const right_aliases = aliases.get(right_key) ?? new Set([right_key])
+    const combined = new Set([...left_aliases, ...right_aliases])
+    for (const node of combined) aliases.set(node, combined)
+  }
+  for (const { text } of lines) {
+    const source =
+      /^v\S*\s+(\S+)\s+(\S+)\s+(?:dc\s+)?([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(?:\s|$)/i.exec(text)
+    if (source && Number(source[3]) === 0) add(source[1], source[2])
+  }
+  return aliases
+}
+
+function addUndirectedEdge(graph: Map<string, Set<string>>, left: string, right: string): void {
+  const left_key = left.toLowerCase()
+  const right_key = right.toLowerCase()
+  if (left_key === "0" || left_key === "gnd" || right_key === "0" || right_key === "gnd") return
+  const left_edges = graph.get(left_key) ?? new Set<string>()
+  const right_edges = graph.get(right_key) ?? new Set<string>()
+  left_edges.add(right_key)
+  right_edges.add(left_key)
+  graph.set(left_key, left_edges)
+  graph.set(right_key, right_edges)
+}
+
+function nodesReachableThroughResistors(
+  lines: readonly LogicalSpiceLine[],
+  starts: ReadonlySet<string>,
+): Set<string> {
+  const graph = new Map<string, Set<string>>()
+  for (const { text } of lines) {
+    const resistor = /^r\S*\s+(\S+)\s+(\S+)\s+/i.exec(text)
+    if (resistor) addUndirectedEdge(graph, resistor[1], resistor[2])
+  }
+  const reachable = new Set([...starts].map((node) => node.toLowerCase()))
+  const queue = [...reachable]
+  while (queue.length > 0) {
+    const node = queue.shift()!
+    for (const adjacent of graph.get(node) ?? []) {
+      if (reachable.has(adjacent)) continue
+      reachable.add(adjacent)
+      queue.push(adjacent)
+    }
+  }
+  return reachable
+}
+
+function probedVoltageNodes(expression: string): Set<string> {
+  const nodes = new Set<string>()
+  for (const match of expression.matchAll(/\bv\s*\(\s*([^,\s)]+)(?:\s*,\s*([^\s)]+))?\s*\)/gi)) {
+    if (match[1]) nodes.add(match[1].toLowerCase())
+    if (match[2]) nodes.add(match[2].toLowerCase())
+  }
+  return nodes
+}
+
+/**
+ * Family-aware topology rules for fresh candidates. These are deliberately
+ * structural rather than value-specific: a model must not pass by copying or
+ * cancelling application-fixture dynamics at any component value.
+ */
+export function assertFreshModelTopologyIntegrity(source: string, contract: ModelContract): void {
+  if (contract.characterization.family !== "power_converter") return
+  const response_nodes = modeledResponseNodes(contract)
+  if (response_nodes.size === 0) return
+  const lines = normalizedLines(source)
+  const aliases = zeroVoltageAliases(lines)
+  const is_response_node = (node: string): boolean => {
+    const key = node.toLowerCase()
+    if (response_nodes.has(key)) return true
+    const equivalent_nodes = aliases.get(key)
+    return equivalent_nodes ? [...equivalent_nodes].some((candidate) => response_nodes.has(candidate)) : false
+  }
+
+  const output_connected_nodes = nodesReachableThroughResistors(lines, response_nodes)
+  const private_state_nodes = new Set<string>()
+  for (const { text: line } of lines) {
+    const stored_energy = /^[cl]\S*\s+(\S+)\s+(\S+)\s+/i.exec(line)
+    if (!stored_energy) continue
+    for (const node of [stored_energy[1], stored_energy[2]]) {
+      const key = node.toLowerCase()
+      if (key !== "0" && key !== "gnd") private_state_nodes.add(key)
+    }
+  }
+
+  const response_driven_state_nodes = new Set<string>()
+  for (const { text: line } of lines) {
+    const behavioral = /^[beg]\S*\s+(\S+)\s+(\S+)\s+(.+)$/i.exec(line)
+    if (!behavioral) continue
+    const probed_nodes = probedVoltageNodes(behavioral[3])
+    if (![...probed_nodes].some((node) => response_nodes.has(node))) continue
+    const driven_component = nodesReachableThroughResistors(lines, new Set([behavioral[1], behavioral[2]]))
+    for (const state_node of private_state_nodes) {
+      if (driven_component.has(state_node)) response_driven_state_nodes.add(state_node)
+    }
+  }
+
+  for (const { text: line, physical_line } of lines) {
+    const stored_energy = /^([cl]\S*)\s+(\S+)\s+(\S+)\s+/i.exec(line)
+    if (
+      stored_energy &&
+      (output_connected_nodes.has(stored_energy[2].toLowerCase()) ||
+        output_connected_nodes.has(stored_energy[3].toLowerCase()) ||
+        is_response_node(stored_energy[2]) ||
+        is_response_node(stored_energy[3]))
+    ) {
+      throw new Error(
+        `model.lib line ${physical_line} connects ${stored_energy[1]} energy storage to a modeled power-converter output; output/load passives belong only to the server-owned application fixture, while controller state must use private nodes`,
+      )
+    }
+    const independent_current = /^(i\S*)\s+(\S+)\s+(\S+)\s+/i.exec(line)
+    if (
+      independent_current &&
+      (is_response_node(independent_current[2]) || is_response_node(independent_current[3]))
+    ) {
+      throw new Error(
+        `model.lib line ${physical_line} connects independent current source ${independent_current[1]} to a modeled power-converter output; output current must arise from the causal regulator loop, not a copied fixture load`,
+      )
+    }
+    const behavioral = /^([beg]\S*)\s+(\S+)\s+(\S+)\s+(.+)$/i.exec(line)
+    if (
+      behavioral &&
+      (output_connected_nodes.has(behavioral[2].toLowerCase()) ||
+        output_connected_nodes.has(behavioral[3].toLowerCase()))
+    ) {
+      const probed_nodes = probedVoltageNodes(behavioral[4])
+      const uncaused_state = [...probed_nodes].find(
+        (node) => private_state_nodes.has(node) && !response_driven_state_nodes.has(node),
+      )
+      if (uncaused_state) {
+        throw new Error(
+          `model.lib line ${physical_line} drives a modeled power-converter output from private state ${uncaused_state}, but that state is not driven by the measured output response; synthetic enable/startup settling states are not valid substitutes for the causal regulator loop`,
+        )
+      }
+    }
+  }
 }
 
 function expressionContainsBuiltinTime(expression: string): boolean {
@@ -138,6 +299,13 @@ function assertCausalModelSource(lines: readonly LogicalSpiceLine[]): void {
         `model.lib line ${physical_line} contains an autonomous initial-condition script; dynamic state must be established causally through public electrical pins`,
       )
     }
+    const passive_value = /^[rcl]\S*\s+\S+\s+\S+\s+(\S+)/i.exec(line)?.[1]
+    const passive_literal = passive_value ? SPICE_LITERAL_PATTERN.exec(passive_value)?.[1] : undefined
+    if (passive_literal !== undefined && Number(passive_literal) <= 0) {
+      throw new Error(
+        `model.lib line ${physical_line} contains a non-positive passive value; R, C, and L primitives must represent positive physical state or damping`,
+      )
+    }
     const independent_source = /^[vi]\S*\s+\S+\s+\S+\s+(.+)$/i.exec(line)
     if (independent_source && INDEPENDENT_TRANSIENT_SOURCE_PATTERN.test(independent_source[1])) {
       throw new Error(
@@ -159,6 +327,11 @@ function assertCausalModelSource(lines: readonly LogicalSpiceLine[]): void {
     if (expression && AUTONOMOUS_RANDOM_EXPRESSION_PATTERN.test(expression)) {
       throw new Error(
         `model.lib line ${physical_line} contains an autonomous random/noise expression; fresh transient behavior must be caused by public electrical pins`,
+      )
+    }
+    if (expression && IMPLICIT_DERIVATIVE_STATE_PATTERN.test(expression)) {
+      throw new Error(
+        `model.lib line ${physical_line} contains DDT/IDT implicit derivative state; use positive C/L/device state driven by public electrical pins instead of cancelling fixture dynamics`,
       )
     }
   }
@@ -236,6 +409,11 @@ export function validateModelSource(source: string, model_interface: ModelSource
     )
   }
   if (open_subcircuit) throw new Error(`model.lib does not close .SUBCKT ${open_subcircuit} with .ENDS`)
+}
+
+export function validateFreshModelSource(source: string, contract: ModelContract): void {
+  validateModelSource(source, contract.interface)
+  assertFreshModelTopologyIntegrity(source, contract)
 }
 
 export function createModelManifest(input: {

@@ -6,10 +6,17 @@ const MODEL_CANDIDATE_SYSTEM_PROMPT =
   "You are a constrained SPICE artifact generator. Follow the supplied task exactly. " +
   "Use workspace_read only for declared inputs in the current workspace and " +
   "model_output_write only for model.lib and model-card.md. After writing both outputs, " +
-  "call check_model_candidate and correct the artifacts until that check passes. " +
+  "use fit_model_parameters when numeric calibration would otherwise require manual guessing, then " +
+  "call check_model_candidate. Search is tool-bounded and retains the best complete direct-and-viewer candidate. " +
+  "Make only evidence-driven topology changes; never repeat fitter bounds or discard a better retained candidate. " +
+  "If the retained runnable candidate still misses comparison tolerances when the budget is exhausted, finish " +
+  "honestly so authoritative validation can render its TSX/reference comparisons and drive repair. " +
+  "The check runs real ngspice and tscircuit viewer simulations and reports residuals only at " +
+  "the reference samples already visible in model-contract.json. " +
   "Do not seek files, tools, instructions, or validation data outside the current workspace."
 const MODEL_CANDIDATE_APPEND_SYSTEM_PROMPT =
-  "No ambient or user-global instructions apply to this constrained artifact task."
+  "No ambient or user-global instructions apply to this constrained artifact task. " +
+  "Do not add undocumented startup thresholds, per-case lookup branches, or opaque high-order curve-fitting nonlinearities."
 
 export interface AgentAttemptEvent {
   event: "attempt_started" | "attempt_failed" | "retry_scheduled" | "attempt_completed"
@@ -34,7 +41,7 @@ export interface AgentClient {
     phase_label: string
     extensions?: readonly string[]
     tool_profile?: "model_candidate_files"
-    model_candidate_check?: { readonly ngspice_path: string }
+    model_candidate_check?: { readonly ngspice_path: string; readonly tsci_path?: string }
     heartbeat_paths?: readonly string[]
     on_output: (stream: JobLogStream, message: string) => void | Promise<void>
     on_attempt?: (event: AgentAttemptEvent) => void | Promise<void>
@@ -90,7 +97,7 @@ export class TsciAgentClient implements AgentClient {
                   "--no-skills",
                   "--no-prompt-templates",
                   "--tools",
-                  "workspace_read,model_output_write,check_model_candidate",
+                  "workspace_read,model_output_write,fit_model_parameters,check_model_candidate",
                   "--no-context-files",
                   "--system-prompt",
                   MODEL_CANDIDATE_SYSTEM_PROMPT,
@@ -112,6 +119,7 @@ export class TsciAgentClient implements AgentClient {
             input.tool_profile === "model_candidate_files"
               ? {
                   DATASHEET_MODEL_CHECK_NGSPICE_BIN: input.model_candidate_check?.ngspice_path ?? "ngspice",
+                  DATASHEET_MODEL_CHECK_TSCI_BIN: input.model_candidate_check?.tsci_path ?? "tsci",
                 }
               : undefined,
           signal: input.signal,

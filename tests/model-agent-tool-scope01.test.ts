@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createModelCandidateFileTools } from "../src/server/infrastructure/agent/model-candidate-tools-extension"
 import { ModelCandidateCheckError } from "../src/server/model-workflow/model-candidate-check"
+import { MODEL_TRAINING_CHECK_RECEIPT_FILE } from "../src/server/model-workflow/model-training-check"
 
 const temporary_directories: string[] = []
 const ngspice_path = Bun.which("ngspice")
@@ -33,7 +34,7 @@ async function executeTool(tool: unknown, parameters: Record<string, unknown>) {
 
 test("model candidate tools are visible to the agent under their scoped capability names", async () => {
   const workspace = await makeTemporaryDirectory("model-tools-workspace-")
-  const [read_tool, write_tool, check_tool] = createModelCandidateFileTools(workspace)
+  const [read_tool, write_tool, check_tool, fit_tool] = createModelCandidateFileTools(workspace)
 
   expect(read_tool.name).toBe("workspace_read")
   expect(read_tool.label).toBe("workspace_read")
@@ -53,10 +54,63 @@ test("model candidate tools are visible to the agent under their scoped capabili
   ])
 
   expect(check_tool.name).toBe("check_model_candidate")
-  expect(check_tool.description).toContain("real ngspice candidate smoke harness")
+  expect(check_tool.description).toContain("real ngspice smoke harness")
+  expect(check_tool.description).toContain("exact agent-visible training fixtures")
+  expect(check_tool.description).toContain("tscircuit viewer")
+  expect(check_tool.description).toContain("held-out samples")
   expect(check_tool.description).toContain("no paths or commands")
   expect(check_tool.promptGuidelines).toEqual([
     "After writing model.lib and model-card.md, call check_model_candidate and correct any failed diagnostic before finishing.",
+  ])
+
+  expect(fit_tool.name).toBe("fit_model_parameters")
+  expect(fit_tool.description).toContain("numeric .param declarations")
+  expect(fit_tool.description).toContain("real ngspice")
+  expect(fit_tool.description).toContain("never sees held-out samples")
+  expect(fit_tool.description).toContain("no paths or commands")
+  expect(fit_tool.promptGuidelines).toEqual([
+    "Use fit_model_parameters for numeric calibration after a structurally valid causal model exists, then rerun check_model_candidate.",
+  ])
+})
+
+test("model parameter fitter receives only bounded declarations and returns a traceable result", async () => {
+  const workspace = await makeTemporaryDirectory("model-tools-fit-")
+  const invocations: Array<Record<string, unknown>> = []
+  const [, , , fit_tool] = createModelCandidateFileTools(workspace, {
+    ngspice_path: "/trusted/ngspice",
+    fit_parameters: async (input) => {
+      invocations.push({
+        workspace: input.workspace,
+        ngspice_path: input.ngspice_path,
+        parameters: input.parameters,
+        max_evaluations: input.max_evaluations,
+      })
+      const evaluation = {
+        values: { LOOP_GAIN: 2 },
+        score: {
+          runnable: true,
+          failed_series_count: 0,
+          worst_normalized_max_error: 0.02,
+          mean_normalized_rmse: 0.01,
+        },
+      }
+      return { evaluations: 7, initial: evaluation, best: evaluation, improvements: [evaluation] }
+    },
+  })
+
+  const result = (await executeTool(fit_tool, {
+    parameters: [{ name: "LOOP_GAIN", min: 0.1, max: 10, scale: "log" }],
+    max_evaluations: 7,
+  })) as { details: { status: string; evaluations: number } }
+
+  expect(result.details).toMatchObject({ status: "completed", evaluations: 7 })
+  expect(invocations).toEqual([
+    {
+      workspace: await realpath(workspace),
+      ngspice_path: "/trusted/ngspice",
+      parameters: [{ name: "LOOP_GAIN", min: 0.1, max: 10, scale: "log" }],
+      max_evaluations: 7,
+    },
   ])
 })
 
@@ -88,6 +142,143 @@ test("model candidate check has no agent-controlled command or path and returns 
   expect(result.details).toMatchObject({ status: "passed", revision: "a".repeat(16) })
   expect(result.content[0]?.text).toContain('"status": "passed"')
   expect(await Bun.file(join(workspace, ".candidate-check.json")).exists()).toBe(true)
+})
+
+test("model candidate check runs the fixed public training gate and retains integrity-bound results", async () => {
+  const workspace = await makeTemporaryDirectory("model-tools-training-check-")
+  await writeFile(join(workspace, "model-training-plan.json"), '{"version":1}\n')
+  const training_invocations: Array<{ ngspice_path: string; tsci_path: string }> = []
+  const candidate = {
+    version: 1 as const,
+    status: "passed" as const,
+    checks: ["model_contract", "model_card", "ngspice_smoke"] as const,
+    revision: "a".repeat(16),
+    entry_name: "SAFE_MODEL",
+    pin_count: 2,
+    model_card_sha256: "b".repeat(64),
+  }
+  const [, , check_tool] = createModelCandidateFileTools(workspace, {
+    ngspice_path: "/trusted/ngspice",
+    tsci_path: "/trusted/tsci",
+    check_candidate: async () => candidate,
+    check_training: async ({ ngspice_path, tsci_path }) => {
+      training_invocations.push({ ngspice_path, tsci_path })
+      return {
+        version: 1,
+        status: "failed",
+        cases: [
+          {
+            case_id: "visible_case",
+            status: "failed",
+            server_series: [
+              {
+                observation_id: "visible_output",
+                status: "failed",
+                metrics: { sample_count: 1, normalized_max_error: 2 },
+                samples: [{ x: 0, reference_y: 3.3, simulated_y: 0, error: -3.3 }],
+                error_codes: ["curve_tolerance_exceeded"],
+              },
+            ],
+            viewer_series: [],
+            error_codes: ["viewer_validation_unavailable"],
+          },
+        ],
+        error_codes: ["curve_tolerance_exceeded", "viewer_validation_unavailable"],
+      }
+    },
+  })
+
+  const result = (await executeTool(check_tool, {})) as {
+    details: {
+      status: string
+      code: string
+      candidate: { revision: string }
+      training_validation: { cases: Array<{ case_id: string }> }
+    }
+  }
+
+  expect(training_invocations).toEqual([{ ngspice_path: "/trusted/ngspice", tsci_path: "/trusted/tsci" }])
+  expect(result.details).toMatchObject({
+    status: "failed",
+    code: "visible_training_validation_failed",
+    candidate: { revision: "a".repeat(16) },
+    training_validation: { cases: [{ case_id: "visible_case" }] },
+  })
+  expect(JSON.parse(await readFile(join(workspace, ".candidate-check.json"), "utf8"))).toEqual(candidate)
+  expect(
+    JSON.parse(await readFile(join(workspace, MODEL_TRAINING_CHECK_RECEIPT_FILE), "utf8")),
+  ).toMatchObject({
+    version: 1,
+    status: "failed",
+    candidate,
+    training_plan_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    training_validation: { status: "failed", cases: [{ case_id: "visible_case" }] },
+  })
+})
+
+test("model candidate check restores the best complete candidate after a regression", async () => {
+  const workspace = await makeTemporaryDirectory("model-tools-best-candidate-")
+  const first_source = ".SUBCKT SAFE_MODEL A B\n.param R=1\nR1 A B {R}\n.ENDS SAFE_MODEL\n"
+  const regressed_source = ".SUBCKT SAFE_MODEL A B\n.param R=2\nR1 A B {R}\n.ENDS SAFE_MODEL\n"
+  await Promise.all([
+    writeFile(join(workspace, "model.lib"), first_source),
+    writeFile(join(workspace, "model-card.md"), "first card\n"),
+    writeFile(join(workspace, "model-training-plan.json"), '{"version":1}\n'),
+  ])
+  let check_index = 0
+  const training_errors = [0.2, 0.4]
+  const [_, write_tool, check_tool] = createModelCandidateFileTools(workspace, {
+    check_candidate: async () => {
+      check_index += 1
+      return {
+        version: 1,
+        status: "passed",
+        checks: ["model_contract", "model_card", "ngspice_smoke"],
+        revision: (check_index === 1 ? "a" : "c").repeat(16),
+        entry_name: "SAFE_MODEL",
+        pin_count: 2,
+        model_card_sha256: (check_index === 1 ? "b" : "d").repeat(64),
+      }
+    },
+    check_training: async () => {
+      const error = training_errors[check_index - 1]!
+      const series = {
+        observation_id: "vout",
+        status: "failed" as const,
+        metrics: { sample_count: 1, normalized_max_error: error, normalized_rmse: error / 2 },
+        samples: [{ x: 0, reference_y: 3.3, simulated_y: 3.3 + error, error }],
+        error_codes: ["curve_tolerance_exceeded"],
+      }
+      return {
+        version: 1,
+        status: "failed" as const,
+        cases: [
+          {
+            case_id: "visible_case",
+            status: "failed" as const,
+            server_series: [series],
+            viewer_series: [series],
+            error_codes: [],
+          },
+        ],
+        error_codes: ["curve_tolerance_exceeded"],
+      }
+    },
+  })
+
+  await executeTool(check_tool, {})
+  await executeTool(write_tool, { path: "model.lib", content: regressed_source })
+  await executeTool(write_tool, { path: "model-card.md", content: "regressed card\n" })
+  const result = (await executeTool(check_tool, {})) as {
+    details: { search_control?: { disposition: string } }
+  }
+
+  expect(result.details.search_control?.disposition).toBe("retained")
+  expect(await readFile(join(workspace, "model.lib"), "utf8")).toBe(first_source)
+  expect(await readFile(join(workspace, "model-card.md"), "utf8")).toBe("first card\n")
+  expect(
+    JSON.parse(await readFile(join(workspace, MODEL_TRAINING_CHECK_RECEIPT_FILE), "utf8")),
+  ).toMatchObject({ candidate: { revision: "a".repeat(16) } })
 })
 
 test("model candidate check returns bounded diagnostics without leaking its workspace", async () => {

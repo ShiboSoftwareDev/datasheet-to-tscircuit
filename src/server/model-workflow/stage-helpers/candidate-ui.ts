@@ -5,7 +5,7 @@ import type { ModelRunStore } from "../../model-run-store"
 import { type GeneratedModel, type ModelContract, projectModelUi } from "../../modeling"
 import type { ValidationPlan, ValidationRunResult } from "../../spice-validation"
 import { writeViewerValidationArtifacts } from "../viewer-validation-artifacts"
-import { writeJson } from "./basic"
+import { readJson, writeJson } from "./basic"
 
 function createCandidateDiagnostics(input: {
   plan: ValidationPlan
@@ -250,4 +250,25 @@ export async function projectCandidateValidationUi(input: {
       reference_preview: first_preview?.reference_preview,
     },
   })
+}
+
+/**
+ * Restores a previously validated immutable candidate as the live preview.
+ * Repair attempts project themselves while they are being evaluated, so a
+ * rejected regression must explicitly put the authoritative candidate back
+ * in both the durable preview pointer and the live run-store projection.
+ */
+export async function restoreCandidateValidationUi(input: {
+  model_run_store: ModelRunStore
+  model_run_id: string
+  model_dir: string
+  immutable_artifact_dir: string
+  evidence_dir: string
+  revision: string
+  signal: AbortSignal
+}): Promise<void> {
+  const projection = (await readJson(join(input.immutable_artifact_dir, "model-ui.json"))) as ReturnType<
+    typeof projectModelUi
+  >
+  await projectCandidateValidationUi({ ...input, projection })
 }

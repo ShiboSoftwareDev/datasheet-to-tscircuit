@@ -1,5 +1,6 @@
 import { join } from "node:path"
 import { parseFreshModelContract } from "../../modeling"
+import type { ValidationPlan } from "../../spice-validation"
 import { generateModelCandidate } from "../model-candidate"
 import { appendModelLog, modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
@@ -15,7 +16,8 @@ export const generateModelStage = defineModelStage({
       message: "Generating a bounded self-contained SPICE subcircuit",
     })
     const { contract_path, plan_path, evidence_dir } = dependency_outputs.design_validation
-    const contract = parseFreshModelContract(await readJson(contract_path))
+    const [contract_value, plan_value] = await Promise.all([readJson(contract_path), readJson(plan_path)])
+    const contract = parseFreshModelContract(contract_value)
     const strategy = services.strategy_registry.require(
       contract.characterization.strategy,
       contract.characterization.family,
@@ -23,6 +25,7 @@ export const generateModelStage = defineModelStage({
     const attempt = await generateModelCandidate({
       model_dir: context.model_dir,
       contract,
+      validation_plan: plan_value as ValidationPlan,
       evidence_dir,
       strategy_guidance: strategy.guidance,
       stage_id: "generate_model",
@@ -32,6 +35,7 @@ export const generateModelStage = defineModelStage({
       agent_client: services.agent_client,
       ngspice: services.ngspice_executor,
       ngspice_path: services.ngspice_bin,
+      tsci_path: services.tsci_bin,
       max_artifact_attempts: 3,
       debug_dir,
       on_output: (stream, message) =>

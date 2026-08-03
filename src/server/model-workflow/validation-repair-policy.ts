@@ -4,6 +4,7 @@ const REPAIRABLE_COMPARISON_CODES = new Set([
   "target_tolerance_exceeded",
   "bounds_exceeded",
   "curve_tolerance_exceeded",
+  "bound_stimulus_insensitive",
   "invalid_log_sample",
   "non_finite_series",
 ])

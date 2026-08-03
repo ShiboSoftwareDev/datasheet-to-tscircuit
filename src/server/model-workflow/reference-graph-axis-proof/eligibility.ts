@@ -1,5 +1,54 @@
-import type { ReferenceGraphObservation } from "../reference-graph-observation"
-import type { ReferenceGraphAxisProofResult, ReferenceGraphSourceProof } from "./types"
+import type { ObservedReferenceGraph, ReferenceGraphObservation } from "../reference-graph-observation"
+import type {
+  ReferenceGraphAxisProofResult,
+  ReferenceGraphSourceProof,
+  ScopeDivisionReferenceGraphAxisCalibrationReceipt,
+} from "./types"
+
+function applyServerOwnedScopeCalibration(
+  graph: ObservedReferenceGraph,
+  receipt: ScopeDivisionReferenceGraphAxisCalibrationReceipt,
+): ObservedReferenceGraph {
+  const canonical = structuredClone(graph)
+  const curve = canonical.digitized_curve
+  if (!curve) throw new Error(`Verified scope graph ${graph.graph_id} has no digitized curve`)
+
+  const x_first_pixel = receipt.x_axis.grid.first_anchor_line_pixel
+  const x_second_pixel = receipt.x_axis.grid.second_anchor_line_pixel
+  const secondsAtPixel = (pixel: number) => (pixel - x_first_pixel) * receipt.x_axis.source_seconds_per_pixel
+  const y_first_pixel = receipt.y_axis.grid.first_anchor_line_pixel
+  const y_second_pixel = receipt.y_axis.grid.second_anchor_line_pixel
+  const voltsAtPixel = (pixel: number) =>
+    receipt.y_axis.nominal_baseline_volts +
+    (receipt.y_axis.nominal_baseline_pixel - pixel) * receipt.y_axis.source_volts_per_pixel
+
+  const x_first_value = 0
+  const x_second_value = secondsAtPixel(x_second_pixel)
+  const y_first_value = voltsAtPixel(y_first_pixel)
+  const y_second_value = voltsAtPixel(y_second_pixel)
+  if (!(x_second_value > x_first_value) || !(y_second_value > y_first_value)) {
+    throw new Error(`Verified scope graph ${graph.graph_id} has an invalid source-owned axis orientation`)
+  }
+
+  curve.x_axis = {
+    scale: "linear",
+    first: { pixel: x_first_pixel, value: x_first_value },
+    second: { pixel: x_second_pixel, value: x_second_value },
+  }
+  curve.x_range = { min: x_first_value, max: x_second_value }
+  curve.y_axis = {
+    scale: "linear",
+    first: { pixel: y_first_pixel, value: y_first_value },
+    second: { pixel: y_second_pixel, value: y_second_value },
+  }
+  curve.y_range = { min: y_first_value, max: y_second_value }
+  curve.points = curve.points.map((point) => ({
+    ...point,
+    x: secondsAtPixel(point.pixel_x),
+    y: voltsAtPixel(point.pixel_y),
+  }))
+  return canonical
+}
 
 export function verifiedReferenceGraphIds(proof: ReferenceGraphSourceProof): Set<string> {
   return new Set(proof.results.flatMap((result) => (result.status === "verified" ? [result.graph_id] : [])))
@@ -24,16 +73,19 @@ export function applyReferenceGraphSourceEligibility(input: {
         graph.fixture_reproducible &&
         graph.electrical_binding !== undefined &&
         graph.digitized_curve !== undefined
-      if (!was_candidate) return { ...graph, crop: { ...graph.crop } }
+      if (!was_candidate) return structuredClone(graph)
       const result = results.get(graph.graph_id)
-      if (result?.status === "verified") return { ...graph, crop: { ...graph.crop } }
+      if (result?.status === "verified") {
+        return result.receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2"
+          ? applyServerOwnedScopeCalibration(graph, result.receipt)
+          : structuredClone(graph)
+      }
       const reason =
         result?.status === "ineligible"
           ? result.reason
           : "No canonical PDF axis-calibration result was retained for this graph."
       return {
-        ...graph,
-        crop: { ...graph.crop },
+        ...structuredClone(graph),
         fixture_reproducible: false,
         reason: `${graph.reason} Axis calibration is source-ineligible: ${reason}`,
         electrical_binding: undefined,

@@ -147,7 +147,14 @@ function parseDivisionSource(value: unknown, path: string): ReferenceDivisionSca
   const record = proofRecord(value, path)
   proofKeys(
     record,
-    ["raw_text", "normalized_unit", "value_per_division_si", "confidence", "ocr_bbox_px"],
+    [
+      "raw_text",
+      "normalized_unit",
+      "value_per_division_si",
+      "confidence",
+      "ocr_bbox_px",
+      ...(record.normalization !== undefined ? ["normalization"] : []),
+    ],
     path,
   )
   if (record.normalized_unit !== "s" && record.normalized_unit !== "V") {
@@ -155,6 +162,22 @@ function parseDivisionSource(value: unknown, path: string): ReferenceDivisionSca
   }
   const bbox = proofRecord(record.ocr_bbox_px, `${path}.ocr_bbox_px`)
   proofKeys(bbox, ["left", "top", "width", "height"], `${path}.ocr_bbox_px`)
+  let normalization: ReferenceDivisionScaleSource["normalization"]
+  if (record.normalization !== undefined) {
+    const value = proofRecord(record.normalization, `${path}.normalization`)
+    proofKeys(value, ["algorithm", "corroborating_raw_text", "multiplier"], `${path}.normalization`)
+    if (value.algorithm !== "missing_time_prefix_from_adjacent_measurement_v1") {
+      throw new Error(`${path}.normalization.algorithm is unsupported`)
+    }
+    normalization = {
+      algorithm: "missing_time_prefix_from_adjacent_measurement_v1",
+      corroborating_raw_text: proofString(
+        value.corroborating_raw_text,
+        `${path}.normalization.corroborating_raw_text`,
+      ),
+      multiplier: proofNumber(value.multiplier, `${path}.normalization.multiplier`),
+    }
+  }
   return {
     raw_text: proofString(record.raw_text, `${path}.raw_text`),
     normalized_unit: record.normalized_unit,
@@ -166,6 +189,7 @@ function parseDivisionSource(value: unknown, path: string): ReferenceDivisionSca
       width: proofNumber(bbox.width, `${path}.ocr_bbox_px.width`),
       height: proofNumber(bbox.height, `${path}.ocr_bbox_px.height`),
     },
+    ...(normalization ? { normalization } : {}),
   }
 }
 
@@ -222,7 +246,8 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
   if (
     receipt.version !== 1 ||
     (receipt.algorithm !== "canonical_pdf_tesseract_explicit_ticks_v1" &&
-      receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v1")
+      receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v1" &&
+      receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v2")
   ) {
     throw new Error(`${path} uses an unsupported receipt version or algorithm`)
   }
@@ -236,7 +261,10 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
     throw new Error(`${path}.ocr_render must retain the canonical 600-DPI transform`)
   }
   const ocr = proofRecord(receipt.ocr, `${path}.ocr`)
-  const is_scope = receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v1"
+  const is_scope =
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v1" ||
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2"
+  const is_server_calibrated_scope = receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2"
   proofKeys(
     ocr,
     [
@@ -337,6 +365,7 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
       "nominal_baseline_volts",
       "nominal_source_text",
       "nominal_source_bbox_pdf_points",
+      ...(is_server_calibrated_scope ? ["nominal_baseline_pixel"] : []),
       "nominal_trace_point_indexes",
     ],
     `${path}.y_axis`,
@@ -355,16 +384,15 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
   if (x_division_scale.normalized_unit !== "s" || y_division_scale.normalized_unit !== "V") {
     throw new Error(`${path} division scales do not match their axes`)
   }
-  return {
+  const scope_common = {
     ...common,
-    algorithm: "canonical_pdf_tesseract_scope_divisions_v1",
     ocr: {
       ...common_ocr,
       panel_tsv_sha256: proofSha(ocr.panel_tsv_sha256, `${path}.ocr.panel_tsv_sha256`),
     },
     x_axis: {
-      quantity: "time",
-      unit: "s",
+      quantity: "time" as const,
+      unit: "s" as const,
       division_scale: x_division_scale,
       grid: parseGridSource(x.grid, `${path}.x_axis.grid`),
       declared_seconds_per_pixel: proofNumber(
@@ -377,8 +405,8 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
       ),
     },
     y_axis: {
-      quantity: "voltage",
-      unit: "V",
+      quantity: "voltage" as const,
+      unit: "V" as const,
       division_scale: y_division_scale,
       grid: parseGridSource(y.grid, `${path}.y_axis.grid`),
       declared_volts_per_pixel: proofNumber(
@@ -396,6 +424,23 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
         proofNumber(index, `${path}.y_axis.nominal_trace_point_indexes[${item_index}]`),
       ),
     },
+  }
+  if (is_server_calibrated_scope) {
+    return {
+      ...scope_common,
+      algorithm: "canonical_pdf_tesseract_scope_divisions_v2",
+      y_axis: {
+        ...scope_common.y_axis,
+        nominal_baseline_pixel: proofNumber(
+          y.nominal_baseline_pixel,
+          `${path}.y_axis.nominal_baseline_pixel`,
+        ),
+      },
+    }
+  }
+  return {
+    ...scope_common,
+    algorithm: "canonical_pdf_tesseract_scope_divisions_v1",
   }
 }
 

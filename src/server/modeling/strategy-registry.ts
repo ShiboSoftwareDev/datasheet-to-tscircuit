@@ -17,19 +17,23 @@ const DEFAULT_STRATEGIES: readonly ModelStrategy[] = [
   },
   {
     id: "behavioral",
-    version: "1",
+    version: "2",
     supported_families: "all",
     guidance:
       "Use causal state and electrical inputs for behavior that cannot be represented by a compact primitive model. Expose unsupported digital protocol behavior as a limitation.",
   },
   {
     id: "hybrid",
-    version: "1",
+    version: "2",
     supported_families: "all",
     guidance:
       "Combine physical primitives with bounded behavioral sources where that materially improves convergence or captures documented control behavior.",
   },
 ]
+
+const POWER_CONVERTER_GUIDANCE = `For power converters, use an averaged closed-loop regulator model. A robust starting topology is a bounded Thevenin-like output behind a positive finite output resistance, with positive C/L state only on private controller nodes. Drive that state from the public output-voltage regulation error (target minus measured output), so an external load step naturally causes droop or overshoot and the controller then restores regulation over the datasheet timescale. MODE, EN, VIN, and other public pins may select documented operating parameters.
+
+The server-owned application fixture is the only owner of output/load capacitance, inductance, resistance, and load stimulus. Do not reproduce or cancel fixture passives inside the DUT; do not sense a duplicate capacitor through a zero-volt branch; do not inject a fixed current chosen to equal the fixture's baseline load; and do not add an output-connected fast state or equalizer chosen to disappear before the first reference sample. Internal controller state must remain causally active over the measured response and affect the output through the regulator loop.`
 
 export class ModelStrategyRegistry {
   readonly strategies: readonly ModelStrategy[]
@@ -46,6 +50,10 @@ export class ModelStrategyRegistry {
     if (strategy.supported_families !== "all" && !strategy.supported_families.includes(family)) {
       throw new Error(`Model strategy ${id} does not support family ${family}`)
     }
-    return strategy
+    if (family !== "power_converter") return strategy
+    return {
+      ...strategy,
+      guidance: `${strategy.guidance}\n\n${POWER_CONVERTER_GUIDANCE}`,
+    }
   }
 }

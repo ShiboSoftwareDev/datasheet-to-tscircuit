@@ -263,6 +263,18 @@ describe("model characterization contract", () => {
     expect(buildCharacterizationPrompt()).toContain('x_quantity exactly "time"')
     expect(buildCharacterizationPrompt()).toContain("evidence/figures/<requirement_id>.png")
     expect(buildCharacterizationPrompt()).toContain("do not use a scalar requirement as an escape")
+    expect(buildCharacterizationPrompt()).toContain(
+      "model-characterization.json already exists, it is the exact retained candidate",
+    )
+    expect(buildCharacterizationPrompt()).toContain("server_verified_reference_curve is an immutable output")
+    expect(buildCharacterizationPrompt()).toContain("copy its points exactly")
+    expect(buildCharacterizationPrompt()).toContain(
+      "expected accepts only the keys unit, target, min,\nmax, and tolerance",
+    )
+    expect(buildCharacterizationPrompt()).toContain(
+      "Every sources[] entry accepts exactly the keys page, locator, and statement",
+    )
+    expect(buildCharacterizationPrompt()).toContain("locator (never figure, table, title, or section)")
     expect(buildCharacterizationPrompt()).not.toContain("strategy: vendor")
     const vendor_characterization = {
       version: 1,

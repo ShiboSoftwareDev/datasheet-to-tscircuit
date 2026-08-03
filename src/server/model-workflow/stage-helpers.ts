@@ -9,6 +9,7 @@ export {
 export {
   persistCandidateValidationUi,
   projectCandidateValidationUi,
+  restoreCandidateValidationUi,
 } from "./stage-helpers/candidate-ui"
 export { commitPreparedModelPublication } from "./stage-helpers/publication-commit"
 export {

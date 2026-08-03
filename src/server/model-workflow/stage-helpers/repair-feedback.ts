@@ -54,7 +54,7 @@ const REPAIR_ACTION_DESCRIPTIONS: Readonly<Record<ModelRepairAction, string>> = 
   retune_dynamic_response:
     "retune causal time constants, damping, or state equations across the visible transient range",
   preserve_viewer_portability:
-    "keep the public response compatible with the portable ngspice constructs used by the tscircuit viewer",
+    "keep the public response compatible with the tscircuit viewer, including a neutral public output when dynamic state begins at zero instead of a pre-solved DC operating point",
   couple_response_to_public_stimulus:
     "derive the response and dynamic state from public-pin voltage or current instead of autonomous behavior",
   guard_logarithmic_domain:
@@ -100,6 +100,7 @@ export function createModelRepairFeedback(
   result: ValidationRunResult,
   viewer_validation_by_case?: Readonly<Record<string, ViewerSimulationValidation | undefined>>,
   stimulus_causality?: CandidateStimulusCausalityCheck,
+  viewer_model_errors_by_case?: Readonly<Record<string, string | undefined>>,
 ): ModelRepairFeedback {
   const aggregate = new Map<ModelRepairFeedbackCategory, { cases: Set<number>; observations: Set<string> }>()
   const add = (category: ModelRepairFeedbackCategory, case_index?: number, series_index?: number): void => {
@@ -145,6 +146,9 @@ export function createModelRepairFeedback(
     for (const series_index of failed_series) {
       add("viewer_curve_mismatch", case_index, series_index)
     }
+  })
+  Object.values(viewer_model_errors_by_case ?? {}).forEach((message, case_index) => {
+    if (message) add("convergence_failure", case_index)
   })
   if (stimulus_causality?.required && !stimulus_causality.passed) {
     const current = aggregate.get("stimulus_insensitive") ?? {

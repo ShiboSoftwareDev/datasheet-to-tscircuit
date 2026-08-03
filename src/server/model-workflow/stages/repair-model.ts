@@ -2,6 +2,12 @@ import { dirname, join } from "node:path"
 import { parseFreshModelContract } from "../../modeling"
 import { PipelineError } from "../../pipeline"
 import type { ValidationPlan, ValidationRunResult } from "../../spice-validation"
+import {
+  compareCandidateQuality,
+  createCandidateQuality,
+  viewerQualityCasesFromValidation,
+  type CandidateViewerQualityCase,
+} from "../candidate-quality"
 import { validateCandidate } from "../candidate-validation"
 import { generateModelCandidate } from "../model-candidate"
 import {
@@ -10,10 +16,62 @@ import {
   formatModelRepairFeedback,
   modelArtifact,
   readJson,
+  restoreCandidateValidationUi,
   updateModelProgress,
 } from "../stage-helpers"
 import { getNonRepairableValidationErrors } from "../validation-repair-policy"
 import { defineModelStage } from "./stage-factory"
+
+async function readStoredViewerQualityCases(input: {
+  result: ValidationRunResult
+  validation_directory: string
+}): Promise<CandidateViewerQualityCase[]> {
+  const [diagnostics_value, model_ui_value] = await Promise.all([
+    readJson(join(input.validation_directory, "candidate-diagnostics.json")),
+    readJson(join(input.validation_directory, "model-ui.json")),
+  ])
+  const diagnostics = diagnostics_value as {
+    cases?: Array<{ case_id?: unknown; viewer_status?: unknown }>
+  }
+  const model_ui = model_ui_value as {
+    validation?: {
+      benchmarks?: Array<{
+        benchmark_id?: unknown
+        series?: Array<{
+          passed?: unknown
+          normalized_max_error?: unknown
+          normalized_rmse?: unknown
+        }>
+      }>
+    }
+  }
+  const viewer_status_by_case = new Map(
+    (diagnostics.cases ?? []).flatMap(({ case_id, viewer_status }) =>
+      typeof case_id === "string" ? [[case_id, viewer_status]] : [],
+    ),
+  )
+  const benchmark_by_case = new Map(
+    (model_ui.validation?.benchmarks ?? []).flatMap((benchmark) =>
+      typeof benchmark.benchmark_id === "string" ? [[benchmark.benchmark_id, benchmark]] : [],
+    ),
+  )
+  return input.result.cases.map(({ case_id }) => {
+    const benchmark = benchmark_by_case.get(case_id)
+    return {
+      case_id,
+      available: viewer_status_by_case.get(case_id) === "available",
+      series: (benchmark?.series ?? []).map((series) => ({
+        passed: series.passed === true,
+        ...(typeof series.normalized_max_error === "number" && Number.isFinite(series.normalized_max_error)
+          ? { normalized_max_error: series.normalized_max_error }
+          : {}),
+        ...(typeof series.normalized_rmse === "number" && Number.isFinite(series.normalized_rmse)
+          ? { normalized_rmse: series.normalized_rmse }
+          : {}),
+      })),
+    }
+  })
+}
 
 export const repairModelStage = defineModelStage({
   id: "repair_model",
@@ -83,6 +141,13 @@ export const repairModelStage = defineModelStage({
         "candidate-diagnostics.json",
       ),
     }
+    let best_quality = createCandidateQuality({
+      result,
+      viewer_cases: await readStoredViewerQualityCases({
+        result,
+        validation_directory: dirname(dependency_outputs.validate_model.result_path),
+      }),
+    })
     for (let repair_attempt = 1; repair_attempt <= currentRepairBudget(); repair_attempt += 1) {
       attempted_repairs = repair_attempt
       services.model_run_store.updateModelRun(context.model_run_id, {
@@ -99,6 +164,7 @@ export const repairModelStage = defineModelStage({
       const candidate = await generateModelCandidate({
         model_dir: context.model_dir,
         contract,
+        validation_plan: plan,
         evidence_dir,
         previous_candidate,
         strategy_guidance: strategy.guidance,
@@ -110,6 +176,7 @@ export const repairModelStage = defineModelStage({
         agent_client: services.agent_client,
         ngspice: services.ngspice_executor,
         ngspice_path: services.ngspice_bin,
+        tsci_path: services.tsci_bin,
         max_artifact_attempts: 2,
         debug_dir: join(debug_dir, `candidate-${repair_attempt}`),
         on_output: (stream, message) =>
@@ -142,7 +209,6 @@ export const repairModelStage = defineModelStage({
         append: (stream, message) =>
           appendModelLog(services.model_run_store, context.model_run_id, stream, message),
       })
-      result = validation.result
       const {
         diagnostic_path,
         infrastructure_failure,
@@ -209,18 +275,54 @@ export const repairModelStage = defineModelStage({
           metrics: { repair_attempts: repair_attempt },
         }
       }
-      repair_feedback = createModelRepairFeedback(
-        result,
+      const candidate_repair_feedback = createModelRepairFeedback(
+        validation.result,
         preview_build.viewer_validation_by_case,
         stimulus_causality,
+        preview_build.viewer_model_errors_by_case,
       )
-      previous_candidate = {
+      const candidate_quality = createCandidateQuality({
+        result: validation.result,
+        viewer_cases: viewerQualityCasesFromValidation({
+          case_ids: plan.cases.map(({ id }) => id),
+          viewer_validation_by_case: preview_build.viewer_validation_by_case,
+        }),
+      })
+      const candidate_refs = {
         model_path: join(candidate.value.artifact_dir, "model.lib"),
         model_card_path: join(candidate.value.artifact_dir, "model-card.md"),
         manifest_path: join(candidate.value.artifact_dir, "model-manifest.json"),
         result_path: join(candidate.value.artifact_dir, "validation", "validation-results.json"),
         revision: candidate.value.manifest.revision,
         diagnostic_path,
+      }
+      if (compareCandidateQuality(candidate_quality, best_quality) < 0) {
+        best_quality = candidate_quality
+        previous_candidate = candidate_refs
+        result = validation.result
+        repair_feedback = candidate_repair_feedback
+        await appendModelLog(
+          services.model_run_store,
+          context.model_run_id,
+          "system",
+          `Repair ${repair_attempt} improved authoritative candidate quality; the next repair will start from revision ${candidate.value.manifest.revision}.\n`,
+        )
+      } else {
+        await restoreCandidateValidationUi({
+          model_run_store: services.model_run_store,
+          model_run_id: context.model_run_id,
+          model_dir: context.model_dir,
+          immutable_artifact_dir: dirname(previous_candidate.result_path),
+          evidence_dir,
+          revision: previous_candidate.revision,
+          signal,
+        })
+        await appendModelLog(
+          services.model_run_store,
+          context.model_run_id,
+          "system",
+          `Repair ${repair_attempt} did not improve authoritative candidate quality; restored revision ${previous_candidate.revision} as the live preview and next repair seed.\n`,
+        )
       }
     }
 
