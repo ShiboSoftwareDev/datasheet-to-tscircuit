@@ -4,9 +4,15 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { applicationSourceNetName } from "@/server/component-workflow/application-endpoint"
 import { parseTypicalApplicationPlan } from "@/server/component-workflow/application-plan"
 import { BunProcessRunner } from "@/server/infrastructure/process"
+import { buildTscircuitSource } from "@/server/infrastructure/tscircuit"
 import { TSCIRCUIT_RUNTIME_CONFIG } from "@/server/job-scaffold/tscircuit-runtime-config"
+import {
+  getTypicalApplicationComponentValueErrors,
+  getTypicalApplicationConnectivityErrors,
+} from "@/server/job-artifact-validator"
 import { buildValidationCircuitPreviews } from "@/server/model-workflow/validation-circuit-previews"
 import {
   ApplicationConditionConflictError,
@@ -32,6 +38,7 @@ const PLAN_SHA256 = "1".repeat(64)
 const PDF_SHA256 = "2".repeat(64)
 const tsciPath = Bun.which("tsci")
 const ngspicePath = Bun.which("ngspice")
+const testWithProductionTscircuit = tsciPath ? test : test.skip
 const testWithProductionSimulation = tsciPath && ngspicePath ? test : test.skip
 
 const interface10Pin: ModelInterface = {
@@ -176,6 +183,76 @@ test("application endpoints may use the datasheet physical pin number", () => {
     "dut.VS",
   ])
 })
+
+testWithProductionTscircuit(
+  "replays agent-76 numeric-leading terminal and unknown shunt through installed tscircuit",
+  async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "application-agent76-replay-"))
+    const battery_net = applicationSourceNetName("48V_BATT")
+    try {
+      await Promise.all([
+        Bun.write(join(workspace, "tscircuit.config.ts"), TSCIRCUIT_RUNTIME_CONFIG),
+        Bun.write(join(workspace, "tscircuit.config.json"), "{}\n"),
+        Bun.write(
+          join(workspace, "index.circuit.tsx"),
+          `export default function Device(props: { name: string }) {
+  return <chip name={props.name} pinLabels={{ pin1: "VIN", pin2: "GND" }} />
+}
+`,
+        ),
+        Bun.write(
+          join(workspace, "typical-application.circuit.tsx"),
+          `import Device from "./index.circuit"
+
+export default () => (
+  <board>
+    <Device name="U1" />
+    <chip name="RSHUNT" value="RSHUNT" pinLabels={{ pin1: "1", pin2: "2" }} />
+    <trace from="U1.VIN" to="net.${battery_net}" />
+    <trace from="RSHUNT.pin1" to="net.${battery_net}" />
+    <trace from="U1.GND" to="net.GND" />
+    <trace from="RSHUNT.pin2" to="net.GND" />
+  </board>
+)
+`,
+        ),
+      ])
+
+      const build = await buildTscircuitSource({
+        workspace,
+        source_file: "typical-application.circuit.tsx",
+        output_stem: "typical-application",
+        tsci_bin: tsciPath!,
+        process_runner: new BunProcessRunner(),
+        signal: new AbortController().signal,
+        build_args: ["--disable-pcb"],
+        checks: ["netlist"],
+      })
+      const plan = {
+        components: [
+          { reference: "U1", kind: "integrated_circuit", value: "TEST" },
+          { reference: "RSHUNT", kind: "resistor" },
+        ],
+        connections: [
+          { net: "48V_BATT", pins: ["U1.VIN", "RSHUNT.1", "48V_BATT"] },
+          { net: "GND", pins: ["U1.GND", "RSHUNT.2", "GND"] },
+        ],
+      }
+
+      expect(build.errors).toEqual([])
+      expect(
+        build.circuit_json.some(
+          (element) => element.type === "source_net" && "name" in element && element.name === battery_net,
+        ),
+      ).toBe(true)
+      expect(getTypicalApplicationConnectivityErrors(plan, build.circuit_json)).toEqual([])
+      expect(getTypicalApplicationComponentValueErrors(plan, build.circuit_json)).toEqual([])
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  },
+  20_000,
+)
 
 test("server-owned application fixture contract merges printed GND and AGND aliases", () => {
   const plan = run93Plan()

@@ -1,6 +1,6 @@
 import { EVIDENCE_CONFIDENCES, EVIDENCE_METHODS } from "../component-evidence/contract"
 import type { ExpectedApplicationConnection } from "../job-artifact-validator"
-import { canonicalizeApplicationEndpoint } from "./application-endpoint"
+import { applicationSourceNetName, canonicalizeApplicationEndpoint } from "./application-endpoint"
 
 export const TYPICAL_APPLICATION_PLAN_VERSION = 4 as const
 export const TYPICAL_APPLICATION_AVAILABILITIES = ["documented", "not_present"] as const
@@ -255,6 +255,7 @@ function canonicalizeTypicalApplicationPlan(
   }))
 
   const seen_endpoints = new Map<string, string>()
+  const external_source_net_identities = new Map<string, string>()
   for (const connection of connections) {
     if (connection.pins.length < 2) {
       throw new Error(
@@ -275,6 +276,16 @@ function canonicalizeTypicalApplicationPlan(
         )
       }
       seen_endpoints.set(key, connection.net)
+      if (!endpoint.includes(".")) {
+        const source_net_name = applicationSourceNetName(endpoint).toLowerCase()
+        const earlier_identity = external_source_net_identities.get(source_net_name)
+        if (earlier_identity !== undefined && earlier_identity.toLowerCase() !== endpoint.toLowerCase()) {
+          throw new Error(
+            `external terminals ${earlier_identity} and ${endpoint} collide after tscircuit net-name encoding`,
+          )
+        }
+        external_source_net_identities.set(source_net_name, endpoint)
+      }
     }
   }
   return {

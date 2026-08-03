@@ -88,9 +88,17 @@ export function getTypicalApplicationComponentValueErrors(
         )
       }
     }
-    if (!expected.kind || !expected.value) continue
+    if (!expected.kind) continue
     const field = componentValueField(expected.kind)
     if (!field) continue
+    if (!expected.value) {
+      if (Object.hasOwn(component, field)) {
+        errors.push(
+          `Application component ${expected.reference} invents ${field} ${JSON.stringify(component[field])}, but the documented plan has no numeric value; use a generic two-pin symbol`,
+        )
+      }
+      continue
+    }
     const expected_value = parseEngineeringValue(expected.value)
     const actual_value = parseEngineeringValue(component[field])
     if (expected_value === undefined) {

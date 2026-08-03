@@ -335,4 +335,254 @@ BOUT OUT GND V=1+1m*V(IN)
       }),
     ).toBe(false)
   })
+
+  testWithNgspice("replays model-agent-107 and rejects its under-coupled load response", async () => {
+    const reference_points = [
+      { x: 0, y: 3.337142857142857 },
+      { x: 0.00019553072625698323, y: 3.3314285714285714 },
+      { x: 0.0002048417132216015, y: 3.24 },
+      { x: 0.00021415270018621975, y: 3.2857142857142856 },
+      { x: 0.00023277467411545624, y: 3.3257142857142856 },
+      { x: 0.0004003724394785848, y: 3.3342857142857145 },
+      { x: 0.0006238361266294227, y: 3.337142857142857 },
+      { x: 0.000633147113594041, y: 3.4257142857142857 },
+      { x: 0.0006424581005586593, y: 3.3771428571428572 },
+      { x: 0.0006517690875232774, y: 3.3485714285714288 },
+      { x: 0.0006610800744878958, y: 3.337142857142857 },
+      { x: 0.0008007448789571696, y: 3.337142857142857 },
+      { x: 0.001, y: 3.3342857142857145 },
+    ]
+    const pin_roles = {
+      EN: "input",
+      MODE: "input",
+      AGND: "ground",
+      FB: "input",
+      PG: "output",
+      VOUT: "power_output",
+      L2: "passive",
+      GND: "ground",
+      L1: "passive",
+      VIN: "power_input",
+    } as const
+    const run107_contract: ModelContract = {
+      version: 1,
+      interface: {
+        version: 1,
+        part_number: "TPS63802",
+        entry_name: "TPS63802",
+        pins: Object.entries(pin_roles).map(([spice_node, role], index) => ({
+          physical_pin: String(index + 1),
+          component_pin: `pin${index + 1}`,
+          source_port_id: `source_port_${index + 1}`,
+          spice_node,
+          labels: [spice_node],
+          role,
+        })),
+      },
+      characterization: {
+        version: 1,
+        family: "power_converter",
+        strategy: "behavioral",
+        requirements: [
+          {
+            requirement_id: "load_transient_pfm_pwm_boost",
+            title: "TPS63802 load transient",
+            behavior: "VOUT follows the documented 100 mA to 1 A load step",
+            analysis: "transient",
+            support: { status: "modeled" },
+            conditions: {},
+            expected: { unit: "V", min: 3.24, max: 3.4257142857142857 },
+            reference_curve: {
+              x_quantity: "time",
+              x_unit: "s",
+              y_quantity: "voltage",
+              y_unit: "V",
+              points: reference_points,
+              tolerance: 0.1,
+              electrical_binding: {
+                response: { type: "voltage", positive: "dut.VOUT", negative: "gnd" },
+                stimulus: {
+                  type: "current_step",
+                  positive: "dut.VOUT",
+                  negative: "gnd",
+                  pulse: {
+                    low: 0.1,
+                    high: 1,
+                    delay: 0.0002,
+                    rise: 0.000001,
+                    fall: 0.000001,
+                    width: 0.0004,
+                    period: 0.002,
+                  },
+                },
+              },
+            },
+            sources: [{ page: 25, locator: "Figure 10-21", statement: "Load transient" }],
+          },
+        ],
+        assumptions: [],
+        limitations: [],
+      },
+    }
+    const run107_plan: ValidationPlan = {
+      version: 1,
+      model: { entry_name: "TPS63802", pins: Object.keys(pin_roles) },
+      cases: [
+        {
+          id: "load_transient_pfm_pwm_boost",
+          requirement_ids: ["load_transient_pfm_pwm_boost"],
+          nets: [],
+          fixtures: [
+            {
+              type: "current_source",
+              id: "stimulus",
+              positive: "dut.VOUT",
+              negative: "gnd",
+              dc_amps: 0.1,
+              pulse: {
+                low: 0.1,
+                high: 1,
+                delay: 0.0002,
+                rise: 0.000001,
+                fall: 0.000001,
+                width: 0.0004,
+                period: 0.002,
+              },
+            },
+            {
+              type: "voltage_source",
+              id: "vin",
+              positive: "dut.VIN",
+              negative: "gnd",
+              dc_volts: 2.5,
+            },
+            {
+              type: "voltage_source",
+              id: "enable",
+              positive: "dut.EN",
+              negative: "gnd",
+              dc_volts: 1.8,
+            },
+            {
+              type: "resistor",
+              id: "ground",
+              positive: "dut.GND",
+              negative: "gnd",
+              resistance_ohms: 0.001,
+            },
+            {
+              type: "resistor",
+              id: "analog_ground",
+              positive: "dut.AGND",
+              negative: "gnd",
+              resistance_ohms: 0.001,
+            },
+            {
+              type: "voltage_source",
+              id: "mode_low",
+              positive: "dut.MODE",
+              negative: "gnd",
+              dc_volts: 0,
+            },
+            {
+              type: "resistor",
+              id: "anchor_fb",
+              positive: "dut.FB",
+              negative: "gnd",
+              resistance_ohms: 1e9,
+            },
+            {
+              type: "resistor",
+              id: "anchor_pg",
+              positive: "dut.PG",
+              negative: "gnd",
+              resistance_ohms: 1e9,
+            },
+            {
+              type: "resistor",
+              id: "anchor_l2",
+              positive: "dut.L2",
+              negative: "gnd",
+              resistance_ohms: 1e9,
+            },
+            {
+              type: "resistor",
+              id: "anchor_l1",
+              positive: "dut.L1",
+              negative: "gnd",
+              resistance_ohms: 1e9,
+            },
+          ],
+          analysis: { type: "transient", step: 0.000001, stop: 0.001001 },
+          observations: [
+            {
+              id: "response",
+              requirement_id: "load_transient_pfm_pwm_boost",
+              type: "voltage",
+              positive: "dut.VOUT",
+              negative: "gnd",
+              unit: "V",
+              scale: "linear",
+              reference: { type: "curve", tolerance: 0.1, points: reference_points },
+            },
+          ],
+        },
+      ],
+    }
+    const model_source = `* model-agent(107) repaired candidate e9660978375f93c5
+.SUBCKT TPS63802 EN MODE AGND FB PG VOUT L2 GND L1 VIN
+.param RTH=3.25e-2
+.param GM=1.053610276891e-2
+.param CCTRL=2.51188643151e-6
+.param RLEAK=1e+5
+.param VBASE=3.38e+0
+CCTRL CTRL GND {CCTRL}
+RCTRL CTRL GND {RLEAK}
+GCTRL GND CTRL VALUE={GM*(3.3343-V(VOUT,GND))}
+BDRV DRV GND V={min(max(V(EN,AGND)/0.8,0),1)*(VBASE+V(CTRL,GND))}
+ROUT DRV VOUT {RTH}
+RFB FB AGND 1e9
+RPG PG GND 1e9
+RL1 L1 GND 1e9
+RL2 L2 GND 1e9
+.ENDS TPS63802
+`
+    const model_dir = await mkdtemp(join(tmpdir(), "candidate-causality-run107-"))
+    temporary_directories.push(model_dir)
+    const manifest = createModelManifest({
+      model_interface: run107_contract.interface,
+      model_source,
+      simulator: "ngspice",
+    })
+    const baseline_result = await runSpiceValidation({
+      plan: run107_plan,
+      manifest,
+      model_source,
+      model_dir,
+      artifact_directory: join(model_dir, "baseline"),
+      model_contract: run107_contract,
+      ngspice: executeLocalNgspice,
+      ngspice_path: ngspice_path!,
+    })
+    const check = await checkCandidateStimulusCausality({
+      plan: run107_plan,
+      contract: run107_contract,
+      manifest,
+      model_source,
+      baseline_result,
+      model_dir,
+      ngspice: executeLocalNgspice,
+      ngspice_path: ngspice_path!,
+    })
+
+    expect(baseline_result.errors).toContainEqual(
+      expect.objectContaining({ code: "curve_tolerance_exceeded" }),
+    )
+    expect(check).toEqual({
+      required: true,
+      passed: false,
+      affected_case_count: 1,
+      affected_observation_count: 1,
+    })
+  })
 })

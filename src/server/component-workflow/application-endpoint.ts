@@ -14,3 +14,24 @@ export function canonicalizeApplicationEndpoint(value: string, path: string): st
     `${path} ${JSON.stringify(endpoint)} must use component.port syntax or an external terminal label; spaces in external labels are canonicalized as underscores`,
   )
 }
+
+const TSCIRCUIT_NET_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Maps a documented semantic net/terminal identity to a spelling accepted by
+ * tscircuit's `net.*` syntax. The evidence identity remains unchanged; this is
+ * only the source-level spelling used by generated TSX and Circuit JSON.
+ */
+export function applicationSourceNetName(identity: string): string {
+  const canonical = identity.trim()
+  if (!canonical) throw new Error("application net identity must be non-empty")
+  if (TSCIRCUIT_NET_IDENTIFIER.test(canonical)) return canonical
+  const encoded = [...canonical]
+    .map((character) =>
+      /[A-Za-z0-9_]/.test(character)
+        ? character
+        : `_x${character.codePointAt(0)!.toString(16).toUpperCase()}_`,
+    )
+    .join("")
+  return `N_${encoded}`
+}

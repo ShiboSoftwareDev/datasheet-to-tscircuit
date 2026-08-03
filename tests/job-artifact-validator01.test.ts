@@ -199,6 +199,31 @@ test("datasheet connectivity verifies named external terminals through source ne
   ])
 })
 
+test("datasheet connectivity resolves a numeric-leading semantic terminal through its safe source net", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "48V_BATT", pins: ["U1.VIN", "48V_BATT"] }],
+  }
+  const circuit = [
+    { type: "source_component", source_component_id: "u1", name: "U1" },
+    {
+      type: "source_port",
+      source_port_id: "u1_vin",
+      source_component_id: "u1",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "battery",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_battery",
+      name: "N_48V_BATT",
+      subcircuit_connectivity_map_key: "battery",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([])
+})
+
 test("datasheet connectivity rejects missing or ambiguous external source nets", () => {
   const plan = {
     components: [{ reference: "U1" }],
@@ -660,6 +685,30 @@ test("application value gate catches a changed feedback-divider value", () => {
 
   expect(getTypicalApplicationComponentValueErrors(plan, circuit)).toEqual([
     "Application component R2 has resistance 110000, expected 100k",
+  ])
+})
+
+test("application value gate rejects invented values for an undocumented shunt scalar", () => {
+  const plan = {
+    components: [{ reference: "RSHUNT", kind: "resistor" }],
+    connections: [{ net: "SENSE", pins: ["RSHUNT.pin1", "SENSE"] }],
+  }
+  const generic_symbol = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT" },
+  ] as unknown as AnyCircuitElement[]
+  const invented_zero = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT", resistance: 0 },
+  ] as unknown as AnyCircuitElement[]
+  const non_numeric = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT", resistance: null },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationComponentValueErrors(plan, generic_symbol)).toEqual([])
+  expect(getTypicalApplicationComponentValueErrors(plan, invented_zero)).toEqual([
+    "Application component RSHUNT invents resistance 0, but the documented plan has no numeric value; use a generic two-pin symbol",
+  ])
+  expect(getTypicalApplicationComponentValueErrors(plan, non_numeric)).toEqual([
+    "Application component RSHUNT invents resistance null, but the documented plan has no numeric value; use a generic two-pin symbol",
   ])
 })
 

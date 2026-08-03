@@ -1,4 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
+import { applicationSourceNetName } from "../component-workflow/application-endpoint"
 import { normalizeElectricalPinLabel } from "../pin-label-normalization"
 import type { ApplicationConnectivityPlan } from "./application-source-validation"
 import { asStringArray, type CircuitRecord } from "./footprint-plan-validation"
@@ -27,7 +28,8 @@ function resolveExpectedPort(input: {
   const { endpoint, components_by_name, ports_by_component_id, source_nets_by_name } = input
   const separator = endpoint.indexOf(".")
   if (separator < 0) {
-    const matches = source_nets_by_name.get(normalizeElectricalPinLabel(endpoint)) ?? []
+    const source_net_name = applicationSourceNetName(endpoint)
+    const matches = source_nets_by_name.get(normalizeElectricalPinLabel(source_net_name)) ?? []
     if (matches.length !== 1) {
       return `Expected external terminal ${JSON.stringify(endpoint)} resolved to ${matches.length} source nets`
     }

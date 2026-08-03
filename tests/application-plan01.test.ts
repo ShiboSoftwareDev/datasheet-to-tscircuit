@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
+import { applicationSourceNetName } from "@/server/component-workflow/application-endpoint"
 import { parseTypicalApplicationPlan } from "@/server/component-workflow/application-plan"
+import { applicationPrompt } from "@/server/component-workflow/prompts"
 
 interface DraftApplicationComponent {
   reference: string
@@ -155,6 +157,10 @@ test("printed external terminal whitespace canonicalizes without changing compon
   }
   const parsed = parseTypicalApplicationPlan(input, "LM393P")
   expect(parsed.connections[0]?.pins).toEqual(["U1.VCC", "C1.1", "48V_BATT"])
+  expect(applicationSourceNetName("48V_BATT")).toBe("N_48V_BATT")
+  expect(applicationSourceNetName("VBUS+")).toBe("N_VBUS_x2B_")
+  expect(applicationSourceNetName("GND")).toBe("GND")
+  expect(applicationPrompt({ plan: parsed })).toContain("- 48V_BATT -> net.N_48V_BATT")
 })
 
 test("application parser preserves sourced scalar objects and omits null optionals", () => {

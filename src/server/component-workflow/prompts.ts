@@ -1,4 +1,5 @@
 import type { TypicalApplicationPlan } from "./application-plan"
+import { applicationSourceNetName } from "./application-endpoint"
 
 function boundedFeedback(value: string): string {
   const max_characters = 14_000
@@ -48,18 +49,36 @@ ${input.feedback ? `\nThe last server build was rejected. Correct every item:\n$
 }
 
 export function applicationPrompt(input: { plan: TypicalApplicationPlan; feedback?: string }): string {
+  const source_net_mappings = new Map<string, string>()
+  for (const connection of input.plan.connections) {
+    source_net_mappings.set(connection.net, applicationSourceNetName(connection.net))
+    for (const endpoint of connection.pins) {
+      if (!endpoint.includes(".")) source_net_mappings.set(endpoint, applicationSourceNetName(endpoint))
+    }
+  }
+  const source_net_mapping_text = [...source_net_mappings]
+    .map(([identity, source_name]) => `- ${identity} -> net.${source_name}`)
+    .join("\n")
   return `Create the documented typical application from typical-application-plan.json.
 
 Read AGENTS.md, the plan, and component.circuit.tsx. Write only
 typical-application.circuit.tsx and import the component from ./index.circuit.
 Implement every planned part, literal value, manufacturer part number, and net.
 In a connection, a bare endpoint such as VIN or GND is the external net
-identity: connect the listed component ports to net.VIN or net.GND. Do not
-instantiate a pseudo-component or standalone <netlabel> for a bare endpoint.
+identity: connect the listed component ports to its mapped source net below. Do
+not instantiate a pseudo-component or standalone <netlabel> for a bare endpoint.
+Use the exact source-net mapping below. The left side is the immutable semantic
+identity from the plan; the right side is its tscircuit-safe TSX spelling. Never
+substitute the semantic spelling when the mapping differs.
+${source_net_mapping_text || "- no application nets"}
+If a resistor, capacitor, or inductor has no planned numeric value, do not invent
+one and do not pass its display label to a numeric prop. Represent that unknown-
+value two-terminal symbol with a generic two-pin chip and retain its planned
+reference/value label; downstream modeling will keep it explicitly non-executable.
 For schematic_only, omit application PCB footprints and placement. For verified,
 use only the exact planned footprints. Never add parts or connections absent from
 the plan, and never disable validation. The server builds and checks the result.
 
 Mode: ${input.plan.pcb_implementation ?? "schematic_only"}.
-${input.feedback ? `\nThe last server build was rejected. Correct every item:\n${boundedFeedback(input.feedback)}\n` : ""}`
+${input.feedback ? `\nThe last server build was rejected. Edit the retained source, preserve fixes that already passed, and correct every remaining item:\n${boundedFeedback(input.feedback)}\n` : ""}`
 }
