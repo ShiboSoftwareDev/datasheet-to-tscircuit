@@ -16,7 +16,19 @@ export interface ApplicationConnectivityPlan {
   connections: ExpectedApplicationConnection[]
 }
 
+interface LiteralJsxComponentProps {
+  element_name: string
+  manufacturerPartNumber?: string
+  footprint?: string
+}
+
 const COMPONENT_MODULE_PATTERN = /^\.\/index\.circuit(?:\.tsx)?$/
+
+function requiresGenericUnknownPassive(
+  component: ApplicationConnectivityPlan["components"][number],
+): boolean {
+  return !component.value?.trim() && /resistor|capacitor|inductor/i.test(component.kind ?? "")
+}
 
 function getValidatedComponentInstantiationErrors(source_file: ts.SourceFile): string[] {
   const component_imports = source_file.statements.flatMap((statement) => {
@@ -83,7 +95,10 @@ export function getTypicalApplicationSourceErrors(
     for (const component of plan.components) {
       if (component.reference.trim().toLowerCase() === "u1") continue
       const requires_part_number = Boolean(component.manufacturer_part_number)
-      if (pcb_implementation !== "verified" && !requires_part_number) continue
+      const requires_generic_unknown_passive = requiresGenericUnknownPassive(component)
+      if (pcb_implementation !== "verified" && !requires_part_number && !requires_generic_unknown_passive) {
+        continue
+      }
       const props = component_props.get(component.reference.trim().toLowerCase())
       if (!props) {
         errors.push(
@@ -92,6 +107,11 @@ export function getTypicalApplicationSourceErrors(
             : `Application component ${component.reference} with a recorded manufacturer part number must be instantiated with a literal name prop`,
         )
         continue
+      }
+      if (requires_generic_unknown_passive && props.element_name !== "chip") {
+        errors.push(
+          `Application component ${component.reference} has no documented numeric ${component.kind} value and must use a literal <chip> element`,
+        )
       }
       if (
         component.manufacturer_part_number &&
@@ -131,7 +151,7 @@ function getLiteralJsxAttribute(node: ts.JsxOpeningLikeElement, attribute_name: 
     : undefined
 }
 
-function getLiteralJsxComponentProps(source: string): Map<string, Record<string, string | undefined>> {
+function getLiteralJsxComponentProps(source: string): Map<string, LiteralJsxComponentProps> {
   const source_file = ts.createSourceFile(
     "typical-application.circuit.tsx",
     source,
@@ -139,12 +159,13 @@ function getLiteralJsxComponentProps(source: string): Map<string, Record<string,
     true,
     ts.ScriptKind.TSX,
   )
-  const components = new Map<string, Record<string, string | undefined>>()
+  const components = new Map<string, LiteralJsxComponentProps>()
   const visit = (node: ts.Node): void => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const name = getLiteralJsxAttribute(node, "name")
       if (name) {
         components.set(name.trim().toLowerCase(), {
+          element_name: node.tagName.getText(source_file),
           manufacturerPartNumber: getLiteralJsxAttribute(node, "manufacturerPartNumber"),
           footprint: getLiteralJsxAttribute(node, "footprint"),
         })

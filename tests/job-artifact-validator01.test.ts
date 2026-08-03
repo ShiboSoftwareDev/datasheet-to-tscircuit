@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import type { AnyCircuitElement } from "circuit-json"
+import { applicationSourceNetName } from "@/server/component-workflow/application-endpoint"
 import {
   getFootprintPlanErrors,
   getTypicalApplicationComponentValueErrors,
@@ -78,6 +79,32 @@ test("application source gate rejects only standalone netlabel JSX elements", ()
       'import Component from "./index.circuit"\nexport default () => <group><Component name="U1" /><capacitor name="C1" capacitance="10uF" manufacturerPartNumber="GRM188R60J106ME84" /></group>',
       "schematic_only",
       schematic_only_plan,
+    ),
+  ).toEqual([])
+})
+
+test("unknown-value passives must use the explicit generic chip representation", () => {
+  const plan = {
+    components: [{ reference: "U1" }, { reference: "RSHUNT", kind: "resistor" }],
+    connections: [{ net: "SENSE", pins: ["U1.SENSE", "RSHUNT.pin1"] }],
+  }
+  const source = (passive: string) =>
+    `import ValidatedComponent from "./index.circuit"\nexport default () => <group><ValidatedComponent name="U1" />${passive}</group>`
+
+  expect(
+    getTypicalApplicationSourceErrors(
+      source('<capacitor name="RSHUNT" capacitance="1uF" />'),
+      "schematic_only",
+      plan,
+    ),
+  ).toContain(
+    "Application component RSHUNT has no documented numeric resistor value and must use a literal <chip> element",
+  )
+  expect(
+    getTypicalApplicationSourceErrors(
+      source('<chip name="RSHUNT" value="RSHUNT" pinLabels={{ pin1: "1", pin2: "2" }} />'),
+      "schematic_only",
+      plan,
     ),
   ).toEqual([])
 })
@@ -216,7 +243,7 @@ test("datasheet connectivity resolves a numeric-leading semantic terminal throug
     {
       type: "source_net",
       source_net_id: "net_battery",
-      name: "N_48V_BATT",
+      name: applicationSourceNetName("48V_BATT"),
       subcircuit_connectivity_map_key: "battery",
     },
   ] as unknown as AnyCircuitElement[]
@@ -702,13 +729,19 @@ test("application value gate rejects invented values for an undocumented shunt s
   const non_numeric = [
     { type: "source_component", source_component_id: "rshunt", name: "RSHUNT", resistance: null },
   ] as unknown as AnyCircuitElement[]
+  const wrong_passive_kind = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT", capacitance: 1e-6 },
+  ] as unknown as AnyCircuitElement[]
 
   expect(getTypicalApplicationComponentValueErrors(plan, generic_symbol)).toEqual([])
   expect(getTypicalApplicationComponentValueErrors(plan, invented_zero)).toEqual([
-    "Application component RSHUNT invents resistance 0, but the documented plan has no numeric value; use a generic two-pin symbol",
+    "Application component RSHUNT invents passive value fields resistance=0, but the documented plan has no numeric value; use a generic two-pin chip",
   ])
   expect(getTypicalApplicationComponentValueErrors(plan, non_numeric)).toEqual([
-    "Application component RSHUNT invents resistance null, but the documented plan has no numeric value; use a generic two-pin symbol",
+    "Application component RSHUNT invents passive value fields resistance=null, but the documented plan has no numeric value; use a generic two-pin chip",
+  ])
+  expect(getTypicalApplicationComponentValueErrors(plan, wrong_passive_kind)).toEqual([
+    "Application component RSHUNT invents passive value fields capacitance=0.000001, but the documented plan has no numeric value; use a generic two-pin chip",
   ])
 })
 

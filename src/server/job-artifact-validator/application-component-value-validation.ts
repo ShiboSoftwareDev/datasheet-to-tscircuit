@@ -16,6 +16,8 @@ const SI_PREFIXES: Record<string, number> = {
   G: 1e9,
 }
 
+const PASSIVE_VALUE_FIELDS = ["resistance", "capacitance", "inductance"] as const
+
 function parseEngineeringValue(value: unknown): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined
   if (typeof value !== "string") return undefined
@@ -92,9 +94,10 @@ export function getTypicalApplicationComponentValueErrors(
     const field = componentValueField(expected.kind)
     if (!field) continue
     if (!expected.value) {
-      if (Object.hasOwn(component, field)) {
+      const invented_fields = PASSIVE_VALUE_FIELDS.filter((candidate) => Object.hasOwn(component, candidate))
+      if (invented_fields.length > 0) {
         errors.push(
-          `Application component ${expected.reference} invents ${field} ${JSON.stringify(component[field])}, but the documented plan has no numeric value; use a generic two-pin symbol`,
+          `Application component ${expected.reference} invents passive value fields ${invented_fields.map((candidate) => `${candidate}=${JSON.stringify(component[candidate])}`).join(", ")}, but the documented plan has no numeric value; use a generic two-pin chip`,
         )
       }
       continue

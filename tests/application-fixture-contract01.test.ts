@@ -254,6 +254,57 @@ export default () => (
   20_000,
 )
 
+testWithProductionTscircuit(
+  "keeps encoded-looking semantic nets distinct through installed tscircuit",
+  async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "application-net-encoding-"))
+    const first_identity = "48V_BATT"
+    const first_net = applicationSourceNetName(first_identity)
+    const second_net = applicationSourceNetName(first_net)
+    expect(second_net).not.toBe(first_net)
+    try {
+      await Promise.all([
+        Bun.write(join(workspace, "tscircuit.config.ts"), TSCIRCUIT_RUNTIME_CONFIG),
+        Bun.write(join(workspace, "tscircuit.config.json"), "{}\n"),
+        Bun.write(
+          join(workspace, "net-encoding.circuit.tsx"),
+          `export default () => (
+  <board>
+    <chip name="U1" pinLabels={{ pin1: "FIRST", pin2: "SECOND" }} />
+    <trace from="U1.FIRST" to="net.${first_net}" />
+    <trace from="U1.SECOND" to="net.${second_net}" />
+  </board>
+)
+`,
+        ),
+      ])
+
+      const build = await buildTscircuitSource({
+        workspace,
+        source_file: "net-encoding.circuit.tsx",
+        output_stem: "net-encoding",
+        tsci_bin: tsciPath!,
+        process_runner: new BunProcessRunner(),
+        signal: new AbortController().signal,
+        build_args: ["--disable-pcb"],
+        checks: ["netlist"],
+      })
+      const source_net_names = build.circuit_json.flatMap((element) =>
+        element.type === "source_net" && "name" in element && typeof element.name === "string"
+          ? [element.name]
+          : [],
+      )
+
+      expect(build.errors).toEqual([])
+      expect(source_net_names).toContain(first_net)
+      expect(source_net_names).toContain(second_net)
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
+  },
+  20_000,
+)
+
 test("server-owned application fixture contract merges printed GND and AGND aliases", () => {
   const plan = run93Plan()
   const ground = plan.connections.find(({ net }) => net === "GND")!

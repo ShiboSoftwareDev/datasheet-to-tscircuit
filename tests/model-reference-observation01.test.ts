@@ -37,10 +37,12 @@ import {
   verifyReferenceGraphObservationPixels,
 } from "../src/server/model-workflow/reference-graph-observation"
 import {
+  assertReferenceGraphObservationVerified,
   findPriorReferenceObservationCandidates,
   inventoryReferenceGraphs,
   sourceProofRejectionDiagnostics,
 } from "../src/server/model-workflow/characterization/source-inventory"
+import { runCharacterizer } from "../src/server/model-workflow/characterization/run-characterizer"
 import { canonicalizeCharacterizationReferenceCrops } from "../src/server/model-workflow/reference-graph-crop-proof"
 import {
   assertObserverFoundEligibleTimeDomainGraph,
@@ -634,6 +636,125 @@ test("source-proof failures identify every agent-claimed eligible graph before c
   ).toEqual([
     "load_transient: The crop does not prove its printed time scale. Missing source proofs: time division scale, figure-local caption. Do not demote a printed graph merely to bypass source verification.",
   ])
+})
+
+test("pixel and source-proof failures jointly reject an observer artifact before characterization", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  let failure: unknown
+  try {
+    assertReferenceGraphObservationVerified({
+      observation,
+      pixel_rejection: new Error("12 traced points are off the rendered waveform"),
+      source_proof: {
+        version: 1,
+        source_pdf_sha256,
+        results: [
+          {
+            status: "ineligible",
+            graph_id: "load_transient",
+            code: "axis_calibration_unproven",
+            reason: "The crop does not prove its printed voltage scale.",
+            diagnostic: {
+              recognized_measurements: ["100 us/div"],
+              missing_proofs: ["declared_voltage_scale_matches_source"],
+            },
+          },
+        ],
+      },
+    })
+  } catch (error) {
+    failure = error
+  }
+  expect(failure).toBeInstanceOf(Error)
+  const message = failure instanceof Error ? failure.message : ""
+  expect(message).toContain("Independent reference graph verification failed")
+  expect(message).toContain("12 traced points are off the rendered waveform")
+  expect(message).toContain("declared_voltage_scale_matches_source")
+})
+
+test("characterization cannot write a model contract from an unverified axis proof", async () => {
+  const root = await mkdtemp(join(tmpdir(), "model-characterizer-proof-gate-"))
+  temporary_directories.push(root)
+  const model_dir = join(root, "spice")
+  const attempt_dir = join(model_dir, "attempt")
+  await mkdir(attempt_dir, { recursive: true })
+  const application_fixture = compileApplicationFixtureContract({
+    plan: {
+      version: 4,
+      availability: "not_present",
+      title: "No documented application",
+      description: "No complete application was found.",
+      source_references: [{ page: 1 }],
+      searched_sections: ["application information"],
+      components: [],
+      connections: [],
+    },
+    model_interface,
+    source_plan_sha256: "1".repeat(64),
+    source_pdf_sha256,
+  })
+  const model_run_store = new ModelRunStore()
+  model_run_store.createModelRun({
+    model_run_id: "proof_gate",
+    job_id: "proof_gate_job",
+    model_dir,
+    effort_multiplier: 1,
+  })
+
+  await expect(
+    runCharacterizer({
+      context: {
+        model_run_id: "proof_gate",
+        job_id: "proof_gate_job",
+        job_dir: root,
+        model_dir,
+        use_openai: false,
+        max_repair_attempts: 1,
+        invocation_id: "proof_gate_invocation",
+      },
+      services: {
+        job_store: new JobStore(),
+        model_run_store,
+        agent_client: {
+          async run() {
+            throw new Error("characterization proof gate must not call an agent")
+          },
+        },
+        process_runner: {
+          async run() {
+            throw new Error("characterization proof gate must not render evidence")
+          },
+        },
+        strategy_registry: new ModelStrategyRegistry(),
+        tsci_bin: "unused-tsci",
+        ngspice_bin: "unused-ngspice",
+        ngspice_executor: async () => {
+          throw new Error("characterization proof gate must not invoke ngspice")
+        },
+      },
+      attempt_dir,
+      debug_dir: join(root, "debug"),
+      signal: new AbortController().signal,
+      model_interface,
+      application_fixture,
+      time_graph_hints_path: join(attempt_dir, "time-graph-hints.json"),
+      source_observation: parseReferenceGraphObservation(validObservationValue(), discovery, model_interface),
+      source_proof: {
+        version: 1,
+        source_pdf_sha256,
+        results: [
+          {
+            status: "ineligible",
+            graph_id: "load_transient",
+            code: "axis_calibration_unproven",
+            reason: "The printed voltage scale is unverified.",
+            diagnostic: { recognized_measurements: [], missing_proofs: ["voltage scale"] },
+          },
+        ],
+      },
+    }),
+  ).rejects.toThrow("does not have exactly one verified axis receipt")
+  expect(await Bun.file(join(attempt_dir, "model-contract.json")).exists()).toBe(false)
 })
 
 test("source-proof correction feedback preserves server-recognized calibration evidence", () => {

@@ -69,7 +69,9 @@ identity: connect the listed component ports to its mapped source net below. Do
 not instantiate a pseudo-component or standalone <netlabel> for a bare endpoint.
 Use the exact source-net mapping below. The left side is the immutable semantic
 identity from the plan; the right side is its tscircuit-safe TSX spelling. Never
-substitute the semantic spelling when the mapping differs.
+substitute the semantic spelling when the mapping differs. When one connection
+lists distinct mapped identities, connect all of them to that same planned node;
+do not choose one identity and silently drop the others.
 ${source_net_mapping_text || "- no application nets"}
 If a resistor, capacitor, or inductor has no planned numeric value, do not invent
 one and do not pass its display label to a numeric prop. Represent that unknown-

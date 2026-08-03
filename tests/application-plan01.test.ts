@@ -152,15 +152,25 @@ test("application nets reject duplicate endpoints and references to undeclared p
 test("printed external terminal whitespace canonicalizes without changing component ports", () => {
   const input = documentedPlan()
   input.connections[0] = {
-    net: "48V_BATT",
+    net: "48V BATT",
     pins: ["LM393P.VCC", "C1.1", "48V BATT"],
   }
   const parsed = parseTypicalApplicationPlan(input, "LM393P")
+  expect(parsed.connections[0]?.net).toBe("48V_BATT")
   expect(parsed.connections[0]?.pins).toEqual(["U1.VCC", "C1.1", "48V_BATT"])
-  expect(applicationSourceNetName("48V_BATT")).toBe("N_48V_BATT")
-  expect(applicationSourceNetName("VBUS+")).toBe("N_VBUS_x2B_")
+  expect(applicationSourceNetName("48V_BATT")).toBe("N_X34_38_56_5F_42_41_54_54")
+  expect(applicationSourceNetName("VBUS+")).toBe("N_X56_42_55_53_2B")
   expect(applicationSourceNetName("GND")).toBe("GND")
-  expect(applicationPrompt({ plan: parsed })).toContain("- 48V_BATT -> net.N_48V_BATT")
+  expect(applicationPrompt({ plan: parsed })).toContain("- 48V_BATT -> net.N_X34_38_56_5F_42_41_54_54")
+})
+
+test("application source-net encoding is injective across encoded-looking semantic names", () => {
+  for (const [semantic, encoded_looking] of [
+    ["48V_BATT", "N_X34_38_56_5F_42_41_54_54"],
+    ["VBUS+", "N_X56_42_55_53_2B"],
+  ] as const) {
+    expect(applicationSourceNetName(semantic)).not.toBe(applicationSourceNetName(encoded_looking))
+  }
 })
 
 test("application parser preserves sourced scalar objects and omits null optionals", () => {

@@ -336,7 +336,7 @@ BOUT OUT GND V=1+1m*V(IN)
     ).toBe(false)
   })
 
-  testWithNgspice("replays model-agent-107 and rejects its under-coupled load response", async () => {
+  testWithNgspice("keeps model-agent-107's under-coupled load response rejected", async () => {
     const reference_points = [
       { x: 0, y: 3.337142857142857 },
       { x: 0.00019553072625698323, y: 3.3314285714285714 },

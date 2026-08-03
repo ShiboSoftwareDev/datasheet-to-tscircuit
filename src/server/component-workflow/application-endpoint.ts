@@ -16,6 +16,7 @@ export function canonicalizeApplicationEndpoint(value: string, path: string): st
 }
 
 const TSCIRCUIT_NET_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
+const ENCODED_NET_PREFIX = "N_X"
 
 /**
  * Maps a documented semantic net/terminal identity to a spelling accepted by
@@ -25,13 +26,11 @@ const TSCIRCUIT_NET_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 export function applicationSourceNetName(identity: string): string {
   const canonical = identity.trim()
   if (!canonical) throw new Error("application net identity must be non-empty")
-  if (TSCIRCUIT_NET_IDENTIFIER.test(canonical)) return canonical
+  if (TSCIRCUIT_NET_IDENTIFIER.test(canonical) && !canonical.toUpperCase().startsWith(ENCODED_NET_PREFIX)) {
+    return canonical
+  }
   const encoded = [...canonical]
-    .map((character) =>
-      /[A-Za-z0-9_]/.test(character)
-        ? character
-        : `_x${character.codePointAt(0)!.toString(16).toUpperCase()}_`,
-    )
-    .join("")
-  return `N_${encoded}`
+    .map((character) => character.codePointAt(0)!.toString(16).toUpperCase())
+    .join("_")
+  return `${ENCODED_NET_PREFIX}${encoded}`
 }

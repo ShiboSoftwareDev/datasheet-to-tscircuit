@@ -127,6 +127,24 @@ export function sourceProofRejectionDiagnostics(
   })
 }
 
+export function assertReferenceGraphObservationVerified(input: {
+  observation: ReferenceGraphObservation
+  source_proof: ReferenceGraphSourceProof
+  pixel_rejection?: Error
+}): void {
+  const diagnostics = [
+    ...(input.pixel_rejection
+      ? [
+          `Reference curve pixels do not match the canonical datasheet render: ${input.pixel_rejection.message}`,
+        ]
+      : []),
+    ...sourceProofRejectionDiagnostics(input.observation, input.source_proof),
+  ]
+  if (diagnostics.length > 0) {
+    throw new Error(`Independent reference graph verification failed:\n${diagnostics.join("\n")}`)
+  }
+}
+
 async function buildSourceProof(input: {
   observation: ReferenceGraphObservation
   datasheet_path: string
@@ -197,6 +215,7 @@ export async function inventoryReferenceGraphs(input: {
         model_interface,
         application_fixture,
       )
+      let pixel_rejection: Error | undefined
       try {
         await verifyReferenceGraphObservationPixels({
           observation,
@@ -207,10 +226,7 @@ export async function inventoryReferenceGraphs(input: {
         })
       } catch (error) {
         signal.throwIfAborted()
-        await logOutput(
-          "system",
-          `Reused graph curves are still an inspectable draft: ${error instanceof Error ? error.message : String(error)}\n`,
-        )
+        pixel_rejection = error instanceof Error ? error : new Error(String(error))
       }
       const source_proof = await buildSourceProof({
         observation,
@@ -218,13 +234,7 @@ export async function inventoryReferenceGraphs(input: {
         services,
         signal,
       })
-      const source_rejections = sourceProofRejectionDiagnostics(observation, source_proof)
-      if (source_rejections.length > 0) {
-        await logOutput(
-          "system",
-          `Reused graph axes remain an inspectable draft:\n${source_rejections.join("\n")}\n`,
-        )
-      }
+      assertReferenceGraphObservationVerified({ observation, source_proof, pixel_rejection })
       assertObserverFoundEligibleTimeDomainGraph(observation)
       await writeJson(join(attempt_dir, "model-reference-observation.json"), observation)
       await writeJson(join(attempt_dir, "model-reference-source-proof.json"), source_proof)
@@ -308,19 +318,7 @@ export async function inventoryReferenceGraphs(input: {
         services,
         signal,
       })
-      const source_rejections = sourceProofRejectionDiagnostics(observation, source_proof)
-      if (pixel_rejection) {
-        await logOutput(
-          "system",
-          `Reference curves are published as an inspectable draft while pixel alignment remains imperfect: ${pixel_rejection.message}\n`,
-        )
-      }
-      if (source_rejections.length > 0) {
-        await logOutput(
-          "system",
-          `Reference axes are published as an inspectable draft while OCR calibration remains imperfect:\n${source_rejections.join("\n")}\n`,
-        )
-      }
+      assertReferenceGraphObservationVerified({ observation, source_proof, pixel_rejection })
       return {
         observation,
         source_proof,

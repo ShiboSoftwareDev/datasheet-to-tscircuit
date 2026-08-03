@@ -10,7 +10,6 @@ import { writeJson } from "../stage-helpers"
 import { materializeModelEvidencePages } from "../model-evidence-pages"
 import type { ReferenceGraphSourceProof } from "../reference-graph-axis-proof"
 import {
-  eligibleObservedGraphs,
   type ReferenceGraphObservation,
   verifyCharacterizationGraphEvidence,
   verifyReferenceGraphTracePixels,
@@ -45,20 +44,10 @@ export async function runCharacterizer(input: {
     observation: input.source_observation,
   })
   services.strategy_registry.require(characterization.strategy, characterization.family)
-  const verified_source_graph_ids = new Set(
-    input.source_proof.results.flatMap((result) => (result.status === "verified" ? [result.graph_id] : [])),
-  )
-  const unverified_source_graph_ids = eligibleObservedGraphs(input.source_observation)
-    .map(({ graph_id }) => graph_id)
-    .filter((graph_id) => !verified_source_graph_ids.has(graph_id))
-  const source_diagnostic =
-    unverified_source_graph_ids.length > 0
-      ? `Canonical PDF axis calibration remains incomplete for: ${unverified_source_graph_ids.join(", ")}`
-      : undefined
   const numeric_verification = verifyCharacterizationGraphEvidence({
     characterization,
     observation: input.source_observation,
-    ...(source_diagnostic ? {} : { source_proof: input.source_proof }),
+    source_proof: input.source_proof,
   })
   const with_evidence = await materializeModelEvidencePages({
     workspace: attempt_dir,
@@ -69,40 +58,12 @@ export async function runCharacterizer(input: {
     on_output: (stream, message) =>
       services.model_run_store.appendLog(context.model_run_id, { stream, message }).then(() => undefined),
   })
-  let pixel_verification: unknown
-  let pixel_diagnostic: string | undefined
-  try {
-    pixel_verification = await verifyReferenceGraphTracePixels({
-      characterization: with_evidence,
-      observation: input.source_observation,
-      numeric_verification,
-      evidence_dir: join(attempt_dir, "evidence"),
-    })
-  } catch (error) {
-    signal.throwIfAborted()
-    pixel_diagnostic = error instanceof Error ? error.message : String(error)
-    await services.model_run_store.appendLog(context.model_run_id, {
-      stream: "system",
-      message: `Reference pixel trace remains a draft; model generation and visible comparison will continue. ${pixel_diagnostic}\n`,
-    })
-  }
-  if (source_diagnostic) {
-    await services.model_run_store.appendLog(context.model_run_id, {
-      stream: "system",
-      message: `Reference axis proof remains a draft; model generation and visible comparison will continue. ${source_diagnostic}\n`,
-    })
-  }
-  const diagnostics = [source_diagnostic, pixel_diagnostic].filter(
-    (diagnostic): diagnostic is string => diagnostic !== undefined,
-  )
-  const verification =
-    diagnostics.length > 0
-      ? {
-          version: 1,
-          status: "draft",
-          diagnostics,
-        }
-      : pixel_verification
+  const verification = await verifyReferenceGraphTracePixels({
+    characterization: with_evidence,
+    observation: input.source_observation,
+    numeric_verification,
+    evidence_dir: join(attempt_dir, "evidence"),
+  })
   await Promise.all([
     writeJson(join(attempt_dir, "model-characterization.json"), with_evidence),
     writeJson(join(attempt_dir, "model-reference-verification.json"), verification),

@@ -396,7 +396,9 @@ async function proveGraphAxis(input: {
 
 /**
  * Builds a deterministic, source-owned calibration receipt. Unsupported or
- * ambiguous graph axes are data-level ineligibility, not agent retry errors.
+ * ambiguous graph axes are returned as typed data-level ineligibility so the
+ * observer stage can provide precise correction feedback without confusing the
+ * result with an OCR/runtime infrastructure failure.
  */
 export async function buildReferenceGraphSourceProof(input: {
   observation: ReferenceGraphObservation

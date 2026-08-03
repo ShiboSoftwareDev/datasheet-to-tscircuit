@@ -255,8 +255,19 @@ function canonicalizeTypicalApplicationPlan(
   }))
 
   const seen_endpoints = new Map<string, string>()
-  const external_source_net_identities = new Map<string, string>()
+  const source_net_identities = new Map<string, string>()
+  const registerSourceNetIdentity = (identity: string): void => {
+    const source_net_name = applicationSourceNetName(identity).toLowerCase()
+    const earlier_identity = source_net_identities.get(source_net_name)
+    if (earlier_identity !== undefined && earlier_identity.toLowerCase() !== identity.toLowerCase()) {
+      throw new Error(
+        `application net identities ${earlier_identity} and ${identity} collide after tscircuit net-name encoding`,
+      )
+    }
+    source_net_identities.set(source_net_name, identity)
+  }
   for (const connection of connections) {
+    registerSourceNetIdentity(connection.net)
     if (connection.pins.length < 2) {
       throw new Error(
         `typical application net ${connection.net} must retain at least two endpoints after canonicalization`,
@@ -276,16 +287,7 @@ function canonicalizeTypicalApplicationPlan(
         )
       }
       seen_endpoints.set(key, connection.net)
-      if (!endpoint.includes(".")) {
-        const source_net_name = applicationSourceNetName(endpoint).toLowerCase()
-        const earlier_identity = external_source_net_identities.get(source_net_name)
-        if (earlier_identity !== undefined && earlier_identity.toLowerCase() !== endpoint.toLowerCase()) {
-          throw new Error(
-            `external terminals ${earlier_identity} and ${endpoint} collide after tscircuit net-name encoding`,
-          )
-        }
-        external_source_net_identities.set(source_net_name, endpoint)
-      }
+      if (!endpoint.includes(".")) registerSourceNetIdentity(endpoint)
     }
   }
   return {
@@ -569,7 +571,13 @@ export function parseTypicalApplicationPlan(
       throw new Error(`typical application connections[${index}] must be a structured net object`)
     }
     assertOnlyKeys(connection, ["net", "pins"], `typical application connections[${index}]`)
-    const net = requiredText(connection.net, `connections[${index}].net`)
+    const net_path = `connections[${index}].net`
+    const net = canonicalizeApplicationEndpoint(requiredText(connection.net, net_path), net_path)
+    if (net.includes(".")) {
+      throw new Error(
+        `typical application ${net_path} must be a bare net identity, not component.port syntax`,
+      )
+    }
     if (seen_nets.has(net.toLowerCase())) {
       throw new Error(`typical application net ${net} is listed more than once`)
     }
