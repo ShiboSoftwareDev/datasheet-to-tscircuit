@@ -14,7 +14,11 @@ import {
 import type { AgentClient } from "../src/server/infrastructure/agent"
 import { JobStore } from "../src/server/job-store"
 import { ModelRunStore } from "../src/server/model-run-store"
-import { compileApplicationFixtureContract, ModelStrategyRegistry } from "../src/server/modeling"
+import {
+  type ApplicationFixtureContract,
+  compileApplicationFixtureContract,
+  ModelStrategyRegistry,
+} from "../src/server/modeling"
 import { parseModelReferenceElectricalBinding } from "../src/server/modeling/reference-electrical-binding"
 import type {
   ModelCharacterization,
@@ -60,8 +64,17 @@ const archived_run94_pdf = join(
   import.meta.dir,
   "../.runtime/jobs/43374555-7ee7-4a2d-b30d-658d9d5f1506/spice/datasheet.pdf",
 )
+const archived_run102_root = join(
+  import.meta.dir,
+  "../.runtime/jobs/8354107b-f70b-484b-ae56-6ef07d7c6610/spice",
+)
+const archived_run102_observation = join(
+  archived_run102_root,
+  "runs/07f2fb3a-9e4b-4ba0-98bb-da75d28291b9/.pipeline/stages/03-characterize/reference-observer/rejected-attempts/1/model-reference-observation.json",
+)
 const testWithArchivedRun93Pdf = Bun.which("pdftotext") && existsSync(archived_run93_pdf) ? test : test.skip
 const testWithArchivedRun94Pdf = Bun.which("pdftotext") && existsSync(archived_run94_pdf) ? test : test.skip
+const testWithArchivedRun102Observation = existsSync(archived_run102_observation) ? test : test.skip
 
 const model_interface: ModelInterface = {
   version: 1,
@@ -380,6 +393,7 @@ test("reference observer contract publishes exact graph keys and actionable unkn
   expect(prompt).not.toContain("figure_10_21")
   expect(prompt).toContain("Do not invent aliases such as pdf_page, figure")
   expect(prompt).toContain("Every reviewed_hints[] entry requires reason")
+  expect(prompt).toContain("Each pixel is one finite scalar, never an {x,y} object")
   const correction_prompt = buildReferenceGraphObserverPrompt(
     "load_transient: 14/16 calibrated points are off trace",
   )
@@ -399,6 +413,65 @@ test("reference observer contract publishes exact graph keys and actionable unkn
     /unsupported fields: pdf_page\. Allowed fields: graph_id, page, locator/,
   )
 })
+
+test("reference observation deterministically normalizes coordinate-shaped axis pixels", () => {
+  const value = validObservationValue()
+  const curve = value.graphs[0]!.digitized_curve
+  curve.x_axis.first.pixel = { x: 10, y: 90 } as unknown as number
+  curve.x_axis.second.pixel = { x: 190, y: 90 } as unknown as number
+  curve.y_axis.first.pixel = { x: 10, y: 90 } as unknown as number
+  curve.y_axis.second.pixel = { x: 10, y: 10 } as unknown as number
+
+  const parsed = parseReferenceGraphObservation(value, discovery, model_interface)
+  expect(parsed.graphs[0]!.digitized_curve).toMatchObject({
+    x_axis: { first: { pixel: 10 }, second: { pixel: 190 } },
+    y_axis: { first: { pixel: 90 }, second: { pixel: 10 } },
+  })
+
+  const ambiguous = validObservationValue()
+  ambiguous.graphs[0]!.digitized_curve.x_axis.first.pixel = { x: 10 } as unknown as number
+  expect(() => parseReferenceGraphObservation(ambiguous, discovery, model_interface)).toThrow(
+    /x_axis\.first\.pixel\.y must be a finite number/,
+  )
+})
+
+testWithArchivedRun102Observation(
+  "replays the exact model-agent 102 graph inventory without spending a schema repair",
+  async () => {
+    const [value, run_discovery, run_interface, run_application_fixture] = await Promise.all([
+      Bun.file(archived_run102_observation).json(),
+      Bun.file(
+        join(archived_run102_root, "attempts/07f2fb3a-9e4b-4ba0-98bb-da75d28291b9/time-graph-hints.json"),
+      ).json(),
+      Bun.file(join(archived_run102_root, "model-interface.json")).json(),
+      Bun.file(join(archived_run102_root, "application-fixture-contract.json")).json(),
+    ])
+    const parsed = parseReferenceGraphObservation(
+      value,
+      run_discovery as TimeGraphDiscovery,
+      run_interface as ModelInterface,
+      run_application_fixture as ApplicationFixtureContract,
+    )
+    const eligible = eligibleObservedGraphs(parsed)
+
+    expect(eligible.map(({ graph_id }) => graph_id)).toEqual([
+      "datasheet_figure_10_21",
+      "datasheet_figure_10_22",
+      "datasheet_figure_10_24",
+      "datasheet_figure_10_25",
+    ])
+    for (const graph of eligible) {
+      expect(graph.digitized_curve.x_axis).toMatchObject({
+        first: { pixel: 37 },
+        second: { pixel: 574 },
+      })
+      expect(graph.digitized_curve.y_axis).toMatchObject({
+        first: { pixel: 300 },
+        second: { pixel: 18 },
+      })
+    }
+  },
+)
 
 test("reference graph inventory sends retained validation errors to every correction attempt", async () => {
   const root = await mkdtemp(join(tmpdir(), "model-reference-feedback-test-"))

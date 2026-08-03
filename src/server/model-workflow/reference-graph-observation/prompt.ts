@@ -85,7 +85,9 @@ graphs may omit digitized_curve; current/other graphs must omit it. digitized_cu
   crop's leftmost calibrated time is 0 s while preserving the displayed span and
   edge offsets. Never emit a negative x range, x anchor, traced x value, or PULSE delay.
 - x_axis and y_axis as {scale:"linear",first:{pixel,value},second:{pixel,value}}.
-  Pixel coordinates are relative to the exact graph crop, not the full PDF page.
+  Each pixel is one finite scalar, never an {x,y} object: x_axis.pixel is the
+  crop-local horizontal x coordinate and y_axis.pixel is the crop-local vertical
+  y coordinate. Pixel coordinates are relative to the exact graph crop, not the full PDF page.
   Put the minimum-value anchor first and maximum-value anchor second. Use two visible,
   widely separated tick/grid positions on each axis.
 - trace_color as integer RGB plus tolerance from 4 through 120

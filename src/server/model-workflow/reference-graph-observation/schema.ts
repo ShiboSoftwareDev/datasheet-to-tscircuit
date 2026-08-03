@@ -86,21 +86,39 @@ function parseAxisRange(value: unknown, path: string): ReferenceGraphAxisRange {
   return { min, max }
 }
 
-function parseAxisAnchor(value: unknown, path: string): ReferenceGraphAxisAnchor {
+function parseAxisPixel(value: unknown, path: string, axis_name: "x_axis" | "y_axis"): number {
+  if (!isRecord(value)) return finiteNumber(value, path)
+  rejectUnknownKeys(value, ["x", "y"], path)
+  const coordinate = {
+    x: finiteNumber(value.x, `${path}.x`),
+    y: finiteNumber(value.y, `${path}.y`),
+  }
+  return axis_name === "x_axis" ? coordinate.x : coordinate.y
+}
+
+function parseAxisAnchor(
+  value: unknown,
+  path: string,
+  axis_name: "x_axis" | "y_axis",
+): ReferenceGraphAxisAnchor {
   if (!isRecord(value)) throw new Error(`${path} must be an object`)
   rejectUnknownKeys(value, ["pixel", "value"], path)
   return {
-    pixel: finiteNumber(value.pixel, `${path}.pixel`),
+    pixel: parseAxisPixel(value.pixel, `${path}.pixel`, axis_name),
     value: finiteNumber(value.value, `${path}.value`),
   }
 }
 
-function parseAxisCalibration(value: unknown, path: string): ReferenceGraphAxisCalibration {
+function parseAxisCalibration(
+  value: unknown,
+  path: string,
+  axis_name: "x_axis" | "y_axis",
+): ReferenceGraphAxisCalibration {
   if (!isRecord(value)) throw new Error(`${path} must be an object`)
   rejectUnknownKeys(value, ["scale", "first", "second"], path)
   if (value.scale !== "linear") throw new Error(`${path}.scale must be linear`)
-  const first = parseAxisAnchor(value.first, `${path}.first`)
-  const second = parseAxisAnchor(value.second, `${path}.second`)
+  const first = parseAxisAnchor(value.first, `${path}.first`, axis_name)
+  const second = parseAxisAnchor(value.second, `${path}.second`, axis_name)
   if (first.pixel === second.pixel) throw new Error(`${path} calibration pixels must be distinct`)
   if (first.value === second.value) throw new Error(`${path} calibration values must be distinct`)
   return { scale: "linear", first, second }
@@ -182,8 +200,8 @@ function parseDigitizedCurve(
   if (value.y_unit !== "V") throw new Error(`${path}.y_unit must be V`)
   const x_range = parseAxisRange(value.x_range, `${path}.x_range`)
   const y_range = parseAxisRange(value.y_range, `${path}.y_range`)
-  const x_axis = parseAxisCalibration(value.x_axis, `${path}.x_axis`)
-  const y_axis = parseAxisCalibration(value.y_axis, `${path}.y_axis`)
+  const x_axis = parseAxisCalibration(value.x_axis, `${path}.x_axis`, "x_axis")
+  const y_axis = parseAxisCalibration(value.y_axis, `${path}.y_axis`, "y_axis")
   if (!(x_axis.second.value > x_axis.first.value)) {
     throw new Error(`${path}.x_axis anchors must progress from minimum to maximum time`)
   }
