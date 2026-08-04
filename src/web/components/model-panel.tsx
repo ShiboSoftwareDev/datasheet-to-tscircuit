@@ -570,6 +570,7 @@ export function ModelPanel({
   ).length
   const progress = stage_results.length > 0 ? (completed_stages / stage_results.length) * 100 : 0
   const is_running = !model_run.is_complete
+  const is_restartable = model_run.is_complete
   const is_waiting = model_run.status === "queued" || model_run.status === "waiting_for_component"
   const current_task = model_run.error_message ?? model_run.progress?.message ?? getStatusCopy(model_run)
   const header_stats = getModelHeaderStats(model_run)
@@ -605,14 +606,10 @@ export function ModelPanel({
 
         <div className="model-header-actions">
           <ModelSourceDialog model_run={model_run} />
-          {(model_run.status === "failed" || model_run.status === "cancelled") && (
+          {is_restartable && (
             <button type="button" disabled={is_retrying} onClick={retry}>
               {is_retrying ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}
-              {is_retrying
-                ? "Retrying…"
-                : model_run.status === "cancelled"
-                  ? "Resume stopped run"
-                  : "Retry failed run"}
+              {is_retrying ? "Restarting…" : "Restart SPICE generation"}
             </button>
           )}
           <button

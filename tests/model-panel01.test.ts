@@ -361,3 +361,51 @@ test("model panel keeps compact progress without rendering the execution trace",
   expect(html).not.toContain("Model execution trace")
   expect(html).not.toContain("internal only stage")
 })
+
+test("model panel offers to restart successful SPICE generation", () => {
+  const timestamp = "2026-08-04T00:00:00.000Z"
+  const html = renderToStaticMarkup(
+    createElement(ModelPanel, {
+      job: {
+        job_id: "job-model-complete",
+        file_name: "TPS63802.pdf",
+        created_at: timestamp,
+        completed_at: timestamp,
+        display_status: "complete",
+        is_complete: true,
+        has_errors: false,
+        logs: [],
+      },
+      model_run_state: {
+        model_run: {
+          model_run_id: "model-complete",
+          job_id: "job-model-complete",
+          created_at: timestamp,
+          updated_at: timestamp,
+          completed_at: timestamp,
+          status: "complete",
+          is_complete: true,
+          has_errors: false,
+          effort_multiplier: 1,
+          elapsed_time_ms: 1_000,
+          iteration: 0,
+          logs: [],
+          progress_history: [],
+          preview_options: [],
+        },
+        is_loading: false,
+        is_starting: false,
+        is_extending: false,
+        is_cancelling: false,
+        is_retrying: false,
+        error_message: undefined,
+        start: async () => undefined,
+        extend: async () => undefined,
+        cancel: async () => undefined,
+        retry: async () => undefined,
+      },
+    } as Parameters<typeof ModelPanel>[0]),
+  )
+
+  expect(html).toContain("Restart SPICE generation")
+})

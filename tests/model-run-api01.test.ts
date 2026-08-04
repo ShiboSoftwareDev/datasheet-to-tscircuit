@@ -175,6 +175,46 @@ test("model API retries a stopped run without adding repair budget", async () =>
   await rm(job_dir, { recursive: true, force: true })
 })
 
+test("model API restarts a successful run without adding repair budget", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-api-success-restart-"))
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  job_store.createJob({ job_id: "job_success", job_dir, file_name: "sensor.pdf" })
+  model_run_store.createModelRun({
+    model_run_id: "model_success",
+    job_id: "job_success",
+    model_dir: join(job_dir, "spice"),
+    effort_multiplier: 4,
+  })
+  model_run_store.finishSegment("model_success", {
+    status: "complete",
+    is_complete: true,
+    has_errors: false,
+  })
+  const started_run_ids: string[] = []
+  const handle = createModelRunApiHandler({
+    job_store,
+    model_run_store,
+    agent_bin: "unused-agent",
+    tsci_bin: "unused-tsci",
+    run_model: async ({ model_run_id }) => {
+      started_run_ids.push(model_run_id)
+    },
+  })
+
+  const response = await handle(
+    new Request("http://localhost/api/model-run/retry?job_id=job_success", { method: "POST" }),
+  )
+  const body = (await response?.json()) as {
+    model_run: { status: string; effort_multiplier: number }
+  }
+
+  expect(response?.status).toBe(202)
+  expect(body.model_run).toMatchObject({ status: "queued", effort_multiplier: 4 })
+  expect(started_run_ids).toEqual(["model_success"])
+  await rm(job_dir, { recursive: true, force: true })
+})
+
 test("model lifecycle log failures cannot strand create, retry, or restarted extension", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "datasheet-model-api-log-observer-"))
   const job_store = new JobStore()

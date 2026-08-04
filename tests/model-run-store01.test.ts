@@ -158,6 +158,41 @@ test("ModelRunStore retries a stopped run at the maximum repair budget", async (
   }
 })
 
+test("ModelRunStore restarts successful and timed-out runs without adding repair budget", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-store-finished-restart-"))
+  const store = new ModelRunStore()
+  try {
+    for (const status of ["complete", "timed_out"] as const) {
+      const model_run_id = `model_${status}`
+      store.createModelRun({
+        model_run_id,
+        job_id: `job_${status}`,
+        model_dir: join(model_dir, status),
+        effort_multiplier: 4,
+      })
+      store.finishSegment(model_run_id, {
+        status,
+        is_complete: true,
+        has_errors: status === "timed_out",
+        error_message: status === "timed_out" ? "fixture timed out" : undefined,
+      })
+
+      const restarted = store.retryModelRun(model_run_id)
+
+      expect(restarted.status).toBe("retried")
+      expect(store.getModelRun(model_run_id)).toMatchObject({
+        status: "queued",
+        is_complete: false,
+        has_errors: false,
+        effort_multiplier: 4,
+      })
+      expect(store.getModelRun(model_run_id)?.error_message).toBeUndefined()
+    }
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
 test("ModelRunStore permits only one active execution per model run", async () => {
   const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-execution-lease-"))
   const store = new ModelRunStore()

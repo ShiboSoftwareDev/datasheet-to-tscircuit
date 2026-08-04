@@ -24,10 +24,10 @@ export async function retryModelRun(request_url: URL, context: ModelRunApiContex
       status: 404,
     })
   }
-  if (current_run.status !== "failed" && current_run.status !== "cancelled") {
+  if (!current_run.is_complete) {
     return errorResponse({
       error_code: "model_run_not_retryable",
-      message: "Only a failed or stopped SPICE model run can be retried.",
+      message: "Only a finished SPICE model run can be restarted.",
       status: 409,
     })
   }
@@ -63,7 +63,7 @@ export async function retryModelRun(request_url: URL, context: ModelRunApiContex
   if (result.status === "not_retryable") {
     return errorResponse({
       error_code: "model_run_not_retryable",
-      message: "Only a failed or stopped SPICE model run can be retried.",
+      message: "Only a finished SPICE model run can be restarted.",
       status: 409,
     })
   }
@@ -71,7 +71,7 @@ export async function retryModelRun(request_url: URL, context: ModelRunApiContex
   appendModelRunLogBestEffort(
     execution_context,
     current_run.model_run_id,
-    `Starting a new full pipeline trace after ${current_run.status === "cancelled" ? "the stopped run" : "failure"}; prior contracts, plans, candidates, and debug bundles remain preserved.\n`,
+    `Restarting SPICE generation after ${current_run.status === "complete" ? "successful completion" : current_run.status === "cancelled" ? "the stopped run" : current_run.status === "timed_out" ? "the run timed out" : "failure"}; prior contracts, plans, candidates, and debug bundles remain preserved.\n`,
   )
   launchModelRunner(current_run.model_run_id, execution_context)
   return jsonResponse({ model_run: context.model_run_store.getModelRun(current_run.model_run_id) }, 202)

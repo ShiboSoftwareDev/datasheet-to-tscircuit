@@ -99,6 +99,8 @@ const ACTIVE_STATUSES = new Set<ModelRunStatus>([
   "cancelling",
 ])
 
+const RESTARTABLE_STATUSES = new Set<ModelRunStatus>(["cancelled", "complete", "failed", "timed_out"])
+
 function computeElapsedTime(record: ModelRunRecord, now = Date.now()): number {
   if (!record.segment_started_at) return record.elapsed_time_ms
   const segment_start = new Date(record.segment_started_at).valueOf()
@@ -469,7 +471,7 @@ export class ModelRunStore {
   retryModelRun(model_run_id: string): ModelRunRetryResult {
     const record = this.run_map.get(model_run_id)
     if (!record) return { status: "not_found" }
-    if (record.status !== "failed" && record.status !== "cancelled") {
+    if (!RESTARTABLE_STATUSES.has(record.status)) {
       return { status: "not_retryable", model_run: getPublicModelRun(record) }
     }
     if (this.active_execution_ids.has(model_run_id)) {
