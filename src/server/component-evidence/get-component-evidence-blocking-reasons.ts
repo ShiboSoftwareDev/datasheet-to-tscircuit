@@ -5,6 +5,14 @@ function hasReliableSource(sources: EvidenceSource[]): boolean {
   return sources.some((source) => source.confidence === "high" || source.confidence === "medium")
 }
 
+function hasReliableDirectSource(sources: EvidenceSource[]): boolean {
+  return sources.some(
+    (source) =>
+      (source.method === "pdf_text" || source.method === "pdf_visual") &&
+      (source.confidence === "high" || source.confidence === "medium"),
+  )
+}
+
 export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence): string[] {
   const errors: string[] = []
   if (evidence.status !== "resolved") {
@@ -31,6 +39,18 @@ export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence)
       errors.push(`pin ${pin.number} has no copper pad in the footprint evidence`)
     }
   }
+  const reliable_footprint_visual_pages = new Set(
+    [
+      ...evidence.footprint.drawing_orientation.sources.filter(
+        (source) => source.image === "visual-reference/land-pattern.png",
+      ),
+      ...evidence.footprint.pads.flatMap((pad) => pad.sources),
+    ].flatMap((source) =>
+      source.method === "pdf_visual" && (source.confidence === "high" || source.confidence === "medium")
+        ? [source.page]
+        : [],
+    ),
+  )
   for (const [index, pad] of evidence.footprint.pads.entries()) {
     if (
       !pad.sources.some(
@@ -43,6 +63,16 @@ export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence)
       errors.push(
         `pad ${index + 1} (${pad.pin ?? "mechanical"}) is not tied to visual, calculated, or package-standard geometry evidence`,
       )
+    }
+    for (const source of pad.sources) {
+      if (
+        (source.method === "calculated" || source.method === "package_standard") &&
+        !reliable_footprint_visual_pages.has(source.page)
+      ) {
+        errors.push(
+          `pad ${index + 1} (${pad.pin ?? "mechanical"}) ${source.method} geometry on page ${source.page} has no medium/high-confidence pdf_visual footprint anchor on that page`,
+        )
+      }
     }
   }
   if (evidence.footprint.drawing_orientation.value !== "pcb_top") {
@@ -57,19 +87,26 @@ export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence)
   ) {
     errors.push("PCB-top orientation is not tied to the inspected land-pattern reference image")
   }
-  const critical_sources = [
+  const direct_fact_sources = [
     ["part number", evidence.part_number.sources],
     ...(evidence.ordering_code ? ([["ordering code", evidence.ordering_code.sources]] as const) : []),
     ["package name", evidence.package.name.sources],
     ...(evidence.package.code ? ([["package code", evidence.package.code.sources]] as const) : []),
     ["package pin count", evidence.package.pin_count.sources],
-    ["drawing orientation", evidence.footprint.drawing_orientation.sources],
     ...evidence.pinout.pins.map((pin) => [`pin ${pin.number}`, pin.sources] as const),
+  ] as const
+  for (const [label, sources] of direct_fact_sources) {
+    if (!hasReliableDirectSource(sources)) {
+      errors.push(`${label} must cite medium/high-confidence pdf_text or pdf_visual evidence`)
+    }
+  }
+  const geometry_sources = [
+    ["drawing orientation", evidence.footprint.drawing_orientation.sources],
     ...evidence.footprint.pads.map(
       (pad, index) => [`pad ${index + 1} (${pad.pin ?? "mechanical"})`, pad.sources] as const,
     ),
   ] as const
-  for (const [label, sources] of critical_sources) {
+  for (const [label, sources] of geometry_sources) {
     if (!hasReliableSource(sources)) errors.push(`${label} has only low-confidence evidence`)
   }
   return errors

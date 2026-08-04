@@ -17,7 +17,24 @@ export async function getJobFile(request_url: URL, context: JobApiContext): Prom
     })
   }
 
-  const resolution = await resolveJobFileArtifact(job_dir, file_kind)
+  let resolution: Awaited<ReturnType<typeof resolveJobFileArtifact>>
+  try {
+    resolution = await resolveJobFileArtifact(job_dir, job_id, file_kind)
+  } catch (error) {
+    console.error("[job-artifact] reader_failed", {
+      job_id,
+      file_kind,
+      cause: error instanceof Error ? error.message : String(error),
+    })
+    return errorResponse({
+      error_code: file_kind === "component" ? "accepted_publication_invalid" : "artifact_resolution_failed",
+      message:
+        file_kind === "component"
+          ? "The accepted component publication failed its integrity checks. Inspect the server diagnostic for this job."
+          : "The requested artifact could not be resolved. Inspect the server diagnostic for this job.",
+      status: 500,
+    })
+  }
   if (resolution.status === "invalid") {
     return errorResponse({ error_code: "invalid_file", message: "Unknown job artifact.", status: 400 })
   }
@@ -28,12 +45,24 @@ export async function getJobFile(request_url: URL, context: JobApiContext): Prom
       status: 404,
     })
   }
-  const artifact = Bun.file(resolution.artifact_path)
+  if (resolution.integrity_warning) {
+    console.error("[job-artifact] publication_fallback", {
+      job_id,
+      file_kind,
+      error_code: resolution.integrity_warning.code,
+      cause: resolution.integrity_warning.cause,
+    })
+  }
+  const artifact =
+    "artifact_bytes" in resolution ? resolution.artifact_bytes : Bun.file(resolution.artifact_path)
   return new Response(artifact, {
     headers: {
       "Cache-Control": resolution.content_type.startsWith("image/") ? "no-store" : "private, no-cache",
       "Content-Disposition": `${request_url.searchParams.get("display") === "inline" ? "inline" : "attachment"}; filename="${resolution.download_name}"`,
       "Content-Type": resolution.content_type,
+      ...(resolution.integrity_warning
+        ? { "X-Tscircuit-Artifact-Warning": resolution.integrity_warning.code }
+        : {}),
     },
   })
 }

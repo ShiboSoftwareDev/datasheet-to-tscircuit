@@ -2,6 +2,12 @@ import type { ModelProgress, ModelProgressPhase } from "@/shared/job-types"
 
 const PROGRESS_PHASES = new Set<ModelProgressPhase>([
   "queued",
+  "preparing_workspace",
+  "characterizing",
+  "designing_validation",
+  "generating_model",
+  "repairing",
+  "publishing",
   "extracting_datasheet",
   "digitizing_graphs",
   "preparing_benchmarks",

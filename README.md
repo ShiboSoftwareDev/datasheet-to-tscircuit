@@ -1,17 +1,31 @@
 # Datasheet to tscircuit
 
-A Bun + React application that accepts a component datasheet, runs
-[`tsci-agent`](https://github.com/tscircuit/tsci-agent) in a per-job
-workspace, streams the full agent process output, builds the generated TSX with
-`tsci`, and previews the resulting Circuit JSON with the same
-[`@tscircuit/runframe`](https://github.com/tscircuit/runframe) surface used by
-tscircuit.com.
+Datasheet to tscircuit is a local Bun + React application that turns a PDF
+datasheet into a validated tscircuit component and, optionally, a validated
+behavioral SPICE model.
 
-## Run locally with Docker
+Fresh SPICE generation starts only when the datasheet contains a reproducible
+public-pin voltage waveform plotted against elapsed time. Static tables, DC
+curves, operating points, and current-only plots remain visible as documented
+specifications but are not presented as simulations.
 
-The recommended demo runs the web app, API, `tsci-agent`, and `tsci` together
-inside one local container. Install Docker Desktop and the `tsci` CLI, then
-authenticate on the host:
+The backend is organized as two explicit typed pipelines. AI agents work in
+isolated temporary directories and propose narrowly scoped artifacts. The
+server parses those artifacts, runs deterministic tscircuit and ngspice checks,
+and promotes only validated canonical artifacts. The existing UI remains the
+main place to watch logs, inspect the generated TSX and Circuit JSON, view
+retained datasheet references, and compare reference curves with simulation
+results.
+
+See [Architecture](docs/architecture.md) for the stage graphs, artifact
+contracts, debug layout, and extension rules.
+
+## Run with Docker
+
+Docker is the simplest way to run the complete application. It includes Bun,
+ngspice, Poppler, `tsci-agent`, and `tsci`.
+
+Prerequisites: Docker Desktop, Bun, and the `tsci` CLI on the host.
 
 ```bash
 tsci login
@@ -19,57 +33,32 @@ cp .env.example .env
 tsci auth print-token
 ```
 
-Paste the printed token into `.env` as `TSCIRCUIT_JWT`. The file is ignored by
-Git and excluded from the Docker build context. Then build the image:
+Paste the printed token into `.env` as `TSCIRCUIT_JWT`, then start the app:
 
 ```bash
 mkdir -p .runtime
-bun run build
-```
-
-After the image has built successfully, start the application:
-
-```bash
 bun start
 ```
 
-`bun start` always checks and rebuilds the Docker image from the current working
-tree before starting it; it never uses Compose's stale `--no-build` path. The Git
-source revision is injected into the image and printed at server startup and at
-the beginning of every component and SPICE log.
+Open <http://localhost:3000>. The container binds to host loopback and persists
+all job artifacts under `.runtime/jobs`.
 
-The startup entrypoint prepares the bind-mounted `.runtime` directory and then
-drops privileges before running the server as the non-root `bun` user. To test
-that behavior without starting the server, run:
-
-```bash
-bun run test:docker
-```
-
-Open `http://localhost:3000`. Compose publishes the port on host loopback only,
-so it is not reachable from other machines. Generated PDFs, TSX, Circuit JSON,
-and `agent.log` files persist under `.runtime/jobs` after the container stops.
-
-To use OpenAI, authenticate once from the repository directory:
+OpenAI is optional. To authenticate it for the agent provider:
 
 ```bash
 bun run auth:openai
 ```
 
-The command starts a temporary authentication container and publishes its OAuth
-callback on host loopback. OpenAI credentials are stored in
-`/app/.runtime/pi-agent`, inside the existing `.runtime` bind mount. They persist
-across application restarts, container recreation, and image rebuilds, so login
-is normally required only once. Run the command again if the credentials expire
-or become invalid. The tscircuit AI Gateway remains the default.
-
-Stop the application with:
+Credentials are stored under `.runtime/pi-agent`. Stop the app with:
 
 ```bash
 bun run stop
 ```
 
-## Develop without Docker
+## Develop locally
+
+Install Bun 1.2.21 or newer, ngspice, Poppler (`pdftotext`, `pdfinfo`, and
+`pdftoppm`), and Tesseract OCR (`tesseract`), then run:
 
 ```bash
 bun install
@@ -77,169 +66,157 @@ tsci login
 bun run dev
 ```
 
-Open `http://localhost:5173`. The API runs on `http://localhost:3000` and is
-proxied by Vite. Direct server execution binds to `127.0.0.1` by default. Set
-`HOST` or `PORT` to override the bind address or port, and set `TSCI_AGENT_BIN`
-or `TSCI_BIN` to override the discovered local executables.
+Open <http://localhost:5173>. Vite proxies `/api` to the Bun API at
+<http://localhost:3000>.
 
-## Source organization
+Useful overrides:
 
-The server is organized by responsibility. Each feature directory exposes its
-public surface through `index.ts`, while its implementation lives in named
-operation modules alongside that index.
+- `HOST` and `PORT` change the API bind address and port.
+- `API_URL` changes the Vite proxy target.
+- `TSCI_AGENT_BIN`, `TSCI_BIN`, and `NGSPICE_BIN` select local executables.
+
+## Checks
+
+```bash
+bun run typecheck
+bun test
+bun run build:web
+```
+
+Run all three with `bun run check`. Docker startup behavior has a separate smoke
+test:
+
+```bash
+bun run test:docker
+```
+
+## Debug a run
+
+Start with the streamed logs in the UI; both component and model panels expose
+their typed execution traces. The durable files under
+`.runtime/jobs/<job-id>` are the source of truth after a restart:
+
+- `agent.log`/`agent.log.1` and `job.json` contain the bounded component NDJSON
+  logs and atomically replaced checkpoint.
+- `spice/model-agent.log`/`spice/model-agent.log.1` and
+  `spice/model-run.json` contain the bounded model NDJSON logs and atomically
+  replaced checkpoint. Public stores keep only the latest 500 log events.
+- `runs/<invocation-id>/.pipeline/events.ndjson` is the component event stream.
+- `spice/runs/<invocation-id>/.pipeline/events.ndjson` is the model event stream.
+- Each `.pipeline/stages/<number>-<stage-id>` directory contains `input.json`,
+  `output.json`, `error.json`, `metrics.json`, and immutable copies of declared
+  artifacts under `artifacts/`.
+- Agent-backed stages also retain `attempt-history.json` plus every rejected
+  candidate. Correction attempts receive those exact files and cumulative
+  diagnostics, so fixing one field cannot silently regress an earlier fix. A
+  typed or process failure inside a nested independent verifier also retains
+  the enclosing outer candidate before the stage terminates.
+- `component-validation.json` and `application-validation.json` contain the
+  deterministic component validation outcomes.
+- `footprint-geometry-review.json` and
+  `footprint-geometry-verification.json` preserve a second agent's independent
+  PCB-top pad transcription and the server-computed 0.01 mm agreement record.
+  The reviewer receives the datasheet and trusted land-pattern render, but no
+  extractor pin names or pad geometry.
+- `application-connectivity-review.json` and
+  `application-connectivity-verification.json` record an independently
+  transcribed visible-component inventory and image-to-netlist graph plus their
+  agreement hashes. Schema errors are accumulated; once the review is valid,
+  inventory, visible-fact, and graph disagreements are reported together. Net
+  names and ordering are ignored; component facts and endpoint connectivity
+  must match. Independent observations are immutable and input-fingerprinted,
+  so unchanged observations are reused across outer evidence repairs and
+  atomically reinstalled over any retained workspace copy.
+- Component identity keeps the visible base family separate from the selected
+  orderable: for example, U1 `value` is `TPS63802` while its authoritative
+  `manufacturer_part_number` is `TPS63802DLAR`. The server binds canonical U1
+  from accepted evidence, requires an ordering code to extend its base family,
+  and rejects a wrong, reversed, or truncated ordering identity.
+- `evidence-image-manifest.json` binds server-rendered 200-DPI reference pages
+  and UI aliases to the exact datasheet hash; agent-authored image pixels are
+  never trusted.
+- `evidence-commit.json` is the version-3 atomic pointer for the complete
+  semantic evidence set. It selects one immutable
+  `evidence-revisions/<generation-id>` directory containing the evidence and
+  its exact source PDF. API readers return only those captured, hash-checked
+  bytes, so a failed replacement, partial promotion, or later root-file
+  mutation cannot expose a mixed generation. Legacy version-1 and version-2
+  markers remain readable; model generation rejects version 1 because it did
+  not bind a source PDF.
+- `spice/candidates/<revision>-<id>/validation/<case-id>` contains the exact
+  ngspice netlist, process logs, raw output, and per-case result used for that
+  immutable candidate.
+- `spice/attempts/<attempt-id>/time-graph-hints.json`,
+  `model-reference-observation.json`, `model-reference-source-proof.json`, and
+  `model-reference-verification.json` show which complete-PDF graph candidates
+  were reviewed and how each accepted crop and numeric voltage/time trace were
+  independently matched. A graph can become executable only when server code
+  extracts its response, stimulus, levels, and edge times from printed numeric
+  test conditions in the same PDF section; a missing or unsupported fixture is
+  authoritative and cannot be filled in by an agent. The retained verification
+  binds the exact observer crop, its adjacent figure caption, source-read axis
+  units/scales, pixel-axis-calibrated observer points, observer/candidate curve
+  digests, interpolation metrics, and the exact server-rendered graph pixels.
+  Publication recomputes that PDF/OCR receipt instead of trusting retained
+  metadata; the accepted bundle retains the hash-bound canonical
+  `datasheet.pdf`, and the generation agent never receives the private observer
+  trace.
+- `spice/candidates/<revision>-<id>/validation/viewer-validation.json` and
+  `validation/cases/<case-id>.circuit.json` bind the exact tscircuit transient
+  voltage waveforms used by the TSX/Runframe UI to the generated model, pin
+  map, pulsed source values, polarity, and source connectivity. The validation
+  result also carries a hash-bound private replay receipt proving the response
+  changes materially when the bound pulse is flattened.
+- Accepted bundles contain `model-workflow-policy.json`. New runs are fixed to
+  `fresh_time_voltage_v1`, so changing a candidate contract to scalar/DC data
+  cannot downgrade publication into the legacy compatibility path.
+- `published-model.json` is the version-3 atomic pointer binding the owning job,
+  invocation, immutable fresh-waveform policy, accepted model revision, and
+  exact integrated component wrapper. Version-2 pointers remain readable only
+  for existing publications; the writer cannot create them. The pointer selects
+  the
+  hash-verified bundles under
+  `spice/accepted-revisions/<revision>-<publication-id>` and
+  `published-models/<revision>-<publication-id>`.
+
+The selected bundles—not root-level compatibility mirrors such as
+`spice/model.lib`—are authoritative for restart recovery, previews, downloads,
+and the UI. Publication-backed readers return bounded bytes rechecked against
+the captured manifest hash; they never hand a later consumer an unverified
+filesystem path.
+
+Pipeline failures include a stable error code, the failed stage, the operation,
+related artifact or entity references, a cause chain, and a direct path to the
+stage debug bundle. `provenance.json` records both the Git revision and a hash
+of the actual workflow source files, so a dirty runtime remains reproducible.
+
+## Source map
 
 ```text
 src/
 ├── server/
-│   ├── agent-tools/                 structured AI-agent CLI tools
-│   ├── component-evidence/          evidence parsing and validation
-│   ├── component-schematic-plan/    schematic-plan parsing and validation
-│   ├── instructions/                agent workspace instruction strings
-│   ├── job-api/                     component-job HTTP operations
-│   ├── job-artifact-validator/      generated component/application checks
-│   ├── job-restorer/                persisted job recovery
-│   ├── job-runner/                  component conversion phases and prompts
-│   ├── job-scaffold/                generated component workspace files
-│   ├── model-artifact-monitor/      saved model preview readers
-│   ├── model-benchmark-lock/        immutable benchmark lock handling
-│   ├── model-progress/              model progress parsing and monitoring
-│   ├── model-run-api/               SPICE model-run HTTP operations
-│   ├── model-runner/                model setup, refinement, and validation
-│   ├── model-scaffold/              generated model workspace files and prompts
-│   ├── model-scorer/                benchmark scoring and comparison output
-│   ├── model-simulation-validator/  independent simulation validation
-│   └── paths/                       repository path definitions
-├── shared/                          browser/server data contracts
-└── web/                             React UI and browser API client
+│   ├── pipeline/             typed stage runner and diagnostics
+│   ├── component-workflow/   datasheet-to-component pipeline
+│   ├── model-workflow/       component-to-SPICE pipeline
+│   ├── modeling/             model contracts, strategies, and UI projections
+│   ├── spice-validation/     declarative fixture compiler and ngspice scoring
+│   ├── infrastructure/       agent, process, artifact, and tscircuit adapters
+│   ├── job-api/              component HTTP/SSE operations
+│   └── model-run-api/        model HTTP/SSE operations
+├── shared/                   browser/server contracts
+└── web/                      React UI and tscircuit viewers
 ```
 
-Files are named for their exported operation. Orchestrators compose those
-operations while stateful stores retain related class methods. Internal
-functions follow the [tscircuit code handbook](https://github.com/tscircuit/handbook/blob/main/guides/code.md): input data is grouped into a named object and a store or execution context is passed separately.
+## Security scope
 
-## How jobs work
-
-Each upload gets its own directory under `.runtime/jobs`. The server writes the
-PDF and a small tscircuit project scaffold there, then executes:
-
-```bash
-tsci-agent do --prompt "..." --dir .runtime/jobs/<job_id>
-```
-
-Both stdout and stderr are streamed to the browser and persisted to
-`agent.log`. The current `tsci-agent` event renderer already reports agent,
-turn, tool, retry, compaction, assistant-text, and thinking events, so a separate
-`--log-file` flag is not required.
-
-The server also checkpoints task metadata to `job.json` and model-run state to
-`spice/model-run.json`. At startup it scans `.runtime/jobs` and restores every
-recoverable task, log, generated component, model checkpoint, and preview. A run
-that was interrupted by the restart is shown as failed and can be retried from
-its preserved files. Deleting a task removes its in-memory component/model jobs
-and its complete `.runtime/jobs/<job_id>` directory, so it does not return after
-the next restart.
-
-After the agent exits successfully, the server runs `tsci build` and returns the
-generated `index.circuit.tsx` and Circuit JSON to the browser.
-Critical footprint, pinout, and application facts must reach independent
-evidence consensus. If they remain split or independent verification cannot
-complete, the task stops as unresolved before component generation; retained
-evidence stays downloadable, but partial or unvalidated code is never presented
-as a completed component.
-
-The New Task form can also launch an ngspice-validated SPICE behavioral-model run with a 1×, 2×, 4×, or 8×
-effort budget. Model creation is enabled by default, and the toggle/effort choice
-is retained locally for the next task. Its setup agent starts alongside component conversion and extracts
-datasheet curves, provenance, and benchmark references without consuming the
-effort budget. If setup finishes first, the model run waits for the authoritative
-component pinout. Once the component is available, a separate untimed pass
-finalizes and source-compiles every benchmark circuit without running ngspice,
-then the server locks the circuits and evidence before
-any model artifact may be created. The refinement timer starts only after that
-lock exists; higher effort uses the same locked benchmarks and scoring process
-for more refinement iterations.
-
-Model work is stored under `.runtime/jobs/<job_id>/spice`. The server immutably
-snapshots the benchmark-finalization pass's manifest, evidence, and test benches
-outside the agent workspace before refinement. It owns the numeric benchmark
-scorer, reruns every generated tscircuit analog test bench, and
-keeps the best checkpointed model when time expires. The model tab streams
-structured progress checkpoints live, including datasheet/graph evidence counts,
-the active benchmark, iteration number, and current champion score, alongside the
-complete agent log. As benchmark TSX, saved Circuit JSON, and numeric evidence
-appear, the server loads them into the runframe and plots the reference curve
-with the current model result. Viewing or switching benchmarks never executes TSX;
-only the agent and background validation workflow can refresh a saved simulation.
-New reference-evidence contracts inventory every visible source subplot and every
-trace independently, require each subplot to be represented, and bind each CSV
-point to calibrated source-image pixels with a checked trace color. This prevents
-a four-pane datasheet figure from being accepted with only two generated
-references, or a plausible analytic curve from being substituted for a trace.
-Every benchmark's `<analogsimulation>` also sets `graphIndependentAxes` so
-multiple plotted signals align and scale independently.
-Candidate CSVs written by the agent are not trusted for final scoring or display:
-the server performs a fresh `tsci build` for each analog circuit, rejects Circuit
-JSON errors, and archives the exact source, Circuit JSON, and hashed extracted
-curve under the job's `.model-validation` directory. Diagnostic copies are given
-back to the agent under `spice/validation-artifacts`; scoring and plotting use only
-the archived server results. The preview dropdown switches the saved circuit and its paired reference/result curve
-together. SPICE runframes expose only Analog Simulation, Code, and Schematic, with
-Analog Simulation selected initially. A failed validation pass is sent back to
-the agent for another correction pass until every locked benchmark passes or the
-effort budget ends; timed-out runs still expose the latest checkpoint. The
-manifest, evidence, conditions, tolerances, critical flags, and sweep points remain
-immutable. If independent validation nevertheless discovers a structural defect
-in a locked benchmark harness, the server pauses the timer, discards all model
-refinement artifacts, permits a bounded repair of only the affected
-`benchmarks/*.circuit.tsx` files, and source-compiles the repaired suite. A successful
-repair creates an audited lock generation while preserving the earlier snapshot,
-then restarts model refinement from a clean effort boundary. Any attempted change
-to the manifest or evidence rejects the repair. The published component wrapper
-is always generated by the server from canonical
-`model.lib` and is attached only after every locked benchmark passes. Reference and model-result traces use
-complementary dash phases so both remain visible when their values overlap.
-The refinement workspace also includes `sync-model-wrapper.ts`, which derives the
-same canonical wrapper from `model.lib` and `model-manifest.json` for targeted
-agent diagnostics; agents do not hand-maintain wrapper source.
-The canonical or last promoted model is published before bounded independent
-validation, so a validation timeout cannot hide an available checkpoint.
-Set `MODEL_BASE_EFFORT_MS` to change the local duration represented by 1× effort
-(30 minutes by default). Refinement and independent validation share that effort
-window, but the server stops refinement early enough to reserve validation time.
-Independent validation retries exit code 137 as resource pressure, and correction
-passes that leave the canonical model and simulation mapping unchanged reuse the
-previous result instead of rerunning the whole benchmark suite.
-Agent phases also back off and resume their existing workspace when the provider
-reports transient saturation or transport failures.
-Set `MODEL_STALE_TIMEOUT_MS` to change the agent-process inactivity watchdog
-(10 minutes by default); every stdout or stderr chunk resets this timeout.
-Independent validation uses one bounded global worker pool across every benchmark.
-It prioritizes one run from each benchmark so saved viewers appear early, then
-dispatches remaining sweep points in round-robin order. Each successful run is
-copied immediately to durable preview storage, and each completed benchmark
-publishes its verified comparison curve without waiting for the full suite.
-Validation disables unrelated PCB and parts-engine work; parameterized sweep
-points retain isolated build outputs. Reference setup
-and waiting for the component remain untimed. The result is not described as
-PSpice-validated unless a PSpice execution backend actually runs it.
-
-The task sidebar can start and monitor multiple conversions concurrently. Each
-job has an independent process group and cancel control, so stopping one task
-does not interrupt other agents or the application container.
-
-## Security and hosting
-
-The local Docker container is the current process and filesystem isolation
-boundary. It runs as a non-root user, drops Linux capabilities, and mounts only
-`.runtime` from this repository. The agent still has outbound network access,
-the `TSCIRCUIT_JWT` credential, and write access to generated job files, so this
-configuration is for a trusted local operator and must not be exposed as a
-public upload service.
-
-The image includes Poppler so the agent can extract datasheet text with
-`pdftotext` and render pinout or mechanical-drawing pages with `pdftoppm` before
-generating the component.
-
-Long-term hosted deployment should move authentication, durable job state,
-storage, quotas, and sandbox orchestration into a separate private backend. That
-hosted backend is intentionally outside the scope of this local demo.
+This is a trusted local application, not a public upload service. The Docker
+container runs as a non-root user, drops Linux capabilities, publishes only on
+host loopback, and mounts only `.runtime`. Agent attempts receive isolated
+working directories. Model generation and repair additionally run without a
+shell or built-in filesystem tools: a fail-closed extension can read only the
+candidate workspace and can write only `model.lib` and `model-card.md`, keeping
+server validation fixtures and held-out curve samples outside that tool
+boundary. The overall agent process is still not an OS or network sandbox: it
+has outbound provider access, configured credentials, and the container user's
+process permissions. A hosted deployment needs separate authentication, quotas,
+durable storage, and stronger per-job process/network sandboxing.

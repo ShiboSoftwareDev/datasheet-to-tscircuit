@@ -23,11 +23,18 @@ function summarizeJob(job: Job): JobSummary {
     has_errors: job.has_errors,
     error_message: job.error_message,
     warnings: job.warnings,
+    component_ready: job.component_ready,
   }
 }
 
 function upsertJobSummary(current_jobs: JobSummary[], next_job: JobSummary): JobSummary[] {
-  return [next_job, ...current_jobs.filter((job) => job.job_id !== next_job.job_id)].sort((first, second) =>
+  const previous_job = current_jobs.find((job) => job.job_id === next_job.job_id)
+  const merged_job = {
+    ...previous_job,
+    ...next_job,
+    model_run: next_job.model_run ?? previous_job?.model_run,
+  }
+  return [merged_job, ...current_jobs.filter((job) => job.job_id !== next_job.job_id)].sort((first, second) =>
     second.created_at.localeCompare(first.created_at),
   )
 }

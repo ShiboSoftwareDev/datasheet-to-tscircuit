@@ -2,7 +2,6 @@ import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { getPinnedTscircuitVersion } from "../runtime-versions"
 import { writeVisionRenderer } from "../vision-scaffold"
-import { jobWorkspaceInstructions } from "../instructions/job-workspace-instructions"
 import { STARTER_COMPONENT } from "./starter-component"
 import { ensureJobTscircuitRuntimeConfig } from "./ensure-job-tscircuit-runtime-config"
 
@@ -11,7 +10,6 @@ export async function writeJobScaffold(job_dir: string): Promise<void> {
   await mkdir(job_dir, { recursive: true })
   await Promise.all([
     Bun.write(join(job_dir, "index.circuit.tsx"), STARTER_COMPONENT),
-    Bun.write(join(job_dir, "AGENTS.md"), jobWorkspaceInstructions),
     writeVisionRenderer(job_dir),
     Bun.write(
       join(job_dir, "package.json"),

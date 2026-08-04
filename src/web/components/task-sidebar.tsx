@@ -9,7 +9,6 @@ import {
   Trash2,
 } from "lucide-react"
 import type { JobDisplayStatus, JobSummary, ModelRunStatus } from "@/shared/job-types"
-import { useModelRun } from "../use-model-run"
 import { Brand } from "./brand"
 
 const STATUS_COPY: Record<JobDisplayStatus, string> = {
@@ -60,10 +59,10 @@ function getStatusTone(status: string): string {
 }
 
 function TaskStatus({ task }: { task: JobSummary }) {
-  const { model_run, is_loading } = useModelRun(task.job_id)
-  const component_ready = task.display_status === "complete"
-  const model_ready = model_run?.status === "complete" && Boolean(model_run.model_source)
-  if (!is_loading && !model_run) {
+  const model_run = task.model_run
+  const component_ready = Boolean(task.component_ready)
+  const model_ready = model_run?.status === "complete" && model_run.has_model
+  if (!model_run) {
     return (
       <span className="task-statuses">
         <span
@@ -81,14 +80,12 @@ function TaskStatus({ task }: { task: JobSummary }) {
       </span>
     )
   }
-  const model_status = model_run?.status
-  const model_copy = is_loading
-    ? "Loading"
-    : model_ready
-      ? "Ready"
-      : model_status
-        ? getModelStatusCopy(model_status, model_run?.error_message)
-        : "Loading"
+  const latest_model_copy = model_ready
+    ? "Ready"
+    : getModelStatusCopy(model_run.status, model_run.error_message)
+  const model_copy = model_run.has_retained_accepted_model
+    ? `${latest_model_copy} · Retained`
+    : latest_model_copy
 
   return (
     <span className="task-statuses">
@@ -107,10 +104,16 @@ function TaskStatus({ task }: { task: JobSummary }) {
       <span
         className={`task-state task-state-model ${model_ready ? "ready" : ""}`}
         aria-label={`Model ${model_copy}`}
-        title={`Model ${model_copy}`}
+        title={
+          model_run.has_retained_accepted_model
+            ? `Model ${latest_model_copy}; accepted model retained`
+            : `Model ${model_copy}`
+        }
       >
         <FlaskConical size={10} />
-        <span className={`task-state-label task-state-label-${getStatusTone(model_copy)}`}>{model_copy}</span>
+        <span className={`task-state-label task-state-label-${getStatusTone(latest_model_copy)}`}>
+          {model_copy}
+        </span>
       </span>
     </span>
   )

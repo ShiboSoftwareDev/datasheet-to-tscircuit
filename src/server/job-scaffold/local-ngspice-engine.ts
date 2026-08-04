@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { rewritePspiceCompatibilitySyntax } from "@tscircuit/ngspice-spice-engine"
 import type { SpiceEngine, SpiceEngineSimulationResult } from "@tscircuit/props"
+import { BunProcessRunner, ProcessError } from "../infrastructure/process"
 
 interface ProbeMetadata {
   simulation_voltage_probe_id?: string
@@ -25,6 +26,20 @@ interface TransientParameters {
   step_seconds: number
   stop_seconds: number
   start_seconds: number
+}
+
+const NGSPICE_FAILURE_PATTERN = /fatal error:|doanalyses:.*(?:aborted|failed)|run simulation\(s\) aborted/i
+
+/**
+ * circuit-json-to-spice currently appends UIC to every generated transient
+ * analysis. Datasheet transient fixtures describe an established operating
+ * point before the printed load step, and our direct ngspice path therefore
+ * uses ngspice's normal DC operating-point solve. Remove only that generated,
+ * trailing UIC token so the tscircuit viewer and direct validation paths start
+ * from the same physical state.
+ */
+export function normalizeTscircuitTransientInitialization(spice_source: string): string {
+  return spice_source.replace(/^(\s*\.tran\b[^\r\n$]*?)\s+uic(\s*(?:\$[^\r\n]*)?)$/gim, "$1$2")
 }
 
 const SI_MULTIPLIERS: Record<string, number> = {
@@ -280,31 +295,44 @@ async function simulateWithLocalNgspice(spice_source: string): Promise<SpiceEngi
   const circuit_path = join(workspace, "circuit.cir")
   const raw_path = join(workspace, "result.raw")
   try {
-    const compatible_source = rewritePspiceCompatibilitySyntax(spice_source)
+    const compatible_source = normalizeTscircuitTransientInitialization(
+      rewritePspiceCompatibilitySyntax(spice_source),
+    )
     await Promise.all([
       Bun.write(circuit_path, compatible_source),
       Bun.write(join(workspace, ".spiceinit"), "set filetype=ascii\n"),
     ])
     const ngspice_bin = process.env.NGSPICE_BIN?.trim() || "ngspice"
-    const child_process = Bun.spawn([ngspice_bin, "-b", "-r", raw_path, circuit_path], {
-      cwd: workspace,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const [exit_code, stdout, stderr] = await Promise.all([
-      child_process.exited,
-      new Response(child_process.stdout).text(),
-      new Response(child_process.stderr).text(),
-    ])
-    const process_output = `${stdout}\n${stderr}`.trim()
-    if (
-      exit_code !== 0 ||
-      /fatal error:|doanalyses:.*(?:aborted|failed)|run simulation\(s\) aborted/i.test(process_output)
-    ) {
+    let process_output: string
+    let failure_scan_tail = ""
+    let reported_failure = false
+    try {
+      const result = await new BunProcessRunner().run({
+        command: [ngspice_bin, "-b", "-r", raw_path, circuit_path],
+        command_label: "local ngspice simulation",
+        cwd: workspace,
+        signal: new AbortController().signal,
+        idle_timeout_ms: 30_000,
+        wall_timeout_ms: 120_000,
+        heartbeat_paths: [raw_path],
+        max_output_chars: 16_000,
+        detached: false,
+        on_output(_stream, message) {
+          failure_scan_tail = `${failure_scan_tail}${message}`.slice(-2_000)
+          if (NGSPICE_FAILURE_PATTERN.test(failure_scan_tail)) reported_failure = true
+        },
+      })
+      process_output = result.output_tail.trim()
+    } catch (error) {
+      if (!(error instanceof ProcessError)) throw error
+      const detail = error.output_tail?.trim() || error.message
       throw new Error(
-        `Local ngspice failed${exit_code !== 0 ? ` with code ${exit_code}` : ""}: ${process_output.slice(-4_000)}`,
+        `Local ngspice failed${error.exit_code === undefined ? "" : ` with code ${error.exit_code}`}: ${detail.slice(-4_000)}`,
+        { cause: error },
       )
+    }
+    if (reported_failure || NGSPICE_FAILURE_PATTERN.test(process_output)) {
+      throw new Error(`Local ngspice failed: ${process_output.slice(-4_000)}`)
     }
     const vectors = parseAsciiRawFile(await readFile(raw_path, "utf8"))
     return {

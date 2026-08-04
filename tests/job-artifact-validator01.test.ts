@@ -1,19 +1,12 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
-import { AGENT_EVENT_PROTOCOL, type TrustedAgentEvent } from "@/server/agent-event-protocol"
+import { applicationSourceNetName } from "@/server/component-workflow/application-endpoint"
 import {
-  assertVisualInspectionSnapshotMatches,
-  captureVisualInspectionSnapshot,
-  getApplicationSchematicLayoutAdvisories,
   getFootprintPlanErrors,
   getTypicalApplicationComponentValueErrors,
   getTypicalApplicationConnectivityErrors,
   getTypicalApplicationSourceErrors,
-  validateAgentImageReads,
-  validateVisualInspection,
+  getTypicalApplicationTargetComponentErrors,
 } from "@/server/job-artifact-validator"
 
 test("application source gate rejects only standalone netlabel JSX elements", () => {
@@ -51,14 +44,14 @@ test("application source gate rejects only standalone netlabel JSX elements", ()
   }
   expect(
     getTypicalApplicationSourceErrors(
-      '<board><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0805" /></board>',
+      'import Component from "./index.circuit"\nexport default () => <board><Component name="U1" /><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0805" /></board>',
       "verified",
       verified_plan,
     ),
   ).toEqual([])
   expect(
     getTypicalApplicationSourceErrors(
-      '<board><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0402" /></board>',
+      'import Component from "./index.circuit"\nexport default () => <board><Component name="U1" /><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0402" /></board>',
       "verified",
       verified_plan,
     ),
@@ -76,64 +69,73 @@ test("application source gate rejects only standalone netlabel JSX elements", ()
   }
   expect(
     getTypicalApplicationSourceErrors(
-      '<group><capacitor name="C1" capacitance="10uF" /></group>',
+      'import Component from "./index.circuit"\nexport default () => <group><Component name="U1" /><capacitor name="C1" capacitance="10uF" /></group>',
       "schematic_only",
       schematic_only_plan,
     ),
   ).toEqual(['Application component C1 must set literal manufacturerPartNumber="GRM188R60J106ME84"'])
   expect(
     getTypicalApplicationSourceErrors(
-      '<group><capacitor name="C1" capacitance="10uF" manufacturerPartNumber="GRM188R60J106ME84" /></group>',
+      'import Component from "./index.circuit"\nexport default () => <group><Component name="U1" /><capacitor name="C1" capacitance="10uF" manufacturerPartNumber="GRM188R60J106ME84" /></group>',
       "schematic_only",
       schematic_only_plan,
     ),
   ).toEqual([])
 })
 
-test("compiled application schematic reports long-wire compactness as an advisory", () => {
-  const circuit = [
-    ...Array.from({ length: 7 }, (_, index) => ({
-      type: "schematic_component",
-      schematic_component_id: `component-${index}`,
-      source_component_id: `source-${index}`,
-      center: { x: index, y: 0 },
-    })),
-    { type: "schematic_net_label", schematic_net_label_id: "label-1", text: "VIN" },
-    {
-      type: "schematic_trace",
-      schematic_trace_id: "trace-1",
-      edges: [{ from: { x: -5, y: 0 }, to: { x: 4.5, y: 0 } }],
-    },
-  ] as unknown as AnyCircuitElement[]
-  const advisories = getApplicationSchematicLayoutAdvisories(circuit)
-  expect(advisories).toHaveLength(1)
-  expect(advisories[0]).toContain("is 9.50 units long")
-  expect(advisories[0]).toContain("compact-layout target")
+test("unknown-value passives must use the explicit generic chip representation", () => {
+  const plan = {
+    components: [{ reference: "U1" }, { reference: "RSHUNT", kind: "resistor" }],
+    connections: [{ net: "SENSE", pins: ["U1.SENSE", "RSHUNT.pin1"] }],
+  }
+  const source = (passive: string) =>
+    `import ValidatedComponent from "./index.circuit"\nexport default () => <group><ValidatedComponent name="U1" />${passive}</group>`
 
   expect(
-    getApplicationSchematicLayoutAdvisories([
-      { type: "schematic_component", center: { x: 0, y: 0 } },
-      {
-        type: "schematic_trace",
-        edges: [{ from: { x: 0, y: 0 }, to: { x: 3, y: 0 } }],
-      },
-    ] as unknown as AnyCircuitElement[]),
-  ).toEqual([])
-
-  const observed_runs = [6.9, 7.13].map((length) =>
-    getApplicationSchematicLayoutAdvisories([
-      ...Array.from({ length: 7 }, (_, index) => ({
-        type: "schematic_component",
-        center: { x: index, y: 0 },
-      })),
-      {
-        type: "schematic_trace",
-        edges: [{ from: { x: 0, y: 0 }, to: { x: length, y: 0 } }],
-      },
-    ] as unknown as AnyCircuitElement[]),
+    getTypicalApplicationSourceErrors(
+      source('<capacitor name="RSHUNT" capacitance="1uF" />'),
+      "schematic_only",
+      plan,
+    ),
+  ).toContain(
+    "Application component RSHUNT has no documented numeric resistor value and must use a literal <chip> element",
   )
-  expect(observed_runs[0]?.[0]).toContain("is 6.90 units long")
-  expect(observed_runs[1]?.[0]).toContain("is 7.13 units long")
+  expect(
+    getTypicalApplicationSourceErrors(
+      source('<chip name="RSHUNT" value="RSHUNT" pinLabels={{ pin1: "1", pin2: "2" }} />'),
+      "schematic_only",
+      plan,
+    ),
+  ).toEqual([])
+})
+
+test("application source must instantiate the validated default import as U1", () => {
+  const plan = { components: [{ reference: "U1" }], connections: [] }
+  expect(
+    getTypicalApplicationSourceErrors(
+      'import ValidatedComponent from "./index.circuit"\nexport default () => <chip name="U1" manufacturerPartNumber="SUBSTITUTE" />',
+      "schematic_only",
+      plan,
+    ),
+  ).toEqual([
+    'Typical application must instantiate the default import ValidatedComponent from ./index.circuit exactly once with literal name="U1"',
+  ])
+  expect(
+    getTypicalApplicationSourceErrors(
+      'import ValidatedComponent from "./index.circuit"\nexport default () => <ValidatedComponent name="U1" />',
+      "schematic_only",
+      plan,
+    ),
+  ).toEqual([])
+  expect(
+    getTypicalApplicationSourceErrors(
+      'import ValidatedComponent from "./index.circuit"\nexport default () => <><ValidatedComponent name="U1" /><ValidatedComponent name="U2" /></>',
+      "schematic_only",
+      plan,
+    ),
+  ).toEqual([
+    'Typical application must instantiate the default import ValidatedComponent from ./index.circuit exactly once with literal name="U1"',
+  ])
 })
 
 const connectivityPlan = {
@@ -167,7 +169,7 @@ function applicationCircuit(r3_pullup_net: "vin" | "vout"): AnyCircuitElement[] 
       source_port_id: "r3_1",
       source_component_id: "r3",
       name: "pin1",
-      pin_number: 1,
+      pin_number: "1",
       subcircuit_connectivity_map_key: r3_pullup_net,
     },
     {
@@ -175,7 +177,7 @@ function applicationCircuit(r3_pullup_net: "vin" | "vout"): AnyCircuitElement[] 
       source_port_id: "r3_2",
       source_component_id: "r3",
       name: "pin2",
-      pin_number: 2,
+      pin_number: "2",
       subcircuit_connectivity_map_key: "pg",
     },
   ] as unknown as AnyCircuitElement[]
@@ -185,6 +187,365 @@ test("datasheet connectivity gate catches a cleanly-built pull-up on the wrong n
   expect(getTypicalApplicationConnectivityErrors(connectivityPlan, applicationCircuit("vin"))).toEqual([])
   expect(getTypicalApplicationConnectivityErrors(connectivityPlan, applicationCircuit("vout"))).toEqual([
     "VIN: expected pins are not electrically connected: U1.VIN, R3.pin1",
+  ])
+})
+
+test("datasheet connectivity verifies named external terminals through source nets", () => {
+  const plan = {
+    ...connectivityPlan,
+    connections: [
+      { net: "VIN", pins: ["U1.VIN", "R3.pin1", "VIN"] },
+      { net: "PG", pins: ["U1.PG", "R3.pin2", "PG"] },
+    ],
+  }
+  const external_nets = [
+    {
+      type: "source_net",
+      source_net_id: "net_vin",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "vin",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_pg",
+      name: "PG",
+      subcircuit_connectivity_map_key: "pg",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(
+    getTypicalApplicationConnectivityErrors(plan, [...applicationCircuit("vin"), ...external_nets]),
+  ).toEqual([])
+
+  const swapped = external_nets.map((net) => ({
+    ...net,
+    subcircuit_connectivity_map_key: (net as unknown as { name: string }).name === "VIN" ? "pg" : "vin",
+  })) as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(plan, [...applicationCircuit("vin"), ...swapped])).toEqual([
+    "VIN: expected pins are not electrically connected: U1.VIN, R3.pin1, VIN",
+    "PG: expected pins are not electrically connected: U1.PG, R3.pin2, PG",
+  ])
+})
+
+test("datasheet connectivity resolves a numeric-leading semantic terminal through its safe source net", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "48V_BATT", pins: ["U1.VIN", "48V_BATT"] }],
+  }
+  const circuit = [
+    { type: "source_component", source_component_id: "u1", name: "U1" },
+    {
+      type: "source_port",
+      source_port_id: "u1_vin",
+      source_component_id: "u1",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "battery",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_battery",
+      name: applicationSourceNetName("48V_BATT"),
+      subcircuit_connectivity_map_key: "battery",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([])
+})
+
+test("datasheet connectivity rejects missing or ambiguous external source nets", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = applicationCircuit("vin").filter(
+    (element) => (element as unknown as { type: string; name?: string }).name !== "R3",
+  )
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toContain(
+    'VIN: Expected external terminal "VIN" resolved to 0 source nets',
+  )
+
+  const duplicate_nets = ["net_vin_a", "net_vin_b"].map((source_net_id) => ({
+    type: "source_net",
+    source_net_id,
+    name: "VIN",
+    subcircuit_connectivity_map_key: "vin",
+  })) as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(plan, [...circuit, ...duplicate_nets])).toContain(
+    'VIN: Expected external terminal "VIN" resolved to 2 source nets',
+  )
+})
+
+test("datasheet connectivity follows trace-connected source net ids", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = [
+    { type: "source_component", source_component_id: "u1", name: "U1" },
+    { type: "source_port", source_port_id: "u1_vin", source_component_id: "u1", name: "VIN" },
+    { type: "source_net", source_net_id: "net_vin", name: "VIN" },
+    {
+      type: "source_trace",
+      source_trace_id: "trace_vin",
+      connected_source_port_ids: ["u1_vin"],
+      connected_source_net_ids: ["net_vin"],
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([])
+})
+
+test("datasheet connectivity scopes repeated keys and external names to the application subcircuit", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = [
+    {
+      type: "source_group",
+      source_group_id: "application_group",
+      subcircuit_id: "application_subcircuit",
+    },
+    { type: "source_component", source_component_id: "u1", source_group_id: "application_group", name: "U1" },
+    {
+      type: "source_port",
+      source_port_id: "u1_vin",
+      source_component_id: "u1",
+      name: "VIN",
+      subcircuit_id: "application_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+    {
+      type: "source_net",
+      source_net_id: "application_vin",
+      name: "VIN",
+      subcircuit_id: "application_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+    {
+      type: "source_net",
+      source_net_id: "child_vin",
+      name: "VIN",
+      subcircuit_id: "child_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([])
+
+  const cross_scope_plan = {
+    components: [{ reference: "U1" }, { reference: "C1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "C1.1"] }],
+  }
+  const cross_scope_circuit = [
+    ...circuit,
+    {
+      type: "source_component",
+      source_component_id: "c1",
+      source_group_id: "application_group",
+      name: "C1",
+    },
+    {
+      type: "source_port",
+      source_port_id: "c1_1",
+      source_component_id: "c1",
+      name: "pin1",
+      pin_number: 1,
+      subcircuit_id: "child_subcircuit",
+      subcircuit_connectivity_map_key: "net0",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(cross_scope_plan, cross_scope_circuit)).toContain(
+    'VIN: Expected pin "C1.1" resolved to 0 source ports',
+  )
+})
+
+test("datasheet connectivity includes ordinary nested groups but excludes child subcircuits", () => {
+  const grouped_circuit = applicationCircuit("vin").map((element) => {
+    const record = element as unknown as Record<string, unknown>
+    if (record.type === "source_component") {
+      return {
+        ...record,
+        source_group_id: record.name === "R3" ? "layout_group" : "application_group",
+      }
+    }
+    if (record.type === "source_port") {
+      return { ...record, subcircuit_id: "application_subcircuit" }
+    }
+    return record
+  }) as unknown as AnyCircuitElement[]
+  grouped_circuit.unshift(
+    {
+      type: "source_group",
+      source_group_id: "layout_group",
+      parent_source_group_id: "application_group",
+      name: "layout",
+    } as unknown as AnyCircuitElement,
+    {
+      type: "source_group",
+      source_group_id: "application_group",
+      subcircuit_id: "application_subcircuit",
+      is_subcircuit: true,
+    } as unknown as AnyCircuitElement,
+  )
+
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, grouped_circuit)).toEqual([])
+
+  const unplanned_nested = [
+    ...grouped_circuit,
+    {
+      type: "source_component",
+      source_component_id: "r99",
+      source_group_id: "layout_group",
+      name: "R99",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, unplanned_nested)).toContain(
+    "Unexpected application component R99",
+  )
+
+  const child_subcircuit = [
+    ...grouped_circuit,
+    {
+      type: "source_group",
+      source_group_id: "child_implementation_group",
+      parent_subcircuit_id: "instantiated_child",
+    },
+    {
+      type: "source_component",
+      source_component_id: "internal_r1",
+      source_group_id: "child_implementation_group",
+      name: "R_INTERNAL",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, child_subcircuit)).toEqual([])
+
+  const hidden_sibling_root = [
+    ...grouped_circuit,
+    {
+      type: "source_group",
+      source_group_id: "sibling_root",
+      subcircuit_id: "sibling_subcircuit",
+    },
+    {
+      type: "source_component",
+      source_component_id: "hidden_r99",
+      source_group_id: "sibling_root",
+      name: "R99",
+    },
+  ] as unknown as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, hidden_sibling_root)).toContain(
+    "Application component R99 is outside the selected root scope application_group",
+  )
+})
+
+test("datasheet connectivity rejects unplanned root-level electrical connections", () => {
+  const plan = {
+    components: [{ reference: "U1" }],
+    connections: [{ net: "VIN", pins: ["U1.VIN", "VIN"] }],
+  }
+  const circuit = [
+    { type: "source_component", source_component_id: "u1", name: "U1" },
+    {
+      type: "source_port",
+      source_port_id: "u1_vin",
+      source_component_id: "u1",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "vin",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_vin",
+      name: "VIN",
+      subcircuit_connectivity_map_key: "vin",
+    },
+    {
+      type: "source_port",
+      source_port_id: "u1_en",
+      source_component_id: "u1",
+      name: "EN",
+      subcircuit_connectivity_map_key: "bad",
+    },
+    {
+      type: "source_net",
+      source_net_id: "net_bad",
+      name: "BAD",
+      subcircuit_connectivity_map_key: "bad",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationConnectivityErrors(plan, circuit)).toEqual([
+    "Unexpected root-level application connection: BAD, U1.EN",
+  ])
+})
+
+test("datasheet connectivity rejects components absent from the approved plan", () => {
+  const circuit = [
+    ...applicationCircuit("vin"),
+    { type: "source_component", source_component_id: "c99", name: "C99", capacitance: 1e-6 },
+  ] as AnyCircuitElement[]
+  expect(getTypicalApplicationConnectivityErrors(connectivityPlan, circuit)).toEqual([
+    "Unexpected application component C99",
+  ])
+})
+
+test("application U1 must retain the validated component identity and pin signature", () => {
+  const validated = [
+    {
+      type: "source_component",
+      source_component_id: "validated-u1",
+      name: "ValidatedPart",
+      manufacturer_part_number: "TARGET-2",
+    },
+    {
+      type: "source_port",
+      source_port_id: "validated-vin",
+      source_component_id: "validated-u1",
+      pin_number: "1",
+      name: "VIN",
+      port_hints: ["pin1", "VIN"],
+      requires_power: true,
+    },
+    {
+      type: "source_port",
+      source_port_id: "validated-ground",
+      source_component_id: "validated-u1",
+      pin_number: "2",
+      name: "GND",
+      port_hints: ["pin2", "GND"],
+      requires_ground: true,
+    },
+  ] as unknown as AnyCircuitElement[]
+  const substitute = [
+    {
+      type: "source_component",
+      source_component_id: "application-u1",
+      name: "U1",
+      manufacturer_part_number: "SUBSTITUTE-2",
+    },
+    {
+      type: "source_port",
+      source_port_id: "application-vin",
+      source_component_id: "application-u1",
+      pin_number: "1",
+      name: "INPUT",
+      port_hints: ["pin1", "INPUT"],
+    },
+    {
+      type: "source_port",
+      source_port_id: "application-ground",
+      source_component_id: "application-u1",
+      pin_number: "3",
+      name: "GND",
+      port_hints: ["pin3", "GND"],
+      requires_ground: true,
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationTargetComponentErrors(validated, substitute)).toEqual([
+    'Typical application U1 manufacturer_part_number is "SUBSTITUTE-2", expected validated value "TARGET-2"',
+    "Typical application U1 pin 1 is missing validated aliases: vin",
+    "Typical application U1 pin 1 has requires_power=false, expected true",
+    "Typical application U1 is missing validated pin 2",
+    "Typical application U1 has unexpected pin 3",
   ])
 })
 
@@ -235,10 +596,13 @@ test("datasheet connectivity resolves punctuation-bearing endpoints through pola
 
   expect(getTypicalApplicationConnectivityErrors(plan, circuit as unknown as AnyCircuitElement[])).toEqual([])
 
-  circuit[2]!.name = "IN_NEG"
-  circuit[2]!.port_hints = ["IN_NEG", "pin10", "10"]
-  circuit[3]!.name = "IN_POS"
-  circuit[3]!.port_hints = ["IN_POS", "pin9", "9"]
+  const positive_port = circuit[2]
+  const negative_port = circuit[3]
+  if (!positive_port || !negative_port) throw new Error("Fixture source ports are missing")
+  positive_port.name = "IN_NEG"
+  positive_port.port_hints = ["IN_NEG", "pin10", "10"]
+  negative_port.name = "IN_POS"
+  negative_port.port_hints = ["IN_POS", "pin9", "9"]
   expect(getTypicalApplicationConnectivityErrors(plan, circuit as unknown as AnyCircuitElement[])).toEqual([
     "SENSE_POS: expected pins are not electrically connected: U1.IN+, R1.1",
     "SENSE_NEG: expected pins are not electrically connected: U1.IN−, R1.2",
@@ -351,6 +715,76 @@ test("application value gate catches a changed feedback-divider value", () => {
   ])
 })
 
+test("application value gate rejects invented values for an undocumented shunt scalar", () => {
+  const plan = {
+    components: [{ reference: "RSHUNT", kind: "resistor" }],
+    connections: [{ net: "SENSE", pins: ["RSHUNT.pin1", "SENSE"] }],
+  }
+  const generic_symbol = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT" },
+  ] as unknown as AnyCircuitElement[]
+  const invented_zero = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT", resistance: 0 },
+  ] as unknown as AnyCircuitElement[]
+  const non_numeric = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT", resistance: null },
+  ] as unknown as AnyCircuitElement[]
+  const wrong_passive_kind = [
+    { type: "source_component", source_component_id: "rshunt", name: "RSHUNT", capacitance: 1e-6 },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationComponentValueErrors(plan, generic_symbol)).toEqual([])
+  expect(getTypicalApplicationComponentValueErrors(plan, invented_zero)).toEqual([
+    "Application component RSHUNT invents passive value fields resistance=0, but the documented plan has no numeric value; use a generic two-pin chip",
+  ])
+  expect(getTypicalApplicationComponentValueErrors(plan, non_numeric)).toEqual([
+    "Application component RSHUNT invents passive value fields resistance=null, but the documented plan has no numeric value; use a generic two-pin chip",
+  ])
+  expect(getTypicalApplicationComponentValueErrors(plan, wrong_passive_kind)).toEqual([
+    "Application component RSHUNT invents passive value fields capacitance=0.000001, but the documented plan has no numeric value; use a generic two-pin chip",
+  ])
+})
+
+test("application value gate cannot be satisfied by a same-name child-subcircuit component", () => {
+  const plan = {
+    components: [{ reference: "C1", kind: "capacitor", value: "10uF" }],
+    connections: [{ net: "VIN", pins: ["C1.pin1", "VIN"] }],
+  }
+  const circuit = [
+    { type: "source_group", source_group_id: "app", subcircuit_id: "app-subcircuit" },
+    {
+      type: "source_component",
+      source_component_id: "root-c1",
+      source_group_id: "app",
+      name: "C1",
+      capacitance: "1uF",
+    },
+    {
+      type: "source_group",
+      source_group_id: "child-implementation",
+      parent_subcircuit_id: "child-subcircuit",
+    },
+    {
+      type: "source_component",
+      source_component_id: "child-c1",
+      source_group_id: "child-implementation",
+      name: "C1",
+      capacitance: "10uF",
+    },
+    {
+      type: "source_port",
+      source_port_id: "root-c1-pin1",
+      source_component_id: "root-c1",
+      subcircuit_id: "app-subcircuit",
+      name: "pin1",
+    },
+  ] as unknown as AnyCircuitElement[]
+
+  expect(getTypicalApplicationComponentValueErrors(plan, circuit)).toEqual([
+    "Application component C1 has capacitance 0.000001, expected 10uF",
+  ])
+})
+
 test("application component gate enforces sourced manufacturer part numbers", () => {
   const plan = {
     components: [
@@ -412,326 +846,4 @@ test("application component gate trusts the generated target IC ordering code", 
   ] as unknown as AnyCircuitElement[]
 
   expect(getTypicalApplicationComponentValueErrors(plan, circuit)).toEqual([])
-})
-
-test("visual gate accepts honest inconclusive reports but rejects unsupported pass claims", async () => {
-  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-visual-gate-"))
-  const png = Uint8Array.from(
-    atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
-    (character) => character.charCodeAt(0),
-  )
-  const expected_images = {
-    reference: "visual-reference/land-pattern.png",
-    pcb: "dist/index/pcb.png",
-    schematic: "dist/index/schematic.png",
-  }
-  await Promise.all([
-    mkdir(join(job_dir, "visual-reference"), { recursive: true }),
-    mkdir(join(job_dir, "dist/index"), { recursive: true }),
-  ])
-  for (const path of Object.values(expected_images)) await Bun.write(join(job_dir, path), png)
-  await Bun.write(
-    join(job_dir, "component-visual-inspection.json"),
-    JSON.stringify({
-      version: 1,
-      status: "passed",
-      reference_image: expected_images.reference,
-      pcb_image: expected_images.pcb,
-      schematic_image: expected_images.schematic,
-    }),
-  )
-  const events: TrustedAgentEvent[] = [
-    {
-      protocol: AGENT_EVENT_PROTOCOL,
-      sequence: 1,
-      type: "tool_start",
-      tool_call_id: "build",
-      tool_name: "bash",
-      args: { command: "tsci build index.circuit.tsx" },
-    },
-    {
-      protocol: AGENT_EVENT_PROTOCOL,
-      sequence: 2,
-      type: "tool_end",
-      tool_call_id: "build",
-      tool_name: "bash",
-      is_error: false,
-      result_has_image: false,
-    },
-    ...Object.values(expected_images).flatMap((path, index): TrustedAgentEvent[] => [
-      {
-        protocol: AGENT_EVENT_PROTOCOL,
-        sequence: index * 2 + 3,
-        type: "tool_start",
-        tool_call_id: `read-${index}`,
-        tool_name: "read",
-        args: { path },
-      },
-      {
-        protocol: AGENT_EVENT_PROTOCOL,
-        sequence: index * 2 + 4,
-        type: "tool_end",
-        tool_call_id: `read-${index}`,
-        tool_name: "read",
-        is_error: false,
-        result_has_image: true,
-      },
-    ]),
-  ]
-  const input = {
-    job_dir,
-    events,
-    report_file: "component-visual-inspection.json",
-    build_command: "tsci build index.circuit.tsx",
-    expected_images,
-  }
-  await expect(validateVisualInspection(input)).resolves.toEqual({ status: "passed" })
-  await Bun.write(
-    join(job_dir, "component-visual-inspection.json"),
-    JSON.stringify({
-      version: 1,
-      status: "passed",
-      reference_image: expected_images.reference,
-      schematic_image: expected_images.schematic,
-    }),
-  )
-  await expect(validateVisualInspection(input)).rejects.toThrow(
-    `must set pcb_image to ${expected_images.pcb}`,
-  )
-  await expect(
-    validateVisualInspection({
-      ...input,
-      expected_images: {
-        reference: expected_images.reference,
-        schematic: expected_images.schematic,
-      },
-    }),
-  ).resolves.toEqual({ status: "passed" })
-  await Bun.write(
-    join(job_dir, "component-visual-inspection.json"),
-    JSON.stringify({
-      version: 1,
-      status: "passed",
-      reference_image: expected_images.reference,
-      pcb_image: expected_images.pcb,
-      schematic_image: expected_images.schematic,
-    }),
-  )
-  await expect(
-    validateVisualInspection({
-      ...input,
-      expected_images: {
-        reference: expected_images.reference,
-        schematic: expected_images.schematic,
-      },
-    }),
-  ).rejects.toThrow("must omit pcb_image")
-  for (const executable of ["npx tsci", "bunx tsci", "./node_modules/.bin/tsci", "node_modules/.bin/tsci"]) {
-    const wrapped_events: TrustedAgentEvent[] = events.map((event) =>
-      event.type === "tool_start" && event.tool_call_id === "build"
-        ? {
-            ...event,
-            args: {
-              command: `${executable} build index.circuit.tsx --ignore-warnings --pcb-png --schematic-svgs`,
-            },
-          }
-        : event,
-    )
-    await expect(validateVisualInspection({ ...input, events: wrapped_events })).resolves.toEqual({
-      status: "passed",
-    })
-  }
-  for (const environment_prefix of [
-    "NODE_ENV=development",
-    'NODE_ENV="development"',
-    "env NODE_ENV='development'",
-  ]) {
-    const environment_prefixed_events: TrustedAgentEvent[] = events.map((event) =>
-      event.type === "tool_start" && event.tool_call_id === "build"
-        ? {
-            ...event,
-            args: {
-              command: `${environment_prefix} tsci build index.circuit.tsx --ignore-warnings --pcb-png --schematic-svgs`,
-            },
-          }
-        : event,
-    )
-    await expect(
-      validateVisualInspection({ ...input, events: environment_prefixed_events }),
-    ).resolves.toEqual({ status: "passed" })
-  }
-  await expect(
-    validateVisualInspection({
-      ...input,
-      events: events.map((event) =>
-        event.type === "tool_start" && event.tool_call_id === "build"
-          ? {
-              ...event,
-              args: { command: "NODE_ENV=production tsci build index.circuit.tsx" },
-            }
-          : event,
-      ),
-    }),
-  ).rejects.toThrow("missing final build command")
-  await expect(
-    validateVisualInspection({
-      ...input,
-      events: events.map((event) =>
-        event.type === "tool_start" && event.tool_call_id === "build"
-          ? {
-              ...event,
-              args: { command: "npx tsci build index.circuit.tsx && touch unexpected" },
-            }
-          : event,
-      ),
-    }),
-  ).rejects.toThrow("missing final build command")
-  await Bun.write(
-    join(job_dir, "component-visual-inspection.json"),
-    JSON.stringify({
-      version: 1,
-      status: "passed",
-      reference_image: expected_images.reference,
-      pcb_render: expected_images.pcb,
-      schematic_render: expected_images.schematic,
-    }),
-  )
-  await expect(validateVisualInspection(input)).resolves.toEqual({ status: "passed" })
-  const canonical_report = JSON.parse(
-    await Bun.file(join(job_dir, "component-visual-inspection.json")).text(),
-  )
-  expect(canonical_report.pcb_image).toBe(expected_images.pcb)
-  expect(canonical_report.schematic_image).toBe(expected_images.schematic)
-  expect(canonical_report.basis).toBe("agent_visual_attestation")
-  expect(canonical_report.pcb_render).toBeUndefined()
-  await expect(
-    validateVisualInspection({
-      ...input,
-      events: [
-        ...events,
-        {
-          protocol: AGENT_EVENT_PROTOCOL,
-          sequence: 9,
-          type: "text_delta",
-          text: "There are no pixels present.",
-        },
-      ],
-    }),
-  ).rejects.toThrow("Image inspection was unavailable")
-  await expect(
-    validateVisualInspection({
-      ...input,
-      events: events.map((event) =>
-        event.type === "tool_end" && event.tool_call_id === "read-2"
-          ? { ...event, result_has_image: false }
-          : event,
-      ),
-    }),
-  ).rejects.toThrow("was not successfully inspected as pixels")
-
-  await Bun.write(
-    join(job_dir, "component-visual-inspection.json"),
-    JSON.stringify({ version: 1, status: "inconclusive" }),
-  )
-  await expect(
-    validateVisualInspection({
-      ...input,
-      events: events.map((event) =>
-        event.type === "tool_end" && event.tool_name === "read"
-          ? { ...event, result_has_image: false }
-          : event,
-      ),
-    }),
-  ).resolves.toEqual({ status: "inconclusive" })
-
-  await expect(
-    validateAgentImageReads({
-      job_dir,
-      expected_images: [expected_images.reference],
-      events: [
-        {
-          protocol: AGENT_EVENT_PROTOCOL,
-          sequence: 1,
-          type: "tool_start",
-          tool_call_id: "read-resize-failure",
-          tool_name: "read",
-          args: { path: expected_images.reference },
-        },
-        {
-          protocol: AGENT_EVENT_PROTOCOL,
-          sequence: 2,
-          type: "tool_end",
-          tool_call_id: "read-resize-failure",
-          tool_name: "read",
-          is_error: false,
-          result_has_image: false,
-          result_text:
-            "Read image file [image/png]\n[Image omitted: could not be resized below the inline image size limit.]",
-        },
-      ],
-    }),
-  ).rejects.toThrow("Image inspection was unavailable")
-
-  const snapshot = await captureVisualInspectionSnapshot({ job_dir, expected_images })
-  await Bun.write(join(job_dir, expected_images.pcb), "different authoritative render")
-  await expect(assertVisualInspectionSnapshotMatches({ job_dir, snapshot })).rejects.toThrow(
-    "did not reproduce the agent-inspected image",
-  )
-
-  await rm(job_dir, { recursive: true, force: true })
-})
-
-test("evidence image inspection accepts a byte-identical canonical copy", async () => {
-  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-evidence-image-alias-"))
-  const png = Uint8Array.from(
-    atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
-    (character) => character.charCodeAt(0),
-  )
-  const rendered_page = "visual-reference/pages/page-036.png"
-  const canonical_reference = "visual-reference/land-pattern.png"
-  await mkdir(join(job_dir, "visual-reference/pages"), { recursive: true })
-  await Promise.all([
-    Bun.write(join(job_dir, rendered_page), png),
-    Bun.write(join(job_dir, canonical_reference), png),
-  ])
-  const events: TrustedAgentEvent[] = [
-    {
-      protocol: AGENT_EVENT_PROTOCOL,
-      sequence: 1,
-      type: "tool_start",
-      tool_call_id: "read-rendered-page",
-      tool_name: "read",
-      args: { path: rendered_page },
-    },
-    {
-      protocol: AGENT_EVENT_PROTOCOL,
-      sequence: 2,
-      type: "tool_end",
-      tool_call_id: "read-rendered-page",
-      tool_name: "read",
-      is_error: false,
-      result_has_image: true,
-    },
-  ]
-
-  await expect(
-    validateAgentImageReads({
-      job_dir,
-      events,
-      expected_images: [canonical_reference],
-      allow_identical_copies: true,
-    }),
-  ).resolves.toBeUndefined()
-
-  await Bun.write(join(job_dir, canonical_reference), Uint8Array.from([...png, 0]))
-  await expect(
-    validateAgentImageReads({
-      job_dir,
-      events,
-      expected_images: [canonical_reference],
-      allow_identical_copies: true,
-    }),
-  ).rejects.toThrow("was not successfully inspected as pixels")
-
-  await rm(job_dir, { recursive: true, force: true })
 })

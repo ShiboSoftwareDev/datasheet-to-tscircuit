@@ -238,7 +238,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
           <span className="model-option-copy">
             <strong>Create SPICE behavioral model</strong>
             <small>
-              Validated with ngspice; evidence setup and benchmark locking run outside the refinement budget.
+              Validated with ngspice; effort sets the maximum number of server-guided model repair attempts.
             </small>
           </span>
           <i aria-hidden="true">
@@ -261,7 +261,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
                 onClick={() => updateModelEffort(value)}
               >
                 <strong>{value}×</strong>
-                <small>{value === 1 ? "Baseline" : `${value}× time`}</small>
+                <small>{value === 1 ? "1 repair" : `Up to ${value} repairs`}</small>
               </button>
             ))}
           </div>

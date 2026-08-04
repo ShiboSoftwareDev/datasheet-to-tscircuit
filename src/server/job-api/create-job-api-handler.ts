@@ -2,7 +2,7 @@ import type { Job } from "@/shared/job-types"
 import { JobApiContext } from "./job-api-context"
 import { createJobFromRequest } from "./create-job-from-request"
 import { errorResponse, getJobId, jsonResponse } from "./job-api-responses"
-import { createEventStream, createJobListEventStream } from "./create-job-event-stream"
+import { createEventStream, createJobListEventStream, listJobSummaries } from "./create-job-event-stream"
 import { cancelJob } from "./cancel-job"
 import { retryJob } from "./retry-job"
 import { deleteJob } from "./delete-job"
@@ -19,10 +19,10 @@ export function createJobApiHandler(context: JobApiContext) {
       return createJobFromRequest(request, context)
     }
     if (request_url.pathname === "/api/jobs" && request.method === "GET") {
-      return jsonResponse({ jobs: context.job_store.listJobs() })
+      return jsonResponse({ jobs: listJobSummaries(context.job_store, context.model_run_store) })
     }
     if (request_url.pathname === "/api/jobs/events" && request.method === "GET") {
-      return createJobListEventStream(context.job_store)
+      return createJobListEventStream(context.job_store, context.model_run_store)
     }
     if (request_url.pathname === "/api/job/cancel" && request.method === "POST") {
       return cancelJob(request_url, context)

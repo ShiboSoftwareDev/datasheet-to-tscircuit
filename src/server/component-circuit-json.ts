@@ -3,13 +3,14 @@ import type { AnyCircuitElement } from "circuit-json"
 export function isCircuitJson(value: unknown): value is AnyCircuitElement[] {
   return (
     Array.isArray(value) &&
+    value.length > 0 &&
     value.every(
       (element) => typeof element === "object" && element !== null && typeof element.type === "string",
     )
   )
 }
 
-export function hasRenderablePcb(circuit_json: AnyCircuitElement[]): boolean {
+function hasRenderablePcb(circuit_json: AnyCircuitElement[]): boolean {
   return circuit_json.some(
     (element) =>
       element.type === "pcb_component" ||

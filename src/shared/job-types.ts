@@ -1,4 +1,33 @@
 import type { AnyCircuitElement } from "circuit-json"
+import type { PipelineRunStatus, PipelineStageStatus } from "./pipeline-types"
+
+export interface PublicPipelineError {
+  code: string
+  message: string
+  operation: string
+  hint?: string
+  retryable: boolean
+}
+
+export interface PublicPipelineStage {
+  stage_id: string
+  status: PipelineStageStatus
+  debug_ref: string
+  started_at?: string
+  completed_at?: string
+  duration_ms?: number
+  reason?: string
+  error?: PublicPipelineError
+}
+
+export interface PublicPipelineSnapshot {
+  pipeline_id: string
+  status: PipelineRunStatus
+  sequence: number
+  started_at: string
+  updated_at: string
+  stage_results: Record<string, PublicPipelineStage>
+}
 
 export type JobDisplayStatus =
   | "queued"
@@ -43,6 +72,9 @@ export interface JobValidation {
 
 export interface JobProvenance {
   source_commit: string
+  /** Hash of the actual server/shared workflow files, including uncommitted edits. */
+  workflow_source_sha256?: string
+  evidence_contract_sha256?: string
   bun_version: string
   tscircuit_version: string
   tsci_agent_version: string
@@ -75,6 +107,19 @@ export interface Job {
   validation?: JobValidation
   provenance?: JobProvenance
   evidence_available?: boolean
+  /** Observable, typed execution state. Older persisted jobs may not have one. */
+  pipeline?: PublicPipelineSnapshot
+}
+
+export interface ModelRunSummary {
+  model_run_id: string
+  job_id: string
+  status: ModelRunStatus
+  is_complete: boolean
+  has_errors: boolean
+  error_message?: string
+  has_model: boolean
+  has_retained_accepted_model: boolean
 }
 
 export type JobSummary = Pick<
@@ -88,7 +133,10 @@ export type JobSummary = Pick<
   | "has_errors"
   | "error_message"
   | "warnings"
->
+  | "component_ready"
+> & {
+  model_run?: ModelRunSummary
+}
 
 export type JobEvent =
   | { event_type: "snapshot" | "job_updated"; job: Job }
@@ -143,15 +191,42 @@ export interface ModelValidationSeries {
 }
 
 export interface ModelValidationSummary {
+  /** Distinguishes an inspectable attempt from the immutable accepted model. */
+  artifact_state?: "candidate" | "accepted"
+  /** Revision whose simulator results produced this exact projection. */
+  model_revision?: string
+  /** Immutable live-preview generation for an unaccepted candidate. */
+  preview_generation?: string
   benchmark_count: number
   passing_count: number
   critical_count: number
   critical_passing_count: number
   score?: number
   worst_normalized_error?: number
+  /** Sample-weighted NRMSE for curve observations only; scalar checks never dilute it. */
+  curve_score?: number
+  curve_worst_normalized_error?: number
   all_critical_passed: boolean
   all_passed: boolean
   benchmarks: ModelValidationBenchmark[]
+  scope?: {
+    total_requirement_count: number
+    modeled_requirement_count: number
+    documented_only_requirement_count: number
+    validated_sample_count: number
+    scalar_observation_count: number
+    curve_observation_count: number
+    compared_curve_observation_count: number
+    curve_sample_count: number
+    swept_case_count: number
+    quality: "scalar_only" | "range_checked" | "curve_attempted" | "curve_validated"
+    documented_only_requirements: Array<{
+      requirement_id: string
+      title: string
+      reason: string
+    }>
+    limitations: string[]
+  }
 }
 
 export interface ModelManifest {
@@ -171,6 +246,12 @@ export interface ModelManifest {
 
 export type ModelProgressPhase =
   | "queued"
+  | "preparing_workspace"
+  | "characterizing"
+  | "designing_validation"
+  | "generating_model"
+  | "repairing"
+  | "publishing"
   | "extracting_datasheet"
   | "digitizing_graphs"
   | "preparing_benchmarks"
@@ -239,7 +320,13 @@ export interface ModelReferenceSeriesPreview {
   source_file: string
   result_file?: string
   y_scale: "linear" | "log"
+  /** Distinguishes a sampled time-domain curve from scalar specification checks. */
+  reference_kind?: "curve" | "target" | "bounds"
   reference_points: ModelCurvePoint[]
+  reference_bounds?: {
+    min?: number
+    max?: number
+  }
   result_points?: ModelCurvePoint[]
   normalized_rmse?: number
   normalized_max_error?: number
@@ -252,6 +339,10 @@ export interface ModelCircuitPreview {
   build_status: "source_ready" | "building" | "ready" | "failed"
   updated_at: string
   circuit_json?: AnyCircuitElement[]
+  /** Analysis represented by the generated validation-case TSX. */
+  analysis_type?: "operating_point" | "dc_sweep" | "transient"
+  /** Whether Circuit JSON contains a completed transient experiment and waveform. */
+  analog_simulation_status?: "available" | "unsupported" | "failed"
   snapshot_origin?: "workspace" | "server_validation"
   is_stale?: boolean
   error_message?: string
@@ -268,11 +359,17 @@ export interface ModelReferencePreview {
   y_axis_unit?: string
   x_scale: "linear" | "log"
   y_scale: "linear" | "log"
+  /** Distinguishes a sampled time-domain curve from scalar specification checks. */
+  reference_kind?: "curve" | "target" | "bounds"
   reference_points: ModelCurvePoint[]
+  reference_bounds?: {
+    min?: number
+    max?: number
+  }
   result_points?: ModelCurvePoint[]
   series?: ModelReferenceSeriesPreview[]
-  result_status?: "unverified" | "partial" | "verified" | "deprecated"
-  result_origin?: "workspace" | "server_validation"
+  result_status?: "unverified" | "partial" | "verified" | "failed" | "cancelled" | "deprecated"
+  result_origin?: "workspace" | "server_validation" | "tscircuit_viewer"
   normalized_rmse?: number
   normalized_max_error?: number
   matches_reference?: boolean
@@ -288,7 +385,15 @@ export interface ModelPreviewOption {
   result_file?: string
 }
 
+/** Immutable identity shared by one selected preview and its datasheet image. */
+export interface ModelPreviewArtifactIdentity {
+  preview_generation: string
+  model_revision: string
+}
+
 export interface ModelSelectedPreview {
+  /** Missing only for preview artifacts written before immutable image binding was introduced. */
+  artifact_identity?: ModelPreviewArtifactIdentity
   circuit_preview?: ModelCircuitPreview
   reference_preview?: ModelReferencePreview
 }
@@ -307,10 +412,10 @@ export interface ModelRun {
   error_message?: string
   warnings?: string[]
   effort_multiplier: number
-  base_effort_ms: number
-  allocated_time_ms: number
   elapsed_time_ms: number
   segment_started_at?: string
+  /** Identifies the pipeline invocation whose checkpoints are currently being written. */
+  current_invocation_id?: string
   iteration: number
   logs: JobLog[]
   model_source?: string
@@ -322,6 +427,8 @@ export interface ModelRun {
   circuit_preview?: ModelCircuitPreview
   reference_preview?: ModelReferencePreview
   preview_options: ModelPreviewOption[]
+  /** Observable, typed execution state. Older persisted runs may not have one. */
+  pipeline?: PublicPipelineSnapshot
 }
 
 export type ModelRunEvent =

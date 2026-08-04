@@ -1,26 +1,29 @@
-import { appendFile } from "node:fs/promises"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync } from "node:fs"
 import { join } from "node:path"
 import type {
   JobLog,
   JobLogStream,
-  ModelManifest,
-  ModelProgress,
   ModelPreviewOption,
+  ModelProgress,
   ModelRun,
   ModelRunEvent,
   ModelRunStatus,
-  ModelValidationSummary,
+  ModelRunSummary,
 } from "@/shared/job-types"
-import type { BenchmarkLock } from "./model-benchmark-lock"
+import { hasRetainedAcceptedModel } from "@/shared/model-warnings"
+import { atomicWriteJsonSync, type CheckpointWriter } from "./infrastructure/persistence/atomic-write"
+import {
+  appendBoundedLogEvent,
+  capRecentLogs,
+  type LogEventWriter,
+  prepareBoundedLogEvent,
+} from "./infrastructure/persistence/bounded-log"
 
 type ModelRunSubscriber = (event: ModelRunEvent) => void
+type ModelRunListSubscriber = (summary: ModelRunSummary) => void
 
 interface ModelRunRecord extends ModelRun {
   model_dir: string
-  benchmark_lock?: BenchmarkLock
-  validation_run_count: number
-  validation_canary_ms?: number
   cancellation_controller: AbortController
   subscriber_set: Set<ModelRunSubscriber>
 }
@@ -31,13 +34,22 @@ export interface CreateModelRunInput {
   model_dir: string
   use_openai?: boolean
   effort_multiplier: number
-  base_effort_ms: number
+}
+
+export interface ModelRunStoreOptions {
+  checkpoint_writer?: CheckpointWriter
+  log_writer?: LogEventWriter
 }
 
 export interface RestoreModelRunInput {
   model_dir: string
   model_run: ModelRun
   logs: JobLog[]
+}
+
+export interface CommittedModelProjectionResult {
+  model_run: ModelRun
+  checkpoint_error?: string
 }
 
 export type ModelRunUpdate = Partial<
@@ -49,23 +61,34 @@ export type ModelRunUpdate = Partial<
     | "error_message"
     | "warnings"
     | "completed_at"
+    | "current_invocation_id"
     | "iteration"
     | "model_source"
     | "manifest"
     | "validation"
     | "model_card"
     | "use_openai"
+    | "pipeline"
   >
 >
 
 export type ModelRunCancellationResult = "requested" | "already_requested" | "already_complete" | "not_found"
 
-export interface ExtendModelRunResult {
-  model_run: ModelRun
-  should_start: boolean
-}
+export type CreateModelRunResult =
+  | { status: "created"; model_run: ModelRun }
+  | { status: "already_exists"; model_run: ModelRun }
 
-export type ModelRunRetryResult = "retried" | "not_failed" | "not_found"
+export type ExtendModelRunResult =
+  | { status: "extended"; model_run: ModelRun; should_start: boolean }
+  | { status: "invalid_effort"; model_run: ModelRun }
+  | { status: "busy"; model_run: ModelRun }
+  | { status: "not_found" }
+
+export type ModelRunRetryResult =
+  | { status: "retried"; model_run: ModelRun }
+  | { status: "busy"; model_run: ModelRun }
+  | { status: "not_retryable"; model_run: ModelRun }
+  | { status: "not_found" }
 
 const ACTIVE_STATUSES = new Set<ModelRunStatus>([
   "queued",
@@ -83,12 +106,6 @@ function computeElapsedTime(record: ModelRunRecord, now = Date.now()): number {
   return record.elapsed_time_ms + Math.max(0, now - segment_start)
 }
 
-function computeValidationReserve(): number {
-  // Evidence setup, benchmark repair, and independent validation are server-owned
-  // work. They pause the refinement segment instead of consuming user effort.
-  return 0
-}
-
 function getPublicModelRun(record: ModelRunRecord): ModelRun {
   return {
     model_run_id: record.model_run_id,
@@ -103,10 +120,9 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
     error_message: record.error_message,
     warnings: [...(record.warnings ?? [])],
     effort_multiplier: record.effort_multiplier,
-    base_effort_ms: record.base_effort_ms,
-    allocated_time_ms: record.allocated_time_ms,
     elapsed_time_ms: record.elapsed_time_ms,
     segment_started_at: record.segment_started_at,
+    current_invocation_id: record.current_invocation_id,
     iteration: record.iteration,
     logs: [...record.logs],
     model_source: record.model_source,
@@ -118,6 +134,32 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
     circuit_preview: record.circuit_preview,
     reference_preview: record.reference_preview,
     preview_options: [...record.preview_options],
+    pipeline: record.pipeline,
+  }
+}
+
+function getModelRunSummary(record: ModelRunRecord): ModelRunSummary {
+  return {
+    model_run_id: record.model_run_id,
+    job_id: record.job_id,
+    status: record.status,
+    is_complete: record.is_complete,
+    has_errors: record.has_errors,
+    error_message: record.error_message,
+    has_model: Boolean(record.model_source),
+    has_retained_accepted_model: hasRetainedAcceptedModel(record),
+  }
+}
+
+function cloneModelRunRecord(record: ModelRunRecord): ModelRunRecord {
+  return {
+    ...record,
+    warnings: [...(record.warnings ?? [])],
+    logs: [...record.logs],
+    progress_history: [...record.progress_history],
+    preview_options: [...record.preview_options],
+    cancellation_controller: record.cancellation_controller,
+    subscriber_set: record.subscriber_set,
   }
 }
 
@@ -125,9 +167,27 @@ export class ModelRunStore {
   private run_map = new Map<string, ModelRunRecord>()
   private job_run_map = new Map<string, string>()
   private active_execution_ids = new Set<string>()
+  private run_list_subscriber_set = new Set<ModelRunListSubscriber>()
+  private readonly checkpoint_writer: CheckpointWriter
+  private readonly log_writer: LogEventWriter
+
+  constructor(options: ModelRunStoreOptions = {}) {
+    this.checkpoint_writer = options.checkpoint_writer ?? atomicWriteJsonSync
+    this.log_writer = options.log_writer ?? appendBoundedLogEvent
+  }
 
   createModelRun(input: CreateModelRunInput): ModelRun {
-    if (this.job_run_map.has(input.job_id)) throw new Error(`Job ${input.job_id} already has a model run`)
+    const result = this.createModelRunIfAbsent(input)
+    if (result.status === "already_exists") {
+      throw new Error(`Job ${input.job_id} already has a model run`)
+    }
+    return result.model_run
+  }
+
+  createModelRunIfAbsent(input: CreateModelRunInput): CreateModelRunResult {
+    const existing_id = this.job_run_map.get(input.job_id)
+    const existing = existing_id ? this.run_map.get(existing_id) : undefined
+    if (existing) return { status: "already_exists", model_run: getPublicModelRun(existing) }
     const now = new Date().toISOString()
     const record: ModelRunRecord = {
       model_run_id: input.model_run_id,
@@ -141,23 +201,21 @@ export class ModelRunStore {
       has_errors: false,
       warnings: [],
       effort_multiplier: input.effort_multiplier,
-      base_effort_ms: input.base_effort_ms,
-      allocated_time_ms: input.base_effort_ms * input.effort_multiplier,
       elapsed_time_ms: 0,
       iteration: 0,
       logs: [],
       progress_history: [],
       preview_options: [],
-      validation_run_count: 0,
       cancellation_controller: new AbortController(),
       subscriber_set: new Set(),
     }
-    this.run_map.set(record.model_run_id, record)
-    this.job_run_map.set(record.job_id, record.model_run_id)
     mkdirSync(record.model_dir, { recursive: true })
     this.persist(record)
-    this.writeRunControl(record)
-    return getPublicModelRun(record)
+    this.run_map.set(record.model_run_id, record)
+    this.job_run_map.set(record.job_id, record.model_run_id)
+    const model_run = getPublicModelRun(record)
+    this.publishModelRunList(getModelRunSummary(record))
+    return { status: "created", model_run }
   }
 
   restoreModelRun(input: RestoreModelRunInput): ModelRun {
@@ -181,23 +239,20 @@ export class ModelRunStore {
         : input.model_run.error_message,
       warnings: input.model_run.warnings ?? [],
       completed_at: was_active ? new Date().toISOString() : input.model_run.completed_at,
-      elapsed_time_ms: Math.min(
-        input.model_run.allocated_time_ms,
-        input.model_run.elapsed_time_ms + interrupted_segment_ms,
-      ),
+      elapsed_time_ms: input.model_run.elapsed_time_ms + interrupted_segment_ms,
       segment_started_at: undefined,
-      logs: input.logs,
+      logs: capRecentLogs(input.logs),
       progress_history: input.model_run.progress_history ?? [],
       preview_options: input.model_run.preview_options ?? [],
-      validation_run_count: 0,
       cancellation_controller: new AbortController(),
       subscriber_set: new Set(),
     }
+    this.persist(record)
     this.run_map.set(record.model_run_id, record)
     this.job_run_map.set(record.job_id, record.model_run_id)
-    this.persist(record)
-    this.writeRunControl(record)
-    return getPublicModelRun(record)
+    const model_run = getPublicModelRun(record)
+    this.publishModelRunList(getModelRunSummary(record))
+    return model_run
   }
 
   getModelRun(model_run_id: string): ModelRun | undefined {
@@ -232,112 +287,92 @@ export class ModelRunStore {
     this.active_execution_ids.delete(model_run_id)
   }
 
-  rememberBenchmarkLock(model_run_id: string, benchmark_lock: BenchmarkLock): void {
-    this.requireRecord(model_run_id).benchmark_lock = structuredClone(benchmark_lock)
-  }
-
-  getRememberedBenchmarkLock(model_run_id: string): BenchmarkLock | undefined {
-    const benchmark_lock = this.run_map.get(model_run_id)?.benchmark_lock
-    return benchmark_lock ? structuredClone(benchmark_lock) : undefined
-  }
-
-  getRemainingTimeMs(model_run_id: string): number | undefined {
-    const record = this.run_map.get(model_run_id)
-    if (!record) return undefined
-    return Math.max(0, record.allocated_time_ms - computeElapsedTime(record))
-  }
-
-  getFinalizationReserveMs(model_run_id: string, simulation_run_count = 0): number | undefined {
-    const record = this.run_map.get(model_run_id)
-    return record ? computeValidationReserve() : undefined
-  }
-
-  setValidationProfile(
-    model_run_id: string,
-    profile: { simulation_run_count: number; canary_duration_ms?: number },
-  ): ModelRun {
-    const record = this.requireRecord(model_run_id)
-    record.validation_run_count = Math.max(0, Math.floor(profile.simulation_run_count))
-    record.validation_canary_ms = profile.canary_duration_ms
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
-  }
-
   startSegment(model_run_id: string): ModelRun {
     const record = this.requireRecord(model_run_id)
     if (record.segment_started_at) return getPublicModelRun(record)
-    record.segment_started_at = new Date().toISOString()
-    record.completed_at = undefined
-    record.status = "running"
-    record.is_complete = false
-    record.has_errors = false
-    record.error_message = undefined
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
-  }
-
-  pauseSegment(model_run_id: string): ModelRun {
-    const record = this.requireRecord(model_run_id)
-    if (record.segment_started_at) record.elapsed_time_ms = computeElapsedTime(record)
-    record.segment_started_at = undefined
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
-  }
-
-  restartSegment(model_run_id: string): ModelRun {
-    const record = this.requireRecord(model_run_id)
-    record.elapsed_time_ms = 0
-    record.segment_started_at = new Date().toISOString()
-    record.completed_at = undefined
-    record.status = "running"
-    record.is_complete = false
-    record.has_errors = false
-    record.error_message = undefined
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.segment_started_at = new Date().toISOString()
+      candidate.completed_at = undefined
+      candidate.status = "running"
+      candidate.is_complete = false
+      candidate.has_errors = false
+      candidate.error_message = undefined
+    })
   }
 
   finishSegment(model_run_id: string, update: ModelRunUpdate): ModelRun {
     const record = this.requireRecord(model_run_id)
-    record.elapsed_time_ms = computeElapsedTime(record)
-    record.segment_started_at = undefined
-    Object.assign(record, update)
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
+    const elapsed_time_ms = computeElapsedTime(record)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.elapsed_time_ms = elapsed_time_ms
+      candidate.segment_started_at = undefined
+      Object.assign(candidate, update)
+    })
+  }
+
+  /**
+   * Projects artifacts selected by an already-durable publication pointer.
+   * Restart recovery can reconstruct this live view if its compatibility
+   * checkpoint fails, so that failure must not roll memory back.
+   */
+  projectCommittedPublication(
+    model_run_id: string,
+    input: {
+      update: ModelRunUpdate
+      preview_options: ModelPreviewOption[]
+      previews: Pick<ModelRun, "circuit_preview" | "reference_preview">
+    },
+  ): CommittedModelProjectionResult {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateCommittedAndPublish(record, (candidate) => {
+      Object.assign(candidate, input.update)
+      candidate.preview_options = input.preview_options
+      candidate.circuit_preview = input.previews.circuit_preview
+      candidate.reference_preview = input.previews.reference_preview
+    })
+  }
+
+  /** Finalizes the invocation that crossed an external durable commit barrier. */
+  finishCommittedSegment(model_run_id: string, update: ModelRunUpdate): CommittedModelProjectionResult {
+    const record = this.requireRecord(model_run_id)
+    const elapsed_time_ms = computeElapsedTime(record)
+    return this.mutateCommittedAndPublish(record, (candidate) => {
+      candidate.elapsed_time_ms = elapsed_time_ms
+      candidate.segment_started_at = undefined
+      Object.assign(candidate, update)
+    })
   }
 
   updateModelRun(model_run_id: string, update: ModelRunUpdate): ModelRun {
     const record = this.requireRecord(model_run_id)
-    Object.assign(record, update)
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
+    return this.mutateAndPublish(record, (candidate) => Object.assign(candidate, update))
   }
 
   updateProgress(model_run_id: string, progress: ModelProgress): ModelRun {
     const record = this.requireRecord(model_run_id)
-    record.progress = progress
-    if (progress.iteration !== undefined) {
-      record.iteration = Math.max(record.iteration, progress.iteration)
-    }
-    const last_event = record.progress_history.at(-1)
-    if (
-      !last_event ||
-      last_event.sequence !== progress.sequence ||
-      last_event.phase !== progress.phase ||
-      last_event.message !== progress.message ||
-      last_event.updated_at !== progress.updated_at
-    ) {
-      record.progress_history.push({
-        sequence: progress.sequence,
-        phase: progress.phase,
-        message: progress.message,
-        updated_at: progress.updated_at,
-        iteration: progress.iteration,
-      })
-      record.progress_history = record.progress_history.slice(-50)
-    }
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.progress = progress
+      if (progress.iteration !== undefined) {
+        candidate.iteration = Math.max(candidate.iteration, progress.iteration)
+      }
+      const last_event = candidate.progress_history.at(-1)
+      if (
+        !last_event ||
+        last_event.sequence !== progress.sequence ||
+        last_event.phase !== progress.phase ||
+        last_event.message !== progress.message ||
+        last_event.updated_at !== progress.updated_at
+      ) {
+        candidate.progress_history.push({
+          sequence: progress.sequence,
+          phase: progress.phase,
+          message: progress.message,
+          updated_at: progress.updated_at,
+          iteration: progress.iteration,
+        })
+        candidate.progress_history = candidate.progress_history.slice(-50)
+      }
+    })
   }
 
   updatePreviews(
@@ -345,10 +380,10 @@ export class ModelRunStore {
     previews: Pick<ModelRun, "circuit_preview" | "reference_preview">,
   ): ModelRun {
     const record = this.requireRecord(model_run_id)
-    record.circuit_preview = previews.circuit_preview
-    record.reference_preview = previews.reference_preview
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.circuit_preview = previews.circuit_preview
+      candidate.reference_preview = previews.reference_preview
+    })
   }
 
   updatePreviewOptions(model_run_id: string, preview_options: ModelPreviewOption[]): ModelRun {
@@ -356,41 +391,100 @@ export class ModelRunStore {
     if (JSON.stringify(record.preview_options) === JSON.stringify(preview_options)) {
       return getPublicModelRun(record)
     }
-    record.preview_options = preview_options
-    this.touchAndPublish(record)
-    return getPublicModelRun(record)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.preview_options = preview_options
+    })
+  }
+
+  /** Publishes the source crop/curve while model generation is still pending. */
+  projectReferenceDraft(
+    model_run_id: string,
+    input: {
+      preview_options: ModelPreviewOption[]
+      reference_preview: NonNullable<ModelRun["reference_preview"]>
+    },
+  ): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.preview_options = input.preview_options
+      candidate.circuit_preview = undefined
+      candidate.reference_preview = input.reference_preview
+    })
+  }
+
+  /**
+   * Atomically projects a fully persisted, non-accepted candidate validation
+   * bundle into the live view. Accepted model fields remain untouched until the
+   * publication commit barrier is crossed.
+   */
+  projectCandidateValidation(
+    model_run_id: string,
+    input: {
+      validation: NonNullable<ModelRun["validation"]>
+      preview_options: ModelPreviewOption[]
+      previews: Pick<ModelRun, "circuit_preview" | "reference_preview">
+    },
+  ): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.validation = input.validation
+      candidate.preview_options = input.preview_options
+      candidate.circuit_preview = input.previews.circuit_preview
+      candidate.reference_preview = input.previews.reference_preview
+    })
   }
 
   extendModelRun(model_run_id: string, additional_effort: number): ExtendModelRunResult {
-    const record = this.requireRecord(model_run_id)
-    const should_start = !ACTIVE_STATUSES.has(record.status)
-    record.effort_multiplier += additional_effort
-    record.allocated_time_ms += record.base_effort_ms * additional_effort
-    if (should_start) {
-      record.status = "queued"
-      record.is_complete = false
-      record.has_errors = false
-      record.error_message = undefined
-      record.completed_at = undefined
-      record.cancellation_controller = new AbortController()
+    const record = this.run_map.get(model_run_id)
+    if (!record) return { status: "not_found" }
+    if (
+      record.status === "validating" ||
+      record.status === "cancelling" ||
+      (!ACTIVE_STATUSES.has(record.status) && this.active_execution_ids.has(model_run_id))
+    ) {
+      return { status: "busy", model_run: getPublicModelRun(record) }
     }
-    this.touchAndPublish(record)
-    return { model_run: getPublicModelRun(record), should_start }
+    if (
+      !Number.isInteger(additional_effort) ||
+      additional_effort < 1 ||
+      record.effort_multiplier + additional_effort > 8
+    ) {
+      return { status: "invalid_effort", model_run: getPublicModelRun(record) }
+    }
+    const should_start = !ACTIVE_STATUSES.has(record.status)
+    const model_run = this.mutateAndPublish(record, (candidate) => {
+      candidate.effort_multiplier += additional_effort
+      if (should_start) {
+        candidate.status = "queued"
+        candidate.is_complete = false
+        candidate.has_errors = false
+        candidate.error_message = undefined
+        candidate.completed_at = undefined
+        candidate.cancellation_controller = new AbortController()
+      }
+    })
+    return { status: "extended", model_run, should_start }
   }
 
   retryModelRun(model_run_id: string): ModelRunRetryResult {
     const record = this.run_map.get(model_run_id)
-    if (!record) return "not_found"
-    if (record.status !== "failed") return "not_failed"
-    record.status = "queued"
-    record.is_complete = false
-    record.has_errors = false
-    record.error_message = undefined
-    record.completed_at = undefined
-    record.segment_started_at = undefined
-    record.cancellation_controller = new AbortController()
-    this.touchAndPublish(record)
-    return "retried"
+    if (!record) return { status: "not_found" }
+    if (record.status !== "failed" && record.status !== "cancelled") {
+      return { status: "not_retryable", model_run: getPublicModelRun(record) }
+    }
+    if (this.active_execution_ids.has(model_run_id)) {
+      return { status: "busy", model_run: getPublicModelRun(record) }
+    }
+    const model_run = this.mutateAndPublish(record, (candidate) => {
+      candidate.status = "queued"
+      candidate.is_complete = false
+      candidate.has_errors = false
+      candidate.error_message = undefined
+      candidate.completed_at = undefined
+      candidate.segment_started_at = undefined
+      candidate.cancellation_controller = new AbortController()
+    })
+    return { status: "retried", model_run }
   }
 
   requestCancellation(model_run_id: string): ModelRunCancellationResult {
@@ -398,28 +492,33 @@ export class ModelRunStore {
     if (!record) return "not_found"
     if (record.is_complete) return "already_complete"
     if (record.cancellation_controller.signal.aborted) return "already_requested"
-    record.status = "cancelling"
+    const candidate = cloneModelRunRecord(record)
+    candidate.status = "cancelling"
+    candidate.updated_at = new Date().toISOString()
+    try {
+      this.persist(candidate)
+    } catch (error) {
+      record.cancellation_controller.abort()
+      throw error
+    }
+    Object.assign(record, candidate)
     record.cancellation_controller.abort()
-    this.touchAndPublish(record)
+    this.publish(record, { event_type: "model_run_updated", model_run: getPublicModelRun(record) })
+    this.publishModelRunList(getModelRunSummary(record))
     return "requested"
   }
 
   async appendLog(model_run_id: string, input: { stream: JobLogStream; message: string }): Promise<JobLog> {
     const record = this.requireRecord(model_run_id)
-    const log: JobLog = {
+    const log = prepareBoundedLogEvent({
       log_id: crypto.randomUUID(),
       created_at: new Date().toISOString(),
       stream: input.stream,
       message: input.message,
-    }
-    record.logs.push(log)
+    })
+    await this.log_writer(join(record.model_dir, "model-agent.log"), log)
+    record.logs = capRecentLogs([...record.logs, log])
     record.updated_at = log.created_at
-    await appendFile(
-      join(record.model_dir, "model-agent.log"),
-      `[${log.created_at}] [${input.stream}] ${input.message}`,
-      "utf8",
-    )
-    this.persist(record)
     this.publish(record, { event_type: "log", log })
     return log
   }
@@ -429,6 +528,17 @@ export class ModelRunStore {
     if (!record) return undefined
     record.subscriber_set.add(subscriber)
     return () => record.subscriber_set.delete(subscriber)
+  }
+
+  subscribeToModelRunList(subscriber: ModelRunListSubscriber): () => void {
+    this.run_list_subscriber_set.add(subscriber)
+    return () => this.run_list_subscriber_set.delete(subscriber)
+  }
+
+  getModelRunSummaryForJob(job_id: string): ModelRunSummary | undefined {
+    const model_run_id = this.job_run_map.get(job_id)
+    const record = model_run_id ? this.run_map.get(model_run_id) : undefined
+    return record ? getModelRunSummary(record) : undefined
   }
 
   deleteModelRunForJob(job_id: string): void {
@@ -444,44 +554,61 @@ export class ModelRunStore {
     return record
   }
 
-  private touchAndPublish(record: ModelRunRecord): void {
-    record.updated_at = new Date().toISOString()
-    this.persist(record)
-    this.writeRunControl(record)
+  private mutateAndPublish(record: ModelRunRecord, mutate: (candidate: ModelRunRecord) => void): ModelRun {
+    const candidate = cloneModelRunRecord(record)
+    mutate(candidate)
+    candidate.updated_at = new Date().toISOString()
+    this.persist(candidate)
+    Object.assign(record, candidate)
     this.publish(record, { event_type: "model_run_updated", model_run: getPublicModelRun(record) })
+    this.publishModelRunList(getModelRunSummary(record))
+    return getPublicModelRun(record)
+  }
+
+  private mutateCommittedAndPublish(
+    record: ModelRunRecord,
+    mutate: (candidate: ModelRunRecord) => void,
+  ): CommittedModelProjectionResult {
+    const candidate = cloneModelRunRecord(record)
+    mutate(candidate)
+    candidate.updated_at = new Date().toISOString()
+    let checkpoint_error: string | undefined
+    try {
+      this.persist(candidate)
+    } catch (error) {
+      checkpoint_error = error instanceof Error ? error.message : String(error)
+    }
+    Object.assign(record, candidate)
+    this.publish(record, { event_type: "model_run_updated", model_run: getPublicModelRun(record) })
+    this.publishModelRunList(getModelRunSummary(record))
+    return {
+      model_run: getPublicModelRun(record),
+      ...(checkpoint_error ? { checkpoint_error } : {}),
+    }
   }
 
   private persist(record: ModelRunRecord): void {
     const { logs: _logs, ...snapshot } = getPublicModelRun(record)
-    writeFileSync(join(record.model_dir, "model-run.json"), `${JSON.stringify(snapshot, null, 2)}\n`)
-  }
-
-  private writeRunControl(record: ModelRunRecord): void {
-    const remaining_time_ms = Math.max(0, record.allocated_time_ms - computeElapsedTime(record))
-    const deadline_at = record.segment_started_at
-      ? new Date(Date.now() + remaining_time_ms).toISOString()
-      : undefined
-    writeFileSync(
-      join(record.model_dir, "run-control.json"),
-      `${JSON.stringify(
-        {
-          version: 1,
-          effort_multiplier: record.effort_multiplier,
-          allocated_time_ms: record.allocated_time_ms,
-          elapsed_time_ms: computeElapsedTime(record),
-          remaining_time_ms,
-          deadline_at,
-          finalization_reserve_ms: computeValidationReserve(),
-          instruction:
-            "Re-read this file before every refinement iteration; only agent refinement consumes effort, while server validation is untimed.",
-        },
-        null,
-        2,
-      )}\n`,
-    )
+    this.checkpoint_writer(join(record.model_dir, "model-run.json"), snapshot)
   }
 
   private publish(record: ModelRunRecord, event: ModelRunEvent): void {
-    for (const subscriber of record.subscriber_set) subscriber(event)
+    for (const subscriber of [...record.subscriber_set]) {
+      try {
+        subscriber(event)
+      } catch {
+        record.subscriber_set.delete(subscriber)
+      }
+    }
+  }
+
+  private publishModelRunList(summary: ModelRunSummary): void {
+    for (const subscriber of [...this.run_list_subscriber_set]) {
+      try {
+        subscriber(summary)
+      } catch {
+        this.run_list_subscriber_set.delete(subscriber)
+      }
+    }
   }
 }

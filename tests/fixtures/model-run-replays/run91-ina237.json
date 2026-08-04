@@ -1,0 +1,810 @@
+{
+  "version": 1,
+  "source": "model-agent(91)",
+  "contract": {
+    "version": 1,
+    "interface": {
+      "version": 1,
+      "part_number": "INA237",
+      "entry_name": "INA237",
+      "pins": [
+        {
+          "physical_pin": "1",
+          "component_pin": "pin1",
+          "source_port_id": "source_port_0",
+          "spice_node": "A1",
+          "labels": ["A1"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "2",
+          "component_pin": "pin2",
+          "source_port_id": "source_port_1",
+          "spice_node": "A0",
+          "labels": ["A0"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "3",
+          "component_pin": "pin3",
+          "source_port_id": "source_port_2",
+          "spice_node": "ALERT",
+          "labels": ["ALERT"],
+          "role": "output"
+        },
+        {
+          "physical_pin": "4",
+          "component_pin": "pin4",
+          "source_port_id": "source_port_3",
+          "spice_node": "SDA",
+          "labels": ["SDA"],
+          "role": "bidirectional"
+        },
+        {
+          "physical_pin": "5",
+          "component_pin": "pin5",
+          "source_port_id": "source_port_4",
+          "spice_node": "SCL",
+          "labels": ["SCL"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "6",
+          "component_pin": "pin6",
+          "source_port_id": "source_port_5",
+          "spice_node": "VS",
+          "labels": ["VS"],
+          "role": "power_input"
+        },
+        {
+          "physical_pin": "7",
+          "component_pin": "pin7",
+          "source_port_id": "source_port_6",
+          "spice_node": "GND",
+          "labels": ["GND"],
+          "role": "ground"
+        },
+        {
+          "physical_pin": "8",
+          "component_pin": "pin8",
+          "source_port_id": "source_port_7",
+          "spice_node": "VBUS",
+          "labels": ["VBUS"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "9",
+          "component_pin": "pin9",
+          "source_port_id": "source_port_8",
+          "spice_node": "INNEG",
+          "labels": ["IN-"],
+          "role": "input"
+        },
+        {
+          "physical_pin": "10",
+          "component_pin": "pin10",
+          "source_port_id": "source_port_9",
+          "spice_node": "INPOS",
+          "labels": ["IN+"],
+          "role": "input"
+        }
+      ]
+    },
+    "characterization": {
+      "version": 1,
+      "family": "digital_mixed_signal",
+      "strategy": "behavioral",
+      "requirements": [
+        {
+          "requirement_id": "active_supply_quiescent_current",
+          "title": "Active supply quiescent-current draw",
+          "behavior": "With the monitor active, VS draws quiescent current from VS to GND.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "vs_voltage": 3.3,
+            "shunt_differential_voltage": 0,
+            "in_negative_common_mode_voltage": 48,
+            "ambient_temperature": 25
+          },
+          "expected": {
+            "unit": "A",
+            "target": 0.00064,
+            "max": 0.00075,
+            "tolerance": 0.0001
+          },
+          "sources": [
+            {
+              "page": 6,
+              "locator": "Section 6.5, Electrical Characteristics (continued), POWER SUPPLY row IQ",
+              "statement": "At VSENSE = 0 V, quiescent current is 640 µA typical and 750 µA maximum at the table's nominal conditions.",
+              "image": "evidence/source-page-6.png"
+            }
+          ]
+        },
+        {
+          "requirement_id": "vbus_active_input_loading",
+          "title": "VBUS active-mode input loading",
+          "behavior": "In active mode, VBUS draws current to GND consistent with its specified input impedance.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "vbus_voltage": 48,
+            "vs_voltage": 3.3,
+            "ambient_temperature": 25
+          },
+          "expected": {
+            "unit": "A",
+            "target": 0.000048,
+            "min": 0.00004,
+            "max": 0.00006,
+            "tolerance": 0.000004
+          },
+          "sources": [
+            {
+              "page": 5,
+              "locator": "Section 6.5, Electrical Characteristics, INPUT row ZVBUS",
+              "statement": "VBUS pin input impedance in active mode is 0.8 MΩ minimum, 1 MΩ typical, and 1.2 MΩ maximum.",
+              "image": "evidence/source-page-5.png"
+            }
+          ]
+        },
+        {
+          "requirement_id": "shunt_input_differential_loading",
+          "title": "IN+ to IN− differential input loading",
+          "behavior": "For a positive differential excitation, current entering IN+ and leaving IN− follows the specified active-mode differential input impedance.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "in_positive_voltage": 48.1,
+            "in_negative_voltage": 48,
+            "vs_voltage": 3.3,
+            "ambient_temperature": 25
+          },
+          "expected": {
+            "unit": "A",
+            "target": 0.0000010869565,
+            "tolerance": 2e-7
+          },
+          "sources": [
+            {
+              "page": 5,
+              "locator": "Section 6.5, Electrical Characteristics, INPUT row RDIFF",
+              "statement": "Active-mode differential input impedance is 92 kΩ typical for VIN+ − VIN− less than 164 mV.",
+              "image": "evidence/source-page-5.png"
+            }
+          ]
+        },
+        {
+          "requirement_id": "shunt_input_bias_current",
+          "title": "Shunt-input bias current",
+          "behavior": "Each shunt input draws a small bias current under the specified common-mode condition.",
+          "analysis": "operating_point",
+          "support": {
+            "status": "modeled"
+          },
+          "conditions": {
+            "in_positive_voltage": 85,
+            "in_negative_voltage": 85,
+            "vs_voltage": 3.3,
+            "ambient_temperature": 25
+          },
+          "expected": {
+            "unit": "A",
+            "target": 1e-10,
+            "max": 2.5e-9
+          },
+          "sources": [
+            {
+              "page": 5,
+              "locator": "Section 6.5, Electrical Characteristics, INPUT row IB",
+              "statement": "Input bias current for either IN+ or IN− at VCM = 85 V is 0.1 nA typical and 2.5 nA maximum.",
+              "image": "evidence/source-page-5.png"
+            }
+          ]
+        },
+        {
+          "requirement_id": "i2c_register_measurement_interface",
+          "title": "I²C measurement and configuration interface",
+          "behavior": "The device is an I²C/SMBus secondary that receives register writes and returns shunt-voltage, bus-voltage, temperature, current, power, diagnostic, and configuration register data.",
+          "analysis": "transient",
+          "support": {
+            "status": "documented_only",
+            "reason": "Correct operation requires I²C transaction decoding, internal register state, ADC conversion sequencing, and calibrated digital result generation; these are not represented through an ordinary analog ngspice model."
+          },
+          "conditions": {
+            "vs_voltage": 3.3,
+            "scl_frequency": 400000
+          },
+          "expected": {
+            "unit": "Hz",
+            "target": 400000
+          },
+          "sources": [
+            {
+              "page": 18,
+              "locator": "Section 7.5.1, I2C Serial Interface",
+              "statement": "INA237 operates only as a secondary device on SMBus and I2C, using open-drain SDA and SCL lines and 16 selectable addresses."
+            },
+            {
+              "page": 20,
+              "locator": "Table 7-3, INA237 Registers",
+              "statement": "The register map identifies configuration, measurement, current, power, diagnostic, and threshold registers."
+            },
+            {
+              "page": 28,
+              "locator": "Section 8.1.1, Device Measurement Range and Resolution",
+              "statement": "Shunt voltage, bus voltage, and temperature measurements are read through VSHUNT, VBUS, and DIETEMP registers."
+            }
+          ]
+        },
+        {
+          "requirement_id": "programmable_alert_output",
+          "title": "Programmable open-drain ALERT indication",
+          "behavior": "ALERT is an open-drain output, active low by default, whose assertion is configurable for conversion-ready and programmable shunt, bus, temperature, and power diagnostic thresholds.",
+          "analysis": "transient",
+          "support": {
+            "status": "documented_only",
+            "reason": "ALERT state and timing depend on unimplemented register programming, ADC conversion state, averaging, and diagnostic threshold comparisons; no analog-only ALERT assertion is invented."
+          },
+          "conditions": {
+            "vs_voltage": 3.3,
+            "output_sink_current": 0.003
+          },
+          "expected": {
+            "unit": "V",
+            "max": 0.4
+          },
+          "sources": [
+            {
+              "page": 3,
+              "locator": "Table 5-1, Pin Functions, ALERT",
+              "statement": "ALERT is an open-drain digital output with default active-low state."
+            },
+            {
+              "page": 6,
+              "locator": "Section 6.5, Electrical Characteristics (continued), DIGITAL INPUT / OUTPUT row VOL",
+              "statement": "Output low voltage is 0.4 V maximum at 3 mA sink current."
+            },
+            {
+              "page": 16,
+              "locator": "Table 7-1, ALERT Diagnostics Description and accompanying text",
+              "statement": "ALERT can report threshold diagnostics or conversion completion and its polarity, latching, and averaged comparison are configurable."
+            }
+          ]
+        }
+      ],
+      "assumptions": [
+        "The behavioral model will represent only static analog loading at the public VS, GND, VBUS, IN+, and IN− pins; it does not decode digital traffic.",
+        "Active-mode requirements use the 25 °C, VS = 3.3 V nominal electrical-characteristics conditions unless additional numeric conditions are stated.",
+        "The VBUS loading target is the 48 V current implied by the specified 1 MΩ typical active-mode input impedance, with hard limits implied by the 0.8 MΩ to 1.2 MΩ bounds.",
+        "The differential-loading target is the 0.1 V / 92 kΩ current implied by the typical RDIFF specification and remains below the stated 164 mV condition."
+      ],
+      "limitations": [
+        "I²C/SMBus addressing, register reads and writes, conversion modes, calibration, ADC quantization, averaging, current/power calculations, temperature reporting, and reset behavior are documented only.",
+        "ALERT assertion, polarity, latching, threshold comparisons, and conversion-ready timing are documented only; the model provides no fabricated digital output waveform.",
+        "Input behavior is characterized only within the documented operating ranges: VS 2.7 V to 5.5 V, IN common mode −0.3 V to 85 V, VBUS 0 V to 85 V, and the selected shunt full-scale range. Absolute-maximum, ESD, thermal, package, layout, and fault-survival behavior are not modeled.",
+        "No vendor SPICE model is claimed or used; a vendor-model link, if any, would require a separately verified ingestion path."
+      ]
+    }
+  },
+  "proposal": {
+    "version": 1,
+    "model": {
+      "entry_name": "INA237",
+      "pins": ["A1", "A0", "ALERT", "SDA", "SCL", "VS", "GND", "VBUS", "INNEG", "INPOS"]
+    },
+    "cases": [
+      {
+        "id": "active-supply-quiescent",
+        "title": "Active supply current at zero shunt differential voltage",
+        "requirement_ids": ["active_supply_quiescent_current"],
+        "nets": ["vs_supply", "vbus_drive", "inneg_drive", "inpos_drive"],
+        "fixtures": [
+          {
+            "id": "VSupply",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "gnd",
+            "dc_volts": 3.3
+          },
+          {
+            "id": "VSSense",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "dut.VS",
+            "dc_volts": 0
+          },
+          {
+            "id": "GndTie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.GND",
+            "dc_volts": 0
+          },
+          {
+            "id": "VBusDrive",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "VBusSense",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "dut.VBUS",
+            "dc_volts": 0
+          },
+          {
+            "id": "InNegDrive",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "InNegSense",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "dut.INNEG",
+            "dc_volts": 0
+          },
+          {
+            "id": "InPosDrive",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "InPosSense",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "dut.INPOS",
+            "dc_volts": 0
+          },
+          {
+            "id": "A0Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A0",
+            "dc_volts": 0
+          },
+          {
+            "id": "A1Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A1",
+            "dc_volts": 0
+          },
+          {
+            "id": "SclPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SCL",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "SdaPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SDA",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "AlertPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.ALERT",
+            "resistance_ohms": 10000
+          }
+        ],
+        "analysis": {
+          "type": "operating_point"
+        },
+        "observations": [
+          {
+            "id": "VsQuiescentCurrent",
+            "requirement_id": "active_supply_quiescent_current",
+            "type": "current",
+            "element_id": "VSSense",
+            "unit": "A",
+            "scale": "linear",
+            "evidence": {
+              "page": 6,
+              "image": "evidence/source-page-6.png"
+            }
+          }
+        ]
+      },
+      {
+        "id": "vbus-active-loading",
+        "title": "VBUS loading in the documented high-side application",
+        "requirement_ids": ["vbus_active_input_loading"],
+        "nets": ["vs_supply", "vbus_drive", "inneg_drive", "inpos_drive"],
+        "fixtures": [
+          {
+            "id": "VSupply",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "gnd",
+            "dc_volts": 3.3
+          },
+          {
+            "id": "VSSense",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "dut.VS",
+            "dc_volts": 0
+          },
+          {
+            "id": "GndTie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.GND",
+            "dc_volts": 0
+          },
+          {
+            "id": "VBusDrive",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "VBusSense",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "dut.VBUS",
+            "dc_volts": 0
+          },
+          {
+            "id": "InNegDrive",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "InNegSense",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "dut.INNEG",
+            "dc_volts": 0
+          },
+          {
+            "id": "InPosDrive",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "InPosSense",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "dut.INPOS",
+            "dc_volts": 0
+          },
+          {
+            "id": "A0Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A0",
+            "dc_volts": 0
+          },
+          {
+            "id": "A1Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A1",
+            "dc_volts": 0
+          },
+          {
+            "id": "SclPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SCL",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "SdaPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SDA",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "AlertPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.ALERT",
+            "resistance_ohms": 10000
+          }
+        ],
+        "analysis": {
+          "type": "operating_point"
+        },
+        "observations": [
+          {
+            "id": "VBusInputCurrent",
+            "requirement_id": "vbus_active_input_loading",
+            "type": "current",
+            "element_id": "VBusSense",
+            "unit": "A",
+            "scale": "linear",
+            "evidence": {
+              "page": 5,
+              "image": "evidence/source-page-5.png"
+            }
+          }
+        ]
+      },
+      {
+        "id": "shunt-differential-loading",
+        "title": "Positive shunt differential input loading",
+        "requirement_ids": ["shunt_input_differential_loading"],
+        "nets": ["vs_supply", "vbus_drive", "inneg_drive", "inpos_drive"],
+        "fixtures": [
+          {
+            "id": "VSupply",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "gnd",
+            "dc_volts": 3.3
+          },
+          {
+            "id": "VSSense",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "dut.VS",
+            "dc_volts": 0
+          },
+          {
+            "id": "GndTie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.GND",
+            "dc_volts": 0
+          },
+          {
+            "id": "VBusDrive",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "VBusSense",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "dut.VBUS",
+            "dc_volts": 0
+          },
+          {
+            "id": "InNegDrive",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "gnd",
+            "dc_volts": 48
+          },
+          {
+            "id": "InNegSense",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "dut.INNEG",
+            "dc_volts": 0
+          },
+          {
+            "id": "InPosDrive",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "gnd",
+            "dc_volts": 48.1
+          },
+          {
+            "id": "InPosSense",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "dut.INPOS",
+            "dc_volts": 0
+          },
+          {
+            "id": "A0Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A0",
+            "dc_volts": 0
+          },
+          {
+            "id": "A1Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A1",
+            "dc_volts": 0
+          },
+          {
+            "id": "SclPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SCL",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "SdaPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SDA",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "AlertPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.ALERT",
+            "resistance_ohms": 10000
+          }
+        ],
+        "analysis": {
+          "type": "operating_point"
+        },
+        "observations": [
+          {
+            "id": "InPosDifferentialCurrent",
+            "requirement_id": "shunt_input_differential_loading",
+            "type": "current",
+            "element_id": "InPosSense",
+            "unit": "A",
+            "scale": "linear",
+            "evidence": {
+              "page": 5,
+              "image": "evidence/source-page-5.png"
+            }
+          }
+        ]
+      },
+      {
+        "id": "shunt-input-bias",
+        "title": "Shunt input bias current at 85 V common mode",
+        "requirement_ids": ["shunt_input_bias_current"],
+        "nets": ["vs_supply", "vbus_drive", "inneg_drive", "inpos_drive"],
+        "fixtures": [
+          {
+            "id": "VSupply",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "gnd",
+            "dc_volts": 3.3
+          },
+          {
+            "id": "VSSense",
+            "type": "voltage_source",
+            "positive": "net.vs_supply",
+            "negative": "dut.VS",
+            "dc_volts": 0
+          },
+          {
+            "id": "GndTie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.GND",
+            "dc_volts": 0
+          },
+          {
+            "id": "VBusDrive",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "gnd",
+            "dc_volts": 85
+          },
+          {
+            "id": "VBusSense",
+            "type": "voltage_source",
+            "positive": "net.vbus_drive",
+            "negative": "dut.VBUS",
+            "dc_volts": 0
+          },
+          {
+            "id": "InNegDrive",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "gnd",
+            "dc_volts": 85
+          },
+          {
+            "id": "InNegSense",
+            "type": "voltage_source",
+            "positive": "net.inneg_drive",
+            "negative": "dut.INNEG",
+            "dc_volts": 0
+          },
+          {
+            "id": "InPosDrive",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "gnd",
+            "dc_volts": 85
+          },
+          {
+            "id": "InPosSense",
+            "type": "voltage_source",
+            "positive": "net.inpos_drive",
+            "negative": "dut.INPOS",
+            "dc_volts": 0
+          },
+          {
+            "id": "A0Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A0",
+            "dc_volts": 0
+          },
+          {
+            "id": "A1Tie",
+            "type": "voltage_source",
+            "positive": "gnd",
+            "negative": "dut.A1",
+            "dc_volts": 0
+          },
+          {
+            "id": "SclPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SCL",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "SdaPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.SDA",
+            "resistance_ohms": 10000
+          },
+          {
+            "id": "AlertPullup",
+            "type": "resistor",
+            "positive": "net.vs_supply",
+            "negative": "dut.ALERT",
+            "resistance_ohms": 10000
+          }
+        ],
+        "analysis": {
+          "type": "operating_point"
+        },
+        "observations": [
+          {
+            "id": "InNegBiasCurrent",
+            "requirement_id": "shunt_input_bias_current",
+            "type": "current",
+            "element_id": "InNegSense",
+            "unit": "A",
+            "scale": "linear",
+            "evidence": {
+              "page": 5,
+              "image": "evidence/source-page-5.png"
+            }
+          },
+          {
+            "id": "InPosBiasCurrent",
+            "requirement_id": "shunt_input_bias_current",
+            "type": "current",
+            "element_id": "InPosSense",
+            "unit": "A",
+            "scale": "linear",
+            "evidence": {
+              "page": 5,
+              "image": "evidence/source-page-5.png"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

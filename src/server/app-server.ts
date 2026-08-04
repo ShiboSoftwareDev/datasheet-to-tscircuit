@@ -49,8 +49,6 @@ export async function createAppServer(options: AppServerOptions = {}) {
     job_store,
     model_run_store,
     agent_bin: process.env.TSCI_AGENT_BIN ?? join(root_dir, "node_modules", ".bin", "tsci-agent"),
-    agent_event_runner:
-      process.env.TSCI_AGENT_EVENT_RUNNER ?? join(root_dir, "src", "server", "structured-agent-runner.ts"),
     tsci_bin: process.env.TSCI_BIN ?? join(root_dir, "node_modules", ".bin", "tsci"),
   }
   const handleModelRunApiRequest = createModelRunApiHandler(runner_context)
@@ -60,8 +58,27 @@ export async function createAppServer(options: AppServerOptions = {}) {
     hostname: resolveServerHostname(options.hostname),
     port: options.port ?? Number(process.env.PORT ?? 3000),
     async fetch(request) {
-      const api_response = (await handleModelRunApiRequest(request)) ?? (await handleJobApiRequest(request))
-      return api_response ?? getStaticResponse(request, root_dir)
+      try {
+        const api_response = (await handleModelRunApiRequest(request)) ?? (await handleJobApiRequest(request))
+        return api_response ?? getStaticResponse(request, root_dir)
+      } catch (error) {
+        const request_url = new URL(request.url)
+        console.error("[api] unhandled_request_error", {
+          method: request.method,
+          path: request_url.pathname,
+          cause: error instanceof Error ? error.message : String(error),
+        })
+        if (!request_url.pathname.startsWith("/api/")) throw error
+        return Response.json(
+          {
+            error: {
+              error_code: "internal_error",
+              message: "The API request failed unexpectedly. Inspect the server diagnostic for details.",
+            },
+          },
+          { status: 500 },
+        )
+      }
     },
   })
 }

@@ -1,0 +1,95 @@
+                                              Table 10-7. Typical Characteristics Curves
+                         PARAMETER                                             CONDITIONS                              FIGURE
+ Switching Waveforms
+ Switching Waveforms, PFM Boost Operation                  VI = 2.3 V, VO = 3.3 V, MODE = Low                        Figure 10-15
+ Switching Waveforms, PFM Buck-Boost Operation             VI = 3.3 V, VO = 3.3 V, MODE = Low                        Figure 10-16
+ Switching Waveforms, PFM Buck Operation                   VI = 4.3 V, VO = 3.3 V, MODE = Low                        Figure 10-17
+ Switching Waveforms, PWM Boost Operation                  VI = 2.3 V, VO = 3.3 V, MODE = High                       Figure 10-18
+ Switching Waveforms, PWM Buck-Boost Operation             VI = 3.3 V, VO = 3.3 V, MODE = High                       Figure 10-19
+ Switching Waveforms, PWM Buck Operation                   VI = 4.3 V, VO = 3.3 V, MODE = High                       Figure 10-20
+ Transient Performance
+                                                           VI = 2.5 V, VO = 3.3 V, Load = 100 mA to 1A, MODE =
+ Load Transient, PFM/PWM Boost Operation                                                                             Figure 10-21
+                                                           Low
+                                                           VI = 3.3 V, VO = 3.3 V, Load = 100 mA to 1A, MODE =
+ Load Transient, PFM/PWM Buck-Boost Operation                                                                        Figure 10-22
+                                                           Low
+                                                           VI = 4.2 V, VO = 3.3V, Load = 100 mA to 1A, MODE =
+ Load Transient, PFM/PWM Buck Operation                                                                              Figure 10-23
+                                                           Low
+                                                           VI = 2.5 V, VO = 3.3 V, Load = 100 mA to 1A, MODE =
+ Load Transient, PWM Boost Operation                                                                                 Figure 10-24
+                                                           High
+                                                           VI = 3.3 V, VO = 3.3 V, Load = 100 mA to 1A, MODE =
+ Load Transient, PWM Buck-Boost Operation                                                                            Figure 10-25
+                                                           High
+                                                           VI = 4.2 V, VO = 3.3 V, Load = 100 mA to 1A, MODE =
+ Load Transient, PWM Buck Operation                                                                                  Figure 10-26
+                                                           High
+                                                           VI = 2.3 V to 4.3 V, VO = 3.3 V, Load = 0.5 A , MODE =
+ Line Transient, PWM Operation                                                                                       Figure 10-27
+                                                           Low
+                                                           VI = 2.3 V to 4.3 V, VO = 3.3 V, Load = 1 A , MODE =
+ Line Transient, PWM Operation                                                                                       Figure 10-28
+                                                           Low
+                                                           VI = 3 V to 3.6 V, VO = 3.3 V, Load = 0.5 A , MODE =
+ Line Transient, PWM Operation                                                                                       Figure 10-29
+                                                           Low
+ Start-up
+ Start-up Behavior from Rising Enable, PFM Operation       VI = 2.2 V, VO = 3.3 V, Load = 10 mA, MODE = Low          Figure 10-30
+ Start-up Behavior from Rising Enable, PWM Operation       VI = 2.2 V, VO = 3.3 V, Load = 10 mA, MODE = High         Figure 10-31
+\f
+                                                                                                                      Figure 10-15. Switching Waveforms, PFM Boost
+                                                                                                                                         Operation
+
+ VI = 2.3 V, VO = 3.3 V                                    MODE = Low                    IO = 40 mA                   VI = 4.2 V, VO = 3.3 V     MODE = Low            IO = 40 mA
+
+     Figure 10-16. Switching Waveforms, PFM Buck-                                                                      Figure 10-17. Switching Waveforms, PFM Buck
+                    Boost Operation                                                                                                      Operation
+
+ VI = 2.3 V, VO = 3.3 V                                    MODE = Low                     IO = 2 A                   VI = 3.3 V, VO = 3.3 V    MODE = Low              IO = 2 A
+
+     Figure 10-18. Switching Waveforms, PWM Boost                                                                     Figure 10-19. Switching Waveforms, PWM Buck-
+                        Operation                                                                                                     Boost Operation
+\f
+  VI = 4.2 V, VO = 3.3 V     MODE = Low               IO = 2 A                                    IO from 100 mA to
+                                                                          VI = 2.5 V, VO = 3.3
+                                                                                                  1 A tr = 1 µs, tf = 1     MODE = Low
+                                                                                   V
+                                                                                                           µs
+    Figure 10-20. Switching Waveforms, PWM Buck
+                       Operation                                           Figure 10-21. Load Transient, PFM/PWM Boost
+                                                                                             Operation
+
+                              IO from 100 mA to                                                      IO from 100 mA to
+    VI = 3.3 V, VO = 3.3 V     1 A tr = 1 µs, tf =   MODE = Low            VI = 5 V, VO = 3.3 V       1 A tr = 1 µs, tf =   MODE = Low
+                                      1 µs                                                                   1 µs
+
+     Figure 10-22. Load Transient, PFM/PWM Buck-                            Figure 10-23. Load Transient, PFM/PWM Buck
+                    Boost Operation                                                          Operation
+
+                              IO from 100 mA to                                                      IO from 100 mA to
+    VI = 2.5 V, VO = 3.3 V     1 A tr = 1 µs, tf =   MODE = High          VI = 3.3 V, VO = 3.3 V      1 A tr = 1 µs, tf =   MODE = High
+                                      1 µs                                                                   1 µs
+
+        Figure 10-24. Load Transient, PWM Boost                            Figure 10-25. Load Transient, PWM Buck-Boost
+                        Operation                                                            Operation
+\f
+                             IO from 100 mA                                                          VI from 2.2 V to
+     VI = 5 V, VO = 3.3 V   to 1 A tr = 1 µs, tf       MODE = High                  IO = 0.5 A      4.2 V tr =1 µs, tf =   MODE = High
+                                   = 1 µs                                                                  1 µs
+
+ Figure 10-26. Load Transient, PWM Buck Operation                               Figure 10-27. Line Transient, PWM Operation
+
+                                VI from 2.2 V to                                                    VI from 3 V to 3.6
+            IO = 1 A            4.2 V tr = 1 µs, tf     MODE = High                 IO = 0.5 A      V tr = 1 µs, tf = 1    MODE = High
+                                      = 1 µs                                                                µs
+
+       Figure 10-28. Line Transient, PWM Operation                              Figure 10-29. Line Transient, PWM Operation
+
+                                                      100 mΩ resistive             VI = 4.2 V, VO =             100 mΩ resistive
+  VI = 4.2 V, VO = 3.3 V      MODE = Low                                                            MODE = High
+                                                           load                          3.3 V                       load
+
+        Figure 10-30. Start-up Behavior from Rising                              Figure 10-31. Start-up Behavior from Rising
+                  Enable, PFM Operation                                                    Enable, PWM Operation

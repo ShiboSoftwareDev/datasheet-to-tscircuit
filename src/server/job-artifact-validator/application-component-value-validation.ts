@@ -1,6 +1,7 @@
 import type { AnyCircuitElement } from "circuit-json"
-import { ApplicationConnectivityPlan } from "./application-source-validation"
-import { CircuitRecord, asRecord } from "./footprint-plan-validation"
+import type { ApplicationConnectivityPlan } from "./application-source-validation"
+import { resolveTypicalApplicationCircuitScope } from "./application-circuit-scope"
+import type { CircuitRecord } from "./footprint-plan-validation"
 
 const SI_PREFIXES: Record<string, number> = {
   p: 1e-12,
@@ -14,6 +15,8 @@ const SI_PREFIXES: Record<string, number> = {
   M: 1e6,
   G: 1e9,
 }
+
+const PASSIVE_VALUE_FIELDS = ["resistance", "capacitance", "inductance"] as const
 
 function parseEngineeringValue(value: unknown): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined
@@ -41,9 +44,10 @@ export function getTypicalApplicationComponentValueErrors(
   plan: ApplicationConnectivityPlan,
   circuit_json: AnyCircuitElement[],
 ): string[] {
-  const records = circuit_json.map(asRecord)
+  const scope = resolveTypicalApplicationCircuitScope(plan, circuit_json)
+  const { records } = scope
   const components_by_name = new Map<string, CircuitRecord>()
-  for (const component of records.filter((element) => element.type === "source_component")) {
+  for (const component of scope.source_components) {
     if (typeof component.name === "string") components_by_name.set(component.name.toLowerCase(), component)
   }
   const errors: string[] = []
@@ -86,9 +90,18 @@ export function getTypicalApplicationComponentValueErrors(
         )
       }
     }
-    if (!expected.kind || !expected.value) continue
+    if (!expected.kind) continue
     const field = componentValueField(expected.kind)
     if (!field) continue
+    if (!expected.value) {
+      const invented_fields = PASSIVE_VALUE_FIELDS.filter((candidate) => Object.hasOwn(component, candidate))
+      if (invented_fields.length > 0) {
+        errors.push(
+          `Application component ${expected.reference} invents passive value fields ${invented_fields.map((candidate) => `${candidate}=${JSON.stringify(component[candidate])}`).join(", ")}, but the documented plan has no numeric value; use a generic two-pin chip`,
+        )
+      }
+      continue
+    }
     const expected_value = parseEngineeringValue(expected.value)
     const actual_value = parseEngineeringValue(component[field])
     if (expected_value === undefined) {

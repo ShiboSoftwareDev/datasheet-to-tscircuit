@@ -1,6 +1,4 @@
-import type { AnyCircuitElement } from "circuit-json"
 import ts from "typescript"
-import { CircuitRecord, finiteNumber } from "./footprint-plan-validation"
 
 export interface ExpectedApplicationConnection {
   net: string
@@ -16,6 +14,57 @@ export interface ApplicationConnectivityPlan {
     footprint?: string
   }>
   connections: ExpectedApplicationConnection[]
+}
+
+interface LiteralJsxComponentProps {
+  element_name: string
+  manufacturerPartNumber?: string
+  footprint?: string
+}
+
+const COMPONENT_MODULE_PATTERN = /^\.\/index\.circuit(?:\.tsx)?$/
+
+function requiresGenericUnknownPassive(
+  component: ApplicationConnectivityPlan["components"][number],
+): boolean {
+  return !component.value?.trim() && /resistor|capacitor|inductor/i.test(component.kind ?? "")
+}
+
+function getValidatedComponentInstantiationErrors(source_file: ts.SourceFile): string[] {
+  const component_imports = source_file.statements.flatMap((statement) => {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      !COMPONENT_MODULE_PATTERN.test(statement.moduleSpecifier.text)
+    ) {
+      return []
+    }
+    const default_import = statement.importClause?.name
+    return default_import ? [default_import.text] : []
+  })
+  if (component_imports.length !== 1) {
+    return ["Typical application must have exactly one default import from ./index.circuit"]
+  }
+
+  const component_binding = component_imports[0] ?? ""
+  let component_instances = 0
+  let u1_instances = 0
+  const visit = (node: ts.Node): void => {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      if (node.tagName.getText(source_file) === component_binding) {
+        component_instances += 1
+        const name = getLiteralJsxAttribute(node, "name")
+        if (name?.trim().toLowerCase() === "u1") u1_instances += 1
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source_file)
+  return component_instances === 1 && u1_instances === 1
+    ? []
+    : [
+        `Typical application must instantiate the default import ${component_binding} from ./index.circuit exactly once with literal name="U1"`,
+      ]
 }
 
 export function getTypicalApplicationSourceErrors(
@@ -34,11 +83,22 @@ export function getTypicalApplicationSourceErrors(
     errors.push("Schematic-only typical application source must not assign PCB placement props")
   }
   if (plan) {
+    const source_file = ts.createSourceFile(
+      "typical-application.circuit.tsx",
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TSX,
+    )
+    errors.push(...getValidatedComponentInstantiationErrors(source_file))
     const component_props = getLiteralJsxComponentProps(source)
     for (const component of plan.components) {
       if (component.reference.trim().toLowerCase() === "u1") continue
       const requires_part_number = Boolean(component.manufacturer_part_number)
-      if (pcb_implementation !== "verified" && !requires_part_number) continue
+      const requires_generic_unknown_passive = requiresGenericUnknownPassive(component)
+      if (pcb_implementation !== "verified" && !requires_part_number && !requires_generic_unknown_passive) {
+        continue
+      }
       const props = component_props.get(component.reference.trim().toLowerCase())
       if (!props) {
         errors.push(
@@ -47,6 +107,11 @@ export function getTypicalApplicationSourceErrors(
             : `Application component ${component.reference} with a recorded manufacturer part number must be instantiated with a literal name prop`,
         )
         continue
+      }
+      if (requires_generic_unknown_passive && props.element_name !== "chip") {
+        errors.push(
+          `Application component ${component.reference} has no documented numeric ${component.kind} value and must use a literal <chip> element`,
+        )
       }
       if (
         component.manufacturer_part_number &&
@@ -86,7 +151,7 @@ function getLiteralJsxAttribute(node: ts.JsxOpeningLikeElement, attribute_name: 
     : undefined
 }
 
-function getLiteralJsxComponentProps(source: string): Map<string, Record<string, string | undefined>> {
+function getLiteralJsxComponentProps(source: string): Map<string, LiteralJsxComponentProps> {
   const source_file = ts.createSourceFile(
     "typical-application.circuit.tsx",
     source,
@@ -94,12 +159,13 @@ function getLiteralJsxComponentProps(source: string): Map<string, Record<string,
     true,
     ts.ScriptKind.TSX,
   )
-  const components = new Map<string, Record<string, string | undefined>>()
+  const components = new Map<string, LiteralJsxComponentProps>()
   const visit = (node: ts.Node): void => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const name = getLiteralJsxAttribute(node, "name")
       if (name) {
         components.set(name.trim().toLowerCase(), {
+          element_name: node.tagName.getText(source_file),
           manufacturerPartNumber: getLiteralJsxAttribute(node, "manufacturerPartNumber"),
           footprint: getLiteralJsxAttribute(node, "footprint"),
         })
@@ -109,44 +175,4 @@ function getLiteralJsxComponentProps(source: string): Map<string, Record<string,
   }
   visit(source_file)
   return components
-}
-
-export function getApplicationSchematicLayoutAdvisories(circuit_json: AnyCircuitElement[]): string[] {
-  const records = circuit_json.map((element) => element as CircuitRecord)
-  const advisories: string[] = []
-  const component_count = records.filter((record) => record.type === "schematic_component").length
-  const maximum_edge_length = Math.max(6, 2.5 * Math.sqrt(Math.max(component_count, 1)))
-  for (const [trace_index, trace] of records
-    .filter((record) => record.type === "schematic_trace")
-    .entries()) {
-    if (!Array.isArray(trace.edges)) continue
-    for (const [edge_index, edge] of trace.edges.entries()) {
-      if (typeof edge !== "object" || edge === null) continue
-      const edge_record = edge as Record<string, unknown>
-      if (
-        typeof edge_record.from !== "object" ||
-        edge_record.from === null ||
-        typeof edge_record.to !== "object" ||
-        edge_record.to === null
-      ) {
-        continue
-      }
-      const from = edge_record.from as Record<string, unknown>
-      const to = edge_record.to as Record<string, unknown>
-      const from_x = finiteNumber(from.x)
-      const from_y = finiteNumber(from.y)
-      const to_x = finiteNumber(to.x)
-      const to_y = finiteNumber(to.y)
-      if (from_x === undefined || from_y === undefined || to_x === undefined || to_y === undefined) {
-        continue
-      }
-      const length = Math.hypot(to_x - from_x, to_y - from_y)
-      if (length > maximum_edge_length) {
-        advisories.push(
-          `Application schematic trace ${trace_index + 1} edge ${edge_index + 1} is ${length.toFixed(2)} units long; compact-layout target is ${maximum_edge_length.toFixed(2)} for ${component_count} components`,
-        )
-      }
-    }
-  }
-  return advisories
 }
