@@ -73,7 +73,7 @@ export type ModelPipelineOutputs = {
     application_fixture_path: string
     application_fixture_sha256: string
   }
-  characterize: {
+  find_reference_graphs: {
     contract_path: string
     family: string
     strategy: string
@@ -86,14 +86,14 @@ export type ModelPipelineOutputs = {
     reference_source_proof_path: string
     reference_verification_path: string
   }
-  design_validation: {
+  create_comparison_graphs: {
     plan_path: string
     contract_path: string
     evidence_dir: string
     case_count: number
     requirement_ids: string[]
   }
-  generate_model: {
+  infer_spice_model: {
     model_path: string
     model_card_path: string
     manifest_path: string
@@ -102,7 +102,19 @@ export type ModelPipelineOutputs = {
     evidence_dir: string
     revision: string
   }
-  validate_model: {
+  create_simulation_tsx: {
+    source_dir: string
+    source_manifest_path: string
+    model_path: string
+    model_card_path: string
+    manifest_path: string
+    contract_path: string
+    plan_path: string
+    evidence_dir: string
+    revision: string
+    case_count: number
+  }
+  run_simulations: {
     result_path: string
     model_path: string
     model_card_path: string
@@ -117,7 +129,21 @@ export type ModelPipelineOutputs = {
     repair_feedback?: ModelRepairFeedback
     revision: string
   }
-  repair_model: {
+  compare_simulation_outputs: {
+    result_path: string
+    model_path: string
+    model_card_path: string
+    manifest_path: string
+    contract_path: string
+    plan_path: string
+    evidence_dir: string
+    passed: boolean
+    case_count: number
+    failing_case_ids: string[]
+    repair_feedback?: ModelRepairFeedback
+    revision: string
+  }
+  repair_spice_model: {
     result_path: string
     model_path: string
     model_card_path: string
@@ -129,7 +155,7 @@ export type ModelPipelineOutputs = {
     repair_attempts: number
     revision: string
   }
-  publish_model: {
+  publish: {
     attached: boolean
     component_path: string
     revision: string

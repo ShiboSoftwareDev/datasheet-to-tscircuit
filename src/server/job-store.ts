@@ -77,6 +77,7 @@ export interface RestoreJobInput extends CreateJobInput {
   provenance?: Job["provenance"]
   evidence_available?: boolean
   pipeline?: Job["pipeline"]
+  pipelines?: Job["pipelines"]
 }
 
 export type JobUpdate = Partial<
@@ -99,6 +100,7 @@ export type JobUpdate = Partial<
     | "provenance"
     | "evidence_available"
     | "pipeline"
+    | "pipelines"
   >
 >
 
@@ -125,6 +127,7 @@ function getPublicJob(job_record: JobRecord): Job {
     provenance: job_record.provenance,
     evidence_available: job_record.evidence_available,
     pipeline: job_record.pipeline,
+    pipelines: job_record.pipelines,
   }
 }
 
@@ -401,6 +404,7 @@ export class JobStore {
       provenance: job_record.provenance,
       evidence_available: job_record.evidence_available,
       pipeline: job_record.pipeline,
+      pipelines: job_record.pipelines,
     })
   }
 }

@@ -13,9 +13,9 @@ import {
 } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
 
-export const validateModelStage = defineModelStage({
-  id: "validate_model",
-  depends_on: ["generate_model"],
+export const runSimulationsStage = defineModelStage({
+  id: "run_simulations",
+  depends_on: ["create_simulation_tsx"],
   async execute({ context, services, dependency_outputs, signal }) {
     services.model_run_store.updateModelRun(context.model_run_id, { status: "validating" })
     updateModelProgress({
@@ -24,13 +24,14 @@ export const validateModelStage = defineModelStage({
       phase: "validating",
       message: "Compiling declarative fixtures and running ngspice",
     })
-    const { contract_path, plan_path, evidence_dir } = dependency_outputs.generate_model
+    const simulation_input = dependency_outputs.create_simulation_tsx
+    const { contract_path, plan_path, evidence_dir } = simulation_input
     const [contract_value, plan_value, model_source, model_card, manifest] = await Promise.all([
       readJson(contract_path),
       readJson(plan_path),
-      readFile(dependency_outputs.generate_model.model_path, "utf8"),
-      readFile(dependency_outputs.generate_model.model_card_path, "utf8"),
-      readJson(dependency_outputs.generate_model.manifest_path),
+      readFile(simulation_input.model_path, "utf8"),
+      readFile(simulation_input.model_card_path, "utf8"),
+      readJson(simulation_input.manifest_path),
     ])
     const contract = parseFreshModelContract(contract_value)
     const plan = plan_value as ValidationPlan
@@ -39,11 +40,12 @@ export const validateModelStage = defineModelStage({
       card: model_card,
       manifest: manifest as GeneratedModel["manifest"],
     }
-    const validation_artifact_dir = join(dirname(dependency_outputs.generate_model.model_path), "validation")
+    const validation_artifact_dir = join(dirname(simulation_input.model_path), "validation")
     const validation = await validateCandidate({
       plan,
       contract,
       generated,
+      source_dir: simulation_input.source_dir,
       model_dir: context.model_dir,
       validation_artifact_dir,
       evidence_dir,
@@ -75,7 +77,7 @@ export const validateModelStage = defineModelStage({
         message:
           "Model validation failed outside the repairable model boundary: " +
           infrastructure_failure.errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
-        stage_id: "validate_model",
+        stage_id: "run_simulations",
         operation: "classify_validation_failure",
         artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
         hint: "Inspect the simulator, raw-result, and validation-plan trace. The failed TSX/reference preview was retained, but model repair was not started for this infrastructure or contract error.",
@@ -87,7 +89,7 @@ export const validateModelStage = defineModelStage({
         message:
           "The validation TSX did not produce the required tscircuit transient graph: " +
           infrastructure_failure.failures.map(({ case_id, message }) => `${case_id}: ${message}`).join("; "),
-        stage_id: "validate_model",
+        stage_id: "run_simulations",
         operation: "validate_tscircuit_transient_graph",
         artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
         hint: "Inspect the named validation case and Circuit JSON trace. Only an elapsed-time reference curve backed by one completed tscircuit transient experiment is publishable.",
@@ -111,9 +113,9 @@ export const validateModelStage = defineModelStage({
       status: "completed",
       output: {
         result_path,
-        model_path: dependency_outputs.generate_model.model_path,
-        model_card_path: dependency_outputs.generate_model.model_card_path,
-        manifest_path: dependency_outputs.generate_model.manifest_path,
+        model_path: simulation_input.model_path,
+        model_card_path: simulation_input.model_card_path,
+        manifest_path: simulation_input.manifest_path,
         contract_path,
         plan_path,
         evidence_dir,
@@ -125,13 +127,13 @@ export const validateModelStage = defineModelStage({
       },
       artifacts: [
         await modelArtifact({
-          id: "initial_validation_results",
+          id: "simulation_outputs",
           path: result_path,
           media_type: "application/json",
           role: "validation_result",
         }),
         await modelArtifact({
-          id: "initial_candidate_diagnostics",
+          id: "simulation_diagnostics",
           path: diagnostic_path,
           media_type: "application/json",
           role: "debug",

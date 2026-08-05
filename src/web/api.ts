@@ -7,6 +7,7 @@ import type {
   ModelSelectedPreview,
 } from "@/shared/job-types"
 import { parseModelSelectedPreview } from "@/shared/model-selected-preview"
+import type { DebugPipelineId, DebugRunMode } from "@/shared/pipeline-debug"
 import { getInitialUseOpenai } from "./agent-provider-preference"
 
 interface JobResponse {
@@ -88,6 +89,20 @@ export async function retryJob(job_id: string): Promise<Job> {
   if (!response.ok) throw new Error(await readApiError(response))
   const job_response = (await response.json()) as JobResponse
   return job_response.job
+}
+
+export async function runPipelineDebug(input: {
+  job_id: string
+  pipeline_id: DebugPipelineId
+  mode: DebugRunMode
+  stage_id?: string
+}): Promise<void> {
+  const response = await fetch("/api/pipeline/debug-run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  })
+  if (!response.ok) throw new Error(await readApiError(response))
 }
 
 export async function deleteJob(job_id: string): Promise<void> {

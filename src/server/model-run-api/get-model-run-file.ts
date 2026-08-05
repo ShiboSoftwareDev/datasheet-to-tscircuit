@@ -83,7 +83,7 @@ export async function getModelRunFile(request_url: URL, context: ModelRunApiCont
         job_id,
         operation: `download_${file_kind}`,
         error: new Error(
-          "published-model.json is missing even though the completed datasheet_model pipeline crossed the publish_model commit barrier",
+          "published-model.json is missing even though the completed spice_generation pipeline crossed the publish commit barrier",
         ),
       })
     } else {

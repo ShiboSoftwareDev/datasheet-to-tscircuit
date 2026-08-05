@@ -6,6 +6,7 @@ import { ModelAgentLogs, ModelPanel } from "./components/model-panel"
 import { TaskSidebar } from "./components/task-sidebar"
 import { UploadPanel } from "./components/upload-panel"
 import { WorkspaceStatusBar } from "./components/workspace-status-bar"
+import { PipelineDebugger } from "./components/pipeline-debugger"
 import { useActiveJob } from "./use-active-job"
 import { useModelRun } from "./use-model-run"
 
@@ -196,6 +197,7 @@ export default function App() {
                   <FlaskConical size={15} /> SPICE Model
                 </button>
               </nav>
+              <PipelineDebugger job={job} model_run={model_run_state.model_run} />
             </div>
             <div className="workspace-body">
               {workspace_tab === "component" ? (

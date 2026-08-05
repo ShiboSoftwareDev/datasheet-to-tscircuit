@@ -9,9 +9,9 @@ import {
   readApprovedEvidence,
   readJson,
 } from "../stage-helpers"
-import { defineComponentStage } from "./stage-factory"
+import { defineApplicationStage } from "./stage-factory"
 
-export const repairApplicationStage = defineComponentStage({
+export const repairApplicationStage = defineApplicationStage({
   id: "repair_application",
   depends_on: ["validate_application"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
@@ -23,6 +23,7 @@ export const repairApplicationStage = defineComponentStage({
         status: "completed",
         output: {
           result_path: dependency_outputs.validate_application.result_path,
+          available: dependency_outputs.validate_application.available,
           passed: true,
           repair_attempts: 0,
           errors: [],
@@ -58,6 +59,7 @@ export const repairApplicationStage = defineComponentStage({
         status: "completed",
         output: {
           result_path,
+          available: dependency_outputs.validate_application.available,
           passed: true,
           repair_attempts: repair_attempt,
           errors: [],
@@ -95,6 +97,7 @@ export const repairApplicationStage = defineComponentStage({
       status: "completed",
       output: {
         result_path: join(context.job_dir, "application-validation.json"),
+        available: dependency_outputs.validate_application.available,
         passed: false,
         repair_attempts: max_repairs,
         errors: result.errors,

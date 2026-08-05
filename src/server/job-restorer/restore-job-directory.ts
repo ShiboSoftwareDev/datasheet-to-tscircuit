@@ -248,11 +248,23 @@ export async function restoreJobDirectory(input: {
         has_complete_artifact),
   )
   const restored_pipeline = parsePublicPipelineSnapshot(saved.pipeline)
+  const saved_pipelines = isRecord(saved.pipelines) ? saved.pipelines : undefined
+  const restored_pipelines = {
+    component_generation:
+      parsePublicPipelineSnapshot(saved_pipelines?.component_generation) ??
+      (restored_pipeline?.pipeline_id === "component_generation" ||
+      restored_pipeline?.pipeline_id === "datasheet_component"
+        ? restored_pipeline
+        : undefined),
+    typical_application: parsePublicPipelineSnapshot(saved_pipelines?.typical_application),
+  }
   const interrupted = !saved_status || ACTIVE_JOB_STATUSES.has(saved_status)
   const published_pipeline_completed = Boolean(
-    restored_pipeline?.pipeline_id === "datasheet_component" &&
-      restored_pipeline.status === "completed" &&
-      restored_pipeline.stage_results.publish?.status === "completed",
+    (restored_pipelines.typical_application?.status === "completed" &&
+      restored_pipelines.typical_application.stage_results.publish?.status === "completed") ||
+      (restored_pipeline?.pipeline_id === "datasheet_component" &&
+        restored_pipeline.status === "completed" &&
+        restored_pipeline.stage_results.publish?.status === "completed"),
   )
   const recover_published_component =
     interrupted && (published_pipeline_completed || publication_is_usable) && component_ready
@@ -335,6 +347,7 @@ export async function restoreJobDirectory(input: {
     provenance: isJobProvenance(saved.provenance) ? saved.provenance : undefined,
     evidence_available: evidence_is_committed,
     pipeline: restored_pipeline,
+    pipelines: restored_pipelines,
   })
   return restored_job
 }

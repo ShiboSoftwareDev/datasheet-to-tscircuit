@@ -1,4 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
+import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { isCircuitJson } from "../component-circuit-json"
 import { createStageWorkspace } from "../infrastructure/artifacts"
@@ -73,6 +74,7 @@ async function buildOnePreview(input: {
   model_dir: string
   validation_case: ValidationPlan["cases"][number]
   generated: GeneratedModel
+  source_dir?: string
   tsci_bin: string
   process_runner: ProcessRunner
   signal: AbortSignal
@@ -98,15 +100,15 @@ async function buildOnePreview(input: {
   try {
     input.signal.throwIfAborted()
     const source_file = `${case_id}.circuit.tsx`
-    await Bun.write(
-      join(workspace.path, source_file),
-      renderValidationCaseTsx({
-        validation_case: input.validation_case,
-        manifest: input.generated.manifest,
-        model_source: input.generated.source,
-        model_card: input.generated.card,
-      }),
-    )
+    const source = input.source_dir
+      ? await readFile(join(input.source_dir, source_file), "utf8")
+      : renderValidationCaseTsx({
+          validation_case: input.validation_case,
+          manifest: input.generated.manifest,
+          model_source: input.generated.source,
+          model_card: input.generated.card,
+        })
+    await Bun.write(join(workspace.path, source_file), source)
     await input.append("system", `Building validation TSX preview ${case_id}\n`)
     const build = await buildTscircuitSource({
       workspace: workspace.path,
@@ -197,6 +199,7 @@ export async function buildValidationCircuitPreviews(input: {
   model_dir: string
   plan: ValidationPlan
   generated: GeneratedModel
+  source_dir?: string
   tsci_bin: string
   process_runner: ProcessRunner
   signal: AbortSignal

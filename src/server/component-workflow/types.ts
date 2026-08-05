@@ -39,17 +39,27 @@ export type ComponentPipelineOutputs = {
     passed: boolean
     repair_attempts: number
   }
+}
+
+export type ApplicationPipelineOutputs = {
+  prepare_application: {
+    component_path: string
+    component_circuit_json_path: string
+    application_available: boolean
+  }
   generate_application: {
     available: boolean
     source_path: string
   }
   validate_application: {
     result_path: string
+    available: boolean
     passed: boolean
     errors: string[]
   }
   repair_application: {
     result_path: string
+    available: boolean
     passed: boolean
     repair_attempts: number
     errors: string[]

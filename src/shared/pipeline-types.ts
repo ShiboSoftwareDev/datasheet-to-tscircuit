@@ -7,6 +7,23 @@ export type PipelineJsonValue =
 
 export type PipelineOutputMap = Readonly<Record<string, PipelineJsonValue>>
 
+/**
+ * The complete serializable input required to execute one pipeline task again.
+ * Runtime services such as process launchers and credentials are deliberately
+ * excluded; all workflow state belongs in this envelope.
+ */
+export interface PipelineTaskInputEnvelope {
+  readonly version: 1
+  readonly kind: "pipeline_task_input"
+  readonly pipeline_id: string
+  readonly task_id: string
+  readonly run_id: string
+  readonly execution_context: Readonly<Record<string, PipelineJsonValue>>
+  readonly depends_on: readonly string[]
+  readonly dependency_statuses: Readonly<Record<string, string>>
+  readonly dependency_outputs: Readonly<Record<string, PipelineJsonValue>>
+}
+
 export type DeepReadonly<Value> = Value extends PipelineJsonPrimitive
   ? Value
   : Value extends readonly (infer Item)[]
@@ -203,6 +220,23 @@ export interface PipelineDefinition<
   readonly pipeline_id: string
   readonly stages: readonly RegisteredPipelineStage<Outputs, Context, Services>[]
 }
+
+export type PipelineExecutionTarget<Outputs extends PipelineOutputMap> =
+  | {
+      readonly mode: "pipeline"
+    }
+  | {
+      /** Execute exactly one stage with an explicit, persisted dependency input. */
+      readonly mode: "stage"
+      readonly stage_id: keyof Outputs & string
+      readonly dependency_outputs: Readonly<Record<string, PipelineJsonValue>>
+    }
+  | {
+      /** Execute the selected stage and every stage after it. */
+      readonly mode: "from_stage"
+      readonly stage_id: keyof Outputs & string
+      readonly dependency_outputs: Readonly<Record<string, PipelineJsonValue>>
+    }
 
 interface PipelineEventBase {
   readonly run_id: string

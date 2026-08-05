@@ -1687,7 +1687,7 @@ describe("independent reference-graph observation", () => {
       expect(error).toMatchObject({
         diagnostic: {
           code: "no_eligible_time_domain_graph",
-          stage_id: "characterize",
+          stage_id: "find_reference_graphs",
           message: expect.stringContaining("PDF page 2 Figure 8-3. Alert Response Time"),
           retryable: false,
         },
@@ -1790,8 +1790,8 @@ describe("independent reference-graph observation", () => {
     try {
       await characterizeStage.execute({
         run_id: "model_run94_boundary",
-        pipeline_id: "datasheet_model",
-        stage_id: "characterize",
+        pipeline_id: "spice_generation",
+        stage_id: "find_reference_graphs",
         debug_dir: join(model_dir, "debug"),
         context: {
           model_run_id: "model_run94_boundary",
@@ -1834,7 +1834,7 @@ describe("independent reference-graph observation", () => {
     expect(caught).toMatchObject({
       diagnostic: {
         code: "no_eligible_time_domain_graph",
-        stage_id: "characterize",
+        stage_id: "find_reference_graphs",
         retryable: false,
       },
     })
@@ -1891,7 +1891,7 @@ describe("independent reference-graph observation", () => {
       expect(error).toMatchObject({
         diagnostic: {
           code: "no_eligible_time_domain_graph",
-          stage_id: "characterize",
+          stage_id: "find_reference_graphs",
           retryable: false,
         },
       })

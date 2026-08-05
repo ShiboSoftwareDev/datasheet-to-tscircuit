@@ -10,6 +10,7 @@ import type {
   PipelineDependencyOutputs,
   PipelineDiagnostic,
   PipelineEvent,
+  PipelineExecutionTarget,
   PipelineJsonValue,
   PipelineOutputMap,
   PipelineRunResult,
@@ -21,6 +22,7 @@ import type {
   PipelineStageOutcome,
   PipelineStageResult,
   PipelineStageResults,
+  PipelineTaskInputEnvelope,
   RegisteredPipelineStage,
 } from "@/shared/pipeline-types"
 import { snapshotPipelineArtifacts } from "./artifact-snapshot"
@@ -46,13 +48,6 @@ type MutableStageResults<Outputs extends PipelineOutputMap> = Partial<
   Record<StageId<Outputs>, PipelineStageResult<Outputs[StageId<Outputs>]>>
 >
 
-interface StageDebugInput {
-  readonly stage_id: string
-  readonly depends_on: readonly string[]
-  readonly dependency_statuses: Readonly<Record<string, string>>
-  readonly dependency_outputs: Readonly<Record<string, PipelineJsonValue>>
-}
-
 interface StageDebugMetrics {
   readonly stage_id: string
   readonly status: string
@@ -74,6 +69,7 @@ export interface RunPipelineOptions<
   readonly workspace_dir: string
   readonly context: Readonly<Context>
   readonly services: Readonly<Services>
+  readonly target?: PipelineExecutionTarget<Outputs>
   readonly signal?: AbortSignal
   readonly on_snapshot?: PipelineSnapshotCallback<Outputs>
   readonly snapshot_timeout_ms?: number
@@ -101,6 +97,19 @@ const writeJson = async (path: string, value: unknown): Promise<void> => {
     })
   }
   await writeFile(path, `${json}\n`, "utf8")
+}
+
+const serializeExecutionContext = (context: object): Readonly<Record<string, PipelineJsonValue>> => {
+  const serialized = JSON.parse(JSON.stringify(context)) as unknown
+  if (serialized === null || typeof serialized !== "object" || Array.isArray(serialized)) {
+    throw new PipelineError({
+      code: "task_context_not_serializable",
+      message: "Pipeline task execution context must serialize to a JSON object",
+      stage_id: null,
+      operation: "serialize_task_input",
+    })
+  }
+  return deepFreeze(serialized as Record<string, PipelineJsonValue>)
 }
 
 const getCancellationReason = (signal: AbortSignal): string => {
@@ -191,11 +200,43 @@ const getDependencyState = <
 >(
   stage: RegisteredPipelineStage<Outputs, Context, Services>,
   results: MutableStageResults<Outputs>,
+  provided_outputs?: Readonly<Record<string, PipelineJsonValue>>,
 ): {
   readonly dependency_outputs: Readonly<Record<string, PipelineJsonValue>>
   readonly dependency_statuses: Readonly<Record<string, string>>
   readonly incomplete_dependencies: readonly string[]
 } => {
+  if (provided_outputs) {
+    const required = new Set<string>(stage.depends_on)
+    const provided = Object.keys(provided_outputs)
+    const missing = stage.depends_on.filter((dependency_id) => !(dependency_id in provided_outputs))
+    const unexpected = provided.filter((dependency_id) => !required.has(dependency_id))
+    if (missing.length > 0 || unexpected.length > 0) {
+      throw new PipelineError({
+        code: "invalid_isolated_stage_input",
+        message: [
+          `The isolated input for ${stage.id} does not match its declared dependencies.`,
+          ...(missing.length > 0 ? [`Missing: ${missing.join(", ")}.`] : []),
+          ...(unexpected.length > 0 ? [`Unexpected: ${unexpected.join(", ")}.`] : []),
+        ].join(" "),
+        stage_id: stage.id,
+        operation: "resolve_isolated_stage_input",
+        entity_refs: [...missing, ...unexpected].map((dependency_id) => ({
+          entity_type: "pipeline_stage",
+          entity_id: dependency_id,
+        })),
+        hint: "Use the dependency_outputs from this stage's persisted input.json bundle.",
+      })
+    }
+    return {
+      dependency_outputs: deepFreeze({ ...provided_outputs }),
+      dependency_statuses: deepFreeze(
+        Object.fromEntries(stage.depends_on.map((dependency_id) => [dependency_id, "provided"])),
+      ),
+      incomplete_dependencies: Object.freeze([]),
+    }
+  }
+
   const dependency_outputs: Record<string, PipelineJsonValue> = {}
   const dependency_statuses: Record<string, string> = {}
   const incomplete_dependencies: string[] = []
@@ -227,7 +268,7 @@ const getDependencyState = <
 
 const writeInitialDebugBundle = async (
   debug_dir: string,
-  input: StageDebugInput,
+  input: PipelineTaskInputEnvelope,
   started_at?: string,
 ): Promise<void> => {
   await mkdir(debug_dir, { recursive: true })
@@ -236,7 +277,7 @@ const writeInitialDebugBundle = async (
     writeJson(join(debug_dir, "output.json"), null),
     writeJson(join(debug_dir, "error.json"), null),
     writeJson(join(debug_dir, "metrics.json"), {
-      stage_id: input.stage_id,
+      stage_id: input.task_id,
       status: started_at === undefined ? "pending" : "running",
       ...(started_at === undefined ? {} : { started_at }),
       artifact_count: 0,
@@ -414,7 +455,19 @@ export const runPipeline = async <
   })
 
   const now = options.now ?? (() => new Date())
+  const target = options.target ?? ({ mode: "pipeline" } as const)
+  const target_index =
+    target.mode === "pipeline" ? 0 : stages.findIndex((stage) => stage.id === target.stage_id)
+  if (target_index < 0) {
+    throw new PipelineError({
+      code: "pipeline_stage_not_found",
+      message: `Pipeline ${options.definition.pipeline_id} has no stage ${target.mode === "pipeline" ? "" : target.stage_id}`,
+      stage_id: target.mode === "pipeline" ? null : target.stage_id,
+      operation: "select_pipeline_execution_target",
+    })
+  }
   const signal = options.signal ?? new AbortController().signal
+  const executionContext = serializeExecutionContext(options.context)
   const pipeline_dir = join(options.workspace_dir, ".pipeline")
   const events_path = join(pipeline_dir, "events.ndjson")
   const observer_errors_path = join(pipeline_dir, "observer-errors.ndjson")
@@ -522,7 +575,7 @@ export const runPipeline = async <
     ).catch(() => undefined)
   }
 
-  for (const stage of stages) {
+  for (const [stage_index, stage] of stages.entries()) {
     const prior_result = mutable_results[stage.id]
     if (!prior_result) {
       throw new PipelineError({
@@ -533,13 +586,60 @@ export const runPipeline = async <
       })
     }
     const debug_dir = prior_result.debug_dir
-    const dependency_state = getDependencyState(stage, mutable_results)
+    const selected =
+      target.mode === "pipeline" ||
+      stage_index === target_index ||
+      (target.mode === "from_stage" && stage_index > target_index)
+    if (!selected) {
+      const completed_at = now().toISOString()
+      const reason = "Stage was not selected for this isolated pipeline invocation"
+      const result = Object.freeze({
+        stage_id: stage.id,
+        debug_dir,
+        status: "skipped" as const,
+        reason,
+        completed_at,
+        artifacts: emptyArtifacts(),
+        diagnostics: emptyDiagnostics(),
+        metrics: emptyMetrics(),
+      })
+      mutable_results[stage.id] = result
+      const debug_input = deepFreeze({
+        version: 1,
+        kind: "pipeline_task_input",
+        pipeline_id: options.definition.pipeline_id,
+        task_id: stage.id,
+        run_id: options.run_id,
+        execution_context: executionContext,
+        depends_on: [...stage.depends_on],
+        dependency_statuses: {},
+        dependency_outputs: {},
+      } satisfies PipelineTaskInputEnvelope)
+      await writeInitialDebugBundle(debug_dir, debug_input)
+      await writeTerminalDebugBundle(debug_dir, result)
+      await emit({
+        event_type: "stage_skipped",
+        stage_id: stage.id,
+        status: "skipped",
+        debug_dir,
+        reason,
+      })
+      continue
+    }
+    const provided_outputs =
+      target.mode !== "pipeline" && stage_index === target_index ? target.dependency_outputs : undefined
+    const dependency_state = getDependencyState(stage, mutable_results, provided_outputs)
     const debug_input = deepFreeze({
-      stage_id: stage.id,
+      version: 1,
+      kind: "pipeline_task_input",
+      pipeline_id: options.definition.pipeline_id,
+      task_id: stage.id,
+      run_id: options.run_id,
+      execution_context: executionContext,
       depends_on: [...stage.depends_on],
       dependency_statuses: dependency_state.dependency_statuses,
       dependency_outputs: dependency_state.dependency_outputs,
-    } satisfies StageDebugInput)
+    } satisfies PipelineTaskInputEnvelope)
 
     if (signal.aborted || has_cancelled_stage) {
       const completed_at = now().toISOString()

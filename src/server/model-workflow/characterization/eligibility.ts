@@ -17,7 +17,7 @@ function noEligibleTimeDomainGraphError(graph_diagnostics: readonly string[] = [
     message:
       "The complete PDF scan and independent source observer found no eligible printed elapsed-time voltage graph for a fresh executable SPICE model." +
       graph_detail,
-    stage_id: "characterize",
+    stage_id: "find_reference_graphs",
     operation: "validate_model_characterization",
     hint: "Only a public-pin transient voltage waveform with a supported reproducible fixture and an independently matched cited-page graph crop can start model generation; scalar, operating-point, DC-only, current-only, and protocol-dependent specifications remain documented-only.",
     retryable: false,

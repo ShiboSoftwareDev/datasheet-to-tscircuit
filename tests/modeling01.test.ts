@@ -688,7 +688,7 @@ describe("model characterization contract", () => {
     expect(no_eligible_error).toBeInstanceOf(PipelineError)
     expect((no_eligible_error as PipelineError).diagnostic).toMatchObject({
       code: "no_eligible_time_domain_graph",
-      stage_id: "characterize",
+      stage_id: "find_reference_graphs",
       retryable: false,
     })
     expect(buildCharacterizationPrompt()).toContain("whole-page crop is\nrejected")

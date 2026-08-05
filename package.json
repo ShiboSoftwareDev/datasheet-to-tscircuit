@@ -8,6 +8,7 @@
     "dev": "concurrently -k -n api,web -c blue,green \"bun --watch src/server/index.ts\" \"vite\"",
     "dev:server": "bun --watch src/server/index.ts",
     "dev:web": "vite",
+    "debug": "bun src/cli/pipeline-debug.ts",
     "auth:openai": "docker compose run --rm --no-deps -e PI_OAUTH_CALLBACK_HOST=0.0.0.0 -p 127.0.0.1:1455:1455 app ./node_modules/.bin/tsci-agent auth login --openai",
     "build": "sh scripts/docker-compose-with-source.sh build",
     "build:web": "vite build",

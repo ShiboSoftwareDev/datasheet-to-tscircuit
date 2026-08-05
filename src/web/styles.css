@@ -1428,6 +1428,272 @@ a {
   box-shadow: 0 1px 3px rgba(32, 33, 35, 0.08);
 }
 
+.pipeline-debug-buttons {
+  display: flex;
+  min-width: 0;
+  grid-column: 3;
+  justify-self: start;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #e1e1dd;
+  border-radius: 10px;
+  background: #f3f3f0;
+}
+
+.pipeline-debug-buttons button {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  color: #5d6670;
+  background: white;
+  box-shadow: 0 1px 2px rgba(32, 33, 35, 0.06);
+  font-size: 9px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.pipeline-debug-buttons button:hover:not(:disabled) {
+  color: var(--blue);
+  background: #f7f9fd;
+}
+
+.pipeline-debug-buttons button:disabled {
+  color: #a1a5aa;
+  background: transparent;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.pipeline-debug-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(24, 29, 36, 0.48);
+  backdrop-filter: blur(3px);
+}
+
+.pipeline-debug-dialog {
+  display: flex;
+  width: min(920px, 100%);
+  max-height: min(820px, calc(100dvh - 56px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #d8dbe0;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 28px 90px rgba(21, 26, 33, 0.28);
+}
+
+.pipeline-debug-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 26px 20px;
+  border-bottom: 1px solid #e8e9e7;
+}
+
+.pipeline-debug-dialog > header .eyebrow {
+  margin-bottom: 9px;
+}
+
+.pipeline-debug-dialog > header h2 {
+  margin: 0;
+  color: #24272c;
+  font-size: 22px;
+  letter-spacing: -0.025em;
+}
+
+.pipeline-debug-dialog > header p {
+  max-width: 650px;
+  margin: 7px 0 0;
+  color: #70757c;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.pipeline-debug-dialog > header > button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #e1e2e0;
+  border-radius: 9px;
+  color: #6f747a;
+  background: #f8f8f6;
+  cursor: pointer;
+}
+
+.pipeline-debug-runbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 26px;
+  border-bottom: 1px solid #ececea;
+  background: #fafaf8;
+}
+
+.pipeline-debug-runbar > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pipeline-debug-runbar strong {
+  color: #3d4248;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.pipeline-debug-runbar span {
+  color: #7d8288;
+  font-size: 10px;
+}
+
+.pipeline-debug-runbar .primary-button {
+  display: inline-flex;
+  width: auto;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  font-size: 10px;
+}
+
+.pipeline-debug-error {
+  margin: 12px 26px 0;
+  padding: 9px 11px;
+  border: 1px solid #efcac6;
+  border-radius: 8px;
+  color: #a23f35;
+  background: #fff6f4;
+  font-size: 10px;
+}
+
+.pipeline-stage-list {
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 16px 18px;
+  list-style: none;
+}
+
+.pipeline-stage-list li {
+  display: grid;
+  min-height: 58px;
+  grid-template-columns: 34px minmax(190px, 1fr) 105px 54px max-content;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eeeeeb;
+}
+
+.pipeline-stage-number {
+  color: #a0a4a9;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pipeline-stage-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pipeline-stage-copy strong {
+  overflow: hidden;
+  color: #3a3e43;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-stage-copy code,
+.pipeline-stage-copy small {
+  overflow: hidden;
+  color: #8b9095;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-stage-copy small {
+  color: #a95449;
+}
+
+.pipeline-stage-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #85898e;
+  font-size: 9px;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.pipeline-stage-status.status-completed {
+  color: #24804d;
+}
+
+.pipeline-stage-status.status-running {
+  color: #2667b4;
+}
+
+.pipeline-stage-status.status-failed {
+  color: #b24b40;
+}
+
+.pipeline-stage-duration {
+  color: #888d92;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.pipeline-stage-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.pipeline-stage-actions button {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid #dfe2e6;
+  border-radius: 7px;
+  color: #56616d;
+  background: #fff;
+  font-size: 9px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.pipeline-stage-actions button:hover:not(:disabled) {
+  border-color: #b7c9e0;
+  color: var(--blue);
+  background: #f7f9fd;
+}
+
+.pipeline-stage-actions button:disabled {
+  color: #b0b3b7;
+  background: #fafafa;
+  cursor: not-allowed;
+}
+
 .workspace-grid {
   display: grid;
   height: 100%;
@@ -4471,6 +4737,11 @@ a {
     grid-column: 2;
   }
 
+  .pipeline-debug-buttons {
+    grid-column: 1 / -1;
+    justify-self: center;
+  }
+
   .workspace-tabs button {
     padding: 0 9px;
   }
@@ -4491,9 +4762,40 @@ a {
   }
 
   .workspace-status-bar,
-  .workspace-tabs {
+  .workspace-tabs,
+  .pipeline-debug-buttons {
     grid-column: 1;
     justify-self: center;
+  }
+
+  .pipeline-debug-buttons {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .pipeline-debug-backdrop {
+    padding: 10px;
+  }
+
+  .pipeline-debug-dialog {
+    max-height: calc(100dvh - 20px);
+  }
+
+  .pipeline-debug-runbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pipeline-stage-list li {
+    grid-template-columns: 26px minmax(0, 1fr) 92px;
+  }
+
+  .pipeline-stage-duration {
+    display: none;
+  }
+
+  .pipeline-stage-actions {
+    grid-column: 2 / -1;
   }
 
   .artifact-tabs button {

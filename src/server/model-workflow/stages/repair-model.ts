@@ -74,29 +74,29 @@ async function readStoredViewerQualityCases(input: {
 }
 
 export const repairModelStage = defineModelStage({
-  id: "repair_model",
-  depends_on: ["validate_model"],
+  id: "repair_spice_model",
+  depends_on: ["compare_simulation_outputs"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
-    if (dependency_outputs.validate_model.passed) {
+    if (dependency_outputs.compare_simulation_outputs.passed) {
       return {
         status: "completed",
         output: {
-          result_path: dependency_outputs.validate_model.result_path,
-          model_path: dependency_outputs.validate_model.model_path,
-          model_card_path: dependency_outputs.validate_model.model_card_path,
-          manifest_path: dependency_outputs.validate_model.manifest_path,
-          contract_path: dependency_outputs.validate_model.contract_path,
-          plan_path: dependency_outputs.validate_model.plan_path,
-          evidence_dir: dependency_outputs.validate_model.evidence_dir,
+          result_path: dependency_outputs.compare_simulation_outputs.result_path,
+          model_path: dependency_outputs.compare_simulation_outputs.model_path,
+          model_card_path: dependency_outputs.compare_simulation_outputs.model_card_path,
+          manifest_path: dependency_outputs.compare_simulation_outputs.manifest_path,
+          contract_path: dependency_outputs.compare_simulation_outputs.contract_path,
+          plan_path: dependency_outputs.compare_simulation_outputs.plan_path,
+          evidence_dir: dependency_outputs.compare_simulation_outputs.evidence_dir,
           passed: true,
           repair_attempts: 0,
-          revision: dependency_outputs.validate_model.revision,
+          revision: dependency_outputs.compare_simulation_outputs.revision,
         },
         metrics: { repair_attempts: 0 },
       }
     }
 
-    const { contract_path, plan_path, evidence_dir } = dependency_outputs.validate_model
+    const { contract_path, plan_path, evidence_dir } = dependency_outputs.compare_simulation_outputs
     const [contract_value, plan_value] = await Promise.all([readJson(contract_path), readJson(plan_path)])
     const contract = parseFreshModelContract(contract_value)
     const plan = plan_value as ValidationPlan
@@ -104,9 +104,11 @@ export const repairModelStage = defineModelStage({
       contract.characterization.strategy,
       contract.characterization.family,
     )
-    let result = (await readJson(dependency_outputs.validate_model.result_path)) as ValidationRunResult
+    let result = (await readJson(
+      dependency_outputs.compare_simulation_outputs.result_path,
+    )) as ValidationRunResult
     let repair_feedback =
-      dependency_outputs.validate_model.repair_feedback ?? createModelRepairFeedback(result)
+      dependency_outputs.compare_simulation_outputs.repair_feedback ?? createModelRepairFeedback(result)
     const non_repairable_errors = getNonRepairableValidationErrors(result)
     if (non_repairable_errors.length > 0) {
       throw new PipelineError({
@@ -114,9 +116,9 @@ export const repairModelStage = defineModelStage({
         message:
           "Model repair was not started because validation failed outside the model boundary: " +
           non_repairable_errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
-        stage_id: "repair_model",
+        stage_id: "repair_spice_model",
         operation: "classify_validation_failure",
-        artifact_refs: [{ path: dependency_outputs.validate_model.result_path }],
+        artifact_refs: [{ path: dependency_outputs.compare_simulation_outputs.result_path }],
         hint: "Fix the validation plan, compiler, simulator installation, or raw-result pipeline, then retry without spending model repair attempts.",
       })
     }
@@ -131,13 +133,13 @@ export const repairModelStage = defineModelStage({
       )
     let attempted_repairs = 0
     let previous_candidate = {
-      model_path: dependency_outputs.validate_model.model_path,
-      model_card_path: dependency_outputs.validate_model.model_card_path,
-      manifest_path: dependency_outputs.validate_model.manifest_path,
-      result_path: dependency_outputs.validate_model.result_path,
-      revision: dependency_outputs.validate_model.revision,
+      model_path: dependency_outputs.compare_simulation_outputs.model_path,
+      model_card_path: dependency_outputs.compare_simulation_outputs.model_card_path,
+      manifest_path: dependency_outputs.compare_simulation_outputs.manifest_path,
+      result_path: dependency_outputs.compare_simulation_outputs.result_path,
+      revision: dependency_outputs.compare_simulation_outputs.revision,
       diagnostic_path: join(
-        dirname(dependency_outputs.validate_model.result_path),
+        dirname(dependency_outputs.compare_simulation_outputs.result_path),
         "candidate-diagnostics.json",
       ),
     }
@@ -145,7 +147,7 @@ export const repairModelStage = defineModelStage({
       result,
       viewer_cases: await readStoredViewerQualityCases({
         result,
-        validation_directory: dirname(dependency_outputs.validate_model.result_path),
+        validation_directory: dirname(dependency_outputs.compare_simulation_outputs.result_path),
       }),
     })
     for (let repair_attempt = 1; repair_attempt <= currentRepairBudget(); repair_attempt += 1) {
@@ -169,7 +171,7 @@ export const repairModelStage = defineModelStage({
         previous_candidate,
         strategy_guidance: strategy.guidance,
         feedback: formatModelRepairFeedback(repair_feedback),
-        stage_id: "repair_model",
+        stage_id: "repair_spice_model",
         phase_label: `SPICE model repair ${repair_attempt}`,
         signal,
         use_openai: context.use_openai,
@@ -223,7 +225,7 @@ export const repairModelStage = defineModelStage({
           message:
             `Validation of repaired model ${repair_attempt} failed outside the model boundary: ` +
             infrastructure_failure.errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
-          stage_id: "repair_model",
+          stage_id: "repair_spice_model",
           operation: "classify_validation_failure",
           artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
           hint: "Inspect the simulator and validation trace; the failed TSX/reference preview was retained, but another model-generation attempt would not repair this failure.",
@@ -237,7 +239,7 @@ export const repairModelStage = defineModelStage({
             infrastructure_failure.failures
               .map(({ case_id, message }) => `${case_id}: ${message}`)
               .join("; "),
-          stage_id: "repair_model",
+          stage_id: "repair_spice_model",
           operation: "validate_tscircuit_transient_graph",
           artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
           hint: "Another model-only repair cannot fix a non-transient plan or broken TSX projection. Inspect the validation case and Circuit JSON trace.",
@@ -331,15 +333,15 @@ export const repairModelStage = defineModelStage({
       message:
         `Model did not pass the immutable validation plan after ${attempted_repairs} repair attempt(s).\n` +
         formatModelRepairFeedback(repair_feedback),
-      stage_id: "repair_model",
-      operation: "repair_and_validate_model",
+      stage_id: "repair_spice_model",
+      operation: "repair_and_validate_spice_model",
       artifact_refs: [
         { path: previous_candidate.result_path },
         { path: previous_candidate.diagnostic_path },
         { path: previous_candidate.model_path },
       ],
       entity_refs: [{ entity_type: "model_revision", entity_id: previous_candidate.revision }],
-      hint: "Inspect validation-results.json and the repair_model debug bundle. The validation plan was not changed during repair.",
+      hint: "Inspect validation-results.json and the repair_spice_model debug bundle. The comparison plan was not changed during repair.",
     })
   },
 })

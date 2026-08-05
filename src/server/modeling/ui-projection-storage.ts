@@ -126,7 +126,7 @@ export async function loadStoredModelPreview(input: {
   }
   if (input.require_accepted_publication) {
     throw new Error(
-      "published-model.json is missing even though the completed datasheet_model pipeline crossed the publish_model commit barrier",
+      "published-model.json is missing even though the completed spice_generation pipeline crossed the publish commit barrier",
     )
   }
   return (

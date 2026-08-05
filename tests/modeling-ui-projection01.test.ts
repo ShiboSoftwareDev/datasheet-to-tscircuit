@@ -1064,7 +1064,7 @@ test("stored previews are loaded from their per-case files", async () => {
       case_id: "transfer",
       require_accepted_publication: true,
     }),
-  ).rejects.toThrow(/publish_model commit barrier/)
+  ).rejects.toThrow(/publish commit barrier/)
   await rm(model_dir, { recursive: true, force: true })
 })
 

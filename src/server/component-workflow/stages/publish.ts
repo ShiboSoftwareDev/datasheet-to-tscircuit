@@ -3,14 +3,14 @@ import { join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 import type { JobValidation } from "@/shared/job-types"
 import { appendJobLog, readJson, updateJobValidation } from "../stage-helpers"
-import { defineComponentStage } from "./stage-factory"
+import { defineApplicationStage } from "./stage-factory"
 
-export const publishStage = defineComponentStage({
+export const publishStage = defineApplicationStage({
   id: "publish",
-  depends_on: ["repair_component", "generate_application", "repair_application"],
+  depends_on: ["repair_application"],
   async execute({ context, services, dependency_outputs, signal }) {
     const application_ready =
-      dependency_outputs.generate_application.available && dependency_outputs.repair_application.passed
+      dependency_outputs.repair_application.available && dependency_outputs.repair_application.passed
     const component_code = await readFile(join(context.job_dir, "index.circuit.tsx"), "utf8")
     const component_circuit_json = (await readJson(
       join(context.job_dir, "component.circuit.json"),
@@ -30,7 +30,7 @@ export const publishStage = defineComponentStage({
         services.job_store.updateJob(context.job_id, { validation })
       }
     }
-    if (!dependency_outputs.generate_application.available) {
+    if (!dependency_outputs.repair_application.available) {
       updateJobValidation(services.job_store, context.job_id, {
         application_build: "not_applicable",
         application_connectivity: "not_applicable",
@@ -39,7 +39,7 @@ export const publishStage = defineComponentStage({
       })
     }
     const typical_application_code =
-      application_ready && dependency_outputs.generate_application.available
+      application_ready && dependency_outputs.repair_application.available
         ? await readFile(join(context.job_dir, "typical-application.circuit.tsx"), "utf8")
         : undefined
     const typical_application_circuit_json = typical_application_code
@@ -64,7 +64,7 @@ export const publishStage = defineComponentStage({
       services.job_store,
       context.job_id,
       "system",
-      application_ready && dependency_outputs.generate_application.available
+      application_ready && dependency_outputs.repair_application.available
         ? "Component and typical application are ready.\n"
         : "Validated component is ready.\n",
     ).catch(() => undefined)

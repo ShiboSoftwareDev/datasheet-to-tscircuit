@@ -1,9 +1,9 @@
 import { join } from "node:path"
 import { validateApplication } from "../component-validation"
 import { appendJobLog, componentArtifact } from "../stage-helpers"
-import { defineComponentStage } from "./stage-factory"
+import { defineApplicationStage } from "./stage-factory"
 
-export const validateApplicationStage = defineComponentStage({
+export const validateApplicationStage = defineApplicationStage({
   id: "validate_application",
   depends_on: ["generate_application"],
   async execute({ context, services, dependency_outputs, signal }) {
@@ -19,7 +19,12 @@ export const validateApplicationStage = defineComponentStage({
     const result_path = join(context.job_dir, "application-validation.json")
     return {
       status: "completed",
-      output: { result_path, passed: result.passed, errors: result.errors },
+      output: {
+        result_path,
+        available: dependency_outputs.generate_application.available,
+        passed: result.passed,
+        errors: result.errors,
+      },
       artifacts: [
         await componentArtifact({
           id: "initial_application_validation",

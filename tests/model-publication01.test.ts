@@ -1279,8 +1279,8 @@ test("a failed integrated build cannot replace the prior accepted root files or 
   await expect(
     publishModelStage.execute({
       run_id: "model_integration",
-      pipeline_id: "datasheet_model",
-      stage_id: "publish_model",
+      pipeline_id: "spice_generation",
+      stage_id: "publish",
       debug_dir: join(workspace.model_dir, "debug"),
       context: {
         model_run_id: "model_integration",
@@ -1304,7 +1304,7 @@ test("a failed integrated build cannot replace the prior accepted root files or 
         },
       },
       dependency_outputs: {
-        repair_model: {
+        repair_spice_model: {
           result_path: join(validation_dir, "validation-results.json"),
           model_path: join(candidate_dir, "model.lib"),
           model_card_path: join(candidate_dir, "model-card.md"),

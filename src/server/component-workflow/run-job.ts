@@ -4,9 +4,9 @@ import type { PublicPipelineSnapshot } from "@/shared/job-types"
 import { TsciAgentClient } from "../infrastructure/agent"
 import { BunProcessRunner } from "../infrastructure/process"
 import { projectPublicPipelineSnapshot, runPipeline } from "../pipeline"
-import { COMPONENT_PIPELINE } from "./component-pipeline"
+import { APPLICATION_PIPELINE, COMPONENT_PIPELINE } from "./component-pipeline"
 import { appendJobLog } from "./stage-helpers"
-import type { ComponentPipelineOutputs, JobRunnerContext } from "./types"
+import type { ComponentPipelineServices, JobRunnerContext } from "./types"
 
 function failureMessage(result: PublicPipelineSnapshot): string {
   for (const stage of Object.values(result.stage_results)) {
@@ -34,55 +34,53 @@ export async function runJob(
       max_attempts: context.agent_transport_retry_limit,
       retry_base_delay_ms: context.agent_transport_retry_base_delay_ms,
     })
-  const invocation_id = crypto.randomUUID()
-  const invocation_dir = join(job_dir, "runs", invocation_id)
-  await mkdir(invocation_dir, { recursive: true })
+  const services: ComponentPipelineServices = {
+    job_store: context.job_store,
+    agent_client,
+    process_runner,
+    tsci_bin: context.tsci_bin,
+  }
   try {
-    const result = await runPipeline({
+    const component_invocation_id = crypto.randomUUID()
+    const component_invocation_dir = join(
+      job_dir,
+      "runs",
+      COMPONENT_PIPELINE.pipeline_id,
+      component_invocation_id,
+    )
+    await mkdir(component_invocation_dir, { recursive: true })
+    const component_result = await runPipeline({
       definition: COMPONENT_PIPELINE,
       run_id: input.job_id,
-      workspace_dir: invocation_dir,
+      workspace_dir: component_invocation_dir,
       context: {
         job_id: input.job_id,
         job_dir,
         additional_instructions: input.additional_instructions,
         use_openai: job.use_openai ?? context.use_openai ?? false,
-        invocation_id,
+        invocation_id: component_invocation_id,
       },
-      services: {
-        job_store: context.job_store,
-        agent_client,
-        process_runner,
-        tsci_bin: context.tsci_bin,
-      },
+      services,
       signal,
       on_snapshot: (snapshot) => {
+        const projected = projectPublicPipelineSnapshot({
+          snapshot,
+          artifact_root: job_dir,
+          private_roots: [component_invocation_dir],
+        })
+        const pipelines = context.job_store.getJob(input.job_id)?.pipelines ?? {}
         context.job_store.updateJob(input.job_id, {
-          pipeline: projectPublicPipelineSnapshot({
-            snapshot,
-            artifact_root: job_dir,
-            private_roots: [invocation_dir],
-          }),
+          pipeline: projected,
+          pipelines: { ...pipelines, component_generation: projected },
         })
       },
     })
-    const public_result = projectPublicPipelineSnapshot({
-      snapshot: result,
+    const public_component_result = projectPublicPipelineSnapshot({
+      snapshot: component_result,
       artifact_root: job_dir,
-      private_roots: [invocation_dir],
+      private_roots: [component_invocation_dir],
     })
-    if (result.status === "completed") {
-      context.job_store.updateJob(input.job_id, {
-        display_status: "complete",
-        is_complete: true,
-        has_errors: false,
-        error_message: undefined,
-        completed_at: new Date().toISOString(),
-        pipeline: public_result,
-      })
-      return
-    }
-    if (result.status === "cancelled" || signal.aborted) {
+    if (component_result.status === "cancelled" || signal.aborted) {
       await appendJobLog(
         context.job_store,
         input.job_id,
@@ -95,16 +93,96 @@ export async function runJob(
         has_errors: false,
         error_message: undefined,
         completed_at: new Date().toISOString(),
-        pipeline: public_result,
+        pipeline: public_component_result,
       })
       return
     }
-    const error_message = failureMessage(public_result)
+    if (component_result.status === "failed") {
+      const error_message = failureMessage(public_component_result)
+      await appendJobLog(
+        context.job_store,
+        input.job_id,
+        "system",
+        `Component pipeline failed: ${error_message}\n`,
+      ).catch(() => undefined)
+      context.job_store.updateJob(input.job_id, {
+        display_status: "failed",
+        is_complete: true,
+        has_errors: true,
+        error_message,
+        completed_at: new Date().toISOString(),
+        pipeline: public_component_result,
+      })
+      return
+    }
+
+    const application_invocation_id = crypto.randomUUID()
+    const application_invocation_dir = join(
+      job_dir,
+      "runs",
+      APPLICATION_PIPELINE.pipeline_id,
+      application_invocation_id,
+    )
+    await mkdir(application_invocation_dir, { recursive: true })
+    const application_result = await runPipeline({
+      definition: APPLICATION_PIPELINE,
+      run_id: input.job_id,
+      workspace_dir: application_invocation_dir,
+      context: {
+        job_id: input.job_id,
+        job_dir,
+        additional_instructions: input.additional_instructions,
+        use_openai: job.use_openai ?? context.use_openai ?? false,
+        invocation_id: application_invocation_id,
+      },
+      services,
+      signal,
+      on_snapshot: (snapshot) => {
+        const projected = projectPublicPipelineSnapshot({
+          snapshot,
+          artifact_root: job_dir,
+          private_roots: [application_invocation_dir],
+        })
+        const pipelines = context.job_store.getJob(input.job_id)?.pipelines ?? {}
+        context.job_store.updateJob(input.job_id, {
+          pipelines: { ...pipelines, typical_application: projected },
+        })
+      },
+    })
+    const public_application_result = projectPublicPipelineSnapshot({
+      snapshot: application_result,
+      artifact_root: job_dir,
+      private_roots: [application_invocation_dir],
+    })
+    const pipelines = context.job_store.getJob(input.job_id)?.pipelines ?? {}
+    if (application_result.status === "completed") {
+      context.job_store.updateJob(input.job_id, {
+        display_status: "complete",
+        is_complete: true,
+        has_errors: false,
+        error_message: undefined,
+        completed_at: new Date().toISOString(),
+        pipelines: { ...pipelines, typical_application: public_application_result },
+      })
+      return
+    }
+    if (application_result.status === "cancelled" || signal.aborted) {
+      context.job_store.updateJob(input.job_id, {
+        display_status: "cancelled",
+        is_complete: true,
+        has_errors: false,
+        error_message: undefined,
+        completed_at: new Date().toISOString(),
+        pipelines: { ...pipelines, typical_application: public_application_result },
+      })
+      return
+    }
+    const error_message = failureMessage(public_application_result)
     await appendJobLog(
       context.job_store,
       input.job_id,
       "system",
-      `Component pipeline failed: ${error_message}\n`,
+      `Typical-application pipeline failed: ${error_message}\n`,
     ).catch(() => undefined)
     context.job_store.updateJob(input.job_id, {
       display_status: "failed",
@@ -112,7 +190,7 @@ export async function runJob(
       has_errors: true,
       error_message,
       completed_at: new Date().toISOString(),
-      pipeline: public_result,
+      pipelines: { ...pipelines, typical_application: public_application_result },
     })
   } catch (error) {
     const cancelled = signal.aborted

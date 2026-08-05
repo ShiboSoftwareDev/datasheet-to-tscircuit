@@ -164,7 +164,7 @@ async function buildSourceProof(input: {
       {
         code: "reference_axis_infrastructure_failed",
         message: `Canonical PDF reference-axis verification could not run: ${error instanceof Error ? error.message : String(error)}`,
-        stage_id: "characterize",
+        stage_id: "find_reference_graphs",
         operation: "verify_reference_axis",
         hint: "Install and verify pdftoppm, pdftotext, and tesseract with English OCR data in the server runtime. This is an infrastructure failure, not an agent artifact rejection.",
         retryable: false,

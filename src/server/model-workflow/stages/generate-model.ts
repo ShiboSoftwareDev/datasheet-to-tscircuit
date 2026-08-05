@@ -65,8 +65,8 @@ async function retainedCandidateForRetry(input: {
 }
 
 export const generateModelStage = defineModelStage({
-  id: "generate_model",
-  depends_on: ["design_validation"],
+  id: "infer_spice_model",
+  depends_on: ["create_comparison_graphs"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
     updateModelProgress({
       store: services.model_run_store,
@@ -74,7 +74,7 @@ export const generateModelStage = defineModelStage({
       phase: "generating_model",
       message: "Generating a bounded self-contained SPICE subcircuit",
     })
-    const { contract_path, plan_path, evidence_dir } = dependency_outputs.design_validation
+    const { contract_path, plan_path, evidence_dir } = dependency_outputs.create_comparison_graphs
     const [contract_value, plan_value] = await Promise.all([readJson(contract_path), readJson(plan_path)])
     const contract = parseFreshModelContract(contract_value)
     const strategy = services.strategy_registry.require(
@@ -103,7 +103,7 @@ export const generateModelStage = defineModelStage({
           validation_plan: plan_value as ValidationPlan,
           evidence_dir,
           strategy_guidance: strategy.guidance,
-          stage_id: "generate_model",
+          stage_id: "infer_spice_model",
           phase_label: "SPICE model generation",
           signal,
           use_openai: context.use_openai,

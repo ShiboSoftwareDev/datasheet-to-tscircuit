@@ -1,14 +1,14 @@
 import { join } from "node:path"
 import { generateApplicationSource } from "../source-candidates"
 import { appendJobLog, componentArtifact, readApprovedEvidence } from "../stage-helpers"
-import { defineComponentStage } from "./stage-factory"
+import { defineApplicationStage } from "./stage-factory"
 
-export const generateApplicationStage = defineComponentStage({
+export const generateApplicationStage = defineApplicationStage({
   id: "generate_application",
-  depends_on: ["repair_component"],
-  async execute({ context, services, signal, debug_dir }) {
+  depends_on: ["prepare_application"],
+  async execute({ context, services, dependency_outputs, signal, debug_dir }) {
     const { application_plan } = await readApprovedEvidence(context.job_dir)
-    if (application_plan.availability === "not_present") {
+    if (!dependency_outputs.prepare_application.application_available) {
       return {
         status: "completed",
         output: { available: false, source_path: "" },

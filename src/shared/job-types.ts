@@ -29,6 +29,11 @@ export interface PublicPipelineSnapshot {
   stage_results: Record<string, PublicPipelineStage>
 }
 
+export interface JobPipelineSnapshots {
+  component_generation?: PublicPipelineSnapshot
+  typical_application?: PublicPipelineSnapshot
+}
+
 export type JobDisplayStatus =
   | "queued"
   | "agent_running"
@@ -109,6 +114,8 @@ export interface Job {
   evidence_available?: boolean
   /** Observable, typed execution state. Older persisted jobs may not have one. */
   pipeline?: PublicPipelineSnapshot
+  /** First-class component and application traces. `pipeline` is the legacy component alias. */
+  pipelines?: JobPipelineSnapshots
 }
 
 export interface ModelRunSummary {

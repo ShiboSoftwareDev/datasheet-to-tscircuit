@@ -5,6 +5,7 @@ import { restorePersistedJobs } from "./job-restorer"
 import { JobStore } from "./job-store"
 import { createModelRunApiHandler } from "./model-run-api"
 import { ModelRunStore } from "./model-run-store"
+import { createPipelineDebugApiHandler } from "./pipeline-debug-api"
 
 export interface AppServerOptions {
   hostname?: string
@@ -53,13 +54,17 @@ export async function createAppServer(options: AppServerOptions = {}) {
   }
   const handleModelRunApiRequest = createModelRunApiHandler(runner_context)
   const handleJobApiRequest = createJobApiHandler(runner_context)
+  const handlePipelineDebugApiRequest = createPipelineDebugApiHandler(runner_context)
 
   return Bun.serve({
     hostname: resolveServerHostname(options.hostname),
     port: options.port ?? Number(process.env.PORT ?? 3000),
     async fetch(request) {
       try {
-        const api_response = (await handleModelRunApiRequest(request)) ?? (await handleJobApiRequest(request))
+        const api_response =
+          (await handlePipelineDebugApiRequest(request)) ??
+          (await handleModelRunApiRequest(request)) ??
+          (await handleJobApiRequest(request))
         return api_response ?? getStaticResponse(request, root_dir)
       } catch (error) {
         const request_url = new URL(request.url)

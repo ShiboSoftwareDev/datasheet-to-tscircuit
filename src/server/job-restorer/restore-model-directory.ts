@@ -236,7 +236,7 @@ export async function restoreModelDirectory(input: {
       saved,
       logs,
       error: new Error(
-        "published-model.json is missing even though the completed datasheet_model pipeline recorded publish_model as committed",
+        "published-model.json is missing even though the completed spice_generation pipeline recorded publish as committed",
       ),
     })
   }

@@ -10,8 +10,9 @@ export function modelCheckpointRequiresPublicationPointer(
 ): boolean {
   const pipeline = parsePublicPipelineSnapshot(checkpoint?.pipeline)
   return Boolean(
-    pipeline?.pipeline_id === "datasheet_model" &&
+    (pipeline?.pipeline_id === "spice_generation" || pipeline?.pipeline_id === "datasheet_model") &&
       pipeline.status === "completed" &&
-      pipeline.stage_results.publish_model?.status === "completed",
+      (pipeline.stage_results.publish?.status === "completed" ||
+        pipeline.stage_results.publish_model?.status === "completed"),
   )
 }

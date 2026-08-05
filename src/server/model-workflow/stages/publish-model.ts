@@ -22,8 +22,8 @@ import { readVerifiedViewerCircuitJson } from "../viewer-validation-artifacts"
 import { defineModelStage } from "./stage-factory"
 
 export const publishModelStage = defineModelStage({
-  id: "publish_model",
-  depends_on: ["repair_model"],
+  id: "publish",
+  depends_on: ["repair_spice_model"],
   async execute({ context, services, dependency_outputs, signal }) {
     updateModelProgress({
       store: services.model_run_store,
@@ -33,12 +33,12 @@ export const publishModelStage = defineModelStage({
     })
     const [contract_value, plan_value, result_value, model_source, model_card, manifest_value] =
       await Promise.all([
-        readJson(dependency_outputs.repair_model.contract_path),
-        readJson(dependency_outputs.repair_model.plan_path),
-        readJson(dependency_outputs.repair_model.result_path),
-        readFile(dependency_outputs.repair_model.model_path, "utf8"),
-        readFile(dependency_outputs.repair_model.model_card_path, "utf8"),
-        readJson(dependency_outputs.repair_model.manifest_path),
+        readJson(dependency_outputs.repair_spice_model.contract_path),
+        readJson(dependency_outputs.repair_spice_model.plan_path),
+        readJson(dependency_outputs.repair_spice_model.result_path),
+        readFile(dependency_outputs.repair_spice_model.model_path, "utf8"),
+        readFile(dependency_outputs.repair_spice_model.model_card_path, "utf8"),
+        readJson(dependency_outputs.repair_spice_model.manifest_path),
       ])
     const completion_integrity = requireModelCompletionIntegrity({
       model_source,
@@ -54,13 +54,13 @@ export const publishModelStage = defineModelStage({
       card: model_card,
       manifest: completion_integrity.manifest,
     }
-    if (generated.manifest.revision !== dependency_outputs.repair_model.revision) {
+    if (generated.manifest.revision !== dependency_outputs.repair_spice_model.revision) {
       throw new Error("Validated candidate manifest no longer matches its immutable model and interface")
     }
     const plan = completion_integrity.plan
     const result = completion_integrity.result
     const circuit_json_by_case = await readVerifiedViewerCircuitJson({
-      validation_dir: dirname(dependency_outputs.repair_model.result_path),
+      validation_dir: dirname(dependency_outputs.repair_spice_model.result_path),
       plan,
       generated,
     })
@@ -136,7 +136,7 @@ export const publishModelStage = defineModelStage({
             plan,
             result,
             generated,
-            evidence_dir: dependency_outputs.repair_model.evidence_dir,
+            evidence_dir: dependency_outputs.repair_spice_model.evidence_dir,
             wrapper_source,
             circuit_json: build.circuit_json,
             circuit_json_by_case,
@@ -186,7 +186,7 @@ export const publishModelStage = defineModelStage({
         output: {
           attached: true,
           component_path: publication.component_path,
-          revision: dependency_outputs.repair_model.revision,
+          revision: dependency_outputs.repair_spice_model.revision,
         },
         artifacts: publication.artifacts,
       }

@@ -6,7 +6,7 @@ import type { AgentClient } from "@/server/infrastructure/agent"
 import type { ProcessRunner } from "@/server/infrastructure/process"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
-import { validateModelStage } from "@/server/model-workflow/stages/validate-model"
+import { runSimulationsStage } from "@/server/model-workflow/stages/validate-model"
 import {
   createModelManifest,
   type GeneratedModel,
@@ -236,10 +236,10 @@ test("validate_model retains failed viewer UI but reports direct validation infr
 
     let caught: unknown
     try {
-      await validateModelStage.execute({
+      await runSimulationsStage.execute({
         run_id: "model_validation_failure",
-        pipeline_id: "datasheet_model",
-        stage_id: "validate_model",
+        pipeline_id: "spice_generation",
+        stage_id: "run_simulations",
         debug_dir: join(model_dir, "debug"),
         context: {
           model_run_id: "model_validation_failure",
@@ -261,7 +261,9 @@ test("validate_model retains failed viewer UI but reports direct validation infr
           ngspice_executor: failing_ngspice,
         },
         dependency_outputs: {
-          generate_model: {
+          create_simulation_tsx: {
+            source_dir: "",
+            source_manifest_path: "",
             model_path,
             model_card_path,
             manifest_path,
@@ -269,6 +271,7 @@ test("validate_model retains failed viewer UI but reports direct validation infr
             plan_path,
             evidence_dir,
             revision: generated.manifest.revision,
+            case_count: plan.cases.length,
           },
         },
         signal: new AbortController().signal,
@@ -280,7 +283,7 @@ test("validate_model retains failed viewer UI but reports direct validation infr
     expect(caught).toMatchObject({
       diagnostic: {
         code: "model_validation_infrastructure_failed",
-        stage_id: "validate_model",
+        stage_id: "run_simulations",
         operation: "classify_validation_failure",
       },
     })

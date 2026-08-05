@@ -30,6 +30,7 @@ export interface CandidateValidationInput {
   readonly plan: ValidationPlan
   readonly contract: ModelContract
   readonly generated: GeneratedModel
+  readonly source_dir?: string
   readonly model_dir: string
   readonly validation_artifact_dir: string
   readonly evidence_dir: string
@@ -92,6 +93,7 @@ export async function validateCandidate(input: CandidateValidationInput): Promis
     model_dir: input.model_dir,
     plan: input.plan,
     generated: input.generated,
+    source_dir: input.source_dir,
     tsci_bin: input.tsci_bin,
     process_runner: input.process_runner,
     signal: input.signal,

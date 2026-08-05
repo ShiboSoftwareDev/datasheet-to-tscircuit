@@ -1,21 +1,19 @@
 # Architecture
 
-The backend has one generic pipeline engine and two domain workflows:
+The backend has one generic pipeline engine and three domain pipelines:
 
 ```text
 PDF datasheet
     │
     ▼
-datasheet_component pipeline ──► validated component TSX + Circuit JSON
-                                            │
-                                            ▼
-                              datasheet_model pipeline
-                                            │
-                                            ▼
-                         validated model + integrated component
-                                            │
-                                            ▼
-                    existing React/runframe/reference-graph UI
+component_generation ──► validated component TSX + Circuit JSON
+          │
+          ├──────────────► typical_application ──► validated application TSX
+          │
+          └──────────────► spice_generation ──► validated model + integrated component
+                                                       │
+                                                       ▼
+                                  React/runframe/reference-graph UI
 ```
 
 The main architectural boundary is deliberate: an agent may propose an
@@ -30,9 +28,13 @@ The new backend is split into small, directional layers:
   diagnostics, metrics, and artifact metadata shared with the browser.
 - `src/server/pipeline` validates definitions and executes stages. It has no
   component, model, agent, tscircuit, or ngspice policy.
-- `src/server/component-workflow` owns the component stage registry and
-  component-specific orchestration.
-- `src/server/model-workflow` owns the model stage registry and model-specific
+- `src/server/pipeline-replay` clones retained jobs and executes a task,
+  pipeline suffix, or full pipeline without modifying historical state.
+- `src/cli/pipeline-debug.ts` exposes the same contracts as machine-readable
+  local commands for developers and coding agents.
+- `src/server/component-workflow` owns separate component and
+  typical-application registries and their orchestration.
+- `src/server/model-workflow` owns the SPICE registry and model-specific
   orchestration.
 - `src/server/modeling` owns the versioned model interface and characterization
   contracts, strategy selection, canonical model artifacts, component
@@ -44,10 +46,10 @@ The new backend is split into small, directional layers:
 - Stores and API modules checkpoint public state and stream it to the existing
   React UI. They do not define workflow order.
 
-`component-workflow/component-pipeline.ts` and
-`model-workflow/model-pipeline.ts` are the only authoritative stage-order
-registries. There is no dynamic stage discovery or phase dispatch by method
-name.
+`component-workflow/component-pipeline.ts` contains the authoritative component
+and typical-application registries. `model-workflow/model-pipeline.ts` contains
+the authoritative SPICE registry. There is no dynamic stage discovery or phase
+dispatch by method name.
 
 ## Typed stage protocol
 
@@ -60,6 +62,12 @@ stage definitions. Every stage declares:
 - a read-only run context and injected services;
 - a JSON-serializable output;
 - optional hashed artifacts, structured diagnostics, and scalar metrics.
+
+The three product pipelines are linear: after the first stage, each stage
+depends only on the immediately preceding output. This makes “Run step” and
+“Run from here” deterministic. An isolated invocation accepts an explicit
+dependency-output object, verifies its keys against the selected stage
+contract, and marks every unselected stage as skipped.
 
 The runner validates the graph before execution. It rejects duplicate or
 missing IDs, forward dependencies, and dependency cycles. Completed outputs are
@@ -111,7 +119,7 @@ Every invocation gets a new UUID so retries never overwrite the preceding
 trace:
 
 ```text
-.runtime/jobs/<job-id>/runs/<invocation-id>/.pipeline/
+.runtime/jobs/<job-id>/runs/<pipeline-id>/<invocation-id>/.pipeline/
 ├── events.ndjson
 ├── observer-errors.ndjson        # only when an optional snapshot sink fails
 └── stages/
@@ -131,8 +139,12 @@ trace:
 ```
 
 `events.ndjson` is an append-only, sequenced timeline. A stage's `input.json`
-records dependency states and completed dependency outputs. `output.json`
-contains its terminal result, diagnostics, and SHA-256 artifact records;
+is a versioned `pipeline_task_input` envelope recording its pipeline/task
+identity, source run, complete JSON execution context, dependency states, and
+completed dependency outputs. Runtime services such as credentials, process
+launchers, and installed simulator binaries are intentionally not workflow
+state and remain injected by the local runtime. `output.json` contains its
+terminal result, diagnostics, and SHA-256 artifact records;
 `error.json` contains the structured failure when present; and `metrics.json`
 contains timing, counts, and stage metrics.
 
@@ -148,10 +160,29 @@ event is capped at 256 KiB with an explicit truncation marker, and live stores
 retain the latest 500 events. The pipeline trace is the authoritative
 state-machine record.
 
-## Component workflow
+### Local task and pipeline replay
 
-The component workflow is a single linear graph with an optional application
-branch represented as data:
+The local debugger treats each stage as an independently addressable task. The
+pipeline is only an ordered composition that passes a completed output into the
+next task. `bun run debug -- task run --input <input.json>` selects exactly one
+task and validates that the supplied dependency keys match its registry
+contract. `pipeline run` starts at the first registered task, while `job replay`
+locates retained inputs by job, pipeline, and task ID and supports exact-task,
+suffix, and whole-pipeline modes.
+
+Replay is non-destructive by default. The runtime creates a fresh directory,
+copies the retained job while excluding earlier `runs` histories, rejects
+symbolic links, rewrites every job-local path in the context and dependency
+payload to the clone, restores private stores from the cloned checkpoints, and
+then invokes the ordinary production stage definitions. The replay directory
+contains a stable `summary.json`, a new event stream, task bundles, cloned
+canonical outputs, and immutable artifact snapshots. This gives a local AI the
+same inputs, failures, graphs, and generated files as the UI without granting
+it an alternate workflow implementation.
+
+## Component and typical-application pipelines
+
+The old combined workflow is split into two linear pipelines:
 
 ```text
 prepare
@@ -159,6 +190,8 @@ prepare
   → generate_component
   → validate_component
   → repair_component
+
+prepare_application
   → generate_application
   → validate_application
   → repair_application
@@ -172,6 +205,7 @@ prepare
 | `generate_component` | Generate only `index.circuit.tsx` from accepted JSON plans and reference images. The PDF is not present in this workspace. |
 | `validate_component` | Run `tsci build`; reject Circuit JSON errors; verify the footprint, pinout, schematic plan, and a server-created board fixture. |
 | `repair_component` | Feed deterministic validation errors into bounded isolated repair attempts. Publish `component.circuit.tsx` as soon as the component passes. |
+| `prepare_application` | Bind the accepted component TSX, Circuit JSON, and application availability as an explicit pipeline input. |
 | `generate_application` | Generate a typical application only when the accepted application plan says one is documented. |
 | `validate_application` | Check source shape, values, connectivity, and the resulting Circuit JSON against the accepted plan. |
 | `repair_application` | Run bounded repairs. A still-invalid optional application becomes a warning rather than hiding a valid component. |
@@ -288,32 +322,36 @@ Transport retries and artifact retries are separate. The agent adapter retries
 only classified transient transport failures; schema, source, build, and
 electrical failures go through their owning validation or repair stage.
 
-## Model workflow
+## SPICE workflow
 
-The model pipeline starts alongside the component job but waits for the
+The SPICE pipeline starts alongside the component job but waits for the
 component pipeline's terminal publication:
 
 ```text
 wait_for_component
   → prepare_workspace
-  → characterize
-  → design_validation
-  → generate_model
-  → validate_model
-  → repair_model
-  → publish_model
+  → find_reference_graphs
+  → create_comparison_graphs
+  → infer_spice_model
+  → create_simulation_tsx
+  → run_simulations
+  → compare_simulation_outputs
+  → repair_spice_model
+  → publish
 ```
 
 | Stage | Responsibility |
 | --- | --- |
 | `wait_for_component` | Wait for terminal component publication, not the early live-preview milestone, and fail with component context if the job cannot produce one. |
 | `prepare_workspace` | Copy canonical inputs and derive an exact server-owned SPICE interface from accepted pin evidence. |
-| `characterize` | Scan the complete PDF for time-graph hints, run a candidate-independent source observer, then accept only elapsed-time voltage curves whose cited crop agrees with that observation. Each requirement is explicitly `modeled` or `documented_only`. |
-| `design_validation` | Accept a strictly parsed declarative fixture plan that covers every modeled requirement and every DUT pin. |
-| `generate_model` | Generate a self-contained `model.lib` and explanatory `model-card.md`; derive the manifest and revision on the server. |
-| `validate_model` | Compile fixtures, execute ngspice, privately replay the candidate with each bound pulse flattened, build the same transient-voltage TSX consumed by Runframe, score both waveform paths, persist their hashes/results, and update UI projections. |
-| `repair_model` | Repair only the model from typed aggregate server feedback, then rerun direct simulation, private causality replay, and viewer validation. The validation plan remains unchanged; the effort multiplier bounds repair attempts. |
-| `publish_model` | Revalidate the hash-bound candidate/viewer receipts, re-render every reference crop from the canonical PDF, generate and build the wrapper, verify its exact model and pin mapping, stage hash-verified immutable model/component bundles, and atomically select the pair with one publication pointer. |
+| `find_reference_graphs` | Scan the complete PDF, retain eligible datasheet graph crops and independently verified numeric traces, and publish them to Datasheet Reference. |
+| `create_comparison_graphs` | Turn accepted reference traces and printed conditions into the comparison cases used by later simulation scoring. |
+| `infer_spice_model` | Infer a self-contained `model.lib` and explanatory `model-card.md`; derive the manifest and revision on the server. |
+| `create_simulation_tsx` | Render every validation case to a standalone, hash-retained TSX source in one deterministic pass. |
+| `run_simulations` | Execute ngspice, private stimulus-causality replays, and the retained tscircuit TSX sources; persist raw outputs and viewer Circuit JSON. |
+| `compare_simulation_outputs` | Compare simulator outputs with the reference/comparison curves and emit a dedicated comparison receipt plus closed-enum repair feedback. |
+| `repair_spice_model` | Repair only the model from typed aggregate comparison feedback, then rerun validation. The comparison plan remains unchanged; the effort multiplier bounds repair attempts. |
+| `publish` | Revalidate the hash-bound candidate/viewer receipts, re-render every reference crop from the canonical PDF, generate and build the wrapper, verify its exact model and pin mapping, stage hash-verified immutable model/component bundles, and atomically select the pair with one publication pointer. |
 
 ### Stable model contracts
 

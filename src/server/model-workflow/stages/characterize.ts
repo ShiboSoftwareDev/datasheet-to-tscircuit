@@ -17,7 +17,7 @@ import { defineModelStage } from "./stage-factory"
 export { assertHasEligibleTimeDomainGraph, assertObserverFoundEligibleTimeDomainGraph }
 
 export const characterizeStage = defineModelStage({
-  id: "characterize",
+  id: "find_reference_graphs",
   depends_on: ["prepare_workspace"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
     services.model_run_store.startSegment(context.model_run_id)

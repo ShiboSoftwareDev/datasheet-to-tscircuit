@@ -35,7 +35,7 @@ export async function generateModelCandidate(input: {
   previous_candidate?: { model_path: string; model_card_path: string }
   strategy_guidance: string
   feedback?: string
-  stage_id: "generate_model" | "repair_model"
+  stage_id: "infer_spice_model" | "repair_spice_model" | "generate_model" | "repair_model"
   phase_label: string
   signal: AbortSignal
   use_openai: boolean
@@ -47,16 +47,16 @@ export async function generateModelCandidate(input: {
   debug_dir: string
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
 }): Promise<AgentArtifactAttempt<StoredGeneratedModel>> {
-  if (input.stage_id === "repair_model" && !input.previous_candidate) {
+  const is_repair = input.stage_id === "repair_spice_model" || input.stage_id === "repair_model"
+  if (is_repair && !input.previous_candidate) {
     throw new Error("Model repair requires the exact prior immutable candidate")
   }
-  const repair_inputs =
-    input.stage_id === "repair_model"
-      ? [
-          { source: input.previous_candidate!.model_path, destination: "model.lib" },
-          { source: input.previous_candidate!.model_card_path, destination: "model-card.md" },
-        ]
-      : []
+  const repair_inputs = is_repair
+    ? [
+        { source: input.previous_candidate!.model_path, destination: "model.lib" },
+        { source: input.previous_candidate!.model_card_path, destination: "model-card.md" },
+      ]
+    : []
   const training_contract = createModelTrainingContract(input.contract)
   const training_plan = createModelTrainingValidationPlan({
     plan: input.validation_plan,

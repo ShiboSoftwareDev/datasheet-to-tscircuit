@@ -447,7 +447,11 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
     typical_application_title: "Input bypass",
     typical_application_code: application_source,
     typical_application_circuit_json: application_circuit_json,
-    pipeline: { pipeline_id: "datasheet_component", status: "completed" },
+    pipeline: { pipeline_id: "component_generation", status: "completed" },
+    pipelines: {
+      component_generation: { pipeline_id: "component_generation", status: "completed" },
+      typical_application: { pipeline_id: "typical_application", status: "completed" },
+    },
     validation: {
       evidence: "passed",
       component_build: "passed",
@@ -470,13 +474,20 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
     "generate_component",
     "validate_component",
     "repair_component",
+  ])
+  expect(Object.values(pipeline?.stage_results ?? {}).map(({ status }) => status)).toEqual(
+    Array(5).fill("completed"),
+  )
+  const application_pipeline = job?.pipelines?.typical_application
+  expect(Object.keys(application_pipeline?.stage_results ?? {})).toEqual([
+    "prepare_application",
     "generate_application",
     "validate_application",
     "repair_application",
     "publish",
   ])
-  expect(Object.values(pipeline?.stage_results ?? {}).map(({ status }) => status)).toEqual(
-    Array(9).fill("completed"),
+  expect(Object.values(application_pipeline?.stage_results ?? {}).map(({ status }) => status)).toEqual(
+    Array(5).fill("completed"),
   )
   expect(agent_calls).toEqual([
     "Datasheet evidence extraction",
@@ -791,7 +802,7 @@ test("evidence correction reuses immutable reviewer observations across semantic
     is_complete: true,
     has_errors: false,
     validation: { evidence: "passed" },
-    pipeline: { pipeline_id: "datasheet_component", status: "completed" },
+    pipeline: { pipeline_id: "component_generation", status: "completed" },
   })
   expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(3)
   expect(agent_calls.filter((phase) => phase === "Independent footprint geometry verification")).toHaveLength(

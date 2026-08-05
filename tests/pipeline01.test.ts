@@ -159,6 +159,57 @@ test("pipeline executes ordered dependencies and exposes immutable keyed results
   }
 })
 
+test("an isolated stage runs only from its explicit persisted-style input", async () => {
+  const workspace_dir = await mkdtemp(join(tmpdir(), "pipeline-isolated-stage-"))
+  const calls: string[] = []
+
+  try {
+    const result = await runPipeline({
+      definition: createBasicDefinition(calls),
+      run_id: "isolated_normalize",
+      workspace_dir,
+      context: { source_text: "must not be read", artifact_path: join(workspace_dir, "unused.txt") },
+      services: {
+        write_text: async () => {
+          throw new Error("a later stage must not run")
+        },
+      },
+      target: {
+        mode: "stage",
+        stage_id: "normalize_text",
+        dependency_outputs: { read_source: { text: "  isolated input  " } },
+      },
+    })
+
+    expect(calls).toEqual(["normalize_text"])
+    expect(result.status).toBe("completed")
+    expect(result.stage_results.read_source.status).toBe("skipped")
+    expect(result.stage_results.normalize_text).toMatchObject({
+      status: "completed",
+      output: { normalized: "ISOLATED INPUT" },
+    })
+    expect(result.stage_results.build_report.status).toBe("skipped")
+    const input = await Bun.file(
+      join(workspace_dir, ".pipeline", "stages", "02-normalize_text", "input.json"),
+    ).json()
+    expect(input).toMatchObject({
+      version: 1,
+      kind: "pipeline_task_input",
+      pipeline_id: "basic_generation",
+      task_id: "normalize_text",
+      run_id: "isolated_normalize",
+      execution_context: {
+        source_text: "must not be read",
+        artifact_path: join(workspace_dir, "unused.txt"),
+      },
+      dependency_statuses: { read_source: "provided" },
+      dependency_outputs: { read_source: { text: "  isolated input  " } },
+    })
+  } finally {
+    await rm(workspace_dir, { recursive: true, force: true })
+  }
+})
+
 test("pipeline records artifacts, append-only events, and complete per-stage debug bundles", async () => {
   const workspace_dir = await mkdtemp(join(tmpdir(), "pipeline-debug-"))
   const artifact_path = join(workspace_dir, "report.txt")

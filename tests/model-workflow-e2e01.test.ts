@@ -698,7 +698,7 @@ testWithProductionSimulation(
       has_errors: false,
       validation: { all_passed: true, all_critical_passed: true, passing_count: 1 },
       circuit_preview: { build_status: "ready", analog_simulation_status: "available" },
-      pipeline: { pipeline_id: "datasheet_model", status: "completed" },
+      pipeline: { pipeline_id: "spice_generation", status: "completed" },
     })
     expect(
       run?.circuit_preview?.circuit_json?.some(({ type }) => type === "simulation_transient_voltage_graph"),
@@ -713,6 +713,8 @@ testWithProductionSimulation(
       x_axis_unit: "s",
     })
     expect(Object.values(run!.pipeline!.stage_results).map(({ status }) => status)).toEqual([
+      "completed",
+      "completed",
       "completed",
       "completed",
       "completed",

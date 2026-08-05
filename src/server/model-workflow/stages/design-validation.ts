@@ -14,8 +14,8 @@ import { projectReferenceDraftUi } from "../reference-draft-ui"
 import { defineModelStage } from "./stage-factory"
 
 export const designValidationStage = defineModelStage({
-  id: "design_validation",
-  depends_on: ["characterize"],
+  id: "create_comparison_graphs",
+  depends_on: ["find_reference_graphs"],
   async execute({ context, services, dependency_outputs, signal }) {
     updateModelProgress({
       store: services.model_run_store,
@@ -23,7 +23,7 @@ export const designValidationStage = defineModelStage({
       phase: "designing_validation",
       message: "Building one transient analog-simulation circuit for each reference graph",
     })
-    const contract_path = dependency_outputs.characterize.contract_path
+    const contract_path = dependency_outputs.find_reference_graphs.contract_path
     const attempt_dir = dirname(contract_path)
     const evidence_dir = join(attempt_dir, "evidence")
     const contract = parseFreshModelContract(await readJson(contract_path))

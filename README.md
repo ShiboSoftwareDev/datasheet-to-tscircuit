@@ -9,7 +9,8 @@ public-pin voltage waveform plotted against elapsed time. Static tables, DC
 curves, operating points, and current-only plots remain visible as documented
 specifications but are not presented as simulations.
 
-The backend is organized as two explicit typed pipelines. AI agents work in
+The backend is organized as three explicit typed pipelines: component
+generation, typical-application generation, and SPICE generation. AI agents work in
 isolated temporary directories and propose narrowly scoped artifacts. The
 server parses those artifacts, runs deterministic tscircuit and ngspice checks,
 and promotes only validated canonical artifacts. The existing UI remains the
@@ -92,20 +93,61 @@ bun run test:docker
 
 ## Debug a run
 
-Start with the streamed logs in the UI; both component and model panels expose
-their typed execution traces. The durable files under
+Start with the streamed logs in the UI. The Component, Typical application, and
+SPICE debug buttons expose each typed execution trace and can run one step, run
+from a selected step, or rerun a whole pipeline. A single-step rerun receives
+the exact dependency payload retained in that step's `input.json`; it does not
+execute another step. The durable files under
 `.runtime/jobs/<job-id>` are the source of truth after a restart:
+
+The same execution model is available locally to developers and coding agents:
+
+```bash
+# Discover every pipeline, task ID, and dependency.
+bun run debug -- catalog
+
+# Discover retained jobs and their latest pipeline traces.
+bun run debug -- job list
+
+# Inspect the complete input contract for one task.
+bun run debug -- task inspect --input .runtime/jobs/<job-id>/runs/<pipeline>/<run>/.pipeline/stages/<task>/input.json
+
+# Run one task from only its retained input, or run its complete pipeline.
+bun run debug -- task run --input <input.json>
+bun run debug -- pipeline run --input <input.json>
+
+# Replay an old job's task, suffix, or complete pipeline.
+bun run debug -- job replay <job-id> --pipeline spice_generation --task infer_spice_model
+bun run debug -- job replay <job-id> --pipeline spice_generation --from infer_spice_model
+bun run debug -- job replay <job-id> --pipeline spice_generation
+```
+
+Commands emit structured JSON and return a non-zero status for failed or
+cancelled execution. By default a replay clones the retained job into a fresh
+`.runtime/replays/<replay-id>` directory, rewrites job-local input paths to that
+clone, and writes `summary.json`, the event stream, per-task bundles, and all
+generated artifacts there. The historical job is never mutated. `--output`
+selects another new replay directory and `--root` selects a repository/runtime
+root.
 
 - `agent.log`/`agent.log.1` and `job.json` contain the bounded component NDJSON
   logs and atomically replaced checkpoint.
 - `spice/model-agent.log`/`spice/model-agent.log.1` and
   `spice/model-run.json` contain the bounded model NDJSON logs and atomically
   replaced checkpoint. Public stores keep only the latest 500 log events.
-- `runs/<invocation-id>/.pipeline/events.ndjson` is the component event stream.
-- `spice/runs/<invocation-id>/.pipeline/events.ndjson` is the model event stream.
+- `runs/component_generation/<invocation-id>/.pipeline/events.ndjson` is the
+  component event stream.
+- `runs/typical_application/<invocation-id>/.pipeline/events.ndjson` is the
+  typical-application event stream.
+- `spice/runs/<invocation-id>/.pipeline/events.ndjson` is the normal SPICE event
+  stream; debugger invocations are grouped under
+  `spice/runs/spice_generation/`.
 - Each `.pipeline/stages/<number>-<stage-id>` directory contains `input.json`,
   `output.json`, `error.json`, `metrics.json`, and immutable copies of declared
-  artifacts under `artifacts/`.
+  artifacts under `artifacts/`. `input.json` is a versioned
+  `pipeline_task_input` envelope containing the pipeline/task identity, source
+  run, complete JSON execution context, declared dependencies, and dependency
+  outputs required by the local task runner.
 - Agent-backed stages also retain `attempt-history.json` plus every rejected
   candidate. Correction attempts receive those exact files and cumulative
   diagnostics, so fixing one field cannot silently regress an earlier fix. A
@@ -196,6 +238,7 @@ of the actual workflow source files, so a dirty runtime remains reproducible.
 src/
 ├── server/
 │   ├── pipeline/             typed stage runner and diagnostics
+│   ├── pipeline-replay/      isolated local task and pipeline replay runtime
 │   ├── component-workflow/   datasheet-to-component pipeline
 │   ├── model-workflow/       component-to-SPICE pipeline
 │   ├── modeling/             model contracts, strategies, and UI projections
@@ -204,6 +247,7 @@ src/
 │   ├── job-api/              component HTTP/SSE operations
 │   └── model-run-api/        model HTTP/SSE operations
 ├── shared/                   browser/server contracts
+├── cli/                      machine-readable local pipeline debugger
 └── web/                      React UI and tscircuit viewers
 ```
 
