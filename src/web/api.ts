@@ -245,6 +245,15 @@ export function getModelReferenceImageUrl(
   return `${base}&preview_generation=${encodeURIComponent(artifact_identity.preview_generation)}&model_revision=${encodeURIComponent(artifact_identity.model_revision)}`
 }
 
+export function getModelFoundReferenceImageUrl(
+  job_id: string,
+  reference_id: string,
+  local_run_id?: string,
+): string {
+  const local_query = local_run_id ? `&local_run_id=${encodeURIComponent(local_run_id)}` : ""
+  return `/api/model-run/found-reference-image?job_id=${encodeURIComponent(job_id)}&reference_id=${encodeURIComponent(reference_id)}${local_query}`
+}
+
 export type ModelRunFileKind =
   | "model"
   | "manifest"

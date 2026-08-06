@@ -20,6 +20,7 @@ import type {
 } from "./types"
 
 export type ReferencePointFieldPolicy = "pixels_only" | "canonical"
+export type ReferenceGraphArtifactPhase = "find" | "comparison"
 
 export const MIN_TRACE_POINTS = 8
 export const MAX_TRACE_POINTS = 48
@@ -300,12 +301,20 @@ function parseDigitizedCurve(
     1,
   ]
   const largest_gap = bounded_positions.reduce(
-    (largest, position, index) =>
-      index === 0 ? largest : Math.max(largest, position - bounded_positions[index - 1]!),
-    0,
+    (largest, position, index) => {
+      if (index === 0) return largest
+      const prior = bounded_positions[index - 1]!
+      const gap = position - prior
+      return gap > largest.gap ? { gap, start: prior, end: position } : largest
+    },
+    { gap: 0, start: 0, end: 0 },
   )
-  if (largest_gap > 0.2) {
-    throw new Error(`${path}.points cannot leave more than 20% of the calibrated time axis unsampled`)
+  if (largest_gap.gap > 0.2) {
+    const pixelAtPosition = (position: number) =>
+      x_axis.first.pixel + position * x_pixel_span * x_pixel_direction
+    throw new Error(
+      `${path}.points cannot leave more than 20% of the calibrated time axis unsampled; largest gap is ${(largest_gap.gap * 100).toFixed(1)}% between crop-local x pixels ${pixelAtPosition(largest_gap.start).toFixed(1)} and ${pixelAtPosition(largest_gap.end).toFixed(1)}. Add one or more strictly increasing points on the rendered response trace inside this interval without changing accepted points outside it`,
+    )
   }
   return {
     method: value.method,
@@ -343,6 +352,7 @@ export function parseGraph(
   index: number,
   model_interface: ModelInterface,
   point_field_policy: ReferencePointFieldPolicy,
+  phase: ReferenceGraphArtifactPhase = "comparison",
 ): ObservedReferenceGraph {
   const path = `model-reference-observation.json.graphs[${index}]`
   if (!isRecord(value)) throw new Error(`${path} must be an object`)
@@ -387,9 +397,12 @@ export function parseGraph(
     value.digitized_curve === undefined
       ? undefined
       : parseDigitizedCurve(value.digitized_curve, `${path}.digitized_curve`, crop, point_field_policy)
+  if (phase === "find" && digitized_curve) {
+    throw new Error(`${path}.digitized_curve belongs to Create Comparison Graphs and must be omitted`)
+  }
   const is_eligible =
     response_quantity === "voltage" && value.public_pin_observable && value.fixture_reproducible
-  if (is_eligible && !digitized_curve) {
+  if (phase === "comparison" && is_eligible && !digitized_curve) {
     throw new Error(`${path}.digitized_curve is required for every eligible voltage graph`)
   }
   if (response_quantity !== "voltage" && digitized_curve) {
@@ -401,7 +414,10 @@ export function parseGraph(
     value.electrical_binding === undefined
       ? undefined
       : parseModelReferenceElectricalBinding(value.electrical_binding, `${path}.electrical_binding`)
-  if (is_eligible && !electrical_binding) {
+  if (phase === "find" && electrical_binding) {
+    throw new Error(`${path}.electrical_binding belongs to Create Comparison Graphs and must be omitted`)
+  }
+  if (phase === "comparison" && is_eligible && !electrical_binding) {
     throw new Error(`${path}.electrical_binding is required for every eligible voltage graph`)
   }
   if (!is_eligible && electrical_binding) {

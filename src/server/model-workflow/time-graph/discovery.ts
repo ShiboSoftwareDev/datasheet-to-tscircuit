@@ -135,7 +135,9 @@ function sourceContextsForFigure(input: {
       }
       const context_start_row = Math.max(section_start_row, line_index - 12)
       const column_context = lines
-        .slice(context_start_row, Math.min(lines.length, line_index + 4))
+        // Graph captions may wrap by one line. Conditions for the next plot
+        // begin after that; including more rows can bind a neighboring setup.
+        .slice(context_start_row, Math.min(lines.length, line_index + 2))
         .map((line) => line.slice(column_start, column_end))
         .join("\n")
       const narrow_step_contexts: string[] = []
@@ -185,10 +187,19 @@ function summaryFixtureEvidenceByFigure(datasheet_text: string): Map<string, str
         index === 0
           ? Math.max(0, page.search(/\bparameter\b/i))
           : (figures[index - 1]!.index ?? 0) + figures[index - 1]![0].length
-      const after_figure = page.slice(figure_end)
-      const first_line_end = after_figure.indexOf("\n")
-      const second_line_end = first_line_end < 0 ? -1 : after_figure.indexOf("\n", first_line_end + 1)
-      const context_end = second_line_end < 0 ? figure_end : figure_end + second_line_end
+      // Conditions precede their Figure cell, except a wrapped Low/High value
+      // may occupy the immediately following line. Never consume the next row.
+      const current_line_end = page.indexOf("\n", figure_end)
+      const next_line_end = current_line_end < 0 ? -1 : page.indexOf("\n", current_line_end + 1)
+      const trailing_line =
+        current_line_end < 0
+          ? ""
+          : compactText(page.slice(current_line_end + 1, next_line_end < 0 ? page.length : next_line_end))
+      const context_end = /^(?:low|high)$/i.test(trailing_line)
+        ? next_line_end < 0
+          ? page.length
+          : next_line_end
+        : figure_end
       const context = compactText(page.slice(previous_end, context_end)).slice(
         0,
         MAX_FIXTURE_EVIDENCE_CONTEXT_LENGTH,

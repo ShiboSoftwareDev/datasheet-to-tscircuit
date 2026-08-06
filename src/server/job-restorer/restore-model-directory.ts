@@ -543,6 +543,9 @@ export async function restoreModelDirectory(input: {
             : Array.isArray(ui?.preview_options)
               ? (ui.preview_options as ModelRun["preview_options"])
               : [],
+    found_references: Array.isArray(checkpoint?.found_references)
+      ? (checkpoint.found_references as NonNullable<ModelRun["found_references"]>)
+      : [],
     pipeline: parsePublicPipelineSnapshot(checkpoint?.pipeline),
   }
   return input.model_run_store.restoreModelRun({ model_dir: input.model_dir, model_run, logs })

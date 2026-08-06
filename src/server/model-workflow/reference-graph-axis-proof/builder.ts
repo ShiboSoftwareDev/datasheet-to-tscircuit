@@ -206,6 +206,8 @@ async function proveGraphAxis(input: {
   let nominal_source: ReturnType<typeof nominalVoltageFromPdfText>
   let nominal_point_indexes: number[] = []
   let nominal_baseline_pixel: number | undefined
+  let source_seconds_per_pixel: number | undefined
+  let source_volts_per_pixel: number | undefined
   if (!receipt) {
     const panels = await ocrScopePanels({
       graph: input.graph,
@@ -264,9 +266,9 @@ async function proveGraphAxis(input: {
       (input.graph.digitized_curve.y_axis.second.value - input.graph.digitized_curve.y_axis.first.value) /
         (input.graph.digitized_curve.y_axis.second.pixel - input.graph.digitized_curve.y_axis.first.pixel),
     )
-    const source_seconds_per_pixel =
+    source_seconds_per_pixel =
       time_scale && x_grid ? time_scale.value_per_division_si / x_grid.median_spacing_px : undefined
-    const source_volts_per_pixel =
+    source_volts_per_pixel =
       voltage_scale && y_grid ? voltage_scale.value_per_division_si / y_grid.median_spacing_px : undefined
     if (!figure_identity) missing_proofs.push("adjacent_figure_identity")
     if (!panels) missing_proofs.push("oscilloscope_panels")
@@ -360,7 +362,27 @@ async function proveGraphAxis(input: {
     }
   }
   if (!receipt) {
+    const x_anchor_pixel_span = Math.abs(
+      input.graph.digitized_curve.x_axis.second.pixel - input.graph.digitized_curve.x_axis.first.pixel,
+    )
+    const y_anchor_pixel_span = Math.abs(
+      input.graph.digitized_curve.y_axis.second.pixel - input.graph.digitized_curve.y_axis.first.pixel,
+    )
     const recognized_measurements = [
+      ...(source_seconds_per_pixel === undefined ||
+      !missing_proofs.includes("declared_time_scale_matches_source")
+        ? []
+        : [
+            `server-source-seconds-per-pixel:${source_seconds_per_pixel.toPrecision(12)}`,
+            `server-required-x-anchor-value-span:${(source_seconds_per_pixel * x_anchor_pixel_span).toPrecision(12)}s`,
+          ]),
+      ...(source_volts_per_pixel === undefined ||
+      !missing_proofs.includes("declared_voltage_scale_matches_source")
+        ? []
+        : [
+            `server-source-volts-per-pixel:${source_volts_per_pixel.toPrecision(12)}`,
+            `server-required-y-anchor-value-span:${(source_volts_per_pixel * y_anchor_pixel_span).toPrecision(12)}V`,
+          ]),
       ...measurements.map(
         ({ raw_text, bbox }) =>
           `${raw_text}@${((bbox.left + bbox.width / 2) / OCR_SCALE).toFixed(2)},${((bbox.top + bbox.height / 2) / OCR_SCALE).toFixed(2)}`,

@@ -102,3 +102,60 @@ test("every independent graph receives fallback biasing when no application topo
     })
   }
 })
+
+test("steady switching references use static fixtures without inventing a pulse", () => {
+  const requirement = loadTransientRequirement("switching_output")
+  requirement.reference_curve!.electrical_binding = {
+    response: { type: "voltage", positive: "dut.VOUT", negative: "gnd", nominal_volts: 3.3 },
+    stimulus: { type: "steady_state" },
+    auxiliary_fixtures: [
+      { type: "dc_voltage", positive: "dut.VIN", negative: "gnd", dc_volts: 3.3 },
+      { type: "resistor", positive: "dut.VOUT", negative: "gnd", resistance_ohms: 10 },
+    ],
+  }
+  const contract: ModelContract = {
+    version: 1,
+    interface: {
+      version: 1,
+      part_number: "TEST-CONVERTER",
+      entry_name: "TEST_CONVERTER",
+      pins: [
+        {
+          physical_pin: "1",
+          component_pin: "pin1",
+          source_port_id: "source_port_1",
+          spice_node: "VIN",
+          labels: ["VIN"],
+          role: "power_input",
+        },
+        {
+          physical_pin: "2",
+          component_pin: "pin2",
+          source_port_id: "source_port_2",
+          spice_node: "VOUT",
+          labels: ["VOUT"],
+          role: "power_output",
+        },
+      ],
+    },
+    characterization: {
+      version: 1,
+      family: "power_converter",
+      strategy: "behavioral",
+      requirements: [requirement],
+      assumptions: [],
+      limitations: [],
+    },
+  }
+
+  const validation_case = buildGraphValidationPlan(contract).cases[0]!
+  expect(validation_case.fixtures.some((fixture) => "pulse" in fixture && fixture.pulse)).toBe(false)
+  expect(validation_case.fixtures).toContainEqual({
+    id: "condition_2",
+    type: "resistor",
+    positive: "dut.VOUT",
+    negative: "gnd",
+    resistance_ohms: 10,
+  })
+  expect(validation_case.analysis.type).toBe("transient")
+})

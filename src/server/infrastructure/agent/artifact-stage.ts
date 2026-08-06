@@ -29,6 +29,7 @@ interface ArtifactAttemptFailure {
 }
 
 const MAX_CUMULATIVE_FEEDBACK_CHARACTERS = 14_000
+const MIN_PRIOR_FAILURE_CHARACTERS = 1_200
 
 function boundedDiagnostic(value: string, max_characters: number): string {
   if (value.length <= max_characters) return value
@@ -49,12 +50,20 @@ function cumulativeFeedback(failures: readonly ArtifactAttemptFailure[]): string
       headers.reduce((total, header) => total + header.length, 0) -
       separator_characters,
   )
-  const base_error_budget = Math.floor(available_for_errors / failures.length)
-  let remainder = available_for_errors % failures.length
+  const newest_index = failures.length - 1
+  const reserved_for_prior = Math.min(available_for_errors, newest_index * MIN_PRIOR_FAILURE_CHARACTERS)
+  const newest_budget = Math.min(
+    failures[newest_index]!.error.length,
+    available_for_errors - reserved_for_prior,
+  )
+  const available_for_prior = available_for_errors - newest_budget
+  const prior_base_budget = newest_index === 0 ? 0 : Math.floor(available_for_prior / newest_index)
+  let prior_remainder = newest_index === 0 ? 0 : available_for_prior % newest_index
   return failures
     .map(({ error }, index) => {
-      const error_budget = base_error_budget + (remainder > 0 ? 1 : 0)
-      remainder = Math.max(0, remainder - 1)
+      const error_budget =
+        index === newest_index ? newest_budget : prior_base_budget + (prior_remainder > 0 ? 1 : 0)
+      if (index !== newest_index) prior_remainder = Math.max(0, prior_remainder - 1)
       return `${headers[index]}${boundedDiagnostic(error, error_budget)}`
     })
     .join("\n\n")
@@ -204,7 +213,7 @@ export async function runAgentArtifactStage<Value>(input: {
   }
   on_output: (stream: JobLogStream, message: string) => void | Promise<void>
 }): Promise<AgentArtifactAttempt<Value>> {
-  const max_attempts = Math.max(1, Math.min(4, Math.floor(input.max_artifact_attempts)))
+  const max_attempts = Math.max(1, Math.min(8, Math.floor(input.max_artifact_attempts)))
   const failures: ArtifactAttemptFailure[] = []
   let total_duration_ms = 0
 
@@ -261,7 +270,7 @@ export async function runAgentArtifactStage<Value>(input: {
         value = await input.validate(workspace.path, attempt)
       } catch (error) {
         input.signal.throwIfAborted()
-        const current_error = boundedDiagnostic(getErrorMessage(error), 6_000)
+        const current_error = boundedDiagnostic(getErrorMessage(error), MAX_CUMULATIVE_FEEDBACK_CHARACTERS)
         const failure = await retainAttemptFailure({
           workspace: workspace.path,
           attempt,

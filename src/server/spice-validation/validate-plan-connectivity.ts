@@ -69,7 +69,7 @@ function isVoltageClamped(validation_case: ValidationCase, positive: string, neg
     for (const endpoint of group.dut_endpoints) connect(endpoint, node)
   }
   for (const overlay of validation_case.application_fixture?.condition_overlays ?? []) {
-    connect(overlay.endpoint, overlay.reference)
+    if (overlay.type === "logic_state") connect(overlay.endpoint, overlay.reference)
   }
   const pending = [positive]
   const visited = new Set<string>()
@@ -201,6 +201,7 @@ export function validateCaseConnectivity(input: {
   ).entries()) {
     const overlay_path = `${case_path}.application_fixture.condition_overlays[${overlay_index}]`
     validate_endpoint(overlay.endpoint, `${overlay_path}.endpoint`, true)
+    if (overlay.type === "pulsed_source") continue
     validate_endpoint(overlay.reference, `${overlay_path}.reference`, false)
     connect(overlay.endpoint, overlay.reference)
   }

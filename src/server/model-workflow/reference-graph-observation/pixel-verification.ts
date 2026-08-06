@@ -20,6 +20,23 @@ import type {
   ReferenceGraphTraceColor,
 } from "./types"
 
+export interface ReferenceGraphPixelFailure {
+  readonly graph_id: string
+  readonly message: string
+}
+
+export class ReferenceGraphPixelVerificationError extends Error {
+  readonly failures: readonly ReferenceGraphPixelFailure[]
+
+  constructor(failures: readonly ReferenceGraphPixelFailure[]) {
+    super(
+      `Independent pixel-trace validation rejected ${failures.length} graph${failures.length === 1 ? "" : "s"}:\n${failures.map(({ message }) => `- ${message}`).join("\n")}`,
+    )
+    this.name = "ReferenceGraphPixelVerificationError"
+    this.failures = failures
+  }
+}
+
 function colorDistance(
   actual: readonly [number, number, number],
   expected: ReferenceGraphTraceColor,
@@ -139,7 +156,115 @@ interface PixelTraceMeasurement {
   search_radius_px: 4
   segment_support_ratio: number
   minimum_segment_support_ratio: 0.75
-  segment_search_radius_px: 2
+  segment_search_radius_px: 6
+}
+
+interface TraceConnectivity {
+  pointsConnected(input: {
+    start: { pixel_x: number; pixel_y: number }
+    end: { pixel_x: number; pixel_y: number }
+    search_radius: number
+  }): boolean
+}
+
+function buildTraceConnectivity(input: {
+  width: number
+  height: number
+  rgbAt(x: number, y: number): [number, number, number]
+  color: ReferenceGraphTraceColor
+  horizontal_dilation_radius: number
+  vertical_dilation_radius: number
+}): TraceConnectivity {
+  const pixel_count = input.width * input.height
+  const trace_mask = new Uint8Array(pixel_count)
+  for (let y = 0; y < input.height; y += 1) {
+    for (let x = 0; x < input.width; x += 1) {
+      if (colorDistance(input.rgbAt(x, y), input.color) > input.color.tolerance) continue
+      for (
+        let mask_y = Math.max(0, y - input.vertical_dilation_radius);
+        mask_y <= Math.min(input.height - 1, y + input.vertical_dilation_radius);
+        mask_y += 1
+      ) {
+        const row_offset = mask_y * input.width
+        for (
+          let mask_x = Math.max(0, x - input.horizontal_dilation_radius);
+          mask_x <= Math.min(input.width - 1, x + input.horizontal_dilation_radius);
+          mask_x += 1
+        ) {
+          trace_mask[row_offset + mask_x] = 1
+        }
+      }
+    }
+  }
+
+  const visited = new Int32Array(pixel_count)
+  const queue = new Int32Array(pixel_count)
+  let visit_id = 0
+
+  return {
+    pointsConnected({ start, end, search_radius }) {
+      visit_id += 1
+      const horizontal_span = Math.abs(end.pixel_x - start.pixel_x)
+      const vertical_margin = Math.max(
+        search_radius + input.vertical_dilation_radius,
+        Math.min(32, Math.ceil(horizontal_span)),
+      )
+      const min_x = Math.max(0, Math.floor(Math.min(start.pixel_x, end.pixel_x) - search_radius))
+      const max_x = Math.min(input.width - 1, Math.ceil(Math.max(start.pixel_x, end.pixel_x) + search_radius))
+      const min_y = Math.max(0, Math.floor(Math.min(start.pixel_y, end.pixel_y) - vertical_margin))
+      const max_y = Math.min(
+        input.height - 1,
+        Math.ceil(Math.max(start.pixel_y, end.pixel_y) + vertical_margin),
+      )
+      const target_x = Math.round(end.pixel_x)
+      const target_y = Math.round(end.pixel_y)
+      const start_x = Math.round(start.pixel_x)
+      const start_y = Math.round(start.pixel_y)
+
+      let queue_start = 0
+      let queue_end = 0
+      for (
+        let y = Math.max(min_y, start_y - search_radius);
+        y <= Math.min(max_y, start_y + search_radius);
+        y += 1
+      ) {
+        const row_offset = y * input.width
+        for (
+          let x = Math.max(min_x, start_x - search_radius);
+          x <= Math.min(max_x, start_x + search_radius);
+          x += 1
+        ) {
+          const pixel = row_offset + x
+          if (trace_mask[pixel] === 0 || visited[pixel] === visit_id) continue
+          visited[pixel] = visit_id
+          queue[queue_end++] = pixel
+        }
+      }
+
+      while (queue_start < queue_end) {
+        const pixel = queue[queue_start++]!
+        const x = pixel % input.width
+        const y = Math.floor(pixel / input.width)
+        if (Math.abs(x - target_x) <= search_radius && Math.abs(y - target_y) <= search_radius) {
+          return true
+        }
+        for (let neighbor_y = Math.max(min_y, y - 1); neighbor_y <= Math.min(max_y, y + 1); neighbor_y += 1) {
+          const row_offset = neighbor_y * input.width
+          for (
+            let neighbor_x = Math.max(min_x, x - 1);
+            neighbor_x <= Math.min(max_x, x + 1);
+            neighbor_x += 1
+          ) {
+            const neighbor = row_offset + neighbor_x
+            if (trace_mask[neighbor] === 0 || visited[neighbor] === visit_id) continue
+            visited[neighbor] = visit_id
+            queue[queue_end++] = neighbor
+          }
+        }
+      }
+      return false
+    },
+  }
 }
 
 async function measureReferenceGraphTracePixels(input: {
@@ -198,8 +323,22 @@ async function measureReferenceGraphTracePixels(input: {
       `Independent pixel-trace proof for ${input.error_subject} does not follow the rendered datasheet waveform: ${off_trace_count}/${transformed_points.length} calibrated points are off trace; at most ${allowed_off_trace_count} are allowed. Declared trace color is RGB(${color.r}, ${color.g}, ${color.b}) with tolerance ${color.tolerance}; validation radius is ${validation_radius}px. First failing crop-local points: ${examples}`,
     )
   }
+  const segment_search_radius = 6
+  const trace_connectivity = buildTraceConnectivity({
+    ...decoded,
+    color: input.graph.digitized_curve.trace_color,
+    horizontal_dilation_radius: 5,
+    vertical_dilation_radius: segment_search_radius,
+  })
   let segment_sample_count = 0
   let supported_segment_sample_count = 0
+  const segment_diagnostics: Array<{
+    point_index: number
+    start: { pixel_x: number; pixel_y: number }
+    end: { pixel_x: number; pixel_y: number }
+    sample_count: number
+    supported_sample_count: number
+  }> = []
   for (let point_index = 0; point_index + 1 < transformed_points.length; point_index += 1) {
     const start = transformed_points[point_index]!
     const end = transformed_points[point_index + 1]!
@@ -207,27 +346,42 @@ async function measureReferenceGraphTracePixels(input: {
       1,
       Math.ceil(Math.max(Math.abs(end.pixel_x - start.pixel_x), Math.abs(end.pixel_y - start.pixel_y))),
     )
-    for (let sample_index = 0; sample_index <= sample_count; sample_index += 1) {
-      const ratio = sample_index / sample_count
-      segment_sample_count += 1
-      if (
-        pointTouchesTrace({
-          ...decoded,
-          pixel_x: start.pixel_x + (end.pixel_x - start.pixel_x) * ratio,
-          pixel_y: start.pixel_y + (end.pixel_y - start.pixel_y) * ratio,
-          color: input.graph.digitized_curve.trace_color,
-          search_radius: 2,
-        })
-      ) {
-        supported_segment_sample_count += 1
-      }
-    }
+    const weighted_sample_count = sample_count + 1
+    segment_sample_count += weighted_sample_count
+    const connected = trace_connectivity.pointsConnected({
+      start,
+      end,
+      search_radius: validation_radius,
+    })
+    const segment_supported_sample_count = connected ? weighted_sample_count : 0
+    supported_segment_sample_count += segment_supported_sample_count
+    segment_diagnostics.push({
+      point_index,
+      start,
+      end,
+      sample_count: weighted_sample_count,
+      supported_sample_count: segment_supported_sample_count,
+    })
   }
   const segment_support_ratio =
     segment_sample_count === 0 ? 0 : supported_segment_sample_count / segment_sample_count
   if (segment_support_ratio < 0.75) {
+    const weakest_segments = [...segment_diagnostics]
+      .sort(
+        (left, right) =>
+          left.supported_sample_count / left.sample_count -
+            right.supported_sample_count / right.sample_count ||
+          right.sample_count - left.sample_count ||
+          left.point_index - right.point_index,
+      )
+      .slice(0, 6)
+      .map(({ point_index, start, end, sample_count, supported_sample_count }) => {
+        const support_percent = ((supported_sample_count / sample_count) * 100).toFixed(1)
+        return `#${point_index} (${formatPixelCoordinate(start.pixel_x)}, ${formatPixelCoordinate(start.pixel_y)}) -> #${point_index + 1} (${formatPixelCoordinate(end.pixel_x)}, ${formatPixelCoordinate(end.pixel_y)}): ${supported_sample_count}/${sample_count} connected-span weight (${support_percent}%) belongs to one declared-color trace component`
+      })
+      .join("; ")
     throw new Error(
-      `Independent pixel-trace proof for ${input.error_subject} has disconnected point samples instead of a continuous rendered waveform`,
+      `Independent pixel-trace proof for ${input.error_subject} has disconnected point samples instead of a continuous rendered waveform: ${(segment_support_ratio * 100).toFixed(1)}% aggregate connected-span support; at least 75.0% is required. Weakest point-to-point segments: ${weakest_segments}. Inspect the original-resolution crop and replace every point inside each weak segment as needed so consecutive samples belong to one continuous response centerline, not another same-colored scope channel. Preserve the required point count, 90% axis coverage, and maximum-gap rule; relocate existing points first, and only remove a redundant flat-span point one-for-one with an added transition point.`,
     )
   }
   const pixel_count = decoded.width * decoded.height
@@ -261,7 +415,7 @@ async function measureReferenceGraphTracePixels(input: {
     search_radius_px: 4,
     segment_support_ratio,
     minimum_segment_support_ratio: 0.75,
-    segment_search_radius_px: 2,
+    segment_search_radius_px: segment_search_radius,
   }
 }
 
@@ -321,7 +475,7 @@ export async function verifyReferenceGraphObservationPixels(input: {
       max_total_bytes: 64 * 1024 * 1024,
       validate_file: validatePngArtifact,
     })
-    const failures: string[] = []
+    const failures: ReferenceGraphPixelFailure[] = []
     for (const graph of eligible) {
       try {
         await measureReferenceGraphTracePixels({
@@ -333,13 +487,14 @@ export async function verifyReferenceGraphObservationPixels(input: {
         })
       } catch (error) {
         input.signal.throwIfAborted()
-        failures.push(error instanceof Error ? error.message : String(error))
+        failures.push({
+          graph_id: graph.graph_id,
+          message: error instanceof Error ? error.message : String(error),
+        })
       }
     }
     if (failures.length > 0) {
-      throw new Error(
-        `Independent pixel-trace validation rejected ${failures.length} graph${failures.length === 1 ? "" : "s"}:\n${failures.map((failure) => `- ${failure}`).join("\n")}`,
-      )
+      throw new ReferenceGraphPixelVerificationError(failures)
     }
   } finally {
     await workspace.dispose().catch(() => undefined)

@@ -4,19 +4,28 @@
  * live in cohesive modules under `reference-graph-observation/`.
  */
 export {
+  parseCanonicalFoundReferenceGraphObservation,
   parseCanonicalReferenceGraphObservation,
+  parseFoundReferenceGraphObservation,
   parseReferenceGraphObservation,
 } from "./reference-graph-observation/artifact"
 export {
   eligibleObservedGraphs,
+  foundObservedGraphs,
   projectReferenceGraphObservationForCharacterizer,
 } from "./reference-graph-observation/eligibility"
 export { verifyCharacterizationGraphEvidence } from "./reference-graph-observation/numeric-verification"
 export {
+  ReferenceGraphPixelVerificationError,
   verifyReferenceGraphObservationPixels,
   verifyReferenceGraphTracePixels,
 } from "./reference-graph-observation/pixel-verification"
-export { buildReferenceGraphObserverPrompt } from "./reference-graph-observation/prompt"
+export type { ReferenceGraphPixelFailure } from "./reference-graph-observation/pixel-verification"
+export {
+  buildComparisonReferenceGraphObserverPrompt,
+  buildFoundReferenceGraphObserverPrompt,
+  buildReferenceGraphObserverPrompt,
+} from "./reference-graph-observation/prompt"
 export type {
   CharacterizerReferenceGraphObservation,
   ModelReferenceNumericVerification,

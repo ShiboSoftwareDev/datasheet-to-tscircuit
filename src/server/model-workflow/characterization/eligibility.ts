@@ -1,6 +1,6 @@
 import type { ModelCharacterization } from "../../modeling"
 import { PipelineError } from "../../pipeline"
-import { eligibleObservedGraphs, type ReferenceGraphObservation } from "../reference-graph-observation"
+import { foundObservedGraphs, type ReferenceGraphObservation } from "../reference-graph-observation"
 
 function boundedDiagnosticText(value: string, max_length: number): string {
   const normalized = value.replace(/\s+/g, " ").trim()
@@ -30,7 +30,7 @@ export function assertHasEligibleTimeDomainGraph(characterization: ModelCharacte
 }
 
 export function assertObserverFoundEligibleTimeDomainGraph(observation: ReferenceGraphObservation): void {
-  if (eligibleObservedGraphs(observation).length > 0) return
+  if (foundObservedGraphs(observation).length > 0) return
   throw noEligibleTimeDomainGraphError(
     [...observation.graphs]
       .sort((left, right) => {

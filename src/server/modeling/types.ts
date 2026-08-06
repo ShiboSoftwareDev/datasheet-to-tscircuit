@@ -86,6 +86,26 @@ export type ModelReferenceAuxiliaryFixture =
       reference: ModelPublicElectricalEndpoint
       state: "low" | "high"
     }
+  | {
+      type: "resistor"
+      positive: ModelPublicElectricalEndpoint
+      negative: ModelPublicElectricalEndpoint
+      resistance_ohms: number
+    }
+
+export type ModelReferenceStimulus =
+  | { type: "steady_state"; positive?: never; negative?: never; pulse?: never }
+  | {
+      type: "voltage_step" | "current_step"
+      positive: ModelPublicElectricalEndpoint
+      negative: ModelPublicElectricalEndpoint
+      /**
+       * Observer-owned SI fixture. Levels and visible edge timing come from the
+       * cited plot/conditions; width and period may extend a single documented
+       * edge beyond the plotted window so the harness cannot add a second edge.
+       */
+      pulse: ModelReferencePulse
+    }
 
 /** Immutable electrical meaning of a fresh voltage-versus-time reference graph. */
 export interface ModelReferenceElectricalBinding {
@@ -100,17 +120,8 @@ export interface ModelReferenceElectricalBinding {
     /** Printed operating-point voltage; this constrains the response and is never a clamp fixture. */
     nominal_volts?: number
   }
-  stimulus: {
-    type: "voltage_step" | "current_step"
-    positive: ModelPublicElectricalEndpoint
-    negative: ModelPublicElectricalEndpoint
-    /**
-     * Observer-owned SI fixture. Levels and visible edge timing come from the
-     * cited plot/conditions; width and period may extend a single documented
-     * edge beyond the plotted window so the harness cannot add a second edge.
-     */
-    pulse: ModelReferencePulse
-  }
+  /** A public-pin step, or a static operating setup sampled with transient analysis. */
+  stimulus: ModelReferenceStimulus
   /** Exact static conditions printed for the graph experiment. Omitted only by legacy contracts. */
   auxiliary_fixtures?: ModelReferenceAuxiliaryFixture[]
 }

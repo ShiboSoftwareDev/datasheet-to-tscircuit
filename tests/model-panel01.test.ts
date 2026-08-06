@@ -360,6 +360,9 @@ test("model panel keeps compact progress without rendering the execution trace",
 
   expect(html).toContain("Generating candidate")
   expect(html).toContain("1/2 stages")
+  expect(html).toContain("Waiting for benchmark TSX")
+  expect(html).toContain("Waiting for analog simulation")
+  expect(html).toContain("Reference graph comparison")
   expect(html).not.toContain("Model execution trace")
   expect(html).not.toContain("internal only stage")
 })

@@ -69,6 +69,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseBenchmark(validation_plan: unknown, benchmark_id: string): BenchmarkImageRecord | undefined {
+  if (isRecord(validation_plan) && Array.isArray(validation_plan.references)) {
+    const reference = validation_plan.references.find(
+      (value) => isRecord(value) && value.benchmark_id === benchmark_id,
+    )
+    if (!isRecord(reference) || !Array.isArray(reference.sources)) return undefined
+    const identifiers = new Set<string>([benchmark_id])
+    if (Array.isArray(reference.requirement_ids)) {
+      for (const requirement_id of reference.requirement_ids) {
+        if (typeof requirement_id === "string" && requirement_id.trim()) {
+          identifiers.add(requirement_id.trim())
+        }
+      }
+    }
+    const sources = reference.sources.flatMap((source) => {
+      if (!isRecord(source)) return []
+      return [
+        {
+          page:
+            typeof source.page === "number" && Number.isInteger(source.page) && source.page > 0
+              ? source.page
+              : undefined,
+          figure: typeof source.figure === "string" ? source.figure : undefined,
+          image: typeof source.image === "string" ? source.image : undefined,
+        },
+      ]
+    })
+    return { sources, identifiers: [...identifiers] }
+  }
   if (isRecord(validation_plan) && Array.isArray(validation_plan.cases)) {
     const validation_case = validation_plan.cases.find(
       (value) => isRecord(value) && value.id === benchmark_id,
@@ -112,10 +140,14 @@ async function readBenchmark(
   model_dir: string,
   benchmark_id: string,
 ): Promise<BenchmarkImageRecord | undefined> {
-  const validation_plan: unknown = await readFile(join(model_dir, "validation-plan.json"), "utf8")
-    .then((text) => JSON.parse(text))
-    .catch(() => undefined)
-  return parseBenchmark(validation_plan, benchmark_id)
+  for (const file_name of ["reference-index.json", "validation-plan.json"]) {
+    const document: unknown = await readFile(join(model_dir, file_name), "utf8")
+      .then((text) => JSON.parse(text))
+      .catch(() => undefined)
+    const benchmark = parseBenchmark(document, benchmark_id)
+    if (benchmark) return benchmark
+  }
+  return undefined
 }
 
 function isInsideDirectory(directory: string, file_path: string): boolean {

@@ -69,6 +69,7 @@ function getNodeResolver(
         `Application logic overlay endpoint ${JSON.stringify(spice_node)} is not one detached DUT pin`,
       )
     }
+    if (overlay.type === "pulsed_source") continue
     const reference_node =
       overlay.reference === "gnd"
         ? "0"

@@ -4,7 +4,10 @@ import { asRecord, simulatorError } from "./errors"
 import { resolvePlannedEndpoint } from "./waveform-probes"
 
 function validateApplicationLogicOverlay(input: {
-  overlay: NonNullable<ValidationCase["application_fixture"]>["condition_overlays"][number]
+  overlay: Extract<
+    NonNullable<ValidationCase["application_fixture"]>["condition_overlays"][number],
+    { type: "logic_state" }
+  >
   overlay_index: number
   circuit_json: readonly AnyCircuitElement[]
 }): ValidationExecutionError[] {
@@ -91,6 +94,7 @@ export function validateApplicationNodeGroups(input: {
   if (!application) return []
   const errors: ValidationExecutionError[] = []
   for (const [overlay_index, overlay] of application.condition_overlays.entries()) {
+    if (overlay.type !== "logic_state") continue
     errors.push(
       ...validateApplicationLogicOverlay({
         overlay,

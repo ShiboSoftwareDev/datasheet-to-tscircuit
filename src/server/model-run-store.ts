@@ -136,6 +136,7 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
     circuit_preview: record.circuit_preview,
     reference_preview: record.reference_preview,
     preview_options: [...record.preview_options],
+    found_references: [...(record.found_references ?? [])],
     pipeline: record.pipeline,
   }
 }
@@ -160,6 +161,7 @@ function cloneModelRunRecord(record: ModelRunRecord): ModelRunRecord {
     logs: [...record.logs],
     progress_history: [...record.progress_history],
     preview_options: [...record.preview_options],
+    found_references: [...(record.found_references ?? [])],
     cancellation_controller: record.cancellation_controller,
     subscriber_set: record.subscriber_set,
   }
@@ -208,6 +210,7 @@ export class ModelRunStore {
       logs: [],
       progress_history: [],
       preview_options: [],
+      found_references: [],
       cancellation_controller: new AbortController(),
       subscriber_set: new Set(),
     }
@@ -246,6 +249,7 @@ export class ModelRunStore {
       logs: capRecentLogs(input.logs),
       progress_history: input.model_run.progress_history ?? [],
       preview_options: input.model_run.preview_options ?? [],
+      found_references: input.model_run.found_references ?? [],
       cancellation_controller: new AbortController(),
       subscriber_set: new Set(),
     }
@@ -398,8 +402,24 @@ export class ModelRunStore {
     })
   }
 
-  /** Publishes the source crop/curve while model generation is still pending. */
-  projectReferenceDraft(
+  /** Publishes only Find Reference Graphs' source evidence and clears comparison state. */
+  projectFoundReferences(
+    model_run_id: string,
+    input: {
+      found_references: NonNullable<ModelRun["found_references"]>
+    },
+  ): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.found_references = input.found_references
+      candidate.preview_options = []
+      candidate.circuit_preview = undefined
+      candidate.reference_preview = undefined
+    })
+  }
+
+  /** Publishes Create Comparison Graphs' reference-series draft. */
+  projectComparisonDraft(
     model_run_id: string,
     input: {
       preview_options: ModelPreviewOption[]

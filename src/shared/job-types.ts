@@ -392,6 +392,18 @@ export interface ModelPreviewOption {
   result_file?: string
 }
 
+/** Source evidence published by Find Reference Graphs before any comparison exists. */
+export interface ModelFoundReference {
+  reference_id: string
+  title: string
+  source_file: string
+  page?: number
+  figure?: string
+  x_axis_label: "Time"
+  x_axis_unit: "s"
+  updated_at: string
+}
+
 /** Immutable identity shared by one selected preview and its datasheet image. */
 export interface ModelPreviewArtifactIdentity {
   preview_generation: string
@@ -434,6 +446,8 @@ export interface ModelRun {
   circuit_preview?: ModelCircuitPreview
   reference_preview?: ModelReferencePreview
   preview_options: ModelPreviewOption[]
+  /** Present after Find Reference Graphs; contains no simulated or digitized comparison series. */
+  found_references?: ModelFoundReference[]
   /** Observable, typed execution state. Older persisted runs may not have one. */
   pipeline?: PublicPipelineSnapshot
 }

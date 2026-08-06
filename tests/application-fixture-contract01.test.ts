@@ -611,8 +611,8 @@ function applicationAgentProposal(mode: "low" | "high", exact_binding: ModelRefe
             type: "current_source",
             positive: "dut.VOUT",
             negative: "gnd",
-            dc_amps: exact_binding.stimulus.pulse.low,
-            pulse: structuredClone(exact_binding.stimulus.pulse),
+            dc_amps: exact_binding.stimulus.pulse!.low,
+            pulse: structuredClone(exact_binding.stimulus.pulse!),
           },
           {
             id: "vin_supply",
@@ -855,6 +855,47 @@ describe("server-owned application fixture contract", () => {
     ])
     expect(resolved.fixtures).toEqual(contract.fixtures)
     expect(resolved.topology_sha256).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  test("detaches a pulsed enable pin from VIN while retaining the input supply network", () => {
+    const contract = compileApplicationFixtureContract({
+      plan: run93Plan(),
+      model_interface: interface10Pin,
+      source_plan_sha256: PLAN_SHA256,
+      source_pdf_sha256: PDF_SHA256,
+    })
+    const startup: ModelReferenceElectricalBinding = {
+      response: { type: "voltage", positive: "dut.VOUT", negative: "gnd", nominal_volts: 3.3 },
+      stimulus: {
+        type: "voltage_step",
+        positive: "dut.EN",
+        negative: "gnd",
+        pulse: {
+          low: 0,
+          high: 4.2,
+          delay: 20e-6,
+          rise: 0,
+          fall: 0,
+          width: 180e-6,
+          period: 400e-6,
+        },
+      },
+      auxiliary_fixtures: [
+        { type: "dc_voltage", positive: "dut.VIN", negative: "gnd", dc_volts: 4.2 },
+        { type: "logic_state", endpoint: "dut.MODE", reference: "dut.VIN", state: "high" },
+        { type: "resistor", positive: "dut.VOUT", negative: "gnd", resistance_ohms: 0.1 },
+      ],
+    }
+
+    const resolved = resolveApplicationFixtureForBinding({ contract, binding: startup })
+    expect(resolved.condition_overlays).toEqual([
+      expect.objectContaining({ type: "logic_state", endpoint: "dut.MODE", reference: "dut.VIN" }),
+      expect.objectContaining({ type: "pulsed_source", endpoint: "dut.EN" }),
+    ])
+    expect(resolved.node_groups.find(({ source_net }) => source_net === "VIN")?.dut_endpoints).toContain(
+      "dut.VIN",
+    )
+    expect(resolved.node_groups.flatMap(({ dut_endpoints }) => dut_endpoints)).not.toContain("dut.EN")
   })
 
   test("reports a typed conflict instead of guessing an overlay topology", () => {

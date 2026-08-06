@@ -343,7 +343,8 @@ test("operating-point artifacts are shown as specification checks, never fake gr
   expect(html).not.toContain("NRMSE")
   expect(html).not.toContain("Peak error")
   expect(html).not.toContain("Matches reference")
-  expect(html).not.toContain("model-analog-only-runframe")
+  expect(html).toContain("model-analog-only-runframe")
+  expect(html).toContain("Waiting for analog simulation")
 })
 
 test("a source-ready benchmark does not claim an automatic Circuit JSON simulation", () => {
@@ -769,4 +770,37 @@ test("benchmark previews render every graph without a selector", () => {
   expect(html).not.toContain('aria-label="Select benchmark graph"')
   expect(html).not.toContain("Showing one of")
   expect(html.match(/model-preview-workspace/g)).toHaveLength(3)
+})
+
+test("found references use the normal workspace with both TSX views and an empty comparison", () => {
+  const html = renderToStaticMarkup(
+    createElement(ModelLivePreview, {
+      job_id: "job_1",
+      local_run_id: "local_1",
+      is_complete: true,
+      preview_options: [],
+      found_references: [
+        {
+          reference_id: "load-transient",
+          title: "Figure 10-21. Load transient",
+          source_file: "evidence/load-transient.png",
+          page: 21,
+          figure: "Figure 10-21",
+          x_axis_label: "Time",
+          x_axis_unit: "s",
+          updated_at: "2026-08-06T00:00:00.000Z",
+        },
+      ],
+    }),
+  )
+
+  expect(html.match(/model-preview-workspace/g)).toHaveLength(1)
+  expect(html).toContain("Waiting for benchmark TSX")
+  expect(html).toContain("Waiting for analog simulation")
+  expect(html).toContain("Reference graph comparison")
+  expect(html).toContain("Waiting for digitized evidence")
+  expect(html).toContain(
+    "/api/model-run/found-reference-image?job_id=job_1&amp;reference_id=load-transient&amp;local_run_id=local_1",
+  )
+  expect(html).toContain('class="model-datasheet-reference-image"')
 })

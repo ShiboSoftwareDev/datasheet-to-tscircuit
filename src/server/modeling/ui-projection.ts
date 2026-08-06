@@ -5,7 +5,10 @@ export {
   projectModelPreviewOptions,
   projectModelUi,
 } from "./ui-projection/project-model-ui"
-export { projectModelReferencePreview } from "./ui-projection/reference-preview"
+export {
+  projectReferenceComparisonDraft,
+  projectModelReferencePreview,
+} from "./ui-projection/reference-preview"
 export type { ModelUiProjection, ModelUiProjectionInput } from "./ui-projection/types"
 export { projectModelValidationSummary } from "./ui-projection/validation-summary"
 export {

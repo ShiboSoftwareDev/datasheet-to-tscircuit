@@ -86,6 +86,7 @@ export {
   getAnalogProjectionIssue,
   type ModelUiProjection,
   type ModelUiProjectionInput,
+  projectReferenceComparisonDraft,
   projectModelCircuitPreview,
   projectModelPreviewOptions,
   projectModelReferencePreview,

@@ -218,7 +218,12 @@ async function snapshotFile(input: {
       cause: error,
     })
   } finally {
-    await Promise.all([closeQuietly(source), closeQuietly(destination), unlinkQuietly(temporary_path)])
+    // Bun on macOS can intermittently stall when two handles for the same
+    // filesystem are closed concurrently. Close deterministically so Local
+    // input materialization cannot hang between otherwise tiny files.
+    await closeQuietly(destination)
+    await closeQuietly(source)
+    await unlinkQuietly(temporary_path)
   }
 }
 
@@ -499,7 +504,10 @@ export async function materializePipelineTaskInputFiles(input: {
         cause,
       })
     } finally {
-      await Promise.all([closeQuietly(source), closeQuietly(output)])
+      // See snapshotFile: concurrent FileHandle.close() calls can stall Bun on
+      // macOS after the destination has already been fully materialized.
+      await closeQuietly(output)
+      await closeQuietly(source)
       if (created && !materialized) await unlinkQuietly(destination)
     }
   }

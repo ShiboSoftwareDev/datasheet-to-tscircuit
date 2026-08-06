@@ -15,6 +15,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from "react"
 import type {
   ModelCircuitPreview as ModelCircuitPreviewData,
   ModelCurvePoint,
+  ModelFoundReference,
   ModelPreviewArtifactIdentity,
   ModelPreviewOption,
   ModelReferencePreview,
@@ -26,7 +27,7 @@ import {
   MODEL_PREVIEW_REVISION_PATTERN,
   parseModelSelectedPreview,
 } from "@/shared/model-selected-preview"
-import { getModelReferenceImageUrl, getModelSelectedPreview } from "../api"
+import { getModelFoundReferenceImageUrl, getModelReferenceImageUrl, getModelSelectedPreview } from "../api"
 
 const CircuitJsonPreview = lazy(async () => {
   const runframe_module = await import("@tscircuit/runframe")
@@ -128,6 +129,24 @@ function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) 
   )
 }
 
+function AnalogPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) {
+  return (
+    <div className="model-preview-placeholder">
+      {preview?.build_status === "building" ? (
+        <LoaderCircle className="spin" size={25} />
+      ) : (
+        <Activity size={25} />
+      )}
+      <strong>Waiting for analog simulation</strong>
+      <p>
+        {preview
+          ? "The analog viewer will appear after tscircuit stores a completed transient waveform for this benchmark."
+          : "This appears after a benchmark TSX produces a completed transient waveform."}
+      </p>
+    </div>
+  )
+}
+
 export function getRunframeCircuitJson(input: {
   active_tab: TabId
   live_circuit_json: ModelCircuitPreviewData["circuit_json"]
@@ -168,12 +187,12 @@ function ModelCircuitPreview({
           {preview.error_message}
         </p>
       )}
-      {!preview || !runframe_circuit_json ? (
-        <CircuitPlaceholder preview={preview} />
-      ) : (
-        <Suspense fallback={<CircuitPlaceholder preview={preview} />}>
-          <div className="model-circuit-split">
-            <div className="model-runframe-shell model-schematic-code-runframe">
+      <div className="model-circuit-split">
+        <div className="model-runframe-shell model-schematic-code-runframe">
+          {!preview || !runframe_circuit_json ? (
+            <CircuitPlaceholder preview={preview} />
+          ) : (
+            <Suspense fallback={<CircuitPlaceholder preview={preview} />}>
               <CircuitJsonPreview
                 circuitJson={runframe_circuit_json}
                 code={preview.code}
@@ -190,28 +209,32 @@ function ModelCircuitPreview({
                 isWebEmbedded
                 projectName={project_name}
               />
-            </div>
-            {show_analog_simulation && (
-              <div className="model-runframe-shell model-analog-only-runframe">
-                <CircuitJsonPreview
-                  circuitJson={preview.circuit_json ?? runframe_circuit_json}
-                  code={preview.code}
-                  availableTabs={MODEL_ANALOG_ONLY_TABS}
-                  defaultActiveTab="analog_simulation"
-                  defaultTab="analog_simulation"
-                  showJsonTab={false}
-                  hideSchematicInAnalogSimulation
-                  showRenderLogTab={false}
-                  showFileMenu={false}
-                  allowSelectingVersion={false}
-                  isWebEmbedded
-                  projectName={project_name}
-                />
-              </div>
-            )}
-          </div>
-        </Suspense>
-      )}
+            </Suspense>
+          )}
+        </div>
+        <div className="model-runframe-shell model-analog-only-runframe">
+          {show_analog_simulation && preview?.circuit_json ? (
+            <Suspense fallback={<AnalogPlaceholder preview={preview} />}>
+              <CircuitJsonPreview
+                circuitJson={preview.circuit_json}
+                code={preview.code}
+                availableTabs={MODEL_ANALOG_ONLY_TABS}
+                defaultActiveTab="analog_simulation"
+                defaultTab="analog_simulation"
+                showJsonTab={false}
+                hideSchematicInAnalogSimulation
+                showRenderLogTab={false}
+                showFileMenu={false}
+                allowSelectingVersion={false}
+                isWebEmbedded
+                projectName={project_name}
+              />
+            </Suspense>
+          ) : (
+            <AnalogPlaceholder preview={preview} />
+          )}
+        </div>
+      </div>
     </section>
   )
 }
@@ -802,20 +825,23 @@ function ModelDatasheetReferencePane({
   local_run_id,
   benchmark_id,
   preview,
+  found_reference,
   artifact_identity,
 }: {
   job_id: string
   local_run_id?: string
   benchmark_id: string
   preview?: ModelReferencePreview
+  found_reference?: ModelFoundReference
   artifact_identity?: ModelPreviewArtifactIdentity
 }) {
   const [image_failed, setImageFailed] = useState(false)
   const reference_kind = getModelReferenceKind(preview)
-  const is_curve = reference_kind === "curve"
+  const is_curve = Boolean(found_reference) || reference_kind === "curve"
   const resolved_benchmark_id = preview?.benchmark_id ?? benchmark_id
-  const image_url =
-    resolved_benchmark_id === "live"
+  const image_url = found_reference
+    ? getModelFoundReferenceImageUrl(job_id, found_reference.reference_id, local_run_id)
+    : resolved_benchmark_id === "live"
       ? undefined
       : getModelReferenceImageUrl(job_id, resolved_benchmark_id, artifact_identity, local_run_id)
 
@@ -844,7 +870,7 @@ function ModelDatasheetReferencePane({
             className="model-datasheet-reference-image"
             key={image_url}
             src={image_url}
-            alt={`Datasheet ${is_curve ? "graph" : "specification"} reference for ${preview?.title ?? resolved_benchmark_id}`}
+            alt={`Datasheet ${is_curve ? "graph" : "specification"} reference for ${preview?.title ?? found_reference?.title ?? resolved_benchmark_id}`}
             draggable={false}
             onError={() => setImageFailed(true)}
           />
@@ -854,8 +880,14 @@ function ModelDatasheetReferencePane({
   )
 }
 
-function ModelReferenceGraphsPane({ preview }: { preview?: ModelReferencePreview }) {
-  const is_curve = getModelReferenceKind(preview) === "curve"
+function ModelReferenceGraphsPane({
+  preview,
+  has_found_reference,
+}: {
+  preview?: ModelReferencePreview
+  has_found_reference: boolean
+}) {
+  const is_curve = has_found_reference || !preview || getModelReferenceKind(preview) === "curve"
   return (
     <section
       className="model-reference-graphs-card"
@@ -950,6 +982,7 @@ export function ModelLivePreview({
   circuit_preview,
   reference_preview,
   preview_options,
+  found_references,
   preview_generation,
   model_revision,
 }: {
@@ -959,6 +992,7 @@ export function ModelLivePreview({
   circuit_preview?: ModelCircuitPreviewData
   reference_preview?: ModelReferencePreview
   preview_options: ModelPreviewOption[]
+  found_references?: ModelFoundReference[]
   preview_generation?: string
   model_revision?: string
 }) {
@@ -1036,28 +1070,39 @@ export function ModelLivePreview({
     }
   }, [is_complete, preview_cache_scope, preview_option_key])
 
+  const found_reference_by_id = new Map(
+    (found_references ?? []).map((reference) => [reference.reference_id, reference]),
+  )
   const preview_entries: Array<{ benchmark_id: string; title: string }> =
     preview_options.length > 0
       ? preview_options
-      : [
-          {
-            benchmark_id: live_benchmark_id ?? "live",
-            title: reference_preview?.title ?? "Simulation comparison",
-          },
-        ]
+      : found_reference_by_id.size > 0
+        ? [...found_reference_by_id.values()].map((reference) => ({
+            benchmark_id: reference.reference_id,
+            title: reference.title,
+          }))
+        : [
+            {
+              benchmark_id: live_benchmark_id ?? "live",
+              title: reference_preview?.title ?? "Simulation comparison",
+            },
+          ]
 
   return (
     <section className="model-preview-list" aria-label="SPICE benchmark comparisons">
       {preview_entries.map((entry) => {
+        const found_reference =
+          preview_options.length === 0 ? found_reference_by_id.get(entry.benchmark_id) : undefined
         const loaded = scoped_cache.previews[entry.benchmark_id]
-        const can_use_live_preview = entry.benchmark_id === live_benchmark_id || entry.benchmark_id === "live"
+        const can_use_live_preview =
+          !found_reference && (entry.benchmark_id === live_benchmark_id || entry.benchmark_id === "live")
         const displayed_bundle = loaded ?? (can_use_live_preview ? live_preview.preview : undefined)
         const displayed_circuit = displayed_bundle?.circuit_preview
         const displayed_reference = displayed_bundle?.reference_preview
         const load_error =
           scoped_cache.errors[entry.benchmark_id] ??
           (!loaded && can_use_live_preview ? live_preview.error : undefined)
-        const comparison_kind = getModelReferenceKind(displayed_reference)
+        const comparison_kind = found_reference ? "curve" : getModelReferenceKind(displayed_reference)
 
         return (
           <section
@@ -1088,9 +1133,13 @@ export function ModelLivePreview({
                 local_run_id={local_run_id}
                 benchmark_id={entry.benchmark_id}
                 preview={displayed_reference}
+                found_reference={found_reference}
                 artifact_identity={displayed_bundle?.artifact_identity}
               />
-              <ModelReferenceGraphsPane preview={displayed_reference} />
+              <ModelReferenceGraphsPane
+                preview={displayed_reference}
+                has_found_reference={Boolean(found_reference)}
+              />
             </div>
           </section>
         )

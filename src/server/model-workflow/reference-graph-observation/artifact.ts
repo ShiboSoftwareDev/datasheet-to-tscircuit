@@ -1,13 +1,14 @@
 import type { ApplicationFixtureContract } from "../../modeling/application-fixture-contract"
 import type { ModelInterface } from "../../modeling/types"
 import { normalizeFigureLabel, type TimeGraphDiscovery } from "../time-graph-hints"
-import { eligibleObservedGraphs } from "./eligibility"
+import { eligibleObservedGraphs, foundObservedGraphs } from "./eligibility"
 import {
   isRecord,
   MAX_ELIGIBLE_GRAPHS,
   MAX_OBSERVED_GRAPHS,
   nonEmptyString,
   parseGraph,
+  type ReferenceGraphArtifactPhase,
   type ReferencePointFieldPolicy,
   rejectUnknownKeys,
 } from "./schema"
@@ -26,6 +27,23 @@ export function parseReferenceGraphObservation(
     model_interface,
     application_fixture,
     "pixels_only",
+    "comparison",
+  )
+}
+
+export function parseFoundReferenceGraphObservation(
+  value: unknown,
+  discovery: TimeGraphDiscovery,
+  model_interface: ModelInterface,
+  application_fixture?: ApplicationFixtureContract,
+): ReferenceGraphObservation {
+  return parseReferenceGraphObservationWithPointPolicy(
+    value,
+    discovery,
+    model_interface,
+    application_fixture,
+    "pixels_only",
+    "find",
   )
 }
 
@@ -41,6 +59,23 @@ export function parseCanonicalReferenceGraphObservation(
     model_interface,
     application_fixture,
     "canonical",
+    "comparison",
+  )
+}
+
+export function parseCanonicalFoundReferenceGraphObservation(
+  value: unknown,
+  discovery: TimeGraphDiscovery,
+  model_interface: ModelInterface,
+  application_fixture?: ApplicationFixtureContract,
+): ReferenceGraphObservation {
+  return parseReferenceGraphObservationWithPointPolicy(
+    value,
+    discovery,
+    model_interface,
+    application_fixture,
+    "canonical",
+    "find",
   )
 }
 
@@ -50,6 +85,7 @@ function parseReferenceGraphObservationWithPointPolicy(
   model_interface: ModelInterface,
   application_fixture: ApplicationFixtureContract | undefined,
   point_field_policy: ReferencePointFieldPolicy,
+  phase: ReferenceGraphArtifactPhase,
 ): ReferenceGraphObservation {
   if (!isRecord(value)) throw new Error("model-reference-observation.json must be an object")
   rejectUnknownKeys(
@@ -71,14 +107,27 @@ function parseReferenceGraphObservationWithPointPolicy(
       `model-reference-observation.json.graphs cannot contain more than ${MAX_OBSERVED_GRAPHS} entries`,
     )
   }
-  const graphs = value.graphs.map((graph, index) =>
-    parseGraph(graph, index, model_interface, point_field_policy),
-  )
+  const graph_results = value.graphs.map((graph, index) => {
+    try {
+      return { graph: parseGraph(graph, index, model_interface, point_field_policy, phase) }
+    } catch (error) {
+      return { error: error instanceof Error ? error : new Error(String(error)) }
+    }
+  })
+  const graph_errors = graph_results.flatMap((result) => (result.error ? [result.error] : []))
+  if (graph_errors.length > 0) {
+    const details = [...new Set(graph_errors.map((error) => error.message))]
+    throw new AggregateError(
+      graph_errors,
+      `model-reference-observation.json contains ${graph_errors.length} invalid graph entr${graph_errors.length === 1 ? "y" : "ies"}:\n${details.map((detail) => `- ${detail}`).join("\n")}`,
+    )
+  }
+  const graphs = graph_results.flatMap((result) => (result.graph ? [result.graph] : []))
   const graph_by_id = new Map(graphs.map((graph) => [graph.graph_id, graph]))
   if (graph_by_id.size !== graphs.length)
     throw new Error("model-reference-observation.json graph ids must be unique")
   if (
-    eligibleObservedGraphs({
+    (phase === "find" ? foundObservedGraphs : eligibleObservedGraphs)({
       version: 1,
       source_pdf_sha256: discovery.source_pdf_sha256,
       reviewed_hints: [],
@@ -154,6 +203,7 @@ function parseReferenceGraphObservationWithPointPolicy(
           source_hints: graph_hint_evidence.get(graph.graph_id) ?? [],
           model_interface,
           application_fixture,
+          phase,
         }),
       ]
     } catch (error) {

@@ -51,6 +51,7 @@ function sourceMatchesBinding(
   fixture: ValidationCase["fixtures"][number],
   binding: ModelReferenceElectricalBinding,
 ): boolean {
+  if (binding.stimulus.type === "steady_state") return false
   const source_type = binding.stimulus.type === "voltage_step" ? "voltage_source" : "current_source"
   return (
     fixture.type === source_type &&

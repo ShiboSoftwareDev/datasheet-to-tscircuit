@@ -80,13 +80,20 @@ export interface ApplicationFixtureContract extends ApplicationFixtureContractPa
   contract_sha256: string
 }
 
-export interface ApplicationConditionOverlay {
-  type: "logic_state"
-  endpoint: ModelPublicElectricalEndpoint
-  reference: ModelPublicElectricalEndpoint
-  state: "low" | "high"
-  detached_from_node_group_id: string
-}
+export type ApplicationConditionOverlay =
+  | {
+      type: "logic_state"
+      endpoint: ModelPublicElectricalEndpoint
+      reference: ModelPublicElectricalEndpoint
+      state: "low" | "high"
+      detached_from_node_group_id: string
+    }
+  | {
+      /** Detaches a control pin so its bound PULSE does not drive the application supply net. */
+      type: "pulsed_source"
+      endpoint: ModelPublicElectricalEndpoint
+      detached_from_node_group_id: string
+    }
 
 export interface ResolvedApplicationNodeGroup {
   id: string

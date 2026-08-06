@@ -528,7 +528,7 @@ async function writeReferenceProof(
         condition_conflicts: [],
         unsupported_fixture_conditions: [],
         transient_fixture_evidence: {
-          method: "printed_experiment_conditions_v2",
+          method: "printed_experiment_conditions_v3",
           source_excerpts: [
             {
               scope: "graph_caption",

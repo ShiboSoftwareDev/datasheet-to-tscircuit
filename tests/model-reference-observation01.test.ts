@@ -27,19 +27,23 @@ import type {
   ModelReferenceElectricalBinding,
 } from "../src/server/modeling/types"
 import {
+  buildFoundReferenceGraphObserverPrompt,
   buildReferenceGraphObserverPrompt,
   eligibleObservedGraphs,
+  foundObservedGraphs,
   parseCanonicalReferenceGraphObservation,
+  parseFoundReferenceGraphObservation,
   parseReferenceGraphObservation,
   projectReferenceGraphObservationForCharacterizer,
+  ReferenceGraphPixelVerificationError,
   type ReferenceGraphObservation,
   verifyCharacterizationGraphEvidence,
   verifyReferenceGraphObservationPixels,
 } from "../src/server/model-workflow/reference-graph-observation"
 import {
   assertReferenceGraphObservationVerified,
+  findReferenceGraphs,
   findPriorReferenceObservationCandidates,
-  inventoryReferenceGraphs,
   sourceProofRejectionDiagnostics,
 } from "../src/server/model-workflow/characterization/source-inventory"
 import { runCharacterizer } from "../src/server/model-workflow/characterization/run-characterizer"
@@ -120,6 +124,18 @@ const electrical_binding: ModelReferenceElectricalBinding = {
   },
 }
 
+test("high logic-state parse feedback identifies the deterministic supply-reference correction", () => {
+  const invalid = structuredClone(electrical_binding)
+  invalid.auxiliary_fixtures = [
+    { type: "dc_voltage", positive: "dut.VIN", negative: "gnd", dc_volts: 2.5 },
+    { type: "logic_state", endpoint: "dut.MODE", reference: "gnd", state: "high" },
+  ]
+
+  expect(() => parseModelReferenceElectricalBinding(invalid)).toThrow(
+    /replace reference:"gnd" with the positive dut\.<spice_node> endpoint of the single printed input-supply dc_voltage auxiliary fixture/,
+  )
+})
+
 const crc32_table = Uint32Array.from({ length: 256 }, (_, value) => {
   let crc = value
   for (let bit = 0; bit < 8; bit += 1) {
@@ -147,7 +163,7 @@ function pngChunk(type: string, data = new Uint8Array()): Uint8Array {
 function coloredResponseGraphPng(
   width: number,
   height: number,
-  trace_shape: "diagonal" | "flat" | "points_only" | "grid_only",
+  trace_shape: "diagonal" | "oscillating" | "flat" | "points_only" | "grid_only",
 ): Uint8Array {
   const header = Buffer.alloc(13)
   header.writeUInt32BE(width, 0)
@@ -201,7 +217,18 @@ function coloredResponseGraphPng(
   for (let x = 10; x <= 190; x += 30) drawLine(x, 88, x, 92, black)
   for (let y = 10; y <= 90; y += 20) drawLine(8, y, 12, y, black)
   if (trace_shape === "diagonal") drawLine(10, 90, 190, 10, blue, 3)
-  else if (trace_shape === "flat") drawLine(10, 50, 190, 50, blue, 3)
+  else if (trace_shape === "oscillating") {
+    for (let index = 0; index < 15; index += 1) {
+      const start_x = Math.round(10 + (index / 15) * 180)
+      const start_y = Math.round(90 - (index / 15) * 80)
+      const end_x = Math.round(10 + ((index + 1) / 15) * 180)
+      const end_y = Math.round(90 - ((index + 1) / 15) * 80)
+      const middle_x = Math.round((start_x + end_x) / 2)
+      const middle_y = Math.round((start_y + end_y) / 2) + (index % 2 === 0 ? -9 : 9)
+      drawLine(start_x, start_y, middle_x, middle_y, blue, 3)
+      drawLine(middle_x, middle_y, end_x, end_y, blue, 3)
+    }
+  } else if (trace_shape === "flat") drawLine(10, 50, 190, 50, blue, 3)
   else if (trace_shape === "points_only") {
     for (let index = 0; index < 16; index += 1) {
       const ratio = index / 15
@@ -226,7 +253,14 @@ function coloredResponseGraphPng(
 class ReferenceGraphCropRunner implements ProcessRunner {
   readonly calls: ProcessRunRequest[] = []
 
-  constructor(private readonly trace_shape: "diagonal" | "flat" | "points_only" | "grid_only" = "diagonal") {}
+  constructor(
+    private readonly trace_shape:
+      | "diagonal"
+      | "oscillating"
+      | "flat"
+      | "points_only"
+      | "grid_only" = "diagonal",
+  ) {}
 
   async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
     this.calls.push(request)
@@ -269,7 +303,7 @@ const discovery: TimeGraphDiscovery = {
       condition_conflicts: [],
       unsupported_fixture_conditions: [],
       transient_fixture_evidence: {
-        method: "printed_experiment_conditions_v2",
+        method: "printed_experiment_conditions_v3",
         source_excerpts: [
           {
             scope: "graph_caption",
@@ -388,6 +422,33 @@ function validObservationValue() {
   }
 }
 
+test("Find Reference Graphs rejects comparison fields and retains server-owned simulator eligibility", () => {
+  const value = validObservationValue()
+  expect(() => parseFoundReferenceGraphObservation(value, discovery, model_interface)).toThrow(
+    "digitized_curve belongs to Create Comparison Graphs",
+  )
+  delete (value.graphs[0] as Partial<(typeof value.graphs)[number]>).electrical_binding
+  delete (value.graphs[0] as Partial<(typeof value.graphs)[number]>).digitized_curve
+  const parsed = parseFoundReferenceGraphObservation(value, discovery, model_interface)
+  expect(foundObservedGraphs(parsed)).toHaveLength(1)
+  expect(parsed.graphs[0]).not.toHaveProperty("electrical_binding")
+  expect(parsed.graphs[0]).not.toHaveProperty("digitized_curve")
+  expect(buildFoundReferenceGraphObserverPrompt()).toContain("exclusively to Create Comparison Graphs")
+})
+
+test("cannot dismiss a source-proven public graph as fixture-ineligible", () => {
+  const value = validObservationValue()
+  const graph = value.graphs[0] as Partial<(typeof value.graphs)[number]>
+  graph.fixture_reproducible = false
+  graph.reason = "The surrounding application diagram uses another logic state."
+  delete graph.electrical_binding
+  delete graph.digitized_curve
+
+  expect(() => parseReferenceGraphObservation(value, discovery, model_interface)).toThrow(
+    /cannot be marked fixture_reproducible:false: server-owned printed conditions resolve to one public response and a tscircuit-supported transient fixture/,
+  )
+})
+
 test("reference observer contract publishes exact graph keys and actionable unknown-field errors", () => {
   const prompt = buildReferenceGraphObserverPrompt()
   expect(prompt).toContain('"page": 12')
@@ -399,12 +460,23 @@ test("reference observer contract publishes exact graph keys and actionable unkn
   const correction_prompt = buildReferenceGraphObserverPrompt(
     "load_transient: 14/16 calibrated points are off trace",
   )
-  expect(correction_prompt).toContain("Correct every retained-candidate error below")
+  expect(correction_prompt).toContain(
+    'The final "Rejected attempt N" block below is the only current validation result',
+  )
+  expect(correction_prompt).toContain("Earlier rejected-attempt")
+  expect(correction_prompt).toContain("blocks are history and regression guards")
+  expect(correction_prompt).toContain("Correct every error in the final block only")
   expect(correction_prompt).toContain("Read that retained file first")
   expect(correction_prompt).toContain("Make the smallest edit")
   expect(correction_prompt).toContain("already passed that verification")
-  expect(correction_prompt).toContain("never move its x_px/y_px")
+  expect(correction_prompt).toContain("keep its origin fixed unless")
   expect(correction_prompt).toContain("printed scale or panel is clipped")
+  expect(correction_prompt).toContain("coordinate-translation formula")
+  expect(correction_prompt).toContain("one continuous response centerline")
+  expect(correction_prompt).toContain("same-colored")
+  expect(correction_prompt).toContain("scope channel")
+  expect(correction_prompt).toContain("Preserve the server-required point count")
+  expect(correction_prompt).toContain("one-for-one with an added")
   expect(correction_prompt).toContain("load_transient: 14/16 calibrated points are off trace")
 
   const invalid = validObservationValue()
@@ -458,6 +530,41 @@ test("reference observation rejects traced pixels before the zero-time axis anch
   expect(() => parseReferenceGraphObservation(value, discovery, model_interface)).toThrow(
     /points cannot contain negative elapsed time derived from the pixel-axis calibration/,
   )
+})
+
+test("reference observation reports the exact unsampled trace interval", () => {
+  const value = validObservationValue()
+  const points = value.graphs[0]!.digitized_curve.points
+  const pixel_xs = [10, 15, 20, 25, 30, 35, 40, 45, 155, 160, 165, 170, 175, 180, 185, 190]
+  for (const [index, pixel_x] of pixel_xs.entries()) points[index]!.pixel_x = pixel_x
+
+  expect(() => parseReferenceGraphObservation(value, discovery, model_interface)).toThrow(
+    /largest gap is 61\.1% between crop-local x pixels 45\.0 and 155\.0.*Add one or more strictly increasing points/,
+  )
+})
+
+test("reference observation reports invalid graph entries together", () => {
+  const value = validObservationValue()
+  value.graphs.push(structuredClone(value.graphs[0]!))
+  value.graphs[1]!.graph_id = "second_load_transient"
+  for (const graph of value.graphs) {
+    graph.electrical_binding.auxiliary_fixtures = [
+      { type: "dc_voltage", positive: "dut.VIN", negative: "gnd", dc_volts: 2.5 },
+      { type: "logic_state", endpoint: "dut.MODE", reference: "gnd", state: "high" },
+    ]
+  }
+
+  let failure: unknown
+  try {
+    parseReferenceGraphObservation(value, discovery, model_interface)
+  } catch (error) {
+    failure = error
+  }
+  expect(failure).toBeInstanceOf(AggregateError)
+  const messages = failure instanceof AggregateError ? failure.errors.map(String) : []
+  expect(messages).toHaveLength(2)
+  expect(messages[0]).toContain("graphs[0].electrical_binding.auxiliary_fixtures[1].reference")
+  expect(messages[1]).toContain("graphs[1].electrical_binding.auxiliary_fixtures[1].reference")
 })
 
 testWithArchivedRun102Observation(
@@ -549,7 +656,7 @@ test("reference graph inventory sends retained validation errors to every correc
   })
 
   await expect(
-    inventoryReferenceGraphs({
+    findReferenceGraphs({
       context: {
         model_run_id: "model_reference_feedback",
         job_id: "job_reference_feedback",
@@ -579,11 +686,11 @@ test("reference graph inventory sends retained validation errors to every correc
     }),
   ).rejects.toThrow("model-reference-observation.json.graphs must be an array")
   expect(prompts).toHaveLength(4)
-  expect(prompts[0]).not.toContain("Correct every retained-candidate error below")
-  expect(prompts[1]).toContain("Correct every retained-candidate error below")
-  expect(prompts[1]).toContain("model-reference-observation.json.graphs must be an array")
-  expect(prompts[2]).toContain("model-reference-observation.json.graphs must be an array")
-  expect(prompts[3]).toContain("model-reference-observation.json.graphs must be an array")
+  expect(prompts[0]).not.toContain("smallest changes required by the final rejection block")
+  for (const prompt of prompts.slice(1)) {
+    expect(prompt).toContain("smallest changes required by the final rejection block")
+    expect(prompt).toContain("model-reference-observation.json.graphs must be an array")
+  }
 })
 
 test("reference graph inventory retry considers only prior promoted observations, newest first", async () => {
@@ -644,7 +751,12 @@ test("pixel and source-proof failures jointly reject an observer artifact before
   try {
     assertReferenceGraphObservationVerified({
       observation,
-      pixel_rejection: new Error("12 traced points are off the rendered waveform"),
+      pixel_rejection: new ReferenceGraphPixelVerificationError([
+        {
+          graph_id: "load_transient",
+          message: "12 traced points are off the rendered waveform",
+        },
+      ]),
       source_proof: {
         version: 1,
         source_pdf_sha256,
@@ -670,6 +782,42 @@ test("pixel and source-proof failures jointly reject an observer artifact before
   expect(message).toContain("Independent reference graph verification failed")
   expect(message).toContain("12 traced points are off the rendered waveform")
   expect(message).toContain("declared_voltage_scale_matches_source")
+})
+
+test("pixel rejection takes precedence over source-proof keep-trace guidance", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  let failure: unknown
+  try {
+    assertReferenceGraphObservationVerified({
+      observation,
+      pixel_rejection: new ReferenceGraphPixelVerificationError([
+        { graph_id: "load_transient", message: "14/16 calibrated points are off trace" },
+      ]),
+      source_proof: {
+        version: 1,
+        source_pdf_sha256,
+        results: [
+          {
+            status: "ineligible",
+            graph_id: "load_transient",
+            code: "axis_calibration_unproven",
+            reason: "The crop axis is not yet calibrated.",
+            diagnostic: {
+              recognized_measurements: ["100 us/div"],
+              missing_proofs: ["time_grid_and_anchor_alignment"],
+            },
+          },
+        ],
+      },
+    })
+  } catch (error) {
+    failure = error
+  }
+
+  expect(failure).toBeInstanceOf(Error)
+  const message = failure instanceof Error ? failure.message : ""
+  expect(message).toContain("After the response points pass pixel-trace verification")
+  expect(message).not.toContain("keep the crop origin and trace points fixed")
 })
 
 test("characterization cannot write a model contract from an unverified axis proof", async () => {
@@ -777,7 +925,7 @@ test("source-proof correction feedback preserves server-recognized calibration e
       ],
     }),
   ).toEqual([
-    "load_transient: The crop axis is not yet calibrated. Missing source proofs: voltage_grid_and_anchor_alignment. Server-recognized crop evidence: 100 us/div; 100 mV/div; y-grid:45.67,76.67,108.33,139.33. Change only the named axis anchor pixel coordinates to server-recognized grid lines; keep the crop origin and trace points fixed. Do not demote a printed graph merely to bypass source verification.",
+    "load_transient: The crop axis is not yet calibrated. Missing source proofs: voltage_grid_and_anchor_alignment. Server-recognized crop evidence: 100 us/div; 100 mV/div; y-grid:45.67,76.67,108.33,139.33. Change only the y-axis anchor pixel coordinates to server-recognized grid lines; keep the crop origin and trace points fixed. Do not demote a printed graph merely to bypass source verification.",
   ])
 })
 
@@ -801,10 +949,39 @@ test("source-proof correction feedback distinguishes clipped scope controls from
   })[0]!
 
   expect(feedback).toContain("Do not tune axis values")
-  expect(feedback).toContain("Keep crop.x_px and crop.y_px unchanged")
-  expect(feedback).toContain("extend only crop.width_px")
+  expect(feedback).toContain("Extend the crop on whichever edge is needed")
+  expect(feedback).toContain("new pixel_x = old pixel_x + old crop.x_px - new crop.x_px")
+  expect(feedback).toContain("apply the same formula to pixel_y")
+  expect(feedback).toContain("Increase width/height so the old crop remains fully contained")
   expect(feedback).toContain("Scale-match errors listed with a missing printed scale")
   expect(feedback).not.toContain("Change the y-axis anchor values")
+})
+
+test("source-proof correction feedback uses the exact server-computed axis span", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  const feedback = sourceProofRejectionDiagnostics(observation, {
+    version: 1,
+    source_pdf_sha256,
+    results: [
+      {
+        status: "ineligible",
+        graph_id: "load_transient",
+        code: "axis_calibration_unproven",
+        reason: "The declared voltage scale differs from the source scale.",
+        diagnostic: {
+          recognized_measurements: [
+            "100 mV/div",
+            "server-source-volts-per-pixel:0.00322580645161",
+            "server-required-y-anchor-value-span:0.956129032258V",
+          ],
+          missing_proofs: ["declared_voltage_scale_matches_source"],
+        },
+      },
+    ],
+  })[0]!
+
+  expect(feedback).toContain("server-required-y-anchor-value-span:0.956129032258V")
+  expect(feedback).toContain("use that exact span instead of estimating it")
 })
 
 test("no-eligible diagnostics prioritize public voltage graphs over unrelated switching plots", () => {
@@ -879,7 +1056,7 @@ test("reference observer feedback aggregates electrical errors across every clai
     graph_id: "second_load_transient",
     reason: "The second figure is also an elapsed-time voltage graph.",
   }
-  invalid.graphs[0]!.electrical_binding.stimulus.pulse.delay = 0.002
+  invalid.graphs[0]!.electrical_binding.stimulus.pulse!.delay = 0.002
   invalid.graphs.push({
     ...structuredClone(invalid.graphs[0]!),
     graph_id: "second_load_transient",
@@ -1018,11 +1195,16 @@ VOUT (50 mV/div)                  Time(ms)
       candidates.flatMap(({ figure, transient_fixture_evidence }) =>
         transient_fixture_evidence ? [figure] : [],
       ),
-    ).toEqual(["Figure 10-21", "Figure 10-22", "Figure 10-24", "Figure 10-25"])
+    ).toEqual([
+      "Figure 10-17",
+      "Figure 10-19",
+      "Figure 10-20",
+      ...Array.from({ length: 11 }, (_, index) => `Figure 10-${index + 21}`),
+    ])
     expect(
       candidates.find(({ figure }) => figure === "Figure 10-21")?.transient_fixture_evidence,
     ).toMatchObject({
-      method: "printed_experiment_conditions_v2",
+      method: "printed_experiment_conditions_v3",
       response: { signal: "VO", quantity: "voltage", nominal_volts: 3.3 },
       stimulus: {
         signal: "IO",
@@ -1046,7 +1228,19 @@ VOUT (50 mV/div)                  Time(ms)
       candidates
         .filter(({ condition_conflicts }) => condition_conflicts.length > 0)
         .map(({ figure }) => figure),
-    ).toEqual(["Figure 10-23", "Figure 10-26", "Figure 10-27", "Figure 10-28", "Figure 10-29"])
+    ).toEqual([
+      "Figure 10-16",
+      "Figure 10-17",
+      "Figure 10-18",
+      "Figure 10-19",
+      "Figure 10-20",
+      "Figure 10-23",
+      "Figure 10-26",
+      "Figure 10-27",
+      "Figure 10-29",
+      "Figure 10-30",
+      "Figure 10-31",
+    ])
   })
 
   testWithArchivedRun93Pdf("inventories the archived run-93 PDF with real pdftotext", async () => {
@@ -1067,12 +1261,29 @@ VOUT (50 mV/div)                  Time(ms)
       discovery.hints.flatMap(({ figure, transient_fixture_evidence }) =>
         transient_fixture_evidence ? [figure] : [],
       ),
-    ).toEqual(["Figure 10-21", "Figure 10-22", "Figure 10-24", "Figure 10-25"])
+    ).toEqual([
+      "Figure 10-15",
+      "Figure 10-17",
+      "Figure 10-19",
+      "Figure 10-20",
+      ...Array.from({ length: 11 }, (_, index) => `Figure 10-${index + 21}`),
+    ])
     expect(
       discovery.hints
         .filter(({ condition_conflicts }) => condition_conflicts.length > 0)
         .map(({ figure }) => figure),
-    ).toEqual(["Figure 10-23", "Figure 10-26", "Figure 10-27", "Figure 10-28", "Figure 10-29"])
+    ).toEqual([
+      "Figure 10-17",
+      "Figure 10-18",
+      "Figure 10-19",
+      "Figure 10-20",
+      "Figure 10-23",
+      "Figure 10-26",
+      "Figure 10-27",
+      "Figure 10-29",
+      "Figure 10-30",
+      "Figure 10-31",
+    ])
   })
 
   test("finds the alert response-time figures present in run 94", () => {
@@ -1164,13 +1375,15 @@ describe("independent reference-graph observation", () => {
     observed.graphs[0]!.page = load_hint.page
     observed.graphs[0]!.locator = `${load_hint.figure}. Load Transient`
     observed.graphs[0]!.crop = { ...observed.graphs[0]!.crop, page: load_hint.page }
-    observed.graphs[0]!.electrical_binding.stimulus.pulse.rise = 0.000001
-    observed.graphs[0]!.electrical_binding.stimulus.pulse.fall = 0.000001
+    observed.graphs[0]!.electrical_binding.stimulus.pulse!.rise = 0.000001
+    observed.graphs[0]!.electrical_binding.stimulus.pulse!.fall = 0.000001
     observed.graphs[0]!.electrical_binding.response.nominal_volts = 3.3
     observed.graphs[0]!.electrical_binding.auxiliary_fixtures = [
       { type: "dc_voltage", positive: "dut.VIN", negative: "gnd", dc_volts: 2.5 },
       { type: "logic_state", endpoint: "dut.MODE", reference: "gnd", state: "low" },
     ]
+    observed.graphs[0]!.electrical_binding.stimulus.pulse!.rise = 0.000001
+    observed.graphs[0]!.electrical_binding.stimulus.pulse!.fall = 0.000001
 
     const switching_node_interface: ModelInterface = {
       ...structuredClone(model_interface),
@@ -1199,13 +1412,13 @@ describe("independent reference-graph observation", () => {
         parseReferenceGraphObservation(observed, load_discovery, switching_node_interface),
       ),
     ).toHaveLength(1)
-    observed.graphs[0]!.electrical_binding.stimulus.pulse.high = 0.9
+    observed.graphs[0]!.electrical_binding.stimulus.pulse!.high = 0.9
     expect(() => parseReferenceGraphObservation(observed, load_discovery, switching_node_interface)).toThrow(
       /must exactly match the server-extracted printed response nominal, stimulus, and every auxiliary fixture/,
     )
   })
 
-  test("canonicalizes conflicting run-93 summary and graph conditions as fixture-ineligible", async () => {
+  test("uses graph-local run-93 conditions while retaining summary conflicts", async () => {
     const run93_text = (
       await readFile(
         join(import.meta.dir, "fixtures/model-run-replays/run93-tps63802-time-graphs.txt"),
@@ -1223,7 +1436,12 @@ describe("independent reference-graph observation", () => {
         graph_value: "dc_voltage:5",
       },
     ])
-    expect(conflict_hint.transient_fixture_evidence).toBeNull()
+    expect(conflict_hint.transient_fixture_evidence).toMatchObject({
+      auxiliary_conditions: [
+        { kind: "dc_voltage", signal: "VI", value: 5 },
+        { kind: "logic_state", signal: "MODE", state: "low" },
+      ],
+    })
     const observed = validObservationValue()
     observed.reviewed_hints = [
       {
@@ -1236,6 +1454,12 @@ describe("independent reference-graph observation", () => {
     observed.graphs[0]!.page = conflict_hint.page
     observed.graphs[0]!.locator = `${conflict_hint.figure}. Load Transient`
     observed.graphs[0]!.crop = { ...observed.graphs[0]!.crop, page: conflict_hint.page }
+    observed.graphs[0]!.electrical_binding.auxiliary_fixtures = [
+      { type: "dc_voltage", positive: "dut.VIN", negative: "gnd", dc_volts: 5 },
+      { type: "logic_state", endpoint: "dut.MODE", reference: "gnd", state: "low" },
+    ]
+    observed.graphs[0]!.electrical_binding.stimulus.pulse!.rise = 0.000001
+    observed.graphs[0]!.electrical_binding.stimulus.pulse!.fall = 0.000001
     const parsed = parseReferenceGraphObservation(
       observed,
       {
@@ -1246,11 +1470,10 @@ describe("independent reference-graph observation", () => {
       },
       model_interface,
     )
-    expect(parsed.graphs[0]).toMatchObject({
-      fixture_reproducible: false,
-      reason: expect.stringContaining("condition"),
-    })
-    expect(parsed.graphs[0]?.electrical_binding).toBeUndefined()
+    expect(eligibleObservedGraphs(parsed)).toHaveLength(1)
+    expect(parsed.graphs[0]?.electrical_binding?.auxiliary_fixtures).toEqual(
+      observed.graphs[0]!.electrical_binding.auxiliary_fixtures,
+    )
   })
 
   test("requires the exact run-93 VIN and MODE fixtures one-to-one and rejects response clamps", () => {
@@ -1316,7 +1539,7 @@ describe("independent reference-graph observation", () => {
               positive: "dut.VOUT",
               negative: "gnd",
               dc_amps: 0.1,
-              pulse: structuredClone(run93_binding.stimulus.pulse),
+              pulse: structuredClone(run93_binding.stimulus.pulse!),
             },
             {
               id: "vin_bias",
@@ -1482,7 +1705,7 @@ describe("independent reference-graph observation", () => {
               positive: "dut.VIN",
               negative: "gnd",
               dc_volts: 2.2,
-              pulse: structuredClone(line_binding.stimulus.pulse),
+              pulse: structuredClone(line_binding.stimulus.pulse!),
             },
             {
               id: "static_load",
@@ -1551,7 +1774,7 @@ describe("independent reference-graph observation", () => {
     expect(() => parse(duplicated_load)).toThrow(/requirement_auxiliary_fixture_mismatch/)
   })
 
-  test("rejects an invented pulse for a run-93 switching waveform with no printed step", async () => {
+  test("excludes a run-93 steady switching waveform that the causal tscircuit model cannot reproduce", async () => {
     const run93_text = (
       await readFile(
         join(import.meta.dir, "fixtures/model-run-replays/run93-tps63802-time-graphs.txt"),
@@ -1559,36 +1782,52 @@ describe("independent reference-graph observation", () => {
       )
     ).replaceAll("\\f", "\f")
     const switching_hint = findLikelyTimeGraphCandidates(run93_text).find(
-      ({ figure }) => figure === "Figure 10-15",
+      ({ figure }) => figure === "Figure 10-19",
     )!
-    expect(switching_hint.transient_fixture_evidence).toBeNull()
+    expect(switching_hint.transient_fixture_evidence).toMatchObject({
+      stimulus: { type: "steady_state" },
+      auxiliary_conditions: [
+        { kind: "dc_voltage", signal: "VI", value: 3.3 },
+        { kind: "logic_state", signal: "MODE", state: "low" },
+        { kind: "dc_current", signal: "IO", value: 2 },
+      ],
+    })
     const switching_discovery: TimeGraphDiscovery = {
       version: 1,
       source_pdf_sha256,
       page_count: 4,
       hints: [{ hint_id: "time_graph_001", ...switching_hint }],
     }
-    const malicious = validObservationValue()
-    malicious.reviewed_hints = [
+    const observed = validObservationValue()
+    observed.reviewed_hints = [
       {
         hint_id: "time_graph_001",
         disposition: "graph",
         graph_id: "switching_waveform",
-        reason: "Invent a convenient public pulse.",
+        reason: "The switching output is sampled under its complete static setup.",
       },
     ]
-    malicious.graphs[0]!.graph_id = "switching_waveform"
-    malicious.graphs[0]!.page = switching_hint.page
-    malicious.graphs[0]!.locator = `${switching_hint.figure}. Switching Waveforms`
-    malicious.graphs[0]!.crop = { ...malicious.graphs[0]!.crop, page: switching_hint.page }
-
-    const canonical = parseReferenceGraphObservation(malicious, switching_discovery, model_interface)
-    expect(eligibleObservedGraphs(canonical)).toEqual([])
-    expect(canonical.graphs[0]).toMatchObject({
+    observed.graphs[0]!.graph_id = "switching_waveform"
+    observed.graphs[0]!.page = switching_hint.page
+    observed.graphs[0]!.locator = `${switching_hint.figure}. Switching Waveforms`
+    observed.graphs[0]!.crop = { ...observed.graphs[0]!.crop, page: switching_hint.page }
+    observed.graphs[0]!.electrical_binding = {
+      response: { type: "voltage", positive: "dut.VOUT", negative: "gnd", nominal_volts: 3.3 },
+      stimulus: { type: "steady_state" },
+      auxiliary_fixtures: [
+        { type: "dc_voltage", positive: "dut.VIN", negative: "gnd", dc_volts: 3.3 },
+        { type: "logic_state", endpoint: "dut.MODE", reference: "gnd", state: "low" },
+        { type: "dc_current", positive: "dut.VOUT", negative: "gnd", dc_amps: 2 },
+      ],
+    }
+    const parsed = parseReferenceGraphObservation(observed, switching_discovery, model_interface)
+    expect(eligibleObservedGraphs(parsed)).toHaveLength(0)
+    expect(parsed.graphs[0]).toMatchObject({
       fixture_reproducible: false,
-      reason: expect.stringContaining("electrical fixture cannot be invented"),
+      reason: expect.stringContaining("forbids autonomous time-driven behavior"),
     })
-    expect(canonical.graphs[0]?.electrical_binding).toBeUndefined()
+    expect(parsed.graphs[0]).not.toHaveProperty("electrical_binding")
+    expect(parsed.graphs[0]).not.toHaveProperty("digitized_curve")
   })
 
   test("an observer cannot dismiss a server-detected transient caption", () => {
@@ -1745,7 +1984,7 @@ describe("independent reference-graph observation", () => {
     const stubborn_agent: AgentClient = {
       async run(input) {
         agent_calls += 1
-        expect(input.phase_label).toBe("Independent datasheet graph inventory")
+        expect(input.phase_label).toBe("Independent datasheet graph discovery")
         const discovered = JSON.parse(
           await readFile(join(input.workspace, "time-graph-hints.json"), "utf8"),
         ) as TimeGraphDiscovery
@@ -1769,6 +2008,8 @@ describe("independent reference-graph observation", () => {
                 locator: `${hint.figure}. Alert Response Time`,
                 crop: { ...observer_crop, page: hint.page, y_px: observer_crop.y_px + index * 120 },
                 reason: "A plain public VBUS pulse should reproduce the ALERT response.",
+                electrical_binding: undefined,
+                digitized_curve: undefined,
               })),
             },
             null,
@@ -1931,6 +2172,17 @@ describe("independent reference-graph observation", () => {
     ])
   })
 
+  test("accepts sparse points connected by an oscillating rendered waveform", async () => {
+    const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+
+    await verifyReferenceGraphObservationPixels({
+      observation,
+      datasheet_path: await createPixelProofDatasheet(),
+      process_runner: new ReferenceGraphCropRunner("oscillating"),
+      signal: new AbortController().signal,
+    })
+  })
+
   test("rejects calibrated points that miss the rendered response trace", async () => {
     const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
     let failure: unknown
@@ -1983,14 +2235,29 @@ describe("independent reference-graph observation", () => {
   test("rejects disconnected matching pixels that do not form the claimed waveform", async () => {
     const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
 
-    await expect(
-      verifyReferenceGraphObservationPixels({
+    let failure: unknown
+    try {
+      await verifyReferenceGraphObservationPixels({
         observation,
         datasheet_path: await createPixelProofDatasheet(),
         process_runner: new ReferenceGraphCropRunner("points_only"),
         signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow(/disconnected point samples instead of a continuous rendered waveform/)
+      })
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(Error)
+    const message = failure instanceof Error ? failure.message : ""
+    expect(message).toContain("disconnected point samples instead of a continuous rendered waveform")
+    expect(message).toContain("aggregate connected-span support; at least 75.0% is required")
+    expect(message).toContain("Weakest point-to-point segments: #")
+    expect(message).toContain("connected-span weight (")
+    expect(message).toContain("one declared-color trace component")
+    expect(message).toContain("replace every point inside each weak segment")
+    expect(message).toContain("one continuous response centerline")
+    expect(message).toContain("same-colored scope channel")
+    expect(message).toContain("Preserve the required point count")
+    expect(message).toContain("one-for-one with an added transition point")
   })
 
   test("rejects connected monochrome axes and grid lines impersonating the response trace", async () => {
@@ -2123,7 +2390,7 @@ describe("independent reference-graph observation", () => {
     )
 
     const flat_stimulus = validObservationValue()
-    flat_stimulus.graphs[0]!.electrical_binding.stimulus.pulse.high = 0.1
+    flat_stimulus.graphs[0]!.electrical_binding.stimulus.pulse!.high = 0.1
     expect(() => parseReferenceGraphObservation(flat_stimulus, discovery, model_interface)).toThrow(
       /pulse\.low and .*pulse\.high must differ/,
     )

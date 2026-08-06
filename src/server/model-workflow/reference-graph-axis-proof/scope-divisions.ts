@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ProcessRunner } from "../../infrastructure/process"
 import { decodeModelEvidencePng } from "../model-evidence-pages"
-import { eligibleObservedGraphs, type ReferenceGraphAxisAnchor } from "../reference-graph-observation"
+import { eligibleObservedGraphs } from "../reference-graph-observation"
 import { divisionScaleCandidates, measurementCandidates, parseTesseractTsv } from "./ocr-extraction"
 import { ANCHOR_PIXEL_TOLERANCE, MAX_TSV_BYTES, OCR_DPI, OCR_SCALE, sha256 } from "./shared"
 import type { ReferenceDivisionScaleSource, ReferenceGridCalibrationSource, TesseractWord } from "./types"
@@ -42,9 +42,15 @@ export async function ocrScopePanels(input: {
     return undefined
   }
   const horizontal = horizontal_words[0]
+  const traced_plot_right =
+    Math.max(
+      input.graph.digitized_curve.x_axis.first.pixel,
+      input.graph.digitized_curve.x_axis.second.pixel,
+      ...input.graph.digitized_curve.points.map(({ pixel_x }) => pixel_x),
+    ) * OCR_SCALE
   const panel_left = horizontal
     ? Math.max(0, Math.floor(horizontal.bbox.left - 24))
-    : Math.max(0, input.render_width - 384)
+    : Math.max(0, Math.min(input.render_width - 384, Math.floor(traced_plot_right - 24)))
   const panel_top = horizontal ? Math.max(0, Math.floor(horizontal.bbox.top - 24)) : 0
   const regions = [
     {
@@ -137,16 +143,6 @@ export function neutralGridProfile(input: {
   axis: "x" | "y"
   graph: ReturnType<typeof eligibleObservedGraphs>[number]
 }): number[] {
-  const pixelForValue = (
-    axis: {
-      first: ReferenceGraphAxisAnchor
-      second: ReferenceGraphAxisAnchor
-    },
-    value: number,
-  ) =>
-    axis.first.pixel +
-    ((value - axis.first.value) / (axis.second.value - axis.first.value)) *
-      (axis.second.pixel - axis.first.pixel)
   const point_x = input.graph.digitized_curve.points.map(({ pixel_x }) => pixel_x * OCR_SCALE)
   const point_y = input.graph.digitized_curve.points.map(({ pixel_y }) => pixel_y * OCR_SCALE)
   const anchor_x = [
@@ -157,21 +153,17 @@ export function neutralGridProfile(input: {
     input.graph.digitized_curve.y_axis.first.pixel * OCR_SCALE,
     input.graph.digitized_curve.y_axis.second.pixel * OCR_SCALE,
   ]
-  const range_x = [
-    pixelForValue(input.graph.digitized_curve.x_axis, input.graph.digitized_curve.x_range.min) * OCR_SCALE,
-    pixelForValue(input.graph.digitized_curve.x_axis, input.graph.digitized_curve.x_range.max) * OCR_SCALE,
-  ]
-  const range_y = [
-    pixelForValue(input.graph.digitized_curve.y_axis, input.graph.digitized_curve.y_range.min) * OCR_SCALE,
-    pixelForValue(input.graph.digitized_curve.y_axis, input.graph.digitized_curve.y_range.max) * OCR_SCALE,
-  ]
-  const axis_values =
-    input.axis === "x" ? [...point_x, ...anchor_x, ...range_x] : [...point_y, ...anchor_y, ...range_y]
   const cross_values = input.axis === "x" ? [...point_y, ...anchor_y] : [...point_x, ...anchor_x]
   const axis_limit = input.axis === "x" ? input.decoded.width : input.decoded.height
   const cross_limit = input.axis === "x" ? input.decoded.height : input.decoded.width
-  const axis_min = Math.max(0, Math.floor(Math.min(...axis_values) - 12))
-  const axis_max = Math.min(axis_limit - 1, Math.ceil(Math.max(...axis_values) + 12))
+  // Sweep the complete source crop along the axis being proved. Restricting
+  // this dimension to the observer's claimed anchors/range creates a circular
+  // proof: a correction that narrows to two adjacent grid lines hides the
+  // third line dominantGrid needs to establish the spacing. The perpendicular
+  // sampling band remains tied to the traced plot, so unrelated crop content
+  // cannot supply a grid merely by being elsewhere in the image.
+  const axis_min = 0
+  const axis_max = axis_limit - 1
   const cross_min = Math.max(0, Math.floor(Math.min(...cross_values) - 36))
   const cross_max = Math.min(cross_limit - 1, Math.ceil(Math.max(...cross_values) + 36))
   const scored: Array<{ pixel: number; score: number }> = []

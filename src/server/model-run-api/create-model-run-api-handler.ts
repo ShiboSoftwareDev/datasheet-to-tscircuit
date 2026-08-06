@@ -9,6 +9,7 @@ import { errorResponse, getJobId } from "./model-run-api-responses"
 import { createEventStream } from "./create-model-run-event-stream"
 import { getModelRunFile } from "./get-model-run-file"
 import { getBenchmarkReferenceImage } from "./get-benchmark-reference-image"
+import { getFoundReferenceImage } from "./get-found-reference-image"
 
 export function createModelRunApiHandler(context: ModelRunApiContext) {
   return async (request: Request): Promise<Response | undefined> => {
@@ -35,6 +36,9 @@ export function createModelRunApiHandler(context: ModelRunApiContext) {
     }
     if (request_url.pathname === "/api/model-run/reference-image" && request.method === "GET") {
       return getBenchmarkReferenceImage(request_url, context)
+    }
+    if (request_url.pathname === "/api/model-run/found-reference-image" && request.method === "GET") {
+      return getFoundReferenceImage(request_url, context)
     }
     if (request_url.pathname === "/api/model-run/events" && request.method === "GET") {
       const job_id = getJobId(request_url)

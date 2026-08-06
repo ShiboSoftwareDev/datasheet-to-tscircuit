@@ -74,17 +74,12 @@ export type ModelPipelineOutputs = {
     application_fixture_sha256: string
   }
   find_reference_graphs: {
-    contract_path: string
-    family: string
-    strategy: string
-    modeled_requirement_ids: string[]
-    documented_only_count: number
+    found_reference_ids: string[]
+    evidence_dir: string
     application_fixture_path: string
     application_fixture_sha256: string
     time_graph_hints_path: string
     reference_observation_path: string
-    reference_source_proof_path: string
-    reference_verification_path: string
   }
   create_comparison_graphs: {
     plan_path: string

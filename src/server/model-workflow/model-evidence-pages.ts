@@ -149,7 +149,7 @@ export async function decodeModelEvidencePng(
   return { width, height, rgbAt }
 }
 
-async function assertPngContainsVisibleContent(path: string, requirement_id: string): Promise<void> {
+export async function assertPngContainsVisibleContent(path: string, requirement_id: string): Promise<void> {
   const { width, height, rgbAt } = await decodeModelEvidencePng(path, requirement_id)
   const corners = [rgbAt(0, 0), rgbAt(width - 1, 0), rgbAt(0, height - 1), rgbAt(width - 1, height - 1)]
   const background = ([0, 1, 2] as const).map((channel) => {

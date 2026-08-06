@@ -125,6 +125,14 @@ export function parseCase(
     application_fixture,
   })
   if (application_fixture) {
+    const binding = bound_requirement_id
+      ? requirement_by_id.get(bound_requirement_id)?.reference_curve?.electrical_binding
+      : undefined
+    const allowed_extra_passive_ids = new Set(
+      (binding?.auxiliary_fixtures ?? []).flatMap((fixture, index) =>
+        fixture.type === "resistor" ? [`condition_${index + 1}`] : [],
+      ),
+    )
     validateExactApplicationCase({
       raw_application_fixture: record.application_fixture,
       application_fixture,
@@ -132,6 +140,7 @@ export function parseCase(
       fixtures,
       path,
       collector,
+      allowed_extra_passive_ids,
     })
   } else if (record.application_fixture !== undefined) {
     collector.add(

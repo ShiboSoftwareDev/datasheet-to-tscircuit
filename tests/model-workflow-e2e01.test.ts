@@ -248,7 +248,10 @@ function deterministicAgent(calls: string[]): AgentClient {
   return {
     async run(input) {
       calls.push(input.phase_label)
-      if (input.phase_label === "Independent datasheet graph inventory") {
+      if (
+        input.phase_label === "Independent datasheet graph discovery" ||
+        input.phase_label === "Independent datasheet graph inventory"
+      ) {
         const discovery = JSON.parse(
           await Bun.file(join(input.workspace, "time-graph-hints.json")).text(),
         ) as { source_pdf_sha256: string }
@@ -342,6 +345,19 @@ function deterministicAgent(calls: string[]): AgentClient {
             2,
           )}\n`,
         )
+        if (input.phase_label === "Independent datasheet graph discovery") {
+          const found = (await Bun.file(
+            join(input.workspace, "model-reference-observation.json"),
+          ).json()) as {
+            graphs: Array<Record<string, unknown>>
+          }
+          delete found.graphs[0]!.electrical_binding
+          delete found.graphs[0]!.digitized_curve
+          await Bun.write(
+            join(input.workspace, "model-reference-observation.json"),
+            `${JSON.stringify(found, null, 2)}\n`,
+          )
+        }
         await input.on_output("stdout", `fixture completed ${input.phase_label}\n`)
         return { attempts: 1, duration_ms: 1, output_tail: "" }
       }
@@ -724,7 +740,11 @@ testWithProductionSimulation(
       "completed",
       "completed",
     ])
-    expect(agent_calls).toEqual(["Independent datasheet graph inventory", "SPICE model generation"])
+    expect(agent_calls).toEqual([
+      "Independent datasheet graph discovery",
+      "Independent datasheet graph inventory",
+      "SPICE model generation",
+    ])
     expect(
       process_runner.calls.filter(
         ({ command, command_label }) =>

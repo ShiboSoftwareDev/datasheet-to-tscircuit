@@ -26,8 +26,8 @@ export function parseTransientFixtureEvidence(
   if (value === null) return null
   if (!isRecord(value)) throw new Error(`${path} must be an object or null`)
   assertOnlyKeys(value, ["method", "source_excerpts", "response", "stimulus", "auxiliary_conditions"], path)
-  if (value.method !== "printed_experiment_conditions_v2") {
-    throw new Error(`${path}.method must be printed_experiment_conditions_v2`)
+  if (value.method !== "printed_experiment_conditions_v3") {
+    throw new Error(`${path}.method must be printed_experiment_conditions_v3`)
   }
   if (!Array.isArray(value.source_excerpts) || value.source_excerpts.length < 1) {
     throw new Error(`${path}.source_excerpts must be a non-empty array`)
@@ -54,10 +54,31 @@ export function parseTransientFixtureEvidence(
   assertOnlyKeys(response, ["signal", "quantity", "nominal_volts"], `${path}.response`)
   if (response.quantity !== "voltage") throw new Error(`${path}.response.quantity must be voltage`)
   const stimulus = record(value.stimulus, `${path}.stimulus`)
-  assertOnlyKeys(stimulus, ["signal", "type", "low", "high", "rise", "fall"], `${path}.stimulus`)
-  if (stimulus.type !== "voltage_step" && stimulus.type !== "current_step") {
-    throw new Error(`${path}.stimulus.type must be voltage_step or current_step`)
-  }
+  const parsed_stimulus: TimeGraphTransientFixtureEvidence["stimulus"] = (() => {
+    if (stimulus.type === "steady_state") {
+      assertOnlyKeys(stimulus, ["type"], `${path}.stimulus`)
+      return { type: "steady_state" }
+    }
+    assertOnlyKeys(stimulus, ["signal", "type", "low", "high", "rise", "fall"], `${path}.stimulus`)
+    if (stimulus.type !== "voltage_step" && stimulus.type !== "current_step") {
+      throw new Error(`${path}.stimulus.type must be steady_state, voltage_step, or current_step`)
+    }
+    const result = {
+      signal: boundedString(stimulus.signal, `${path}.stimulus.signal`, 64),
+      type: stimulus.type as "voltage_step" | "current_step",
+      low: finiteNumber(stimulus.low, `${path}.stimulus.low`),
+      high: finiteNumber(stimulus.high, `${path}.stimulus.high`),
+      rise: finiteNumber(stimulus.rise, `${path}.stimulus.rise`),
+      fall: finiteNumber(stimulus.fall, `${path}.stimulus.fall`),
+    }
+    if (result.low === result.high) {
+      throw new Error(`${path}.stimulus.low and ${path}.stimulus.high must differ`)
+    }
+    if (result.rise < 0 || result.fall < 0) {
+      throw new Error(`${path}.stimulus.rise and ${path}.stimulus.fall must be non-negative`)
+    }
+    return result
+  })()
   if (!Array.isArray(value.auxiliary_conditions)) {
     throw new Error(`${path}.auxiliary_conditions must be an array`)
   }
@@ -83,35 +104,29 @@ export function parseTransientFixtureEvidence(
         state: entry.state,
       }
     }
-    throw new Error(`${condition_path}.kind must be dc_voltage, dc_current, or logic_state`)
+    if (entry.kind === "resistance") {
+      assertOnlyKeys(entry, ["kind", "signal", "value"], condition_path)
+      if (entry.signal !== "load") throw new Error(`${condition_path}.signal must be load`)
+      const resistance = finiteNumber(entry.value, `${condition_path}.value`)
+      if (!(resistance > 0)) throw new Error(`${condition_path}.value must be positive`)
+      return { kind: "resistance", signal: "load", value: resistance }
+    }
+    throw new Error(`${condition_path}.kind must be dc_voltage, dc_current, logic_state, or resistance`)
   })
   const auxiliary_keys = auxiliary_conditions.map(({ signal }) => normalizedSignalLabel(signal))
   if (new Set(auxiliary_keys).size !== auxiliary_keys.length) {
     throw new Error(`${path}.auxiliary_conditions must not contain duplicate signals`)
   }
   const result: TimeGraphTransientFixtureEvidence = {
-    method: "printed_experiment_conditions_v2",
+    method: "printed_experiment_conditions_v3",
     source_excerpts,
     response: {
       signal: boundedString(response.signal, `${path}.response.signal`, 64),
       quantity: "voltage",
       nominal_volts: finiteNumber(response.nominal_volts, `${path}.response.nominal_volts`),
     },
-    stimulus: {
-      signal: boundedString(stimulus.signal, `${path}.stimulus.signal`, 64),
-      type: stimulus.type,
-      low: finiteNumber(stimulus.low, `${path}.stimulus.low`),
-      high: finiteNumber(stimulus.high, `${path}.stimulus.high`),
-      rise: finiteNumber(stimulus.rise, `${path}.stimulus.rise`),
-      fall: finiteNumber(stimulus.fall, `${path}.stimulus.fall`),
-    },
+    stimulus: parsed_stimulus,
     auxiliary_conditions,
-  }
-  if (result.stimulus.low === result.stimulus.high) {
-    throw new Error(`${path}.stimulus.low and ${path}.stimulus.high must differ`)
-  }
-  if (result.stimulus.rise < 0 || result.stimulus.fall < 0) {
-    throw new Error(`${path}.stimulus.rise and ${path}.stimulus.fall must be non-negative`)
   }
   return result
 }
@@ -284,11 +299,20 @@ function printedConditionConflicts(
   })
 }
 
+function printedLoadResistance(context: string): number | undefined {
+  const match = new RegExp(
+    `(${NUMBER_SOURCE})\\s*([munpµμ]?)\\s*(?:Ω|ohms?)\\s+resi(?:stive)?\\b.{0,500}?\\bload`,
+    "i",
+  ).exec(context)
+  if (!match) return undefined
+  const value = toSi(match[1]!, `${match[2] ?? ""}ohm`)
+  return value !== undefined && value > 0 ? value : undefined
+}
+
 /**
- * Extracts the complete, narrow experiment class the current simulator can
- * reproduce: one numeric step, a printed output-voltage nominal, and every
- * graph-local static electrical/logical condition. Conflicting retained
- * summary/caption facts fail closed instead of using a precedence heuristic.
+ * Extracts simulator-capable printed experiments. Figure-local conditions own
+ * executable values; the characteristics table remains discovery metadata and
+ * is used only when the figure itself omits a condition.
  */
 export function deriveTimeGraphPrintedExperiment(input: {
   fixture_evidence_context: string
@@ -299,6 +323,48 @@ export function deriveTimeGraphPrintedExperiment(input: {
 } {
   const stimulus_context = input.fixture_evidence_context
   const normalized_stimulus = compactText(stimulus_context)
+  const summary_context = input.summary_fixture_evidence_context
+    ? compactText(input.summary_fixture_evidence_context)
+    : null
+  const summary_facts = summary_context ? parsePrintedConditionFacts(summary_context) : []
+  const graph_facts = parsePrintedConditionFacts(normalized_stimulus)
+  const condition_conflicts = printedConditionConflicts(summary_facts, graph_facts)
+  const all_facts = new Map([...summary_facts, ...graph_facts].map((fact) => [fact.key, fact]))
+  const load_resistance = printedLoadResistance(normalized_stimulus)
+  if (load_resistance !== undefined) all_facts.delete("dc_current:IO")
+  const response_candidates = [...all_facts.values()].filter(
+    (fact) => fact.kind === "dc_voltage" && electricalSignalMatches(fact.signal, "output_voltage"),
+  ) as Array<ParsedConditionFact & { kind: "dc_voltage"; value: number }>
+  const response = response_candidates.length === 1 ? response_candidates[0] : undefined
+  const source_excerpts: TimeGraphTransientFixtureEvidence["source_excerpts"] = [
+    {
+      scope: "graph_caption",
+      text: normalized_stimulus.slice(0, MAX_FIXTURE_SOURCE_EXCERPT_LENGTH),
+    },
+    ...(summary_context
+      ? ([
+          {
+            scope: "summary_row" as const,
+            text: summary_context.slice(0, MAX_FIXTURE_SOURCE_EXCERPT_LENGTH),
+          },
+        ] as const)
+      : []),
+  ]
+  const auxiliaryConditions = (stimulus_signal?: string): TimeGraphAuxiliaryCondition[] => [
+    ...[...all_facts.values()].flatMap((fact): TimeGraphAuxiliaryCondition[] => {
+      if (fact.signal === response?.signal || fact.signal === stimulus_signal) return []
+      if (fact.kind === "dc_voltage" || fact.kind === "dc_current") {
+        return [{ kind: fact.kind, signal: fact.signal, value: fact.value }]
+      }
+      if (fact.kind === "logic_state") {
+        return [{ kind: "logic_state", signal: fact.signal, state: fact.state }]
+      }
+      return []
+    }),
+    ...(load_resistance === undefined
+      ? []
+      : ([{ kind: "resistance", signal: "load", value: load_resistance }] as const)),
+  ]
   const prefix_candidates = (["A", "V"] as const).flatMap((base_unit) => {
     const pattern = new RegExp(
       `\\b(load\\s+current|[iv][a-z0-9_]*)\\s+(?:current\\s+)?(?:steps?\\s+)?from\\s+(${NUMBER_SOURCE})\\s*([munpµμ]?${base_unit})\\b`,
@@ -310,22 +376,55 @@ export function deriveTimeGraphPrintedExperiment(input: {
   const prefix = prefix_candidates.sort(
     (left, right) => (left.match.index ?? 0) - (right.match.index ?? 0),
   )[0]
-  if (!prefix) return { evidence: null, condition_conflicts: [] }
+  if (!prefix) {
+    if (!response) return { evidence: null, condition_conflicts }
+    const input_supply = [...all_facts.values()].find(
+      (fact) => fact.kind === "dc_voltage" && electricalSignalMatches(fact.signal, "input_voltage"),
+    ) as (ParsedConditionFact & { kind: "dc_voltage"; value: number }) | undefined
+    if (!input_supply) return { evidence: null, condition_conflicts }
+    const is_rising_enable = /\b(?:start[- ]?up[^.]{0,160})?rising\s+enable\b/i.test(normalized_stimulus)
+    const auxiliary_conditions = auxiliaryConditions(is_rising_enable ? "EN" : undefined)
+    const has_operating_load = auxiliary_conditions.some(
+      (condition) =>
+        condition.kind === "resistance" ||
+        (condition.kind === "dc_current" && electricalSignalMatches(condition.signal, "load_current")),
+    )
+    if (!has_operating_load) return { evidence: null, condition_conflicts }
+    return {
+      evidence: {
+        method: "printed_experiment_conditions_v3",
+        source_excerpts,
+        response: { signal: response.signal, quantity: "voltage", nominal_volts: response.value },
+        stimulus: is_rising_enable
+          ? {
+              signal: "EN",
+              type: "voltage_step",
+              low: 0,
+              high: input_supply.value,
+              rise: 0,
+              fall: 0,
+            }
+          : { type: "steady_state" },
+        auxiliary_conditions,
+      },
+      condition_conflicts,
+    }
+  }
   const prefix_end = (prefix.match.index ?? 0) + prefix.match[0].length
   const after_prefix = normalized_stimulus.slice(prefix_end, prefix_end + 700)
   const to_match = /\bto\b/i.exec(after_prefix)
-  if (!to_match || (to_match.index ?? 0) > 160) return { evidence: null, condition_conflicts: [] }
+  if (!to_match || (to_match.index ?? 0) > 160) return { evidence: null, condition_conflicts }
   const after_to_offset = prefix_end + (to_match.index ?? 0) + to_match[0].length
   const after_to = normalized_stimulus.slice(after_to_offset, after_to_offset + 540)
   const rise_label = /\b(?:t[_\s]*r|rise(?:\s+time)?)\b/i.exec(after_to)
-  if (!rise_label || (rise_label.index ?? 0) > 260) return { evidence: null, condition_conflicts: [] }
+  if (!rise_label || (rise_label.index ?? 0) > 260) return { evidence: null, condition_conflicts }
   const rise_label_offset = after_to_offset + (rise_label.index ?? 0)
   const after_rise_label = normalized_stimulus.slice(
     rise_label_offset + rise_label[0].length,
     rise_label_offset + rise_label[0].length + 260,
   )
   const fall_label = /\b(?:t[_\s]*f|fall(?:\s+time)?)\b/i.exec(after_rise_label)
-  if (!fall_label || (fall_label.index ?? 0) > 180) return { evidence: null, condition_conflicts: [] }
+  if (!fall_label || (fall_label.index ?? 0) > 180) return { evidence: null, condition_conflicts }
   const fall_label_offset = rise_label_offset + rise_label[0].length + (fall_label.index ?? 0)
   const high_quantity = lastElectricalQuantity(
     normalized_stimulus.slice(after_to_offset, rise_label_offset),
@@ -340,7 +439,7 @@ export function deriveTimeGraphPrintedExperiment(input: {
   )
   const fall_quantity = firstTimeQuantity(fall_segment)
   if (!high_quantity || !rise_quantity || !fall_quantity) {
-    return { evidence: null, condition_conflicts: [] }
+    return { evidence: null, condition_conflicts }
   }
   const stimulus_signal = canonicalConditionSignal(prefix.match[1]!)
   const low = toSi(prefix.match[2]!, prefix.match[3]!)
@@ -356,7 +455,7 @@ export function deriveTimeGraphPrintedExperiment(input: {
     rise < 0 ||
     fall < 0
   ) {
-    return { evidence: null, condition_conflicts: [] }
+    return { evidence: null, condition_conflicts }
   }
   const source_start = prefix.match.index ?? 0
   const source_end =
@@ -370,9 +469,6 @@ export function deriveTimeGraphPrintedExperiment(input: {
     .slice(Math.max(0, source_start - 180), excerpt_end)
     .slice(0, MAX_FIXTURE_SOURCE_EXCERPT_LENGTH)
     .trim()
-  const graph_facts_by_key = new Map(
-    parsePrintedConditionFacts(graph_excerpt).map((fact) => [fact.key, fact]),
-  )
   const stimulus_fact: ParsedConditionFact = {
     key: `step:${stimulus_signal}`,
     display: `${prefix.base_unit === "A" ? "current_step" : "voltage_step"}:${low}:${high}`,
@@ -381,47 +477,15 @@ export function deriveTimeGraphPrintedExperiment(input: {
     low,
     high,
   }
-  graph_facts_by_key.set(stimulus_fact.key, stimulus_fact)
-  const graph_facts = [...graph_facts_by_key.values()]
-  const summary_context = input.summary_fixture_evidence_context
-    ? compactText(input.summary_fixture_evidence_context)
-    : null
-  const summary_facts = summary_context ? parsePrintedConditionFacts(summary_context) : []
-  const condition_conflicts = printedConditionConflicts(summary_facts, graph_facts)
-  if (condition_conflicts.length > 0) return { evidence: null, condition_conflicts }
-
-  const all_facts = new Map([...summary_facts, ...graph_facts].map((fact) => [fact.key, fact]))
   all_facts.set(stimulus_fact.key, stimulus_fact)
-  const response_candidates = [...all_facts.values()].filter(
-    (fact) => fact.kind === "dc_voltage" && electricalSignalMatches(fact.signal, "output_voltage"),
-  ) as Array<ParsedConditionFact & { kind: "dc_voltage"; value: number }>
-  if (response_candidates.length !== 1) return { evidence: null, condition_conflicts: [] }
-  const response = response_candidates[0]!
-  const auxiliary_conditions = [...all_facts.values()].flatMap((fact): TimeGraphAuxiliaryCondition[] => {
-    if (fact.signal === response.signal || fact.signal === stimulus_signal) return []
-    if (fact.kind === "dc_voltage" || fact.kind === "dc_current") {
-      return [{ kind: fact.kind, signal: fact.signal, value: fact.value }]
-    }
-    if (fact.kind === "logic_state") {
-      return [{ kind: "logic_state", signal: fact.signal, state: fact.state }]
-    }
-    return []
-  })
-  const source_excerpts: TimeGraphTransientFixtureEvidence["source_excerpts"] = [
-    { scope: "graph_caption", text: graph_excerpt },
-    ...(summary_context
-      ? ([
-          {
-            scope: "summary_row" as const,
-            text: summary_context.slice(0, MAX_FIXTURE_SOURCE_EXCERPT_LENGTH),
-          },
-        ] as const)
-      : []),
-  ]
+  if (!response) return { evidence: null, condition_conflicts }
   return {
     evidence: {
-      method: "printed_experiment_conditions_v2",
-      source_excerpts,
+      method: "printed_experiment_conditions_v3",
+      source_excerpts: [
+        { scope: "graph_caption", text: graph_excerpt },
+        ...source_excerpts.filter(({ scope }) => scope === "summary_row"),
+      ],
       response: { signal: response.signal, quantity: "voltage", nominal_volts: response.value },
       stimulus: {
         signal: stimulus_signal,
@@ -431,7 +495,7 @@ export function deriveTimeGraphPrintedExperiment(input: {
         rise,
         fall,
       },
-      auxiliary_conditions,
+      auxiliary_conditions: auxiliaryConditions(stimulus_signal),
     },
     condition_conflicts,
   }

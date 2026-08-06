@@ -14,6 +14,19 @@ export type EligibleObservedReferenceGraph = ObservedReferenceGraph & {
   digitized_curve: ObservedVoltageTimeCurve
 }
 
+export type FoundObservedReferenceGraph = ObservedReferenceGraph & {
+  response_quantity: "voltage"
+  public_pin_observable: true
+  fixture_reproducible: true
+}
+
+export function foundObservedGraphs(observation: ReferenceGraphObservation): FoundObservedReferenceGraph[] {
+  return observation.graphs.filter(
+    (graph): graph is FoundObservedReferenceGraph =>
+      graph.response_quantity === "voltage" && graph.public_pin_observable && graph.fixture_reproducible,
+  )
+}
+
 export function eligibleObservedGraphs(
   observation: ReferenceGraphObservation,
 ): EligibleObservedReferenceGraph[] {

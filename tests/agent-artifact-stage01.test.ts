@@ -855,7 +855,9 @@ test("bounded cumulative feedback preserves every attempt and the newest diagnos
       build_prompt: (feedback) => feedback ?? "first attempt",
       async validate(_workspace, attempt) {
         if (attempt <= 3) {
-          throw new Error(`attempt-${attempt}-prefix:${"x".repeat(7_000)}:attempt-${attempt}-latest-detail`)
+          throw new Error(
+            `attempt-${attempt}-prefix:${"x".repeat(3_500)}:attempt-${attempt}-middle-detail:${"y".repeat(3_500)}:attempt-${attempt}-latest-detail`,
+          )
         }
         return "valid"
       },
@@ -871,6 +873,8 @@ test("bounded cumulative feedback preserves every attempt and the newest diagnos
       expect(prompts[3]).toContain(`attempt-${attempt}-prefix`)
       expect(prompts[3]).toContain(`attempt-${attempt}-latest-detail`)
     }
+    expect(prompts[3]).toContain("attempt-3-middle-detail")
+    expect(prompts[3]).not.toContain("attempt-1-middle-detail")
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -28,6 +28,116 @@ export class FixtureEndpointResolutionError extends Error {
   }
 }
 
+function resolvePrintedFixtureEndpoints(input: {
+  evidence: TimeGraphTransientFixtureEvidence
+  model_interface: ModelInterface
+  path: string
+}) {
+  const { evidence, model_interface, path } = input
+  const response_positive = uniquePrintedSignalEndpoint({
+    model_interface,
+    signal: evidence.response.signal,
+    path,
+  })
+  const stimulus_positive =
+    evidence.stimulus.type === "steady_state"
+      ? undefined
+      : evidence.stimulus.type === "current_step" &&
+          electricalSignalMatches(evidence.stimulus.signal, "load_current")
+        ? response_positive
+        : uniquePrintedSignalEndpoint({
+            model_interface,
+            signal: evidence.stimulus.signal,
+            path,
+          })
+  const auxiliary_fixtures = evidence.auxiliary_conditions.map((condition, index) => {
+    const condition_path = `${path} auxiliary condition ${index}`
+    if (condition.kind === "dc_voltage") {
+      return {
+        type: "dc_voltage" as const,
+        positive: uniquePrintedSignalEndpoint({
+          model_interface,
+          signal: condition.signal,
+          path: condition_path,
+        }),
+        negative: "gnd" as const,
+        dc_volts: condition.value,
+      }
+    }
+    if (condition.kind === "dc_current") {
+      const positive = electricalSignalMatches(condition.signal, "load_current")
+        ? response_positive
+        : uniquePrintedSignalEndpoint({
+            model_interface,
+            signal: condition.signal,
+            path: condition_path,
+          })
+      return {
+        type: "dc_current" as const,
+        positive,
+        negative: "gnd" as const,
+        dc_amps: condition.value,
+      }
+    }
+    if (condition.kind === "resistance") {
+      return {
+        type: "resistor" as const,
+        positive: response_positive,
+        negative: "gnd" as const,
+        resistance_ohms: condition.value,
+      }
+    }
+    const logic_endpoint = uniquePrintedSignalEndpoint({
+      model_interface,
+      signal: condition.signal,
+      path: condition_path,
+    })
+    const input_supply_endpoints = [
+      ...evidence.auxiliary_conditions.flatMap((candidate) =>
+        candidate.kind === "dc_voltage" && electricalSignalMatches(candidate.signal, "input_voltage")
+          ? [
+              uniquePrintedSignalEndpoint({
+                model_interface,
+                signal: candidate.signal,
+                path: condition_path,
+              }),
+            ]
+          : [],
+      ),
+      ...(evidence.stimulus.type === "voltage_step" &&
+      electricalSignalMatches(evidence.stimulus.signal, "input_voltage")
+        ? [stimulus_positive!]
+        : []),
+    ]
+    const unique_input_supply_endpoints = [...new Set(input_supply_endpoints)]
+    if (condition.state === "high" && unique_input_supply_endpoints.length !== 1) {
+      throw new FixtureEndpointResolutionError(
+        "input_supply_not_unique",
+        `${condition_path} printed high state cannot map uniquely to one public input-supply endpoint`,
+      )
+    }
+    return {
+      type: "logic_state" as const,
+      endpoint: logic_endpoint,
+      reference: condition.state === "low" ? ("gnd" as const) : unique_input_supply_endpoints[0]!,
+      state: condition.state,
+    }
+  })
+  return { response_positive, stimulus_positive, auxiliary_fixtures }
+}
+
+export function assertPrintedFixtureEndpointsResolvable(input: {
+  evidence: TimeGraphTransientFixtureEvidence
+  model_interface: ModelInterface
+  graph_id: string
+}): void {
+  resolvePrintedFixtureEndpoints({
+    evidence: input.evidence,
+    model_interface: input.model_interface,
+    path: `Observed graph ${input.graph_id}`,
+  })
+}
+
 function matchingPublicPins(model_interface: ModelInterface, signal: string): ModelInterface["pins"] {
   const normalized_signal = normalizeElectricalSignal(signal)
   const semantic_aliases = matchingElectricalSignalAliases(normalized_signal)
@@ -76,103 +186,34 @@ export function assertBindingMatchesPrintedFixture(input: {
 }): void {
   const { graph, evidence, model_interface } = input
   const path = `Eligible graph ${graph.graph_id}`
-  const response_positive = uniquePrintedSignalEndpoint({
+  const { response_positive, stimulus_positive, auxiliary_fixtures } = resolvePrintedFixtureEndpoints({
+    evidence,
     model_interface,
-    signal: evidence.response.signal,
     path,
   })
-  const stimulus_positive =
-    evidence.stimulus.type === "current_step" &&
-    electricalSignalMatches(evidence.stimulus.signal, "load_current")
-      ? response_positive
-      : uniquePrintedSignalEndpoint({
-          model_interface,
-          signal: evidence.stimulus.signal,
-          path,
-        })
-  const auxiliary_fixtures = evidence.auxiliary_conditions.map((condition, index) => {
-    const condition_path = `${path} auxiliary condition ${index}`
-    if (condition.kind === "dc_voltage") {
-      return {
-        type: "dc_voltage" as const,
-        positive: uniquePrintedSignalEndpoint({
-          model_interface,
-          signal: condition.signal,
-          path: condition_path,
-        }),
-        negative: "gnd" as const,
-        dc_volts: condition.value,
-      }
-    }
-    if (condition.kind === "dc_current") {
-      const positive = electricalSignalMatches(condition.signal, "load_current")
-        ? response_positive
-        : uniquePrintedSignalEndpoint({
-            model_interface,
-            signal: condition.signal,
-            path: condition_path,
-          })
-      return {
-        type: "dc_current" as const,
-        positive,
-        negative: "gnd" as const,
-        dc_amps: condition.value,
-      }
-    }
-    const logic_endpoint = uniquePrintedSignalEndpoint({
-      model_interface,
-      signal: condition.signal,
-      path: condition_path,
-    })
-    const input_supply_endpoints = [
-      ...evidence.auxiliary_conditions.flatMap((candidate) =>
-        candidate.kind === "dc_voltage" && electricalSignalMatches(candidate.signal, "input_voltage")
-          ? [
-              uniquePrintedSignalEndpoint({
-                model_interface,
-                signal: candidate.signal,
-                path: condition_path,
-              }),
-            ]
-          : [],
-      ),
-      ...(evidence.stimulus.type === "voltage_step" &&
-      electricalSignalMatches(evidence.stimulus.signal, "input_voltage")
-        ? [stimulus_positive]
-        : []),
-    ]
-    const unique_input_supply_endpoints = [...new Set(input_supply_endpoints)]
-    if (condition.state === "high" && unique_input_supply_endpoints.length !== 1) {
-      throw new FixtureEndpointResolutionError(
-        "input_supply_not_unique",
-        `${condition_path} printed high state cannot map uniquely to one public input-supply endpoint`,
-      )
-    }
-    return {
-      type: "logic_state" as const,
-      endpoint: logic_endpoint,
-      reference: condition.state === "low" ? ("gnd" as const) : unique_input_supply_endpoints[0]!,
-      state: condition.state,
-    }
-  })
   const binding = graph.electrical_binding
-  if (
+  const common_mismatch =
     binding.response.positive !== response_positive ||
     binding.response.negative !== "gnd" ||
     binding.response.nominal_volts !== evidence.response.nominal_volts ||
-    binding.stimulus.type !== evidence.stimulus.type ||
-    binding.stimulus.positive !== stimulus_positive ||
-    binding.stimulus.negative !== "gnd" ||
-    binding.stimulus.pulse.low !== evidence.stimulus.low ||
-    binding.stimulus.pulse.high !== evidence.stimulus.high ||
-    binding.stimulus.pulse.rise !== evidence.stimulus.rise ||
-    binding.stimulus.pulse.fall !== evidence.stimulus.fall ||
     JSON.stringify(binding.auxiliary_fixtures ?? []) !== JSON.stringify(auxiliary_fixtures)
-  ) {
+  const stimulus_mismatch =
+    evidence.stimulus.type === "steady_state"
+      ? binding.stimulus.type !== "steady_state"
+      : binding.stimulus.type === "steady_state" ||
+        binding.stimulus.type !== evidence.stimulus.type ||
+        binding.stimulus.positive !== stimulus_positive ||
+        binding.stimulus.negative !== "gnd" ||
+        binding.stimulus.pulse.low !== evidence.stimulus.low ||
+        binding.stimulus.pulse.high !== evidence.stimulus.high ||
+        binding.stimulus.pulse.rise !== evidence.stimulus.rise ||
+        binding.stimulus.pulse.fall !== evidence.stimulus.fall
+  if (common_mismatch || stimulus_mismatch) {
     throw new Error(
       `${path} electrical_binding must exactly match the server-extracted printed response nominal, stimulus, and every auxiliary fixture`,
     )
   }
+  if (binding.stimulus.type === "steady_state") return
   const { min, max } = graph.digitized_curve.x_range
   const pulse = binding.stimulus.pulse
   const falling_edge_start = pulse.delay + pulse.rise + pulse.width

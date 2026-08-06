@@ -154,7 +154,7 @@ export function parseTimeGraphDiscovery(value: unknown, expected_pdf_sha256: str
     }
     if (!("transient_fixture_evidence" in hint)) {
       throw new Error(
-        `${path}.transient_fixture_evidence must be present (use null when no printed step is proven)`,
+        `${path}.transient_fixture_evidence must be present (use null when no supported printed transient setup is proven)`,
       )
     }
     const transient_fixture_evidence = parseTransientFixtureEvidence(

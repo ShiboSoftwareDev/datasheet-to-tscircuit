@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
-import { buildValidationPlanGuide, parseFreshModelContract } from "../../modeling"
+import {
+  buildValidationPlanGuide,
+  parseApplicationFixtureContract,
+  parseFreshModelContract,
+  parseModelInterface,
+} from "../../modeling"
+import { runCharacterizer } from "../characterization/run-characterizer"
+import { digitizeReferenceGraphs } from "../characterization/source-inventory"
+import { projectComparisonGraphsUi } from "../comparison-draft-ui"
 import {
   modelArtifact,
   modeledRequirementIds,
@@ -10,21 +18,49 @@ import {
 } from "../stage-helpers"
 import { assertValidationPlanSensitiveToDut } from "../validation-sensitivity"
 import { buildGraphValidationPlan } from "../validation-plan-from-graphs"
-import { projectReferenceDraftUi } from "../reference-draft-ui"
 import { defineModelStage } from "./stage-factory"
 
 export const designValidationStage = defineModelStage({
   id: "create_comparison_graphs",
   depends_on: ["find_reference_graphs"],
-  async execute({ context, services, dependency_outputs, signal }) {
+  async execute({ context, services, dependency_outputs, signal, debug_dir }) {
     updateModelProgress({
       store: services.model_run_store,
       model_run_id: context.model_run_id,
       phase: "designing_validation",
-      message: "Building one transient analog-simulation circuit for each reference graph",
+      message: "Digitizing found references and building their comparison circuits",
     })
-    const contract_path = dependency_outputs.find_reference_graphs.contract_path
-    const attempt_dir = dirname(contract_path)
+    const found = dependency_outputs.find_reference_graphs
+    const attempt_dir = dirname(found.reference_observation_path)
+    const model_interface = parseModelInterface(
+      await readJson(join(context.model_dir, "model-interface.json")),
+    )
+    const application_fixture = parseApplicationFixtureContract(
+      await readJson(join(context.model_dir, "application-fixture-contract.json")),
+    )
+    const inventory = await digitizeReferenceGraphs({
+      context,
+      services,
+      attempt_dir,
+      debug_dir,
+      signal,
+      model_interface,
+      application_fixture,
+      found_observation_path: found.reference_observation_path,
+    })
+    await runCharacterizer({
+      context,
+      services,
+      attempt_dir,
+      debug_dir,
+      signal,
+      model_interface,
+      application_fixture,
+      time_graph_hints_path: inventory.time_graph_hints_path,
+      source_observation: inventory.observation,
+      source_proof: inventory.source_proof,
+    })
+    const contract_path = join(attempt_dir, "model-contract.json")
     const evidence_dir = join(attempt_dir, "evidence")
     const contract = parseFreshModelContract(await readJson(contract_path))
     const requirement_ids = modeledRequirementIds(contract)
@@ -34,19 +70,6 @@ export const designValidationStage = defineModelStage({
       writeJson(join(attempt_dir, "validation-plan.json"), plan),
     ])
 
-    // Publish the graph screenshot and independently digitized curve before
-    // model generation starts. The circuit pane is explicitly pending until a
-    // real model candidate is available; later validation atomically replaces
-    // this draft with the TSX, Circuit JSON, and comparison waveform.
-    await projectReferenceDraftUi({
-      model_run_store: services.model_run_store,
-      model_run_id: context.model_run_id,
-      model_dir: context.model_dir,
-      plan,
-      evidence_dir,
-      signal,
-    })
-
     await assertValidationPlanSensitiveToDut({
       plan,
       contract,
@@ -55,6 +78,14 @@ export const designValidationStage = defineModelStage({
       signal,
       ngspice: services.ngspice_executor,
       ngspice_path: services.ngspice_bin,
+    })
+    await projectComparisonGraphsUi({
+      model_run_store: services.model_run_store,
+      model_run_id: context.model_run_id,
+      model_dir: context.model_dir,
+      contract,
+      evidence_dir,
+      signal,
     })
     const plan_path = join(attempt_dir, "validation-plan.json")
     return {
@@ -68,6 +99,30 @@ export const designValidationStage = defineModelStage({
       },
       artifacts: [
         await modelArtifact({
+          id: "model_contract",
+          path: contract_path,
+          media_type: "application/json",
+          role: "model_contract",
+        }),
+        await modelArtifact({
+          id: "model_reference_observation",
+          path: join(attempt_dir, "model-reference-observation.json"),
+          media_type: "application/json",
+          role: "source_observation",
+        }),
+        await modelArtifact({
+          id: "model_reference_source_proof",
+          path: join(attempt_dir, "model-reference-source-proof.json"),
+          media_type: "application/json",
+          role: "source_verification",
+        }),
+        await modelArtifact({
+          id: "model_reference_verification",
+          path: join(attempt_dir, "model-reference-verification.json"),
+          media_type: "application/json",
+          role: "source_verification",
+        }),
+        await modelArtifact({
           id: "validation_plan",
           path: plan_path,
           media_type: "application/json",
@@ -75,7 +130,7 @@ export const designValidationStage = defineModelStage({
         }),
       ],
       metrics: {
-        agent_attempts: 0,
+        agent_attempts: inventory.observer_attempts,
         validation_cases: plan.cases.length,
       },
     }

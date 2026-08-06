@@ -44,16 +44,34 @@ export function resolveApplicationFixtureForBinding(input: {
   }))
   const condition_overlays: ApplicationConditionOverlay[] = []
   const conditioned_endpoints = new Set<ModelPublicElectricalEndpoint>()
+  const detachEndpoint = (endpoint: ModelPublicElectricalEndpoint): string => {
+    if (endpoint === "gnd") conditionConflict("condition cannot detach the global ground endpoint", endpoint)
+    if (conditioned_endpoints.has(endpoint)) {
+      conditionConflict(`endpoint ${endpoint} is conditioned more than once`, endpoint)
+    }
+    conditioned_endpoints.add(endpoint)
+    const containing_groups = groups.filter((group) => group.dut_endpoints.includes(endpoint))
+    if (containing_groups.length !== 1) {
+      conditionConflict(
+        `condition endpoint ${endpoint} belongs to ${containing_groups.length} application node groups; expected one uniquely detachable U1 leaf`,
+        endpoint,
+      )
+    }
+    const containing_group = containing_groups[0]!
+    containing_group.dut_endpoints = containing_group.dut_endpoints.filter(
+      (candidate) => candidate !== endpoint,
+    )
+    if (!hasExecutableAnchorAfterDetach(containing_group)) {
+      conditionConflict(
+        `condition endpoint ${endpoint} is the only electrical anchor for non-ground application node ${containing_group.source_net}; detaching it would orphan a required passive/network`,
+        endpoint,
+      )
+    }
+    return containing_group.id
+  }
   for (const fixture of input.binding.auxiliary_fixtures ?? []) {
     if (fixture.type !== "logic_state") continue
     const endpoint = fixture.endpoint
-    if (endpoint === "gnd") {
-      conditionConflict("logic-state condition cannot detach the global ground endpoint", endpoint)
-    }
-    if (conditioned_endpoints.has(endpoint)) {
-      conditionConflict(`logic-state endpoint ${endpoint} is conditioned more than once`, endpoint)
-    }
-    conditioned_endpoints.add(endpoint)
     if (fixture.reference === endpoint) {
       conditionConflict(`logic-state endpoint ${endpoint} cannot reference itself`, endpoint)
     }
@@ -62,13 +80,6 @@ export function resolveApplicationFixtureForBinding(input: {
     }
     if (fixture.state === "high" && fixture.reference === "gnd") {
       conditionConflict(`logic-high endpoint ${endpoint} must reference a public supply endpoint`, endpoint)
-    }
-    const containing_groups = groups.filter((group) => group.dut_endpoints.includes(endpoint))
-    if (containing_groups.length !== 1) {
-      conditionConflict(
-        `logic-state endpoint ${endpoint} belongs to ${containing_groups.length} application node groups; expected one uniquely detachable U1 leaf`,
-        endpoint,
-      )
     }
     if (
       fixture.reference !== "gnd" &&
@@ -79,25 +90,30 @@ export function resolveApplicationFixtureForBinding(input: {
         endpoint,
       )
     }
-    const containing_group = containing_groups[0]!
-    containing_group.dut_endpoints = containing_group.dut_endpoints.filter(
-      (candidate) => candidate !== endpoint,
-    )
-    if (!hasExecutableAnchorAfterDetach(containing_group)) {
-      conditionConflict(
-        `logic-state endpoint ${endpoint} is the only electrical anchor for non-ground application node ${containing_group.source_net}; detaching it would orphan a required passive/network`,
-        endpoint,
-      )
-    }
+    const detached_from_node_group_id = detachEndpoint(endpoint)
     condition_overlays.push({
       type: "logic_state",
       endpoint,
       reference: fixture.reference,
       state: fixture.state,
-      detached_from_node_group_id: containing_group.id,
+      detached_from_node_group_id,
     })
   }
+  if (input.binding.stimulus.type === "voltage_step") {
+    const endpoint = input.binding.stimulus.positive
+    const has_separate_dc_supply = (input.binding.auxiliary_fixtures ?? []).some(
+      (fixture) => fixture.type === "dc_voltage" && fixture.positive !== endpoint,
+    )
+    if (has_separate_dc_supply) {
+      condition_overlays.push({
+        type: "pulsed_source",
+        endpoint,
+        detached_from_node_group_id: detachEndpoint(endpoint),
+      })
+    }
+  }
   for (const overlay of condition_overlays) {
+    if (overlay.type !== "logic_state") continue
     if (
       overlay.reference !== "gnd" &&
       !groups.some((group) => group.dut_endpoints.includes(overlay.reference))

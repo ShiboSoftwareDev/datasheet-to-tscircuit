@@ -127,9 +127,13 @@ export function renderValidationCaseTsx(input: {
       )
     },
   )
-  const application_overlay_traces = (validation_case.application_fixture?.condition_overlays ?? []).map(
+  const application_overlay_traces = (validation_case.application_fixture?.condition_overlays ?? []).flatMap(
     (overlay) =>
-      `      <trace from=${JSON.stringify(endpointSelector(overlay.endpoint, manifest))} to=${JSON.stringify(endpointSelector(overlay.reference, manifest))} />`,
+      overlay.type === "logic_state"
+        ? [
+            `      <trace from=${JSON.stringify(endpointSelector(overlay.endpoint, manifest))} to=${JSON.stringify(endpointSelector(overlay.reference, manifest))} />`,
+          ]
+        : [],
   )
   const current_observation_by_element = new Map(
     validation_case.observations.flatMap((observation) =>

@@ -121,7 +121,7 @@ export interface ModelReferenceVerification {
         search_radius_px: 4
         segment_support_ratio: number
         minimum_segment_support_ratio: 0.75
-        segment_search_radius_px: 2
+        segment_search_radius_px: 6
       }
     }
   >

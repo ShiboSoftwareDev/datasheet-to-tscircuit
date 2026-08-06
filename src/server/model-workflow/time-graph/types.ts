@@ -9,7 +9,7 @@ export interface TimeGraphHint {
   fixture_evidence_context: string
   /** Summary-table conditions for this same figure, retained independently from the graph caption. */
   summary_fixture_evidence_context: string | null
-  /** Same-key disagreements make the experiment ineligible; neither source silently wins. */
+  /** Retained diagnostic; graph-local conditions take precedence over summary-table metadata. */
   condition_conflicts: TimeGraphConditionConflict[]
   /**
    * Immutable server extraction of non-source graph conditions. Fresh
@@ -18,28 +18,29 @@ export interface TimeGraphHint {
    * after a future heuristic change.
    */
   graph_local_conditions?: TimeGraphLocalConditionReceipt
-  /** Conditions an ordinary public-pin analog pulse fixture cannot establish. */
+  /** Conditions the supported public-pin tscircuit fixture vocabulary cannot establish. */
   unsupported_fixture_conditions: UnsupportedFixtureCondition[]
   /**
-   * A pulse identity extracted by server code from printed test-condition text.
-   * `null` is authoritative: an observer is not allowed to invent a fixture for
-   * a waveform whose non-flat stimulus is not stated in the PDF text layer.
+   * A simulator fixture identity extracted by server code from printed test-condition text.
+   * `null` is authoritative: an observer is not allowed to invent a setup.
    */
   transient_fixture_evidence: TimeGraphTransientFixtureEvidence | null
 }
 
 export interface TimeGraphTransientFixtureEvidence {
-  method: "printed_experiment_conditions_v2"
+  method: "printed_experiment_conditions_v3"
   source_excerpts: Array<{ scope: "summary_row" | "graph_caption"; text: string }>
   response: { signal: string; quantity: "voltage"; nominal_volts: number }
-  stimulus: {
-    signal: string
-    type: "voltage_step" | "current_step"
-    low: number
-    high: number
-    rise: number
-    fall: number
-  }
+  stimulus:
+    | { type: "steady_state" }
+    | {
+        signal: string
+        type: "voltage_step" | "current_step"
+        low: number
+        high: number
+        rise: number
+        fall: number
+      }
   auxiliary_conditions: TimeGraphAuxiliaryCondition[]
 }
 
@@ -47,6 +48,7 @@ export type TimeGraphAuxiliaryCondition =
   | { kind: "dc_voltage"; signal: string; value: number }
   | { kind: "dc_current"; signal: string; value: number }
   | { kind: "logic_state"; signal: string; state: "low" | "high" }
+  | { kind: "resistance"; signal: "load"; value: number }
 
 export interface TimeGraphConditionConflict {
   code: "condition_conflict"

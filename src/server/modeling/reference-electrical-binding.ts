@@ -107,11 +107,22 @@ function parseAuxiliaryFixture(value: unknown, path: string): ModelReferenceAuxi
       throw new Error(`${path}.reference must be gnd for a low logic state`)
     }
     if (fixture.state === "high" && reference === "gnd") {
-      throw new Error(`${path}.reference must be a public input-supply endpoint for a high logic state`)
+      throw new Error(
+        `${path}.reference must be a public input-supply endpoint for a high logic state; replace reference:"gnd" with the positive dut.<spice_node> endpoint of the single printed input-supply dc_voltage auxiliary fixture`,
+      )
     }
     return { type: "logic_state", endpoint: logic_endpoint, reference, state: fixture.state }
   }
-  throw new Error(`${path}.type must be dc_voltage, dc_current, or logic_state`)
+  if (fixture.type === "resistor") {
+    exactKeys(fixture, ["type", "positive", "negative", "resistance_ohms"], path)
+    const positive = endpoint(fixture.positive, `${path}.positive`)
+    const negative = endpoint(fixture.negative, `${path}.negative`)
+    assertDistinctEndpoints(positive, negative, path)
+    const resistance_ohms = finite(fixture.resistance_ohms, `${path}.resistance_ohms`)
+    if (!(resistance_ohms > 0)) throw new Error(`${path}.resistance_ohms must be positive`)
+    return { type: "resistor", positive, negative, resistance_ohms }
+  }
+  throw new Error(`${path}.type must be dc_voltage, dc_current, logic_state, or resistor`)
 }
 
 export function parseModelReferenceElectricalBinding(
@@ -156,13 +167,25 @@ export function parseModelReferenceElectricalBinding(
       : finite(response.nominal_volts, `${path}.response.nominal_volts`)
 
   const stimulus = record(binding.stimulus, `${path}.stimulus`)
-  exactKeys(stimulus, ["type", "positive", "negative", "pulse"], `${path}.stimulus`)
-  if (stimulus.type !== "voltage_step" && stimulus.type !== "current_step") {
-    throw new Error(`${path}.stimulus.type must be voltage_step or current_step`)
-  }
-  const stimulus_positive = endpoint(stimulus.positive, `${path}.stimulus.positive`)
-  const stimulus_negative = endpoint(stimulus.negative, `${path}.stimulus.negative`)
-  assertDistinctEndpoints(stimulus_positive, stimulus_negative, `${path}.stimulus`)
+  const parsed_stimulus: ModelReferenceElectricalBinding["stimulus"] = (() => {
+    if (stimulus.type === "steady_state") {
+      exactKeys(stimulus, ["type"], `${path}.stimulus`)
+      return { type: "steady_state" }
+    }
+    exactKeys(stimulus, ["type", "positive", "negative", "pulse"], `${path}.stimulus`)
+    if (stimulus.type !== "voltage_step" && stimulus.type !== "current_step") {
+      throw new Error(`${path}.stimulus.type must be steady_state, voltage_step, or current_step`)
+    }
+    const positive = endpoint(stimulus.positive, `${path}.stimulus.positive`)
+    const negative = endpoint(stimulus.negative, `${path}.stimulus.negative`)
+    assertDistinctEndpoints(positive, negative, `${path}.stimulus`)
+    return {
+      type: stimulus.type,
+      positive,
+      negative,
+      pulse: parsePulse(stimulus.pulse, `${path}.stimulus.pulse`),
+    }
+  })()
 
   const auxiliary_fixtures =
     binding.auxiliary_fixtures === undefined
@@ -190,6 +213,7 @@ export function parseModelReferenceElectricalBinding(
         : [fixture.positive, fixture.negative]
     if (
       fixture.type !== "dc_current" &&
+      fixture.type !== "resistor" &&
       endpoints.includes(response_positive) &&
       endpoints.includes(response_negative)
     ) {
@@ -207,12 +231,7 @@ export function parseModelReferenceElectricalBinding(
       negative: response_negative,
       ...(nominal_volts === undefined ? {} : { nominal_volts }),
     },
-    stimulus: {
-      type: stimulus.type,
-      positive: stimulus_positive,
-      negative: stimulus_negative,
-      pulse: parsePulse(stimulus.pulse, `${path}.stimulus.pulse`),
-    },
+    stimulus: parsed_stimulus,
     ...(auxiliary_fixtures.length === 0 ? {} : { auxiliary_fixtures }),
   }
 }
@@ -229,8 +248,12 @@ export function assertModelReferenceElectricalBindingInterface(input: {
   const endpoints: Array<[string, ModelPublicElectricalEndpoint]> = [
     ["response.positive", input.binding.response.positive],
     ["response.negative", input.binding.response.negative],
-    ["stimulus.positive", input.binding.stimulus.positive],
-    ["stimulus.negative", input.binding.stimulus.negative],
+    ...(input.binding.stimulus.type === "steady_state"
+      ? []
+      : ([
+          ["stimulus.positive", input.binding.stimulus.positive],
+          ["stimulus.negative", input.binding.stimulus.negative],
+        ] as Array<[string, ModelPublicElectricalEndpoint]>)),
   ]
   endpoints.push(
     ...(input.binding.auxiliary_fixtures ?? []).flatMap(
@@ -264,16 +287,7 @@ export function modelReferenceElectricalBindingsEqual(
     left.response.positive === right.response.positive &&
     left.response.negative === right.response.negative &&
     left.response.nominal_volts === right.response.nominal_volts &&
-    left.stimulus.type === right.stimulus.type &&
-    left.stimulus.positive === right.stimulus.positive &&
-    left.stimulus.negative === right.stimulus.negative &&
-    left.stimulus.pulse.low === right.stimulus.pulse.low &&
-    left.stimulus.pulse.high === right.stimulus.pulse.high &&
-    left.stimulus.pulse.delay === right.stimulus.pulse.delay &&
-    left.stimulus.pulse.rise === right.stimulus.pulse.rise &&
-    left.stimulus.pulse.fall === right.stimulus.pulse.fall &&
-    left.stimulus.pulse.width === right.stimulus.pulse.width &&
-    left.stimulus.pulse.period === right.stimulus.pulse.period &&
+    JSON.stringify(left.stimulus) === JSON.stringify(right.stimulus) &&
     JSON.stringify(left.auxiliary_fixtures ?? []) === JSON.stringify(right.auxiliary_fixtures ?? [])
   )
 }

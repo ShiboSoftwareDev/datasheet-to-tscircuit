@@ -118,6 +118,7 @@ export function validateExactApplicationCase(input: {
   fixtures: readonly FixtureElement[]
   path: string
   collector: ValidationCollector
+  allowed_extra_passive_ids?: ReadonlySet<string>
 }): void {
   const expected_nets = exactApplicationNetIds(input.application_fixture)
   if (stableStringify(input.nets) !== stableStringify(expected_nets)) {
@@ -141,12 +142,16 @@ export function validateExactApplicationCase(input: {
     if (!passive_types.has(fixture.type)) continue
     const expected = expected_by_id.get(fixture.id)
     if (!expected) {
-      input.collector.add(
-        `${input.path}.fixtures[${fixture_index}]`,
-        "application_fixture_extra_passive",
-        `passive ${JSON.stringify(fixture.id)} is not present in the canonical typical application`,
-      )
-    } else if (stableStringify(fixture) !== stableStringify(expected)) {
+      if (!input.allowed_extra_passive_ids?.has(fixture.id)) {
+        input.collector.add(
+          `${input.path}.fixtures[${fixture_index}]`,
+          "application_fixture_extra_passive",
+          `passive ${JSON.stringify(fixture.id)} is not present in the canonical typical application`,
+        )
+      }
+      continue
+    }
+    if (stableStringify(fixture) !== stableStringify(expected)) {
       input.collector.add(
         `${input.path}.fixtures[${fixture_index}]`,
         "application_fixture_changed_passive",
@@ -197,67 +202,70 @@ export function validateRequirementElectricalBindings(input: {
   )
   const matched_fixture_indexes = new Set<number>()
   for (const { requirement_id, requirement_index, binding } of bound_requirements) {
-    const expected_type = binding.stimulus.type === "voltage_step" ? "voltage_source" : "current_source"
-    const matches = pulsed_sources.filter(
-      ({ fixture }) =>
-        fixture.type === expected_type &&
-        fixture.positive === binding.stimulus.positive &&
-        fixture.negative === binding.stimulus.negative,
-    )
-    if (matches.length !== 1) {
-      input.collector.add(
-        `${input.path}.requirement_ids[${requirement_index}]`,
-        "requirement_stimulus_mismatch",
-        `requirement ${JSON.stringify(requirement_id)} needs exactly one ${expected_type} PULSE from ${binding.stimulus.positive} to ${binding.stimulus.negative}; found ${matches.length}`,
+    if (binding.stimulus.type !== "steady_state") {
+      const expected_type = binding.stimulus.type === "voltage_step" ? "voltage_source" : "current_source"
+      const matches = pulsed_sources.filter(
+        ({ fixture }) =>
+          fixture.type === expected_type &&
+          fixture.positive === binding.stimulus.positive &&
+          fixture.negative === binding.stimulus.negative,
       )
-      continue
-    }
-    const match = matches[0]!
-    matched_fixture_indexes.add(match.fixture_index)
-    if (match.fixture.pulse!.low === match.fixture.pulse!.high) {
-      input.collector.add(
-        `${input.path}.fixtures[${match.fixture_index}].pulse`,
-        "flat_bound_stimulus",
-        `the pulsed stimulus bound to requirement ${JSON.stringify(requirement_id)} must have different low and high levels`,
-      )
-    }
-    const expected_pulse = binding.stimulus.pulse
-    const actual_pulse = match.fixture.pulse!
-    const dc_value = match.fixture.type === "voltage_source" ? match.fixture.dc_volts : match.fixture.dc_amps
-    if (dc_value !== expected_pulse.low) {
-      input.collector.add(
-        `${input.path}.fixtures[${match.fixture_index}].${match.fixture.type === "voltage_source" ? "dc_volts" : "dc_amps"}`,
-        "requirement_stimulus_dc_mismatch",
-        `must equal the observer-owned PULSE low value ${expected_pulse.low} for requirement ${JSON.stringify(requirement_id)}`,
-      )
-    }
-    if (
-      actual_pulse.low !== expected_pulse.low ||
-      actual_pulse.high !== expected_pulse.high ||
-      actual_pulse.delay !== expected_pulse.delay ||
-      actual_pulse.rise !== expected_pulse.rise ||
-      actual_pulse.fall !== expected_pulse.fall ||
-      actual_pulse.width !== expected_pulse.width ||
-      actual_pulse.period !== expected_pulse.period
-    ) {
-      input.collector.add(
-        `${input.path}.fixtures[${match.fixture_index}].pulse`,
-        "requirement_stimulus_pulse_mismatch",
-        `must exactly match the observer-owned SI PULSE for requirement ${JSON.stringify(requirement_id)}: ${JSON.stringify(expected_pulse)}`,
-      )
-    }
-    if (input.analysis.type === "transient") {
-      const reference_max = Math.max(
-        ...(input.requirement_by_id.get(requirement_id)?.reference_curve?.points ?? []).map(({ x }) => x),
-        0,
-      )
-      const minimum_stop = Math.max(expected_pulse.delay + expected_pulse.rise, reference_max)
-      if (input.analysis.stop < minimum_stop) {
+      if (matches.length !== 1) {
         input.collector.add(
-          `${input.path}.analysis.stop`,
-          "bound_stimulus_outside_analysis_range",
-          `must be at least ${minimum_stop} s to include the observer-owned pulse transition and complete reference curve for requirement ${JSON.stringify(requirement_id)}`,
+          `${input.path}.requirement_ids[${requirement_index}]`,
+          "requirement_stimulus_mismatch",
+          `requirement ${JSON.stringify(requirement_id)} needs exactly one ${expected_type} PULSE from ${binding.stimulus.positive} to ${binding.stimulus.negative}; found ${matches.length}`,
         )
+        continue
+      }
+      const match = matches[0]!
+      matched_fixture_indexes.add(match.fixture_index)
+      if (match.fixture.pulse!.low === match.fixture.pulse!.high) {
+        input.collector.add(
+          `${input.path}.fixtures[${match.fixture_index}].pulse`,
+          "flat_bound_stimulus",
+          `the pulsed stimulus bound to requirement ${JSON.stringify(requirement_id)} must have different low and high levels`,
+        )
+      }
+      const expected_pulse = binding.stimulus.pulse
+      const actual_pulse = match.fixture.pulse!
+      const dc_value =
+        match.fixture.type === "voltage_source" ? match.fixture.dc_volts : match.fixture.dc_amps
+      if (dc_value !== expected_pulse.low) {
+        input.collector.add(
+          `${input.path}.fixtures[${match.fixture_index}].${match.fixture.type === "voltage_source" ? "dc_volts" : "dc_amps"}`,
+          "requirement_stimulus_dc_mismatch",
+          `must equal the observer-owned PULSE low value ${expected_pulse.low} for requirement ${JSON.stringify(requirement_id)}`,
+        )
+      }
+      if (
+        actual_pulse.low !== expected_pulse.low ||
+        actual_pulse.high !== expected_pulse.high ||
+        actual_pulse.delay !== expected_pulse.delay ||
+        actual_pulse.rise !== expected_pulse.rise ||
+        actual_pulse.fall !== expected_pulse.fall ||
+        actual_pulse.width !== expected_pulse.width ||
+        actual_pulse.period !== expected_pulse.period
+      ) {
+        input.collector.add(
+          `${input.path}.fixtures[${match.fixture_index}].pulse`,
+          "requirement_stimulus_pulse_mismatch",
+          `must exactly match the observer-owned SI PULSE for requirement ${JSON.stringify(requirement_id)}: ${JSON.stringify(expected_pulse)}`,
+        )
+      }
+      if (input.analysis.type === "transient") {
+        const reference_max = Math.max(
+          ...(input.requirement_by_id.get(requirement_id)?.reference_curve?.points ?? []).map(({ x }) => x),
+          0,
+        )
+        const minimum_stop = Math.max(expected_pulse.delay + expected_pulse.rise, reference_max)
+        if (input.analysis.stop < minimum_stop) {
+          input.collector.add(
+            `${input.path}.analysis.stop`,
+            "bound_stimulus_outside_analysis_range",
+            `must be at least ${minimum_stop} s to include the observer-owned pulse transition and complete reference curve for requirement ${JSON.stringify(requirement_id)}`,
+          )
+        }
       }
     }
 
@@ -296,20 +304,32 @@ export function validateRequirementElectricalBindings(input: {
                 value_key: "dc_amps" as const,
                 value: auxiliary.dc_amps,
               }
-            : {
-                fixture_type: "voltage_source" as const,
-                positive: auxiliary.endpoint,
-                negative: auxiliary.reference,
-                value_key: "dc_volts" as const,
-                value: 0,
-              }
+            : auxiliary.type === "resistor"
+              ? {
+                  fixture_type: "resistor" as const,
+                  positive: auxiliary.positive,
+                  negative: auxiliary.negative,
+                  value_key: "resistance_ohms" as const,
+                  value: auxiliary.resistance_ohms,
+                }
+              : {
+                  fixture_type: "voltage_source" as const,
+                  positive: auxiliary.endpoint,
+                  negative: auxiliary.reference,
+                  value_key: "dc_volts" as const,
+                  value: 0,
+                }
       const matches = input.fixtures.flatMap((fixture, fixture_index) => {
         if (
           fixture.type !== expected.fixture_type ||
-          fixture.pulse !== undefined ||
+          ("pulse" in fixture && fixture.pulse !== undefined) ||
           fixture.positive !== expected.positive ||
           fixture.negative !== expected.negative ||
-          (fixture.type === "voltage_source" ? fixture.dc_volts : fixture.dc_amps) !== expected.value
+          (fixture.type === "voltage_source"
+            ? fixture.dc_volts
+            : fixture.type === "current_source"
+              ? fixture.dc_amps
+              : fixture.resistance_ohms) !== expected.value
         ) {
           return []
         }
@@ -355,8 +375,9 @@ export function validateRequirementElectricalBindings(input: {
       [
         binding.response.positive,
         binding.response.negative,
-        binding.stimulus.positive,
-        binding.stimulus.negative,
+        ...(binding.stimulus.type === "steady_state"
+          ? []
+          : [binding.stimulus.positive, binding.stimulus.negative]),
         ...(binding.auxiliary_fixtures ?? []).flatMap((auxiliary) =>
           auxiliary.type === "logic_state"
             ? [auxiliary.endpoint, auxiliary.reference]

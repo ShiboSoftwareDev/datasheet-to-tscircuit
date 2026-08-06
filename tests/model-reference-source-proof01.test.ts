@@ -222,6 +222,34 @@ testWithArchivedRun93("builds a source-grounded scope receipt for archived run93
 })
 
 testWithArchivedRun93(
+  "discovers the source grid independently of a narrow adjacent-anchor claim",
+  async () => {
+    requireSourceProofTools()
+    const observation = await run93Observation()
+    const graph = observation.graphs[0]!
+    if (!graph.digitized_curve) throw new Error("Archived run93 observation is missing its curve")
+    graph.digitized_curve.y_range = { min: 3.3, max: 3.4 }
+    graph.digitized_curve.y_axis = {
+      scale: "linear",
+      first: { pixel: 118.333333, value: 3.3 },
+      second: { pixel: 86.666667, value: 3.4 },
+    }
+
+    const proof = await prove(observation)
+    const result = proof.results[0]
+
+    if (!result || result.status !== "verified") throw new Error(JSON.stringify(result))
+    expect(result.receipt.algorithm).toBe("canonical_pdf_tesseract_scope_divisions_v2")
+    if (result.receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v2") {
+      throw new Error("Archived run93 unexpectedly used explicit-tick calibration")
+    }
+    expect(result.receipt.y_axis.grid.line_pixels.length).toBeGreaterThanOrEqual(3)
+    expect(result.receipt.y_axis.grid.first_anchor_line_pixel).toBeCloseTo(118.333333, 1)
+    expect(result.receipt.y_axis.grid.second_anchor_line_pixel).toBeCloseTo(86.666667, 1)
+  },
+)
+
+testWithArchivedRun93(
   "finds right-edge scope controls when the faint Horizontal heading is not recognized",
   async () => {
     requireSourceProofTools()
@@ -235,6 +263,32 @@ testWithArchivedRun93(
       throw new Error("Figure 10-25 unexpectedly used explicit-tick calibration")
     }
     expect(result.receipt.x_axis.division_scale.value_per_division_si).toBeCloseTo(100e-6, 12)
+    expect(result.receipt.y_axis.division_scale.value_per_division_si).toBeCloseTo(100e-3, 12)
+  },
+)
+
+testWithArchivedRun93(
+  "finds plot-local scope controls when the canonical crop has extra right padding",
+  async () => {
+    requireSourceProofTools()
+    const observation = await run93Figure1025Observation()
+    const graph = observation.graphs[0]!
+    if (!graph.digitized_curve) throw new Error("Archived run93 observation is missing its curve")
+    const old_x = graph.crop.x_px
+    graph.crop.x_px = 850
+    graph.crop.width_px = 850
+    const translated_x = old_x - graph.crop.x_px
+    graph.digitized_curve.x_axis.first.pixel += translated_x
+    graph.digitized_curve.x_axis.second.pixel += translated_x
+    for (const point of graph.digitized_curve.points) point.pixel_x += translated_x
+    const proof = await prove(observation)
+    const result = proof.results[0]
+
+    if (!result || result.status !== "verified") throw new Error(JSON.stringify(result))
+    expect(result.receipt.algorithm).toBe("canonical_pdf_tesseract_scope_divisions_v2")
+    if (result.receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v2") {
+      throw new Error("Figure 10-25 unexpectedly used explicit-tick calibration")
+    }
     expect(result.receipt.y_axis.division_scale.value_per_division_si).toBeCloseTo(100e-3, 12)
   },
 )

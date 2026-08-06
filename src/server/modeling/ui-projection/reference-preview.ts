@@ -1,4 +1,5 @@
 import type { ModelReferencePreview, ModelReferenceSeriesPreview } from "@/shared/job-types"
+import type { ModelRequirement } from "../types"
 import type {
   FixtureElement,
   ValidationAnalysis,
@@ -22,6 +23,36 @@ function downsample(points: ValidationSeriesPoint[]): ValidationSeriesPoint[] {
   if (points.length <= MAX_PREVIEW_POINTS) return points.map(({ x, y }) => ({ x, y }))
   const stride = Math.ceil(points.length / MAX_PREVIEW_POINTS)
   return points.filter((_, index) => index % stride === 0 || index === points.length - 1)
+}
+
+/** Projects the immutable source series used to start a comparison chart. */
+export function projectReferenceComparisonDraft(input: {
+  requirement: ModelRequirement
+  updated_at: string
+}): ModelReferencePreview {
+  const curve = input.requirement.reference_curve
+  if (input.requirement.support.status !== "modeled" || !curve) {
+    throw new Error(`Requirement ${input.requirement.requirement_id} has no modeled reference graph`)
+  }
+  const source_file = curve.image?.trim()
+  if (!source_file) {
+    throw new Error(`Reference graph ${input.requirement.requirement_id} has no retained source image`)
+  }
+  return {
+    benchmark_id: input.requirement.requirement_id,
+    title: input.requirement.title,
+    source_file,
+    x_axis_label: titleFromIdentifier(curve.x_quantity),
+    x_axis_unit: curve.x_unit,
+    y_axis_label: titleFromIdentifier(curve.y_quantity),
+    y_axis_unit: curve.y_unit,
+    x_scale: "linear",
+    y_scale: "linear",
+    reference_kind: "curve",
+    reference_points: downsample(curve.points),
+    is_stale: false,
+    updated_at: input.updated_at,
+  }
 }
 
 function referencePoints(

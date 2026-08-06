@@ -25,6 +25,15 @@ function fixtureForAuxiliary(auxiliary: ModelReferenceAuxiliaryFixture, index: n
       dc_amps: auxiliary.dc_amps,
     }
   }
+  if (auxiliary.type === "resistor") {
+    return {
+      id,
+      type: "resistor",
+      positive: auxiliary.positive,
+      negative: auxiliary.negative,
+      resistance_ohms: auxiliary.resistance_ohms,
+    }
+  }
   return {
     id,
     type: "voltage_source",
@@ -34,7 +43,8 @@ function fixtureForAuxiliary(auxiliary: ModelReferenceAuxiliaryFixture, index: n
   }
 }
 
-function stimulusFixture(binding: ModelReferenceElectricalBinding): FixtureElement {
+function stimulusFixture(binding: ModelReferenceElectricalBinding): FixtureElement | undefined {
+  if (binding.stimulus.type === "steady_state") return undefined
   const common = {
     id: "stimulus",
     positive: binding.stimulus.positive,
@@ -69,7 +79,9 @@ function transientAnalysis(points: readonly { x: number }[], binding: ModelRefer
   const smallest_delta = Math.min(...positive_deltas)
   const desired_step = Math.min(span / 1000, smallest_delta / 4)
   const step = Math.max(span / 20_000, desired_step, 1e-12)
-  const stop = Math.max(maximum, binding.stimulus.pulse.delay + binding.stimulus.pulse.rise) + step
+  const stimulus_end =
+    binding.stimulus.type === "steady_state" ? 0 : binding.stimulus.pulse.delay + binding.stimulus.pulse.rise
+  const stop = Math.max(maximum, stimulus_end) + step
   return {
     type: "transient" as const,
     step,
@@ -82,8 +94,9 @@ function protectedEndpoints(binding: ModelReferenceElectricalBinding): Set<strin
   return new Set([
     binding.response.positive,
     binding.response.negative,
-    binding.stimulus.positive,
-    binding.stimulus.negative,
+    ...(binding.stimulus.type === "steady_state"
+      ? []
+      : [binding.stimulus.positive, binding.stimulus.negative]),
     ...(binding.auxiliary_fixtures ?? []).flatMap((fixture) =>
       fixture.type === "logic_state"
         ? [fixture.endpoint, fixture.reference]
@@ -117,8 +130,9 @@ export function buildGraphValidationPlan(contract: ModelContract): ValidationPla
         `Modeled requirement ${requirement.requirement_id} is not a bound voltage-versus-time graph`,
       )
     }
+    const stimulus_fixture = stimulusFixture(binding)
     const fixtures: FixtureElement[] = [
-      stimulusFixture(binding),
+      ...(stimulus_fixture ? [stimulus_fixture] : []),
       ...(binding.auxiliary_fixtures ?? []).flatMap((auxiliary, index) =>
         auxiliary.type === "logic_state" && has_documented_application
           ? []
