@@ -136,22 +136,25 @@ test("an early component-ready milestone cannot race the final component publica
   )
   await Bun.sleep(10)
   expect(model_run_store.getModelRun("publishing_component_model")?.is_complete).toBe(false)
+  expect(model_run_store.getModelRun("publishing_component_model")?.pipeline).toBeUndefined()
   expect(agent_calls).toBe(0)
   expect(process_calls).toBe(0)
 
   const pipeline_timestamp = new Date().toISOString()
   job_store.updateJob("publishing_component", {
-    pipeline: {
-      pipeline_id: "datasheet_component",
-      status: "completed",
-      sequence: 1,
-      started_at: pipeline_timestamp,
-      updated_at: pipeline_timestamp,
-      stage_results: {
-        publish: {
-          stage_id: "publish",
-          status: "completed",
-          debug_ref: "runs/test/.pipeline/stages/publish",
+    pipelines: {
+      component_generation: {
+        pipeline_id: "component_generation",
+        status: "completed",
+        sequence: 1,
+        started_at: pipeline_timestamp,
+        updated_at: pipeline_timestamp,
+        stage_results: {
+          repair_component: {
+            stage_id: "repair_component",
+            status: "completed",
+            debug_ref: "runs/test/.pipeline/stages/repair_component",
+          },
         },
       },
     },

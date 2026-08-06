@@ -132,7 +132,6 @@ export interface CircuitValidationRecord {
   passed: boolean
   errors: string[]
   circuit_json: AnyCircuitElement[]
-  generated_at: string
 }
 
 export function validateGeneratedSource(source: string, kind: "component" | "application"): void {

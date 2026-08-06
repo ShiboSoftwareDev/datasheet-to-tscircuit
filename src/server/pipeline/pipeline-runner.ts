@@ -27,6 +27,7 @@ import type {
 } from "@/shared/pipeline-types"
 import { snapshotPipelineArtifacts } from "./artifact-snapshot"
 import { getPipelineCauseChain, PipelineError, toPipelineError } from "./pipeline-error"
+import { retainPipelineTaskInputFiles } from "./task-input-files"
 
 const STABLE_ID_PATTERN = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
@@ -74,6 +75,10 @@ export interface RunPipelineOptions<
   readonly on_snapshot?: PipelineSnapshotCallback<Outputs>
   readonly snapshot_timeout_ms?: number
   readonly now?: () => Date
+  /** Filesystem root whose exact pre-task contents make this task independently replayable. */
+  readonly task_input_root?: string
+  /** Top-level task_input_root directories that are runtime services rather than task inputs. */
+  readonly task_input_excluded_roots?: readonly string[]
 }
 
 const deepFreeze = <Value>(value: Value, seen = new WeakSet<object>()): DeepReadonly<Value> => {
@@ -605,7 +610,7 @@ export const runPipeline = async <
       })
       mutable_results[stage.id] = result
       const debug_input = deepFreeze({
-        version: 1,
+        version: 2,
         kind: "pipeline_task_input",
         pipeline_id: options.definition.pipeline_id,
         task_id: stage.id,
@@ -630,7 +635,7 @@ export const runPipeline = async <
       target.mode !== "pipeline" && stage_index === target_index ? target.dependency_outputs : undefined
     const dependency_state = getDependencyState(stage, mutable_results, provided_outputs)
     const debug_input = deepFreeze({
-      version: 1,
+      version: 2,
       kind: "pipeline_task_input",
       pipeline_id: options.definition.pipeline_id,
       task_id: stage.id,
@@ -712,6 +717,19 @@ export const runPipeline = async <
 
     const started_ms = now().getTime()
     const stage_started_at = new Date(started_ms).toISOString()
+    await mkdir(debug_dir, { recursive: true })
+    const input_files = options.task_input_root
+      ? await retainPipelineTaskInputFiles({
+          root_dir: options.task_input_root,
+          debug_dir,
+          objects_dir: join(pipeline_dir, "input-objects"),
+          excluded_roots: options.task_input_excluded_roots,
+        })
+      : undefined
+    const runnable_debug_input = deepFreeze({
+      ...debug_input,
+      ...(input_files ? { input_files } : {}),
+    } satisfies PipelineTaskInputEnvelope)
     mutable_results[stage.id] = Object.freeze({
       stage_id: stage.id,
       debug_dir,
@@ -721,7 +739,7 @@ export const runPipeline = async <
       diagnostics: emptyDiagnostics(),
       metrics: emptyMetrics(),
     })
-    await writeInitialDebugBundle(debug_dir, debug_input, stage_started_at)
+    await writeInitialDebugBundle(debug_dir, runnable_debug_input, stage_started_at)
     await emit({
       event_type: "stage_started",
       stage_id: stage.id,

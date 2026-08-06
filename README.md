@@ -95,9 +95,10 @@ bun run test:docker
 
 Start with the streamed logs in the UI. The Component, Typical application, and
 SPICE debug buttons expose each typed execution trace and can run one step, run
-from a selected step, or rerun a whole pipeline. A single-step rerun receives
-the exact dependency payload retained in that step's `input.json`; it does not
-execute another step. The durable files under
+from a selected step, or rerun a whole pipeline. Before each runnable step, the
+pipeline retains its complete input filesystem plus the exact dependency payload.
+A single-step rerun materializes only that retained input and does not read the
+current job or execute another step. The durable files under
 `.runtime/jobs/<job-id>` are the source of truth after a restart:
 
 The same execution model is available locally to developers and coding agents:
@@ -112,7 +113,8 @@ bun run debug -- job list
 # Inspect the complete input contract for one task.
 bun run debug -- task inspect --input .runtime/jobs/<job-id>/runs/<pipeline>/<run>/.pipeline/stages/<task>/input.json
 
-# Run one task from only its retained input, or run its complete pipeline.
+# Run one task from only its retained input. Complete-pipeline replay requires
+# the retained input from that pipeline's first task.
 bun run debug -- task run --input <input.json>
 bun run debug -- pipeline run --input <input.json>
 
@@ -123,12 +125,15 @@ bun run debug -- job replay <job-id> --pipeline spice_generation
 ```
 
 Commands emit structured JSON and return a non-zero status for failed or
-cancelled execution. By default a replay clones the retained job into a fresh
-`.runtime/replays/<replay-id>` directory, rewrites job-local input paths to that
-clone, and writes `summary.json`, the event stream, per-task bundles, and all
-generated artifacts there. The historical job is never mutated. `--output`
-selects another new replay directory and `--root` selects a repository/runtime
-root.
+cancelled execution. By default a replay verifies the content-addressed retained
+input, materializes it into a fresh `.runtime/replays/<replay-id>` directory,
+rewrites job-local input paths to that workspace, and writes `summary.json`, the
+event stream, per-task bundles, and generated artifacts there. It does not read
+or mutate the historical job after selecting the retained bundle, so an input
+captured under `/app` can run locally with the same files. `--output` selects
+another new replay directory and `--root` selects a repository/runtime root.
+Agent-backed replays use `PI_CODING_AGENT_DIR` when explicitly set and otherwise
+use `<root>/.runtime/pi-agent`, matching the application's credential location.
 
 - `agent.log`/`agent.log.1` and `job.json` contain the bounded component NDJSON
   logs and atomically replaced checkpoint.
@@ -145,9 +150,11 @@ root.
 - Each `.pipeline/stages/<number>-<stage-id>` directory contains `input.json`,
   `output.json`, `error.json`, `metrics.json`, and immutable copies of declared
   artifacts under `artifacts/`. `input.json` is a versioned
-  `pipeline_task_input` envelope containing the pipeline/task identity, source
-  run, complete JSON execution context, declared dependencies, and dependency
-  outputs required by the local task runner.
+  version 2 `pipeline_task_input` envelope containing the pipeline/task identity,
+  source run, complete JSON execution context, declared dependencies, dependency
+  outputs, and a pointer to `input-files.json`. That manifest maps every retained
+  file to an immutable SHA-256 object in `.pipeline/input-objects`, shared across
+  tasks in the run. Runtime logs and prior `runs` histories are not task inputs.
 - Agent-backed stages also retain `attempt-history.json` plus every rejected
   candidate. Correction attempts receive those exact files and cumulative
   diagnostics, so fixing one field cannot silently regress an earlier fix. A

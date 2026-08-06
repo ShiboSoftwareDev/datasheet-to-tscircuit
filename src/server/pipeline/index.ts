@@ -27,9 +27,11 @@ export type {
   PipelineStageSkippedOutcome,
   PipelineStageStatus,
   PipelineTaskInputEnvelope,
+  PipelineTaskInputFiles,
   RegisteredPipelineStage,
 } from "@/shared/pipeline-types"
 export * from "./pipeline-error"
 export * from "./pipeline-runner"
 export * from "./public-snapshot"
 export * from "./task-input"
+export * from "./task-input-files"

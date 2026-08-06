@@ -70,6 +70,7 @@ export class TsciAgentClient implements AgentClient {
       retry_base_delay_ms?: number
       idle_timeout_ms?: number
       wall_timeout_ms?: number
+      env?: Readonly<Record<string, string>>
     },
   ) {}
 
@@ -115,13 +116,15 @@ export class TsciAgentClient implements AgentClient {
           ],
           command_label: input.phase_label,
           cwd: input.workspace,
-          env:
-            input.tool_profile === "model_candidate_files"
+          env: {
+            ...this.options.env,
+            ...(input.tool_profile === "model_candidate_files"
               ? {
                   DATASHEET_MODEL_CHECK_NGSPICE_BIN: input.model_candidate_check?.ngspice_path ?? "ngspice",
                   DATASHEET_MODEL_CHECK_TSCI_BIN: input.model_candidate_check?.tsci_path ?? "tsci",
                 }
-              : undefined,
+              : {}),
+          },
           signal: input.signal,
           idle_timeout_ms: this.options.idle_timeout_ms ?? 10 * 60_000,
           wall_timeout_ms: this.options.wall_timeout_ms ?? 30 * 60_000,

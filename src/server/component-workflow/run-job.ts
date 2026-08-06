@@ -61,6 +61,8 @@ export async function runJob(
         invocation_id: component_invocation_id,
       },
       services,
+      task_input_root: job_dir,
+      task_input_excluded_roots: ["spice"],
       signal,
       on_snapshot: (snapshot) => {
         const projected = projectPublicPipelineSnapshot({
@@ -136,6 +138,8 @@ export async function runJob(
         invocation_id: application_invocation_id,
       },
       services,
+      task_input_root: job_dir,
+      task_input_excluded_roots: ["spice"],
       signal,
       on_snapshot: (snapshot) => {
         const projected = projectPublicPipelineSnapshot({

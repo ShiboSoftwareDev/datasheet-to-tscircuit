@@ -18,7 +18,7 @@ function parseEvent(message: MessageEvent<string>): ModelRunEvent | undefined {
   }
 }
 
-export function useModelRun(job_id?: string) {
+export function useModelRun(job_id?: string, local_run_id?: string) {
   const [model_run, setModelRun] = useState<ModelRun>()
   const [is_loading, setIsLoading] = useState(false)
   const [is_starting, setIsStarting] = useState(false)
@@ -55,13 +55,13 @@ export function useModelRun(job_id?: string) {
     let is_active = true
     setIsLoading(true)
 
-    getModelRun(job_id)
+    getModelRun(job_id, local_run_id)
       .then((loaded_run) => {
         if (!is_active) return
         setModelRun(loaded_run)
         setIsLoading(false)
         if (!loaded_run) return
-        connectToEvents(job_id)
+        if (!local_run_id) connectToEvents(job_id)
       })
       .catch((error: Error) => {
         if (is_active) {
@@ -75,10 +75,10 @@ export function useModelRun(job_id?: string) {
       event_source_ref.current?.close()
       event_source_ref.current = undefined
     }
-  }, [job_id])
+  }, [job_id, local_run_id])
 
   const start = async (effort_multiplier: number) => {
-    if (!job_id || is_starting) return
+    if (!job_id || local_run_id || is_starting) return
     setIsStarting(true)
     setErrorMessage(undefined)
     try {
@@ -92,7 +92,7 @@ export function useModelRun(job_id?: string) {
   }
 
   const extend = async (additional_effort: number) => {
-    if (!job_id || is_extending) return
+    if (!job_id || local_run_id || is_extending) return
     setIsExtending(true)
     setErrorMessage(undefined)
     try {
@@ -107,7 +107,7 @@ export function useModelRun(job_id?: string) {
   }
 
   const cancel = async () => {
-    if (!job_id || is_cancelling) return
+    if (!job_id || local_run_id || is_cancelling) return
     setIsCancelling(true)
     setErrorMessage(undefined)
     try {
@@ -120,7 +120,7 @@ export function useModelRun(job_id?: string) {
   }
 
   const retry = async () => {
-    if (!job_id || is_retrying) return
+    if (!job_id || local_run_id || is_retrying) return
     setIsRetrying(true)
     setErrorMessage(undefined)
     try {
@@ -142,6 +142,8 @@ export function useModelRun(job_id?: string) {
     is_cancelling,
     is_retrying,
     error_message,
+    local_run_id,
+    is_read_only: Boolean(local_run_id),
     start,
     extend,
     cancel,

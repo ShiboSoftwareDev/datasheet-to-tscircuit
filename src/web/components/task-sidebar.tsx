@@ -1,6 +1,7 @@
 import {
   Boxes,
   FlaskConical,
+  Laptop,
   LoaderCircle,
   PanelLeftClose,
   Plus,
@@ -9,6 +10,7 @@ import {
   Trash2,
 } from "lucide-react"
 import type { JobDisplayStatus, JobSummary, ModelRunStatus } from "@/shared/job-types"
+import type { LocalRunSummary } from "@/shared/local-run"
 import { Brand } from "./brand"
 
 const STATUS_COPY: Record<JobDisplayStatus, string> = {
@@ -121,34 +123,48 @@ function TaskStatus({ task }: { task: JobSummary }) {
 
 interface TaskSidebarProps {
   jobs: JobSummary[]
+  local_runs: LocalRunSummary[]
   active_job_id?: string
+  active_local_run_id?: string
+  active_view: "tasks" | "local"
   action_error?: string
   is_open: boolean
   cancelling_job_ids: Set<string>
   retrying_job_ids: Set<string>
   deleting_job_ids: Set<string>
+  rerunning_local_run_ids: Set<string>
   on_new_task: () => void
   on_toggle: () => void
   on_select_task: (job_id: string) => void
+  on_select_local: (local_run: LocalRunSummary) => void
+  on_view_change: (view: "tasks" | "local") => void
   on_cancel_task: (job_id: string) => void
   on_retry_task: (job_id: string) => void
   on_delete_task: (job_id: string) => void
+  on_rerun_local: (local_run_id: string) => void
 }
 
 export function TaskSidebar({
   jobs,
+  local_runs,
   active_job_id,
+  active_local_run_id,
+  active_view,
   action_error,
   is_open,
   cancelling_job_ids,
   retrying_job_ids,
   deleting_job_ids,
+  rerunning_local_run_ids,
   on_new_task,
   on_toggle,
   on_select_task,
+  on_select_local,
+  on_view_change,
   on_cancel_task,
   on_retry_task,
   on_delete_task,
+  on_rerun_local,
 }: TaskSidebarProps) {
   return (
     <aside className="task-sidebar" aria-label="Conversion tasks" aria-hidden={!is_open} inert={!is_open}>
@@ -169,15 +185,31 @@ export function TaskSidebar({
         <Plus size={16} /> <span>New task</span>
       </button>
 
-      <section className="sidebar-tasks" aria-labelledby="tasks-title">
-        <div className="sidebar-section-heading">
-          <span id="tasks-title">Tasks</span>
-          <small>{jobs.length}</small>
+      <section className="sidebar-tasks">
+        <div className="sidebar-section-tabs" role="tablist" aria-label="Run type">
+          <button
+            className={active_view === "tasks" ? "is-active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={active_view === "tasks"}
+            onClick={() => on_view_change("tasks")}
+          >
+            Tasks <small>{jobs.length}</small>
+          </button>
+          <button
+            className={active_view === "local" ? "is-active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={active_view === "local"}
+            onClick={() => on_view_change("local")}
+          >
+            Local <small>{local_runs.length}</small>
+          </button>
         </div>
         <div className="task-list" role="list">
-          {jobs.length === 0 ? (
+          {active_view === "tasks" && jobs.length === 0 ? (
             <p className="empty-task-list">Your conversions will appear here.</p>
-          ) : (
+          ) : active_view === "tasks" ? (
             jobs.map((task) => {
               const is_working = isWorking(task.display_status)
               const is_stopping = task.display_status === "cancelling" || cancelling_job_ids.has(task.job_id)
@@ -247,6 +279,71 @@ export function TaskSidebar({
                     >
                       {is_deleting ? <LoaderCircle className="spin" size={13} /> : <Trash2 size={13} />}
                     </button>
+                  </span>
+                </div>
+              )
+            })
+          ) : local_runs.length === 0 ? (
+            <p className="empty-task-list">CLI and UI debugging runs will appear here.</p>
+          ) : (
+            local_runs.map((localRun) => {
+              const isRunning = localRun.status === "running"
+              const isRerunning = rerunning_local_run_ids.has(localRun.local_run_id)
+              const statusClass = isRunning
+                ? "agent_running"
+                : localRun.status === "completed"
+                  ? "complete"
+                  : localRun.status
+              const statusCopy = isRunning
+                ? "Running"
+                : localRun.status === "completed"
+                  ? "Ready"
+                  : localRun.status === "cancelled"
+                    ? "Cancelled"
+                    : "Failed"
+              const targetCopy = localRun.task_id
+                ? localRun.task_id.replaceAll("_", " ")
+                : localRun.pipeline_id.replaceAll("_", " ")
+              return (
+                <div
+                  className={`task-row local-run-row ${localRun.local_run_id === active_local_run_id ? "is-active" : ""}`}
+                  key={localRun.local_run_id}
+                  role="listitem"
+                >
+                  <button
+                    className="task-select"
+                    type="button"
+                    aria-current={localRun.local_run_id === active_local_run_id ? "page" : undefined}
+                    onClick={() => on_select_local(localRun)}
+                  >
+                    <span className={`task-status-dot task-status-${statusClass}`} aria-hidden="true" />
+                    <span className="task-copy">
+                      <strong title={localRun.file_name}>
+                        <Laptop size={12} /> {localRun.file_name.replace(/\.pdf$/i, "")}
+                      </strong>
+                      <small>
+                        <span className="local-run-status">{statusCopy}</span>
+                        <span aria-hidden="true"> · </span>
+                        <span className="local-run-target">{targetCopy}</span>
+                        <span aria-hidden="true"> · </span>
+                        {formatTaskTime(localRun.created_at)}
+                      </small>
+                    </span>
+                  </button>
+                  <span className="task-entry-actions">
+                    {!isRunning && (
+                      <button
+                        className="task-retry"
+                        type="button"
+                        disabled={isRerunning}
+                        aria-label={`Run ${localRun.file_name} again locally`}
+                        title="Run again locally"
+                        onClick={() => on_rerun_local(localRun.local_run_id)}
+                      >
+                        {isRerunning ? <LoaderCircle className="spin" size={11} /> : <RotateCcw size={11} />}
+                        <span>{isRerunning ? "Starting" : "Run again"}</span>
+                      </button>
+                    )}
                   </span>
                 </div>
               )

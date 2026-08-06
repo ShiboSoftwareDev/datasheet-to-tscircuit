@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, sep } from "node:path"
 import { ProcessError } from "@/server/infrastructure/process"
 import {
   createPipelineArtifact,
   createPipelineStageFactory,
+  loadPipelineTaskInputBundle,
   PipelineError,
   runPipeline,
   validatePipelineDefinition,
@@ -193,7 +194,7 @@ test("an isolated stage runs only from its explicit persisted-style input", asyn
       join(workspace_dir, ".pipeline", "stages", "02-normalize_text", "input.json"),
     ).json()
     expect(input).toMatchObject({
-      version: 1,
+      version: 2,
       kind: "pipeline_task_input",
       pipeline_id: "basic_generation",
       task_id: "normalize_text",
@@ -207,6 +208,38 @@ test("an isolated stage runs only from its explicit persisted-style input", asyn
     })
   } finally {
     await rm(workspace_dir, { recursive: true, force: true })
+  }
+})
+
+test("runnable stages retain a complete content-addressed input filesystem", async () => {
+  const temporary_root = await mkdtemp(join(tmpdir(), "pipeline-retained-input-"))
+  const job_dir = join(temporary_root, "job")
+  const workspace_dir = join(job_dir, "runs", "basic_generation", "retained_run")
+  const artifact_path = join(job_dir, "report.txt")
+  try {
+    await mkdir(workspace_dir, { recursive: true })
+    await Bun.write(join(job_dir, "source.txt"), "retained source")
+    const result = await runPipeline({
+      definition: createBasicDefinition([]),
+      run_id: "retained_run",
+      workspace_dir,
+      context: { source_text: "retained source", artifact_path },
+      services: { write_text: (path, content) => Bun.write(path, content).then(() => undefined) },
+      task_input_root: job_dir,
+    })
+
+    const bundle = await loadPipelineTaskInputBundle(
+      join(result.pipeline_dir, "stages", "01-read_source", "input.json"),
+    )
+    expect(bundle.manifest.files.find(({ path }) => path === "source.txt")).toMatchObject({
+      path: "source.txt",
+      hash: createHash("sha256").update("retained source").digest("hex"),
+      size_bytes: Buffer.byteLength("retained source"),
+    })
+    expect(bundle.manifest.files.some(({ path }) => path.startsWith(`runs${sep}`))).toBe(false)
+    expect(await readdir(bundle.objects_dir)).toHaveLength(1)
+  } finally {
+    await rm(temporary_root, { recursive: true, force: true })
   }
 })
 

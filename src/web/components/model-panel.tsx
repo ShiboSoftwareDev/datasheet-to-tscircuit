@@ -345,7 +345,7 @@ function PreviousTasks({ model_run, current_task }: { model_run: ModelRun; curre
   )
 }
 
-function ModelSourceDialog({ model_run }: { model_run: ModelRun }) {
+function ModelSourceDialog({ model_run, local_run_id }: { model_run: ModelRun; local_run_id?: string }) {
   const is_showing_candidate = model_run.validation?.artifact_state === "candidate"
   return (
     <Dialog.Root>
@@ -370,7 +370,7 @@ function ModelSourceDialog({ model_run }: { model_run: ModelRun }) {
               </Dialog.Description>
             </div>
             <div className="model-dialog-actions">
-              <a href={getModelRunFileUrl(model_run.job_id, "model")}>
+              <a href={getModelRunFileUrl(model_run.job_id, "model", local_run_id)}>
                 <Download size={14} /> Download
               </a>
               <Dialog.Close asChild>
@@ -418,7 +418,8 @@ export function ModelAgentLogs({
   model_run_state: ReturnType<typeof useModelRun>
   on_close: () => void
 }) {
-  const { model_run, is_loading, is_cancelling, error_message, cancel } = model_run_state
+  const { model_run, is_loading, is_cancelling, error_message, cancel, local_run_id, is_read_only } =
+    model_run_state
   const is_running = Boolean(model_run && !model_run.is_complete)
   const empty_message = is_loading
     ? "Loading the SPICE model agent…"
@@ -434,12 +435,12 @@ export function ModelAgentLogs({
           <span>SPICE model agent</span>
         </div>
         <div className="toolbar-actions">
-          {is_running && (
+          {is_running && !is_read_only && (
             <span className="run-indicator">
               <i /> {is_cancelling ? "STOPPING…" : "RUNNING"}
             </span>
           )}
-          {is_running && (
+          {is_running && !is_read_only && (
             <button className="stop-run-button" type="button" disabled={is_cancelling} onClick={cancel}>
               <Square size={9} fill="currentColor" />
               {is_cancelling ? "Stopping…" : "Stop run"}
@@ -448,7 +449,7 @@ export function ModelAgentLogs({
           {model_run && (
             <a
               className="toolbar-icon-link"
-              href={getModelRunFileUrl(model_run.job_id, "log")}
+              href={getModelRunFileUrl(model_run.job_id, "log", local_run_id)}
               aria-label="Download complete SPICE model log"
             >
               <Download size={15} />
@@ -494,6 +495,8 @@ export function ModelPanel({
     extend,
     cancel,
     retry,
+    local_run_id,
+    is_read_only,
   } = model_run_state
   const [effort, setEffort] = useState(1)
   const [now, setNow] = useState(Date.now())
@@ -513,6 +516,13 @@ export function ModelPanel({
   }
 
   if (!model_run) {
+    if (is_read_only) {
+      return (
+        <section className="model-empty-state">
+          <FlaskConical size={26} /> This Local run has no SPICE model output.
+        </section>
+      )
+    }
     return (
       <section className="model-start-card">
         <span className="eyebrow">
@@ -605,26 +615,28 @@ export function ModelPanel({
         </section>
 
         <div className="model-header-actions">
-          <ModelSourceDialog model_run={model_run} />
-          {is_restartable && (
+          <ModelSourceDialog model_run={model_run} local_run_id={local_run_id} />
+          {is_restartable && !is_read_only && (
             <button type="button" disabled={is_retrying} onClick={retry}>
               {is_retrying ? <LoaderCircle className="spin" size={14} /> : <RotateCcw size={14} />}
               {is_retrying ? "Restarting…" : "Restart SPICE generation"}
             </button>
           )}
-          <button
-            type="button"
-            disabled={
-              is_extending ||
-              model_run.effort_multiplier >= 8 ||
-              model_run.status === "validating" ||
-              model_run.status === "cancelling"
-            }
-            onClick={() => extend(1)}
-          >
-            {is_extending ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />} Add 1× effort
-          </button>
-          {is_running && (
+          {!is_read_only && (
+            <button
+              type="button"
+              disabled={
+                is_extending ||
+                model_run.effort_multiplier >= 8 ||
+                model_run.status === "validating" ||
+                model_run.status === "cancelling"
+              }
+              onClick={() => extend(1)}
+            >
+              {is_extending ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />} Add 1× effort
+            </button>
+          )}
+          {is_running && !is_read_only && (
             <button className="model-stop-button" type="button" disabled={is_cancelling} onClick={cancel}>
               <Square size={9} fill="currentColor" /> {is_cancelling ? "Stopping…" : "Stop"}
             </button>
@@ -661,6 +673,7 @@ export function ModelPanel({
 
       <ModelLivePreview
         job_id={job.job_id}
+        local_run_id={local_run_id}
         is_complete={model_run.is_complete}
         circuit_preview={model_run.circuit_preview}
         reference_preview={model_run.reference_preview}

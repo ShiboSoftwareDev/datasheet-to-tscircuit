@@ -8,6 +8,7 @@ import { ModelStrategyRegistry } from "../modeling"
 import { projectPublicPipelineSnapshot, runPipeline } from "../pipeline"
 import { executeLocalNgspice } from "../spice-validation"
 import { MODEL_PIPELINE } from "./model-pipeline"
+import { waitForComponentBeforeModelPipeline } from "./stages/wait-for-component"
 import { appendModelLog, updateModelProgress } from "./stage-helpers"
 import type { ModelRunnerContext } from "./types"
 
@@ -79,6 +80,13 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
     model_run_id: input.model_run_id,
     state: "running",
   })
+  await waitForComponentBeforeModelPipeline({
+    job_id: model_run.job_id,
+    model_run_id: input.model_run_id,
+    job_store: context.job_store,
+    model_run_store: context.model_run_store,
+    signal,
+  })
 
   const process_runner = context.process_runner ?? new BunProcessRunner()
   const agent_client =
@@ -116,6 +124,7 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
       ngspice_bin: context.ngspice_bin ?? (process.env.NGSPICE_BIN?.trim() || "ngspice"),
       ngspice_executor: context.ngspice_executor ?? executeLocalNgspice,
     },
+    task_input_root: job_dir,
     signal,
     on_snapshot: (snapshot) => {
       context.model_run_store.updateModelRun(input.model_run_id, {

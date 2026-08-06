@@ -49,5 +49,15 @@ docker compose run --rm --no-deps app sh -c '
   test -s "$probe_dir/dist/runtime-smoke/circuit.json"
 
   /app/node_modules/.bin/tsci-agent --version >/dev/null
+  bun /app/src/cli/pipeline-debug.ts catalog > "$probe_dir/debug-catalog.json"
+  bun -e '\''
+    const catalog = await Bun.file(process.argv[1]).json()
+    const ids = catalog.pipelines?.map((pipeline) => pipeline.pipeline_id)
+    if (JSON.stringify(ids) !== JSON.stringify([
+      "component_generation",
+      "typical_application",
+      "spice_generation",
+    ])) process.exit(1)
+  '\'' "$probe_dir/debug-catalog.json"
   printf "Docker runtime, ngspice, and tsci smoke passed as uid=%s gid=%s\n" "$(id -u)" "$(id -g)"
 '

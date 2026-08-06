@@ -151,6 +151,18 @@ test("component and application validators reject empty Circuit JSON", async () 
       component_visual: "failed",
     })
 
+    const repeated_component = await validateComponent({
+      job_id: "empty-circuit",
+      job_dir,
+      job_store,
+      tsci_bin: "fake-tsci",
+      process_runner,
+      signal,
+      on_output() {},
+    })
+    expect(repeated_component).toEqual(component)
+    expect(repeated_component).not.toHaveProperty("generated_at")
+
     const application = await validateApplication({
       job_id: "empty-circuit",
       job_dir,
@@ -169,7 +181,7 @@ test("component and application validators reject empty Circuit JSON", async () 
       application_schematic: "failed",
       application_visual: "failed",
     })
-    expect(builds).toEqual(["index.circuit.tsx", "typical-application.circuit.tsx"])
+    expect(builds).toEqual(["index.circuit.tsx", "index.circuit.tsx", "typical-application.circuit.tsx"])
   } finally {
     await rm(job_dir, { recursive: true, force: true })
   }

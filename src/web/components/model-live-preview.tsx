@@ -799,11 +799,13 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
 
 function ModelDatasheetReferencePane({
   job_id,
+  local_run_id,
   benchmark_id,
   preview,
   artifact_identity,
 }: {
   job_id: string
+  local_run_id?: string
   benchmark_id: string
   preview?: ModelReferencePreview
   artifact_identity?: ModelPreviewArtifactIdentity
@@ -815,7 +817,7 @@ function ModelDatasheetReferencePane({
   const image_url =
     resolved_benchmark_id === "live"
       ? undefined
-      : getModelReferenceImageUrl(job_id, resolved_benchmark_id, artifact_identity)
+      : getModelReferenceImageUrl(job_id, resolved_benchmark_id, artifact_identity, local_run_id)
 
   useEffect(() => setImageFailed(false), [image_url])
 
@@ -943,6 +945,7 @@ function parseLiveModelPreview(input: {
 
 export function ModelLivePreview({
   job_id,
+  local_run_id,
   is_complete,
   circuit_preview,
   reference_preview,
@@ -951,6 +954,7 @@ export function ModelLivePreview({
   model_revision,
 }: {
   job_id: string
+  local_run_id?: string
   is_complete: boolean
   circuit_preview?: ModelCircuitPreviewData
   reference_preview?: ModelReferencePreview
@@ -965,7 +969,7 @@ export function ModelLivePreview({
   }, [circuit_preview?.source_file, reference_preview?.benchmark_id])
   const preview_option_key = preview_options.map((option) => option.benchmark_id).join("\u0000")
   const preview_cache_scope = getModelPreviewBundleScopeKey({
-    job_id,
+    job_id: local_run_id ? `${job_id}:${local_run_id}` : job_id,
     preview_generation,
     model_revision,
     preview_option_key,
@@ -1006,7 +1010,10 @@ export function ModelLivePreview({
       const results = await Promise.all(
         benchmark_ids.map(async (benchmark_id) => {
           try {
-            return { benchmark_id, preview: await getModelSelectedPreview(job_id, benchmark_id) }
+            return {
+              benchmark_id,
+              preview: await getModelSelectedPreview(job_id, benchmark_id, local_run_id),
+            }
           } catch (error) {
             return {
               benchmark_id,
@@ -1078,6 +1085,7 @@ export function ModelLivePreview({
               />
               <ModelDatasheetReferencePane
                 job_id={job_id}
+                local_run_id={local_run_id}
                 benchmark_id={entry.benchmark_id}
                 preview={displayed_reference}
                 artifact_identity={displayed_bundle?.artifact_identity}

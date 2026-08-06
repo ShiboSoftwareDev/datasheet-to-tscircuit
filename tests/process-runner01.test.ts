@@ -264,6 +264,29 @@ test("TsciAgentClient retries only classified transport failures", async () => {
   ])
 })
 
+test("TsciAgentClient passes an explicitly scoped credential directory to the agent", async () => {
+  const process_runner = new FakeProcessRunner()
+  const client = new TsciAgentClient({
+    process_runner,
+    agent_bin: "unused-agent",
+    env: { PI_CODING_AGENT_DIR: "/repo/.runtime/pi-agent" },
+    retry_base_delay_ms: 0,
+  })
+  await client.run({
+    workspace: process.cwd(),
+    prompt: "private prompt",
+    use_openai: false,
+    signal: new AbortController().signal,
+    phase_label: "analysis agent",
+    on_output: () => undefined,
+  })
+
+  expect(process_runner.requests).toHaveLength(2)
+  for (const request of process_runner.requests) {
+    expect(request.env).toMatchObject({ PI_CODING_AGENT_DIR: "/repo/.runtime/pi-agent" })
+  }
+})
+
 test("TsciAgentClient confines model candidates to scoped read/write tools", async () => {
   const process_runner = new FakeProcessRunner()
   const client = new TsciAgentClient({

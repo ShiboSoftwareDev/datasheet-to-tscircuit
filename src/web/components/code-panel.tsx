@@ -6,9 +6,11 @@ import { getJobFileUrl } from "../api"
 export function CodePanel({
   job,
   artifact = "component",
+  local_run_id,
 }: {
   job: Job
   artifact?: "component" | "typical_application"
+  local_run_id?: string
 }) {
   const [is_copied, setIsCopied] = useState(false)
   const code = artifact === "component" ? job.component_code : job.typical_application_code
@@ -33,7 +35,7 @@ export function CodePanel({
             {is_copied ? <Check size={14} /> : <Clipboard size={14} />}
             {is_copied ? "Copied" : "Copy"}
           </button>
-          <a href={getJobFileUrl(job.job_id, artifact)}>
+          <a href={getJobFileUrl(job.job_id, artifact, undefined, local_run_id)}>
             <Download size={14} /> Download
           </a>
         </div>

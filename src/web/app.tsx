@@ -9,6 +9,7 @@ import { WorkspaceStatusBar } from "./components/workspace-status-bar"
 import { PipelineDebugger } from "./components/pipeline-debugger"
 import { useActiveJob } from "./use-active-job"
 import { useModelRun } from "./use-model-run"
+import { useLocalRuns } from "./use-local-runs"
 
 function getInitialWorkspaceTab(): "component" | "model" {
   try {
@@ -21,10 +22,10 @@ function getInitialWorkspaceTab(): "component" | "model" {
 export default function App() {
   const {
     jobs,
-    job,
+    job: task_job,
     active_job_id,
-    load_error,
-    action_error,
+    load_error: task_load_error,
+    action_error: task_action_error,
     cancelling_job_ids,
     retrying_job_ids,
     deleting_job_ids,
@@ -35,11 +36,25 @@ export default function App() {
     retryTask,
     deleteTask,
   } = useActiveJob()
-  const model_run_state = useModelRun(active_job_id)
+  const local_run_state = useLocalRuns()
+  const active_local_run_id = local_run_state.active_local_run_id
+  const job = active_local_run_id ? local_run_state.detail?.job : task_job
+  const load_error = active_local_run_id ? local_run_state.load_error : task_load_error
+  const action_error = local_run_state.action_error ?? task_action_error
+  const model_run_state = useModelRun(job?.job_id, active_local_run_id)
   const [is_sidebar_open, setIsSidebarOpen] = useState(false)
   const [is_terminal_open, setIsTerminalOpen] = useState(false)
   const [workspace_tab, setWorkspaceTab] = useState<"component" | "model">(getInitialWorkspaceTab)
   const [component_preview_tab, setComponentPreviewTab] = useState<ComponentPreviewTab>("pcb")
+  const [sidebar_view, setSidebarView] = useState<"tasks" | "local">(active_local_run_id ? "local" : "tasks")
+
+  const selectLocalRun = (localRun: (typeof local_run_state.local_runs)[number]) => {
+    startNewTask()
+    local_run_state.selectLocalRun(localRun)
+    setSidebarView("local")
+  }
+
+  const clearLocalRun = () => local_run_state.setActiveLocalRunId(undefined)
 
   useEffect(() => {
     try {
@@ -97,27 +112,47 @@ export default function App() {
 
       <TaskSidebar
         jobs={jobs}
+        local_runs={local_run_state.local_runs}
         active_job_id={active_job_id}
+        active_local_run_id={active_local_run_id}
+        active_view={sidebar_view}
         action_error={action_error}
         is_open={is_sidebar_open}
         cancelling_job_ids={cancelling_job_ids}
         retrying_job_ids={retrying_job_ids}
         deleting_job_ids={deleting_job_ids}
+        rerunning_local_run_ids={local_run_state.rerunning_local_run_ids}
         on_new_task={() => {
           setIsSidebarOpen(false)
+          clearLocalRun()
           startNewTask()
         }}
         on_toggle={() => setIsSidebarOpen(false)}
         on_select_task={(job_id) => {
-          if (job_id === active_job_id) {
+          if (job_id === active_job_id && !active_local_run_id) {
             setIsSidebarOpen(false)
             return
           }
+          clearLocalRun()
           selectTask(job_id)
+          setSidebarView("tasks")
         }}
+        on_select_local={(localRun) => {
+          if (localRun.local_run_id === active_local_run_id) {
+            setIsSidebarOpen(false)
+            return
+          }
+          selectLocalRun(localRun)
+        }}
+        on_view_change={setSidebarView}
         on_cancel_task={cancelTask}
-        on_retry_task={retryTask}
+        on_retry_task={(jobId) => {
+          clearLocalRun()
+          void retryTask(jobId)
+          setSidebarView("tasks")
+        }}
         on_delete_task={deleteTask}
+        on_rerun_local={(localRunId) => void local_run_state.runAgain(localRunId)}
       />
 
       {job && (
@@ -142,9 +177,15 @@ export default function App() {
             {workspace_tab === "component" ? (
               <AgentLogs
                 job={job}
-                is_stopping={job.display_status === "cancelling" || cancelling_job_ids.has(job.job_id)}
-                on_cancel={() => cancelTask(job.job_id)}
+                is_stopping={
+                  !active_local_run_id &&
+                  (job.display_status === "cancelling" || cancelling_job_ids.has(job.job_id))
+                }
+                on_cancel={() => {
+                  if (!active_local_run_id) void cancelTask(job.job_id)
+                }}
                 on_close={() => setIsTerminalOpen(false)}
+                local_run_id={active_local_run_id}
               />
             ) : (
               <ModelAgentLogs model_run_state={model_run_state} on_close={() => setIsTerminalOpen(false)} />
@@ -154,9 +195,14 @@ export default function App() {
       )}
 
       <div className="app-content">
-        {!active_job_id ? (
+        {!active_job_id && !active_local_run_id ? (
           <main className="landing-main">
-            <UploadPanel on_job_created={selectJob} />
+            <UploadPanel
+              on_job_created={(nextJob) => {
+                clearLocalRun()
+                selectJob(nextJob)
+              }}
+            />
           </main>
         ) : load_error ? (
           <main className="landing-main">
@@ -164,7 +210,13 @@ export default function App() {
               <WandSparkles size={24} />
               <strong>That conversion is no longer available.</strong>
               <p>{load_error}</p>
-              <button type="button" onClick={startNewTask}>
+              <button
+                type="button"
+                onClick={() => {
+                  clearLocalRun()
+                  startNewTask()
+                }}
+              >
                 Start a new task
               </button>
             </div>
@@ -180,6 +232,7 @@ export default function App() {
                 job={job}
                 model_run={model_run_state.model_run}
                 is_model_loading={model_run_state.is_loading}
+                local_run_id={active_local_run_id}
               />
               <nav className="workspace-tabs" aria-label="Datasheet artifacts">
                 <button
@@ -197,7 +250,18 @@ export default function App() {
                   <FlaskConical size={15} /> SPICE Model
                 </button>
               </nav>
-              <PipelineDebugger job={job} model_run={model_run_state.model_run} />
+              <PipelineDebugger
+                job={job}
+                model_run={model_run_state.model_run}
+                local_run={local_run_state.detail?.local_run}
+                is_rerunning_local={
+                  active_local_run_id
+                    ? local_run_state.rerunning_local_run_ids.has(active_local_run_id)
+                    : false
+                }
+                on_local_run_started={selectLocalRun}
+                on_rerun_local={(localRunId) => void local_run_state.runAgain(localRunId)}
+              />
             </div>
             <div className="workspace-body">
               {workspace_tab === "component" ? (
@@ -208,6 +272,7 @@ export default function App() {
                       job={job}
                       active_tab={component_preview_tab}
                       on_active_tab_change={setComponentPreviewTab}
+                      local_run_id={active_local_run_id}
                     />
                   </div>
                 </div>

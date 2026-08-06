@@ -1,30 +1,32 @@
-import { mkdir, readFile, stat } from "node:fs/promises"
+import { lstat, mkdir, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import type { PublicPipelineSnapshot } from "@/shared/job-types"
-import type { PipelineJsonValue, PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
+import type { LocalRunMode } from "@/shared/local-run"
 import { JobStore } from "../server/job-store"
 import { restorePersistedJobs } from "../server/job-restorer"
+import { listLocalRuns } from "../server/local-runs"
 import { ModelRunStore } from "../server/model-run-store"
-import { loadPipelineTaskInput, parsePipelineTaskInput } from "../server/pipeline"
+import { loadPipelineTaskInputBundle } from "../server/pipeline"
 import {
   PIPELINE_REGISTRY,
   PIPELINE_TASK_CATALOG,
   type RegisteredPipelineId,
 } from "../server/pipeline-registry"
-import { type ReplayMode, runPipelineReplay } from "../server/pipeline-replay"
+import { runPipelineLocal } from "../server/pipeline-local-run"
 
 const HELP = `datasheet pipeline debugger
 
 Commands:
   debug catalog
   debug job list [--root <repo>]
-  debug job replay <job-id> --pipeline <id> [--task <id> | --from <id>] [--output <dir>]
+  debug local list [--root <repo>]
+  debug local run <job-id> --pipeline <id> [--task <id> | --from <id>] [--output <dir>]
   debug task inspect --input <input.json>
   debug task run --input <input.json> [--output <dir>]
   debug pipeline run --input <input.json> [--output <dir>]
 
-Every command writes machine-readable JSON. Replays run in a fresh cloned workspace
-under .runtime/replays unless --output is supplied.
+Every command writes machine-readable JSON. Local runs materialize the exact retained
+task input in a fresh workspace under .runtime/local unless --output is supplied.
 `
 
 function option({ args, name }: { args: readonly string[]; name: string }): string | undefined {
@@ -41,17 +43,37 @@ function requiredOption({ args, name }: { args: readonly string[]; name: string 
   return value
 }
 
+function assertArguments(input: {
+  args: readonly string[]
+  positional_count: number
+  allowed_options: readonly string[]
+}): void {
+  const allowed = new Set(input.allowed_options)
+  const seen = new Set<string>()
+  for (let index = input.positional_count; index < input.args.length; index += 2) {
+    const name = input.args[index]
+    if (!name?.startsWith("--") || !allowed.has(name)) {
+      throw new Error(`Unknown option ${name ?? ""}`.trim())
+    }
+    if (seen.has(name)) throw new Error(`Option ${name} may be specified only once`)
+    seen.add(name)
+    const value = input.args[index + 1]
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`)
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function jsonRecord(value: unknown): value is Record<string, PipelineJsonValue> {
-  return isRecord(value)
-}
-
-function resolveInputPath({ jobDir, debugRef }: { jobDir: string; debugRef: string }): string {
-  const jobRoot = resolve(jobDir)
-  const inputPath = resolve(jobRoot, debugRef, "input.json")
+async function resolveInputPath({ jobDir, debugRef }: { jobDir: string; debugRef: string }): Promise<string> {
+  const jobRoot = await realpath(jobDir)
+  const unresolvedInputPath = resolve(jobRoot, debugRef, "input.json")
+  const inputMetadata = await lstat(unresolvedInputPath)
+  if (inputMetadata.isSymbolicLink() || !inputMetadata.isFile()) {
+    throw new Error("Retained task input must be a regular file")
+  }
+  const inputPath = await realpath(unresolvedInputPath)
   const pathFromJob = relative(jobRoot, inputPath)
   if (pathFromJob.startsWith("..") || isAbsolute(pathFromJob)) {
     throw new Error("Retained task input escapes the job workspace")
@@ -62,7 +84,7 @@ function resolveInputPath({ jobDir, debugRef }: { jobDir: string; debugRef: stri
 async function restoredState(rootDir: string) {
   const jobsRoot = join(rootDir, ".runtime", "jobs")
   await mkdir(jobsRoot, { recursive: true })
-  // Discovery and input selection are read-only. Replay gets separate stores
+  // Discovery and input selection are read-only. Local runs get separate stores
   // backed by the cloned workspace after its input has been resolved.
   const jobStore = new JobStore({ checkpoint_writer: () => undefined })
   const modelRunStore = new ModelRunStore({ checkpoint_writer: () => undefined })
@@ -90,121 +112,23 @@ function snapshotForPipeline(input: {
   return modelRunId ? input.modelRunStore.getModelRun(modelRunId)?.pipeline : undefined
 }
 
-function contextForLegacyInput(input: {
-  pipelineId: RegisteredPipelineId
-  jobId: string
-  jobStore: JobStore
-  modelRunStore: ModelRunStore
-}): Readonly<Record<string, PipelineJsonValue>> {
-  const job = input.jobStore.getJob(input.jobId)
-  const jobDir = input.jobStore.getJobDir(input.jobId)
-  if (!job || !jobDir) throw new Error(`Job ${input.jobId} was not found`)
-  if (input.pipelineId !== "spice_generation") {
-    const retrySource = input.jobStore.getJobRetrySource(input.jobId)
-    return {
-      job_id: input.jobId,
-      job_dir: jobDir,
-      use_openai: job.use_openai ?? false,
-      invocation_id: `legacy-${crypto.randomUUID()}`,
-      ...(retrySource?.additional_instructions
-        ? { additional_instructions: retrySource.additional_instructions }
-        : {}),
-    }
-  }
-  const modelRunId = input.modelRunStore.getModelRunIdForJob(input.jobId)
-  const modelRun = modelRunId ? input.modelRunStore.getModelRun(modelRunId) : undefined
-  const modelDir = modelRunId ? input.modelRunStore.getModelDir(modelRunId) : undefined
-  if (!modelRunId || !modelRun || !modelDir) throw new Error(`Job ${input.jobId} has no SPICE run`)
-  return {
-    model_run_id: modelRunId,
-    job_id: input.jobId,
-    job_dir: jobDir,
-    model_dir: modelDir,
-    use_openai: modelRun.use_openai ?? false,
-    max_repair_attempts: Math.max(1, Math.min(8, modelRun.effort_multiplier)),
-    invocation_id: `legacy-${crypto.randomUUID()}`,
-  }
-}
-
-async function loadReplayEnvelope(input: {
-  path: string
-  pipelineId: RegisteredPipelineId
-  taskId: string
-  jobId: string
-  jobStore: JobStore
-  modelRunStore: ModelRunStore
-}): Promise<PipelineTaskInputEnvelope> {
-  const raw = JSON.parse(await readFile(input.path, "utf8")) as unknown
-  let parseError: unknown
-  try {
-    const current = parsePipelineTaskInput(raw)
-    if (current.pipeline_id !== input.pipelineId || current.task_id !== input.taskId) {
-      throw new Error("Retained task input identity does not match the requested task")
-    }
-    return current
-  } catch (error) {
-    parseError = error
-  }
-  if (
-    !isRecord(raw) ||
-    raw.version !== undefined ||
-    !Array.isArray(raw.depends_on) ||
-    !isRecord(raw.dependency_statuses) ||
-    !jsonRecord(raw.dependency_outputs)
-  ) {
-    throw parseError
-  }
-  return {
-    version: 1,
-    kind: "pipeline_task_input",
-    pipeline_id: input.pipelineId,
-    task_id: input.taskId,
-    run_id: input.jobId,
-    execution_context: contextForLegacyInput(input),
-    depends_on: raw.depends_on.filter((entry): entry is string => typeof entry === "string"),
-    dependency_statuses: Object.fromEntries(
-      Object.entries(raw.dependency_statuses).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    ),
-    dependency_outputs: raw.dependency_outputs,
-  }
-}
-
-function collectPaths({
-  value,
-  result = new Set<string>(),
-}: {
-  value: PipelineJsonValue
-  result?: Set<string>
-}): Set<string> {
-  if (typeof value === "string" && isAbsolute(value)) result.add(value)
-  else if (Array.isArray(value)) {
-    value.forEach((entry) => collectPaths({ value: entry, result }))
-  } else if (value !== null && typeof value === "object") {
-    Object.values(value).forEach((entry) => collectPaths({ value: entry, result }))
-  }
-  return result
-}
-
 async function inspectInput(path: string) {
-  const envelope = await loadPipelineTaskInput(path)
-  const paths = collectPaths({ value: envelope.execution_context })
-  collectPaths({ value: envelope.dependency_outputs, result: paths })
-  const referencedPaths = await Promise.all(
-    [...paths].map(async (referencedPath) => ({
-      path: referencedPath,
-      exists: await stat(referencedPath)
-        .then(() => true)
-        .catch(() => false),
-    })),
-  )
-  return { input_path: resolve(path), envelope, referenced_paths: referencedPaths }
+  const bundle = await loadPipelineTaskInputBundle(path)
+  return {
+    input_path: bundle.input_path,
+    envelope: bundle.envelope,
+    retained_files: {
+      count: bundle.manifest.files.length,
+      total_bytes: bundle.manifest.files.reduce((sum, file) => sum + file.size_bytes, 0),
+      manifest_path: join(bundle.input_dir, "input-files.json"),
+      objects_path: bundle.objects_dir,
+    },
+  }
 }
 
-async function replayOldJob({ args, rootDir }: { args: readonly string[]; rootDir: string }) {
+async function runLocalJob({ args, rootDir }: { args: readonly string[]; rootDir: string }) {
   const jobId = args[2]
-  if (!jobId || jobId.startsWith("--")) throw new Error("job replay requires a job id")
+  if (!jobId || jobId.startsWith("--")) throw new Error("local run requires a job id")
   const pipelineId = requiredOption({ args, name: "--pipeline" })
   if (!(pipelineId in PIPELINE_REGISTRY)) throw new Error(`Unknown pipeline ${pipelineId}`)
   const registeredPipelineId = pipelineId as RegisteredPipelineId
@@ -212,7 +136,7 @@ async function replayOldJob({ args, rootDir }: { args: readonly string[]; rootDi
   const fromOption = option({ args, name: "--from" })
   if (taskOption && fromOption) throw new Error("Use either --task or --from, not both")
   const definition = PIPELINE_REGISTRY[registeredPipelineId]
-  const mode: ReplayMode = taskOption ? "task" : fromOption ? "from_task" : "pipeline"
+  const mode: LocalRunMode = taskOption ? "task" : fromOption ? "from_task" : "pipeline"
   const taskId = taskOption ?? fromOption ?? definition.stages[0]?.id
   if (!taskId || !definition.stages.some(({ id }) => id === taskId)) {
     throw new Error(`Pipeline ${pipelineId} has no task ${taskId}`)
@@ -229,18 +153,14 @@ async function replayOldJob({ args, rootDir }: { args: readonly string[]; rootDi
   })
   const retainedTask = snapshot?.stage_results[taskId]
   if (!retainedTask) throw new Error(`Job ${jobId} has no retained input for ${pipelineId}/${taskId}`)
-  const inputPath = resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
-  const envelope = await loadReplayEnvelope({
-    path: inputPath,
-    pipelineId: registeredPipelineId,
-    taskId,
-    jobId,
-    jobStore: state.jobStore,
-    modelRunStore: state.modelRunStore,
-  })
-  return runPipelineReplay({
+  const inputPath = await resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
+  const bundle = await loadPipelineTaskInputBundle(inputPath)
+  if (bundle.envelope.pipeline_id !== registeredPipelineId || bundle.envelope.task_id !== taskId) {
+    throw new Error("Retained task input identity does not match the requested task")
+  }
+  return runPipelineLocal({
     rootDir,
-    envelope,
+    bundle,
     mode,
     taskId: mode === "pipeline" ? undefined : taskId,
     outputDir: option({ args, name: "--output" }),
@@ -251,8 +171,12 @@ export async function runDebugCli(args = Bun.argv.slice(2)): Promise<unknown> {
   if (args.length === 0 || args.includes("--help") || args[0] === "help") return { help: HELP }
   const rootDir = resolve(option({ args, name: "--root" }) ?? process.cwd())
 
-  if (args[0] === "catalog") return { pipelines: PIPELINE_TASK_CATALOG }
+  if (args[0] === "catalog") {
+    assertArguments({ args, positional_count: 1, allowed_options: [] })
+    return { pipelines: PIPELINE_TASK_CATALOG }
+  }
   if (args[0] === "job" && args[1] === "list") {
+    assertArguments({ args, positional_count: 2, allowed_options: ["--root"] })
     const state = await restoredState(rootDir)
     return {
       jobs_root: state.jobsRoot,
@@ -271,29 +195,44 @@ export async function runDebugCli(args = Bun.argv.slice(2)): Promise<unknown> {
       }),
     }
   }
+  if (args[0] === "local" && args[1] === "list") {
+    assertArguments({ args, positional_count: 2, allowed_options: ["--root"] })
+    const localRunsRoot = join(rootDir, ".runtime", "local")
+    return { local_runs_root: localRunsRoot, local_runs: await listLocalRuns(localRunsRoot) }
+  }
   if (args[0] === "task" && args[1] === "inspect") {
+    assertArguments({ args, positional_count: 2, allowed_options: ["--input"] })
     return inspectInput(requiredOption({ args, name: "--input" }))
   }
   if (args[0] === "task" && args[1] === "run") {
-    const envelope = await loadPipelineTaskInput(requiredOption({ args, name: "--input" }))
-    return runPipelineReplay({
+    assertArguments({ args, positional_count: 2, allowed_options: ["--input", "--output", "--root"] })
+    const bundle = await loadPipelineTaskInputBundle(requiredOption({ args, name: "--input" }))
+    return runPipelineLocal({
       rootDir,
-      envelope,
+      bundle,
       mode: "task",
-      taskId: envelope.task_id,
+      taskId: bundle.envelope.task_id,
       outputDir: option({ args, name: "--output" }),
     })
   }
   if (args[0] === "pipeline" && args[1] === "run") {
-    const envelope = await loadPipelineTaskInput(requiredOption({ args, name: "--input" }))
-    return runPipelineReplay({
+    assertArguments({ args, positional_count: 2, allowed_options: ["--input", "--output", "--root"] })
+    const bundle = await loadPipelineTaskInputBundle(requiredOption({ args, name: "--input" }))
+    return runPipelineLocal({
       rootDir,
-      envelope,
+      bundle,
       mode: "pipeline",
       outputDir: option({ args, name: "--output" }),
     })
   }
-  if (args[0] === "job" && args[1] === "replay") return replayOldJob({ args, rootDir })
+  if (args[0] === "local" && args[1] === "run") {
+    assertArguments({
+      args,
+      positional_count: 3,
+      allowed_options: ["--pipeline", "--task", "--from", "--output", "--root"],
+    })
+    return runLocalJob({ args, rootDir })
+  }
   throw new Error(`Unknown command.\n\n${HELP}`)
 }
 
@@ -306,7 +245,7 @@ if (import.meta.main) {
       }
     })
     .catch((error) => {
-      process.stderr.write(
+      process.stdout.write(
         `${JSON.stringify(
           {
             error: {

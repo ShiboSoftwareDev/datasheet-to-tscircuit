@@ -8,11 +8,13 @@ export function AgentLogs({
   is_stopping,
   on_cancel,
   on_close,
+  local_run_id,
 }: {
   job: Job
   is_stopping: boolean
   on_cancel: () => void
   on_close: () => void
+  local_run_id?: string
 }) {
   const is_running = !job.is_complete
 
@@ -24,12 +26,12 @@ export function AgentLogs({
           <span title={job.file_name}>{job.file_name.replace(/\.pdf$/i, "")}</span>
         </div>
         <div className="toolbar-actions">
-          {is_running && (
+          {is_running && !local_run_id && (
             <span className="run-indicator">
               <i /> {is_stopping ? "STOPPING…" : "RUNNING"}
             </span>
           )}
-          {is_running && (
+          {is_running && !local_run_id && (
             <button className="stop-run-button" type="button" disabled={is_stopping} onClick={on_cancel}>
               <Square size={9} fill="currentColor" />
               {is_stopping ? "Stopping…" : "Stop run"}
@@ -37,7 +39,7 @@ export function AgentLogs({
           )}
           <a
             className="toolbar-icon-link"
-            href={getJobFileUrl(job.job_id, "log")}
+            href={getJobFileUrl(job.job_id, "log", undefined, local_run_id)}
             aria-label="Download complete agent log"
           >
             <Download size={15} />

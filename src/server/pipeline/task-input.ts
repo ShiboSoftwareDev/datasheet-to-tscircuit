@@ -1,5 +1,9 @@
 import { lstat, readFile } from "node:fs/promises"
-import type { PipelineJsonValue, PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
+import type {
+  PipelineJsonValue,
+  PipelineTaskInputEnvelope,
+  PipelineTaskInputFiles,
+} from "@/shared/pipeline-types"
 import { PipelineError } from "./pipeline-error"
 
 const MAX_TASK_INPUT_BYTES = 16 * 1024 * 1024
@@ -37,10 +41,32 @@ function jsonRecord(value: unknown): value is Record<string, PipelineJsonValue> 
   return isRecord(value) && Object.values(value).every(isJsonValue)
 }
 
+function parseInputFiles(value: unknown): PipelineTaskInputFiles | undefined {
+  if (value === undefined) return undefined
+  if (
+    !isRecord(value) ||
+    value.kind !== "pipeline_task_files" ||
+    value.manifest_path !== "input-files.json" ||
+    value.objects_path !== "../../input-objects"
+  ) {
+    throw new PipelineError({
+      code: "invalid_task_input_files",
+      message: "Task input files must use the portable pipeline_task_files layout",
+      stage_id: null,
+      operation: "parse_task_input",
+    })
+  }
+  return {
+    kind: "pipeline_task_files",
+    manifest_path: "input-files.json",
+    objects_path: "../../input-objects",
+  }
+}
+
 export function parsePipelineTaskInput(value: unknown): PipelineTaskInputEnvelope {
   if (
     !isRecord(value) ||
-    value.version !== 1 ||
+    value.version !== 2 ||
     value.kind !== "pipeline_task_input" ||
     typeof value.pipeline_id !== "string" ||
     typeof value.task_id !== "string" ||
@@ -53,14 +79,15 @@ export function parsePipelineTaskInput(value: unknown): PipelineTaskInputEnvelop
   ) {
     throw new PipelineError({
       code: "invalid_task_input",
-      message: "Task input must be a version 1 pipeline_task_input envelope",
+      message: "Task input must be a version 2 pipeline_task_input envelope",
       stage_id: null,
       operation: "parse_task_input",
       hint: "Use a retained .pipeline/stages/<task>/input.json file from a current run.",
     })
   }
+  const input_files = parseInputFiles(value.input_files)
   return {
-    version: 1,
+    version: 2,
     kind: "pipeline_task_input",
     pipeline_id: value.pipeline_id,
     task_id: value.task_id,
@@ -69,6 +96,7 @@ export function parsePipelineTaskInput(value: unknown): PipelineTaskInputEnvelop
     depends_on: [...value.depends_on],
     dependency_statuses: { ...value.dependency_statuses },
     dependency_outputs: { ...value.dependency_outputs },
+    ...(input_files ? { input_files } : {}),
   }
 }
 

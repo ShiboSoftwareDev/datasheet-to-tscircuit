@@ -62,10 +62,12 @@ export function WorkspaceStatusBar({
   job,
   model_run,
   is_model_loading,
+  local_run_id,
 }: {
   job: Job
   model_run?: ModelRun
   is_model_loading: boolean
+  local_run_id?: string
 }) {
   const component_status = job.component_ready
     ? (job.warnings?.length ?? 0) > 0
@@ -136,7 +138,10 @@ export function WorkspaceStatusBar({
             <DropdownMenu.Label className="workspace-download-label">Download artifact</DropdownMenu.Label>
             {job.component_code && (
               <DropdownMenu.Item asChild>
-                <a className="workspace-download-item" href={getJobFileUrl(job.job_id, "component")}>
+                <a
+                  className="workspace-download-item"
+                  href={getJobFileUrl(job.job_id, "component", undefined, local_run_id)}
+                >
                   <Boxes size={14} /> Component TSX
                 </a>
               </DropdownMenu.Item>
@@ -155,7 +160,7 @@ export function WorkspaceStatusBar({
                     <DropdownMenu.Item asChild>
                       <a
                         className="workspace-download-item"
-                        href={getJobFileUrl(job.job_id, "typical_application")}
+                        href={getJobFileUrl(job.job_id, "typical_application", undefined, local_run_id)}
                       >
                         <CircuitBoard size={14} /> {job.typical_application_title ?? "Typical application"}{" "}
                         TSX
@@ -167,7 +172,10 @@ export function WorkspaceStatusBar({
             )}
             {model_run?.model_source && (
               <DropdownMenu.Item asChild>
-                <a className="workspace-download-item" href={getModelRunFileUrl(job.job_id, "model")}>
+                <a
+                  className="workspace-download-item"
+                  href={getModelRunFileUrl(job.job_id, "model", local_run_id)}
+                >
                   <FlaskConical size={14} /> SPICE model
                 </a>
               </DropdownMenu.Item>

@@ -71,11 +71,13 @@ function ArtifactRunframe({
   artifact,
   active_tab,
   on_active_tab_change,
+  local_run_id,
 }: {
   job: Job
   artifact: ComponentArtifact
   active_tab: ComponentPreviewTab
   on_active_tab_change: (tab: ComponentPreviewTab) => void
+  local_run_id?: string
 }) {
   const is_application = artifact === "typical_application"
   const circuit_json = is_application ? job.typical_application_circuit_json : job.circuit_json
@@ -94,7 +96,7 @@ function ArtifactRunframe({
         circuitJson={circuit_json}
         code={code}
         showCodeTab={Boolean(code)}
-        codeTabContent={<CodePanel job={job} artifact={artifact} />}
+        codeTabContent={<CodePanel job={job} artifact={artifact} local_run_id={local_run_id} />}
         availableTabs={available_tabs}
         defaultActiveTab={active_tab}
         defaultTab={active_tab}
@@ -115,10 +117,12 @@ export function CircuitPreview({
   job,
   active_tab,
   on_active_tab_change,
+  local_run_id,
 }: {
   job: Job
   active_tab: ComponentPreviewTab
   on_active_tab_change: (tab: ComponentPreviewTab) => void
+  local_run_id?: string
 }) {
   const [artifact, setArtifact] = useState<ComponentArtifact>("component")
   const [component_reference_view, setComponentReferenceView] = useState<ComponentReferenceView>("footprint")
@@ -160,6 +164,7 @@ export function CircuitPreview({
             artifact={artifact}
             active_tab={artifact_preview_tab}
             on_active_tab_change={setArtifactPreviewTab}
+            local_run_id={local_run_id}
           />
         </div>
         <DatasheetReference
@@ -167,6 +172,7 @@ export function CircuitPreview({
           artifact={artifact}
           component_view={component_reference_view}
           on_component_view_change={setComponentReferenceView}
+          local_run_id={local_run_id}
         />
       </div>
     </section>

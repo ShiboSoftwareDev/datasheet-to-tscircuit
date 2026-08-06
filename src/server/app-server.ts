@@ -6,6 +6,7 @@ import { JobStore } from "./job-store"
 import { createModelRunApiHandler } from "./model-run-api"
 import { ModelRunStore } from "./model-run-store"
 import { createPipelineDebugApiHandler } from "./pipeline-debug-api"
+import { createLocalRunApiHandler } from "./local-run-api"
 
 export interface AppServerOptions {
   hostname?: string
@@ -40,13 +41,17 @@ function getStaticResponse(request: Request, root_dir: string): Response {
 export async function createAppServer(options: AppServerOptions = {}) {
   const root_dir = options.root_dir ?? resolve(import.meta.dir, "../..")
   const jobs_root = join(root_dir, ".runtime", "jobs")
+  const local_runs_root = join(root_dir, ".runtime", "local")
   await mkdir(jobs_root, { recursive: true })
+  await mkdir(local_runs_root, { recursive: true })
 
   const job_store = options.job_store ?? new JobStore()
   const model_run_store = options.model_run_store ?? new ModelRunStore()
   await restorePersistedJobs({ jobs_root, job_store, model_run_store })
   const runner_context = {
+    root_dir,
     jobs_root,
+    local_runs_root,
     job_store,
     model_run_store,
     agent_bin: process.env.TSCI_AGENT_BIN ?? join(root_dir, "node_modules", ".bin", "tsci-agent"),
@@ -55,6 +60,7 @@ export async function createAppServer(options: AppServerOptions = {}) {
   const handleModelRunApiRequest = createModelRunApiHandler(runner_context)
   const handleJobApiRequest = createJobApiHandler(runner_context)
   const handlePipelineDebugApiRequest = createPipelineDebugApiHandler(runner_context)
+  const handleLocalRunApiRequest = createLocalRunApiHandler(runner_context)
 
   return Bun.serve({
     hostname: resolveServerHostname(options.hostname),
@@ -62,6 +68,7 @@ export async function createAppServer(options: AppServerOptions = {}) {
     async fetch(request) {
       try {
         const api_response =
+          (await handleLocalRunApiRequest(request)) ??
           (await handlePipelineDebugApiRequest(request)) ??
           (await handleModelRunApiRequest(request)) ??
           (await handleJobApiRequest(request))

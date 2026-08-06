@@ -7,13 +7,21 @@ export type PipelineJsonValue =
 
 export type PipelineOutputMap = Readonly<Record<string, PipelineJsonValue>>
 
+export interface PipelineTaskInputFiles {
+  readonly kind: "pipeline_task_files"
+  /** Relative to the directory containing input.json. */
+  readonly manifest_path: "input-files.json"
+  /** Relative to the directory containing input.json. */
+  readonly objects_path: "../../input-objects"
+}
+
 /**
  * The complete serializable input required to execute one pipeline task again.
  * Runtime services such as process launchers and credentials are deliberately
  * excluded; all workflow state belongs in this envelope.
  */
 export interface PipelineTaskInputEnvelope {
-  readonly version: 1
+  readonly version: 2
   readonly kind: "pipeline_task_input"
   readonly pipeline_id: string
   readonly task_id: string
@@ -22,6 +30,8 @@ export interface PipelineTaskInputEnvelope {
   readonly depends_on: readonly string[]
   readonly dependency_statuses: Readonly<Record<string, string>>
   readonly dependency_outputs: Readonly<Record<string, PipelineJsonValue>>
+  /** Present only when this retained task has a complete independently runnable input bundle. */
+  readonly input_files?: PipelineTaskInputFiles
 }
 
 export type DeepReadonly<Value> = Value extends PipelineJsonPrimitive

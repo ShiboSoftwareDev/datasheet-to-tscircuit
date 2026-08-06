@@ -187,7 +187,6 @@ export async function validateComponent(input: {
     passed: errors.length === 0,
     errors,
     circuit_json,
-    generated_at: new Date().toISOString(),
   }
   await Promise.all([
     writeJson(join(input.job_dir, "component-validation.json"), record),
@@ -220,7 +219,6 @@ export async function validateApplication(input: {
       passed: true,
       errors: [],
       circuit_json: [],
-      generated_at: new Date().toISOString(),
     }
     await writeJson(join(input.job_dir, "application-validation.json"), record)
     return record
@@ -308,7 +306,6 @@ export async function validateApplication(input: {
     passed: errors.length === 0,
     errors,
     circuit_json,
-    generated_at: new Date().toISOString(),
   }
   await writeJson(join(input.job_dir, "application-validation.json"), record)
   return record

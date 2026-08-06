@@ -8,6 +8,7 @@ import type {
 } from "@/shared/job-types"
 import { parseModelSelectedPreview } from "@/shared/model-selected-preview"
 import type { DebugPipelineId, DebugRunMode } from "@/shared/pipeline-debug"
+import type { LocalRunDetail, LocalRunSummary } from "@/shared/local-run"
 import { getInitialUseOpenai } from "./agent-provider-preference"
 
 interface JobResponse {
@@ -20,6 +21,14 @@ interface JobsResponse {
 
 interface ModelRunResponse {
   model_run: ModelRun
+}
+
+interface LocalRunsResponse {
+  local_runs: LocalRunSummary[]
+}
+
+interface LocalRunResponse {
+  local_run: LocalRunSummary
 }
 
 async function readApiError(response: Response): Promise<string> {
@@ -96,13 +105,38 @@ export async function runPipelineDebug(input: {
   pipeline_id: DebugPipelineId
   mode: DebugRunMode
   stage_id?: string
-}): Promise<void> {
-  const response = await fetch("/api/pipeline/debug-run", {
+}): Promise<LocalRunSummary> {
+  const response = await fetch("/api/local-run/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   })
   if (!response.ok) throw new Error(await readApiError(response))
+  return ((await response.json()) as LocalRunResponse).local_run
+}
+
+export async function getLocalRuns(): Promise<LocalRunSummary[]> {
+  const response = await fetch("/api/local-runs", { cache: "no-store" })
+  if (!response.ok) throw new Error(await readApiError(response))
+  return ((await response.json()) as LocalRunsResponse).local_runs
+}
+
+export async function getLocalRun(local_run_id: string): Promise<LocalRunDetail> {
+  const response = await fetch(`/api/local-run/get?local_run_id=${encodeURIComponent(local_run_id)}`, {
+    cache: "no-store",
+  })
+  if (!response.ok) throw new Error(await readApiError(response))
+  return (await response.json()) as LocalRunDetail
+}
+
+export async function rerunLocal(local_run_id: string): Promise<LocalRunSummary> {
+  const response = await fetch("/api/local-run/rerun", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ local_run_id }),
+  })
+  if (!response.ok) throw new Error(await readApiError(response))
+  return ((await response.json()) as LocalRunResponse).local_run
 }
 
 export async function deleteJob(job_id: string): Promise<void> {
@@ -123,13 +157,20 @@ export type JobFileKind =
   | "component_schematic_reference"
   | "application_reference"
 
-export function getJobFileUrl(job_id: string, file: JobFileKind, display?: "inline"): string {
+export function getJobFileUrl(
+  job_id: string,
+  file: JobFileKind,
+  display?: "inline",
+  local_run_id?: string,
+): string {
   const inline_query = display === "inline" ? "&display=inline" : ""
-  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}${inline_query}`
+  const local_query = local_run_id ? `&local_run_id=${encodeURIComponent(local_run_id)}` : ""
+  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}${inline_query}${local_query}`
 }
 
-export async function getModelRun(job_id: string): Promise<ModelRun | undefined> {
-  const response = await fetch(`/api/model-run/get?job_id=${encodeURIComponent(job_id)}`)
+export async function getModelRun(job_id: string, local_run_id?: string): Promise<ModelRun | undefined> {
+  const local_query = local_run_id ? `&local_run_id=${encodeURIComponent(local_run_id)}` : ""
+  const response = await fetch(`/api/model-run/get?job_id=${encodeURIComponent(job_id)}${local_query}`)
   if (response.status === 404) return undefined
   if (!response.ok) throw new Error(await readApiError(response))
   return ((await response.json()) as ModelRunResponse).model_run
@@ -181,9 +222,11 @@ export async function retryModelRun(job_id: string): Promise<ModelRun> {
 export async function getModelSelectedPreview(
   job_id: string,
   benchmark_id: string,
+  local_run_id?: string,
 ): Promise<ModelSelectedPreview> {
+  const local_query = local_run_id ? `&local_run_id=${encodeURIComponent(local_run_id)}` : ""
   const response = await fetch(
-    `/api/model-run/preview?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}`,
+    `/api/model-run/preview?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}${local_query}`,
     { cache: "no-store" },
   )
   if (!response.ok) throw new Error(await readApiError(response))
@@ -194,8 +237,10 @@ export function getModelReferenceImageUrl(
   job_id: string,
   benchmark_id: string,
   artifact_identity?: ModelPreviewArtifactIdentity,
+  local_run_id?: string,
 ): string {
-  const base = `/api/model-run/reference-image?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}`
+  const local_query = local_run_id ? `&local_run_id=${encodeURIComponent(local_run_id)}` : ""
+  const base = `/api/model-run/reference-image?job_id=${encodeURIComponent(job_id)}&benchmark_id=${encodeURIComponent(benchmark_id)}${local_query}`
   if (!artifact_identity) return base
   return `${base}&preview_generation=${encodeURIComponent(artifact_identity.preview_generation)}&model_revision=${encodeURIComponent(artifact_identity.model_revision)}`
 }
@@ -210,8 +255,9 @@ export type ModelRunFileKind =
   | "component"
   | "log"
 
-export function getModelRunFileUrl(job_id: string, file: ModelRunFileKind): string {
-  return `/api/model-run/file?job_id=${encodeURIComponent(job_id)}&file=${file}`
+export function getModelRunFileUrl(job_id: string, file: ModelRunFileKind, local_run_id?: string): string {
+  const local_query = local_run_id ? `&local_run_id=${encodeURIComponent(local_run_id)}` : ""
+  return `/api/model-run/file?job_id=${encodeURIComponent(job_id)}&file=${file}${local_query}`
 }
 
 export type { ApiError }

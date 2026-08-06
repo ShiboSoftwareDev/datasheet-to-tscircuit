@@ -28,7 +28,7 @@ The new backend is split into small, directional layers:
   diagnostics, metrics, and artifact metadata shared with the browser.
 - `src/server/pipeline` validates definitions and executes stages. It has no
   component, model, agent, tscircuit, or ngspice policy.
-- `src/server/pipeline-replay` clones retained jobs and executes a task,
+- `src/server/pipeline-replay` materializes retained task inputs and executes a task,
   pipeline suffix, or full pipeline without modifying historical state.
 - `src/cli/pipeline-debug.ts` exposes the same contracts as machine-readable
   local commands for developers and coding agents.
@@ -121,10 +121,12 @@ trace:
 ```text
 .runtime/jobs/<job-id>/runs/<pipeline-id>/<invocation-id>/.pipeline/
 ├── events.ndjson
+├── input-objects/                # SHA-256-addressed task input bytes shared by stages
 ├── observer-errors.ndjson        # only when an optional snapshot sink fails
 └── stages/
     ├── 01-prepare/
     │   ├── input.json
+    │   ├── input-files.json
     │   ├── output.json
     │   ├── error.json
     │   └── metrics.json
@@ -141,9 +143,11 @@ trace:
 `events.ndjson` is an append-only, sequenced timeline. A stage's `input.json`
 is a versioned `pipeline_task_input` envelope recording its pipeline/task
 identity, source run, complete JSON execution context, dependency states, and
-completed dependency outputs. Runtime services such as credentials, process
-launchers, and installed simulator binaries are intentionally not workflow
-state and remain injected by the local runtime. `output.json` contains its
+completed dependency outputs. Its `input-files.json` manifest maps the complete
+pre-task filesystem to immutable objects in `input-objects`; runtime logs and
+prior run histories are deliberately excluded. Runtime services such as
+credentials, process launchers, and installed simulator binaries are injected
+by the local runtime. `output.json` contains its
 terminal result, diagnostics, and SHA-256 artifact records;
 `error.json` contains the structured failure when present; and `metrics.json`
 contains timing, counts, and stage metrics.
@@ -166,19 +170,21 @@ The local debugger treats each stage as an independently addressable task. The
 pipeline is only an ordered composition that passes a completed output into the
 next task. `bun run debug -- task run --input <input.json>` selects exactly one
 task and validates that the supplied dependency keys match its registry
-contract. `pipeline run` starts at the first registered task, while `job replay`
-locates retained inputs by job, pipeline, and task ID and supports exact-task,
-suffix, and whole-pipeline modes.
+contract. `pipeline run` accepts only the first registered task's input, while
+`job replay` locates retained inputs by job, pipeline, and task ID and supports
+exact-task, suffix, and whole-pipeline modes.
 
-Replay is non-destructive by default. The runtime creates a fresh directory,
-copies the retained job while excluding earlier `runs` histories, rejects
-symbolic links, rewrites every job-local path in the context and dependency
-payload to the clone, restores private stores from the cloned checkpoints, and
-then invokes the ordinary production stage definitions. The replay directory
-contains a stable `summary.json`, a new event stream, task bundles, cloned
-canonical outputs, and immutable artifact snapshots. This gives a local AI the
-same inputs, failures, graphs, and generated files as the UI without granting
-it an alternate workflow implementation.
+Replay is non-destructive by default. Immediately before a runnable task starts,
+the runtime snapshots its complete job input into a manifest and content-addressed
+object store, excluding runtime logs and earlier `runs` histories. Replay verifies
+those hashes, materializes only those retained bytes in a fresh directory,
+rewrites every declared job-local path in the context and dependency payload,
+restores private stores from the retained checkpoints, and then invokes the
+ordinary production stage definition. It never clones or consults the job's
+current filesystem state. The replay directory contains a stable `summary.json`,
+a new event stream, new task bundles, canonical outputs, and immutable artifact
+snapshots. This gives a local AI the same task inputs, failures, graphs, and
+generated files as the UI without granting it an alternate workflow implementation.
 
 ## Component and typical-application pipelines
 
