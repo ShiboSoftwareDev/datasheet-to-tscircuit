@@ -25,8 +25,6 @@ export const PIPELINE_DEBUG_CATALOG = Object.freeze([
     title: "SPICE",
     description: "Reconstruct and compare datasheet waveforms before publishing a SPICE-backed component.",
     stages: [
-      "wait_for_component",
-      "prepare_workspace",
       "find_reference_graphs",
       "create_comparison_graphs",
       "infer_spice_model",
@@ -34,6 +32,7 @@ export const PIPELINE_DEBUG_CATALOG = Object.freeze([
       "run_simulations",
       "compare_simulation_outputs",
       "repair_spice_model",
+      "wait_for_component",
       "publish",
     ],
   },

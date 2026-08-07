@@ -328,10 +328,10 @@ test("model panel keeps compact progress without rendering the execution trace",
             started_at: timestamp,
             updated_at: timestamp,
             stage_results: {
-              prepare_workspace: {
-                stage_id: "prepare_workspace",
+              find_reference_graphs: {
+                stage_id: "find_reference_graphs",
                 status: "completed",
-                debug_ref: "debug/prepare-workspace",
+                debug_ref: "debug/find-reference-graphs",
                 duration_ms: 100,
               },
               internal_only_stage: {

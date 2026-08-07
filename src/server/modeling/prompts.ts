@@ -20,8 +20,7 @@ them without reintroducing them.
 
 Read AGENTS.md, model-interface.json, component-evidence.json,
 typical-application-plan.json, application-fixture-contract.json,
-component.circuit.tsx, time-graph-hints.json,
-model-reference-observation.json, and the complete datasheet.pdf from first page
+time-graph-hints.json, model-reference-observation.json, and the complete datasheet.pdf from first page
 to last page. Inspect the PDF itself, including its printed figures; do not rely
 only on extracted text, the application plan, or pages already cited by another
 artifact. The application plan is committed
@@ -169,8 +168,8 @@ Do not turn a scalar specification into a synthetic transient waveform.`
 Read AGENTS.md, model-contract.json, model-interface.json,
 validation-plan-guide.md, component-evidence.json,
 typical-application-plan.json, application-fixture-contract.json, and
-component.circuit.tsx. Treat the committed application plan and its compiled
-fixture contract as topology and operating-condition evidence; when availability
+the evidence-derived model interface. Treat the committed application plan and
+its compiled fixture contract as topology and operating-condition evidence; when availability
 is not_present, do not invent an application. Write
 validation-plan.json only. Never write raw SPICE, .measure statements, TSX,
 scripts, or model.lib; the server compiles the plan.
@@ -237,8 +236,8 @@ export function buildModelGenerationPrompt(input: {
   return `Create the SPICE model described by model-contract.json.
 
 Read AGENTS.md, model-contract.json, model-training-plan.json, model-interface.json,
-component-evidence.json, and component.circuit.tsx. The exact per-graph transient
-fixtures are already compiled into model-training-plan.json. Do not reproduce
+component-evidence.json, and application-fixture-contract.json. The exact per-graph
+transient fixtures are already compiled into model-training-plan.json. Do not reproduce
 fixture passives or sources inside the DUT. Write exactly model.lib and model-card.md.
 After writing both files, call check_model_candidate. It runs the
 real agent-visible fixtures through ngspice and the tscircuit viewer, and reports

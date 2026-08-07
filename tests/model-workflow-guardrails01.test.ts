@@ -2,11 +2,13 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { AgentClient } from "@/server/infrastructure/agent"
-import type { ProcessRunner } from "@/server/infrastructure/process"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
-import { runModel } from "@/server/model-workflow"
+import { ModelStrategyRegistry } from "@/server/modeling"
+import {
+  waitForComponentBeforePublication,
+  waitForComponentStage,
+} from "@/server/model-workflow/stages/wait-for-component"
 
 const temporary_directories: string[] = []
 
@@ -24,7 +26,7 @@ async function waitUntil(predicate: () => boolean, description: string): Promise
   throw new Error(`Timed out waiting for ${description}`)
 }
 
-test("a terminal failed component is rejected by the wait stage with its own diagnostic", async () => {
+test("the publication join rejects a terminal failed component with its own diagnostic", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "model-terminal-component-"))
   temporary_directories.push(job_dir)
   const model_dir = join(job_dir, "spice")
@@ -44,42 +46,67 @@ test("a terminal failed component is rejected by the wait stage with its own dia
     model_dir,
     effort_multiplier: 1,
   })
-  const unused_agent: AgentClient = {
-    async run() {
-      throw new Error("agent must not run")
-    },
-  }
-  const unused_process: ProcessRunner = {
-    async run() {
-      throw new Error("process must not run")
-    },
-  }
-
-  await runModel(
-    { model_run_id: "failed_component_model" },
-    {
-      job_store,
-      model_run_store,
-      agent_bin: "unused",
-      tsci_bin: "unused",
-      agent_client: unused_agent,
-      process_runner: unused_process,
-      ngspice_executor: async () => {
-        throw new Error("ngspice must not run")
+  let caught: unknown
+  try {
+    await waitForComponentStage.execute({
+      run_id: "failed_component_model",
+      pipeline_id: "spice_generation",
+      stage_id: "wait_for_component",
+      debug_dir: join(model_dir, "debug"),
+      context: {
+        model_run_id: "failed_component_model",
+        job_id: "failed_component",
+        job_dir,
+        model_dir,
+        use_openai: false,
+        max_repair_attempts: 1,
+        invocation_id: "failed-component",
       },
-    },
-  )
-
-  const run = model_run_store.getModelRun("failed_component_model")
-  expect(run?.status).toBe("failed")
-  expect(run?.pipeline?.stage_results.wait_for_component).toMatchObject({
-    status: "failed",
-    error: {
+      services: {
+        job_store,
+        model_run_store,
+        agent_client: {
+          async run() {
+            throw new Error("agent must not run")
+          },
+        },
+        process_runner: {
+          async run() {
+            throw new Error("process must not run")
+          },
+        },
+        strategy_registry: new ModelStrategyRegistry(),
+        tsci_bin: "unused",
+        ngspice_bin: "unused",
+        ngspice_executor: async () => {
+          throw new Error("ngspice must not run")
+        },
+      },
+      dependency_outputs: {
+        repair_spice_model: {
+          result_path: "unused",
+          model_path: "unused",
+          model_card_path: "unused",
+          manifest_path: "unused",
+          contract_path: "unused",
+          plan_path: "unused",
+          evidence_dir: "unused",
+          passed: true,
+          repair_attempts: 0,
+          revision: "unused",
+        },
+      },
+      signal: new AbortController().signal,
+    })
+  } catch (error) {
+    caught = error
+  }
+  expect(caught).toMatchObject({
+    diagnostic: {
       code: "component_not_ready",
       message: "Component pinout could not be resolved",
     },
   })
-  expect(run?.pipeline?.stage_results.prepare_workspace?.status).toBe("skipped")
 })
 
 test("an early component-ready milestone cannot race the final component publication", async () => {
@@ -103,32 +130,13 @@ test("an early component-ready milestone cannot race the final component publica
     model_dir,
     effort_multiplier: 1,
   })
-  let agent_calls = 0
-  let process_calls = 0
-  const run_promise = runModel(
-    { model_run_id: "publishing_component_model" },
-    {
-      job_store,
-      model_run_store,
-      agent_bin: "unused",
-      tsci_bin: "unused",
-      agent_client: {
-        async run() {
-          agent_calls += 1
-          throw new Error("agent must not run")
-        },
-      },
-      process_runner: {
-        async run() {
-          process_calls += 1
-          throw new Error("process must not run")
-        },
-      },
-      ngspice_executor: async () => {
-        throw new Error("ngspice must not run")
-      },
-    },
-  )
+  const wait_promise = waitForComponentBeforePublication({
+    job_id: "publishing_component",
+    model_run_id: "publishing_component_model",
+    job_store,
+    model_run_store,
+    signal: new AbortController().signal,
+  })
 
   await waitUntil(
     () => model_run_store.getModelRun("publishing_component_model")?.status === "waiting_for_component",
@@ -136,9 +144,6 @@ test("an early component-ready milestone cannot race the final component publica
   )
   await Bun.sleep(10)
   expect(model_run_store.getModelRun("publishing_component_model")?.is_complete).toBe(false)
-  expect(model_run_store.getModelRun("publishing_component_model")?.pipeline).toBeUndefined()
-  expect(agent_calls).toBe(0)
-  expect(process_calls).toBe(0)
 
   const pipeline_timestamp = new Date().toISOString()
   job_store.updateJob("publishing_component", {
@@ -159,14 +164,9 @@ test("an early component-ready milestone cannot race the final component publica
       },
     },
   })
-  await run_promise
+  await wait_promise
 
   const run = model_run_store.getModelRun("publishing_component_model")
-  expect(run?.pipeline?.stage_results.wait_for_component?.status).toBe("completed")
-  expect(run?.pipeline?.stage_results.prepare_workspace).toMatchObject({
-    status: "failed",
-    error: { message: expect.stringContaining("evidence-commit.json") },
-  })
-  expect(agent_calls).toBe(0)
-  expect(process_calls).toBe(0)
+  expect(run?.status).toBe("waiting_for_component")
+  expect(run?.is_complete).toBe(false)
 })

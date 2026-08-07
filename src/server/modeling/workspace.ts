@@ -1,16 +1,14 @@
 import { createHash } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { isCircuitJson } from "../component-circuit-json"
 import { parseComponentEvidence } from "../component-evidence"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
-import { ensureJobTscircuitRuntimeConfig } from "../job-scaffold"
 import {
   applicationTargetIdentityFromEvidence,
   parseTypicalApplicationPlan,
 } from "../component-workflow/application-plan"
 import { compileApplicationFixtureContract } from "./application-fixture-contract"
-import { createModelInterface } from "./model-interface"
+import { createEvidenceModelInterface } from "./model-interface"
 import { parseModelContract } from "./parse-model-contract"
 import type { ModelContract, ModelInterface } from "./types"
 
@@ -21,8 +19,8 @@ This workspace is controlled by the server pipeline.
 - Read only the inputs named by the current prompt.
 - Write only the declared output artifacts for the current stage.
 - Never modify model-interface.json, model-contract.json, validation-plan.json,
-  component.circuit.tsx, component-evidence.json,
-  typical-application-plan.json, application-fixture-contract.json, or datasheet.pdf.
+  component-evidence.json, typical-application-plan.json,
+  application-fixture-contract.json, or datasheet.pdf.
 - Validation plans are declarative JSON. Never create raw .cir or .measure files.
 - The server compiles fixtures, runs ngspice, records hashes, and owns pass/fail.
 - model.lib must expose exactly one public subcircuit with the exact server-owned
@@ -31,19 +29,26 @@ This workspace is controlled by the server pipeline.
 - Do not claim that an artifact is validated; only server results can do that.
 `
 
-async function copyCanonical(source: string, destination: string): Promise<void> {
-  const bytes = await readFile(source)
-  await Bun.write(destination, bytes)
-}
-
 function sha256Bytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex")
 }
 
-export async function prepareModelWorkspace(input: {
+/**
+ * Materializes only the committed evidence inputs required by Find Reference
+ * Graphs and its downstream model-characterization work. It deliberately does
+ * not read or wait for a generated component artifact.
+ */
+export async function prepareReferenceGraphInputs(input: {
   job_dir: string
   model_dir: string
-}): Promise<ModelInterface> {
+  invocation_id: string
+}): Promise<{
+  model_interface: ModelInterface
+  application_fixture: ReturnType<typeof compileApplicationFixtureContract>
+  attempt_dir: string
+  interface_path: string
+  application_fixture_path: string
+}> {
   const evidence_snapshot = await readCommittedEvidenceSnapshot(input.job_dir)
   if (!evidence_snapshot) {
     throw new Error(
@@ -78,15 +83,7 @@ export async function prepareModelWorkspace(input: {
       cause: error,
     })
   }
-
-  await mkdir(input.model_dir, { recursive: true })
-  const component_circuit_json: unknown = JSON.parse(
-    await readFile(join(input.job_dir, "component.circuit.json"), "utf8"),
-  )
-  if (!isCircuitJson(component_circuit_json)) {
-    throw new Error("component.circuit.json must contain validated Circuit JSON")
-  }
-  const model_interface = createModelInterface(evidence, component_circuit_json)
+  const model_interface = createEvidenceModelInterface(evidence)
   const application_plan = parseTypicalApplicationPlan(
     application_plan_value,
     applicationTargetIdentityFromEvidence(evidence),
@@ -97,46 +94,29 @@ export async function prepareModelWorkspace(input: {
     source_plan_sha256: sha256Bytes(application_plan_bytes),
     source_pdf_sha256: sha256Bytes(datasheet_bytes),
   })
-  const preserved_component = join(input.job_dir, "component.circuit.tsx")
-  const component_source = (await Bun.file(preserved_component).exists())
-    ? preserved_component
-    : join(input.job_dir, "index.circuit.tsx")
-  // Runtime config is executable environment state, not an immutable job
-  // artifact. Refresh it on every model invocation so a job created in Docker
-  // can be retried on the host (and vice versa) without retaining an absolute
-  // import path from the previous runtime.
-  await ensureJobTscircuitRuntimeConfig(input.job_dir)
+  const attempt_dir = join(input.model_dir, "attempts", input.invocation_id)
+  const interface_path = join(input.model_dir, "model-interface.json")
+  const workspace_application_fixture_path = join(input.model_dir, "application-fixture-contract.json")
+  const application_fixture_text = `${JSON.stringify(application_fixture, null, 2)}\n`
+  await mkdir(input.model_dir, { recursive: true })
   await Promise.all([
     Bun.write(join(input.model_dir, "datasheet.pdf"), datasheet_bytes),
-    copyCanonical(component_source, join(input.model_dir, "component.circuit.tsx")),
     Bun.write(join(input.model_dir, "component-evidence.json"), evidence_bytes),
     Bun.write(join(input.model_dir, "typical-application-plan.json"), application_plan_bytes),
-    Bun.write(
-      join(input.model_dir, "application-fixture-contract.json"),
-      `${JSON.stringify(application_fixture, null, 2)}\n`,
-    ),
-    Bun.write(
-      join(input.model_dir, "component.circuit.json"),
-      `${JSON.stringify(component_circuit_json, null, 2)}\n`,
-    ),
-    Bun.write(join(input.model_dir, "model-interface.json"), `${JSON.stringify(model_interface, null, 2)}\n`),
+    Bun.write(workspace_application_fixture_path, application_fixture_text),
+    Bun.write(interface_path, `${JSON.stringify(model_interface, null, 2)}\n`),
     Bun.write(join(input.model_dir, "AGENTS.md"), MODEL_WORKSPACE_GUIDE),
-    mkdir(join(input.model_dir, "evidence"), { recursive: true }),
-    mkdir(join(input.model_dir, "validation"), { recursive: true }),
-    ...[
-      "package.json",
-      "tsconfig.json",
-      "tscircuit.config.json",
-      "tscircuit.config.ts",
-      "typical-application.circuit.tsx",
-    ].map(async (file_name) => {
-      const source = join(input.job_dir, file_name)
-      if (await Bun.file(source).exists()) {
-        await copyCanonical(source, join(input.model_dir, file_name))
-      }
-    }),
+    mkdir(join(attempt_dir, "evidence"), { recursive: true }),
   ])
-  return model_interface
+  const application_fixture_path = join(attempt_dir, "application-fixture-contract.json")
+  await Bun.write(application_fixture_path, application_fixture_text)
+  return {
+    model_interface,
+    application_fixture,
+    attempt_dir,
+    interface_path,
+    application_fixture_path,
+  }
 }
 
 export async function writeModelContract(model_dir: string, contract: ModelContract): Promise<void> {

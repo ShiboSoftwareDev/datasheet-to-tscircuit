@@ -1329,6 +1329,13 @@ test("a failed integrated build cannot replace the prior accepted root files or 
         },
       },
       dependency_outputs: {
+        wait_for_component: {
+          job_id: "job_integration",
+          component_source_path: join(workspace.model_dir, "component.circuit.tsx"),
+          component_circuit_json_path: join(workspace.model_dir, "component.circuit.json"),
+          integration_interface_path: join(workspace.model_dir, "model-interface.json"),
+          integration_dir: workspace.model_dir,
+        },
         repair_spice_model: {
           result_path: join(validation_dir, "validation-results.json"),
           model_path: join(candidate_dir, "model.lib"),

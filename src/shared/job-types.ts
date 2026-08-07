@@ -253,7 +253,6 @@ export interface ModelManifest {
 
 export type ModelProgressPhase =
   | "queued"
-  | "preparing_workspace"
   | "characterizing"
   | "designing_validation"
   | "generating_model"

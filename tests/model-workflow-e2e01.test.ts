@@ -773,7 +773,6 @@ testWithProductionSimulation(
       "completed",
       "completed",
       "completed",
-      "completed",
     ])
     expect(agent_calls).toEqual([
       "Independent datasheet graph discovery",

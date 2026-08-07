@@ -21,6 +21,16 @@ function selectorSafe(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value)
 }
 
+function evidenceSelector(pin: ComponentEvidence["pinout"]["pins"][number]): string {
+  const physical_selector = `pin${pin.number}`
+  if (selectorSafe(physical_selector)) return physical_selector
+  const label_selector = pin.labels.find(selectorSafe)
+  if (label_selector) return label_selector
+  throw new Error(
+    `Physical pin ${pin.number} has no selector-safe physical or label name for the model interface`,
+  )
+}
+
 function resolveComponentSelector(input: {
   pin: ComponentEvidence["pinout"]["pins"][number]
   circuit_json: AnyCircuitElement[]
@@ -65,14 +75,17 @@ function resolveComponentSelector(input: {
   return { component_pin, source_port_id: port.source_port_id }
 }
 
-export function createModelInterface(
+function createModelInterfaceWithSelectors(
   evidence: ComponentEvidence,
-  circuit_json: AnyCircuitElement[],
+  selector_for_pin: (
+    pin: ComponentEvidence["pinout"]["pins"][number],
+    index: number,
+  ) => { component_pin: string; source_port_id: string },
 ): ModelInterface {
   const entry_name = identifier(evidence.part_number.value) || "DATASHEET_MODEL"
   const used_nodes = new Set<string>()
-  const pins = evidence.pinout.pins.map((pin) => {
-    const selector = resolveComponentSelector({ pin, circuit_json })
+  const pins = evidence.pinout.pins.map((pin, index) => {
+    const selector = selector_for_pin(pin, index)
     const primary_label = pin.labels[0]
     const base =
       identifier(primary_label ? normalizeElectricalPinLabel(primary_label) : `PIN_${pin.number}`) ||
@@ -99,5 +112,50 @@ export function createModelInterface(
     part_number: evidence.part_number.value,
     entry_name,
     pins,
+  }
+}
+
+/**
+ * Creates the standalone electrical interface used by graph characterization,
+ * model generation, and validation before a generated component exists. The
+ * source-port ids are stable evidence identities, not Circuit JSON ids.
+ */
+export function createEvidenceModelInterface(evidence: ComponentEvidence): ModelInterface {
+  return createModelInterfaceWithSelectors(evidence, (pin, index) => ({
+    component_pin: evidenceSelector(pin),
+    source_port_id: `evidence_port_${index + 1}`,
+  }))
+}
+
+/** Creates the final integration interface from the validated component. */
+export function createModelInterface(
+  evidence: ComponentEvidence,
+  circuit_json: AnyCircuitElement[],
+): ModelInterface {
+  return createModelInterfaceWithSelectors(evidence, (pin) => resolveComponentSelector({ pin, circuit_json }))
+}
+
+/**
+ * The generated component may supply different concrete Circuit JSON ids, but
+ * it must implement the exact electrical interface that was modeled.
+ */
+export function assertModelInterfaceIntegrationCompatible(
+  modeled: ModelInterface,
+  integrated: ModelInterface,
+): void {
+  const modeled_contract = {
+    version: modeled.version,
+    part_number: modeled.part_number,
+    entry_name: modeled.entry_name,
+    pins: modeled.pins.map(({ source_port_id: _source_port_id, ...pin }) => pin),
+  }
+  const integrated_contract = {
+    version: integrated.version,
+    part_number: integrated.part_number,
+    entry_name: integrated.entry_name,
+    pins: integrated.pins.map(({ source_port_id: _source_port_id, ...pin }) => pin),
+  }
+  if (JSON.stringify(integrated_contract) !== JSON.stringify(modeled_contract)) {
+    throw new Error("Validated component pin interface does not match the evidence-derived SPICE interface")
   }
 }

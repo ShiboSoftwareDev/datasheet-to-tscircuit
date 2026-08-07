@@ -76,6 +76,14 @@ export interface RunPipelineOptions<
   readonly on_snapshot?: PipelineSnapshotCallback<Outputs>
   readonly snapshot_timeout_ms?: number
   readonly now?: () => Date
+  /**
+   * Runtime coordination completed before the independently runnable task input
+   * filesystem is captured. It must not perform task work or mutate task output.
+   */
+  readonly before_stage_start?: (input: {
+    readonly stage_id: keyof Outputs & string
+    readonly signal: AbortSignal
+  }) => void | Promise<void>
   /** Filesystem root whose exact pre-task contents make this task independently replayable. */
   readonly task_input_root?: string
   /** Top-level task_input_root directories that are runtime services rather than task inputs. */
@@ -725,6 +733,34 @@ export const runPipeline = async <
         event_type: "stage_skipped",
         stage_id: stage.id,
         status: "skipped",
+        debug_dir,
+        reason,
+      })
+      continue
+    }
+
+    await options.before_stage_start?.({ stage_id: stage.id, signal })
+    if (signal.aborted) {
+      const completed_at = now().toISOString()
+      const reason = getCancellationReason(signal)
+      const result = Object.freeze({
+        stage_id: stage.id,
+        debug_dir,
+        status: "cancelled" as const,
+        reason,
+        completed_at,
+        artifacts: emptyArtifacts(),
+        diagnostics: emptyDiagnostics(),
+        metrics: emptyMetrics(),
+      })
+      mutable_results[stage.id] = result
+      has_cancelled_stage = true
+      await writeInitialDebugBundle(debug_dir, debug_input)
+      await writeTerminalDebugBundle(debug_dir, result)
+      await emit({
+        event_type: "stage_cancelled",
+        stage_id: stage.id,
+        status: "cancelled",
         debug_dir,
         reason,
       })

@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, rm } from "node:fs/promises"
+import { mkdir, readFile, rm } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 import {
@@ -198,11 +198,6 @@ export async function prepareModelPublication(input: {
     validation_artifact_state: "accepted",
     preview_generation: snapshot_id,
   })
-  const preserved_component = join(input.job_dir, "component.circuit.tsx")
-  if (!(await Bun.file(preserved_component).exists())) {
-    await copyFile(join(input.job_dir, "index.circuit.tsx"), preserved_component)
-  }
-
   const workspace = await createStageWorkspace({ prefix: "model-publication", files: [] })
   try {
     const accepted_bundle = join(workspace.path, "accepted")

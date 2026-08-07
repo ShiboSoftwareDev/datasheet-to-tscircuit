@@ -59,6 +59,7 @@ import {
   type TimeGraphDiscovery,
 } from "../src/server/model-workflow/time-graph-hints"
 import { parseAgentValidationPlan } from "../src/server/spice-validation"
+import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const source_pdf_sha256 = "a".repeat(64)
 const temporary_directories: string[] = []
@@ -1993,30 +1994,62 @@ describe("independent reference-graph observation", () => {
     const attempt_dir = join(model_dir, "attempts", "invocation_run94")
     await Promise.all([mkdir(job_dir, { recursive: true }), mkdir(attempt_dir, { recursive: true })])
     const test_pdf = "%PDF-1.4\n% run94 deterministic fixture\n"
-    const application_fixture = compileApplicationFixtureContract({
-      plan: {
-        version: 4,
-        availability: "not_present",
-        title: "No documented application",
-        description: "The complete datasheet search found no typical application.",
-        source_references: [{ page: 1 }],
-        searched_sections: ["application information"],
-        components: [],
-        connections: [],
+    const application_plan = {
+      version: 4,
+      availability: "not_present",
+      title: "No documented application",
+      description: "The complete datasheet search found no typical application.",
+      source_references: [{ page: 1 }],
+      searched_sections: ["application information"],
+      components: [],
+      connections: [],
+    }
+    const evidence_source = { page: 1, method: "pdf_text", confidence: "high" }
+    const land_pattern_source = {
+      page: 1,
+      figure: "Test land pattern",
+      method: "pdf_visual",
+      confidence: "high",
+      image: "visual-reference/land-pattern.png",
+      render_dpi: 200,
+    }
+    await publishCommittedEvidenceFixture({
+      job_dir,
+      datasheet: test_pdf,
+      component_evidence: {
+        version: 1,
+        status: "resolved",
+        part_number: { value: model_interface.part_number, sources: [evidence_source] },
+        package: {
+          name: { value: "TEST", sources: [evidence_source] },
+          pin_count: { value: model_interface.pins.length, sources: [evidence_source] },
+        },
+        pinout: {
+          pins: model_interface.pins.map((pin) => ({
+            number: pin.physical_pin,
+            labels: pin.labels,
+            role: pin.role === "control" ? "input" : pin.role,
+            sources: [evidence_source],
+          })),
+        },
+        footprint: {
+          view: "pcb_top",
+          units: "mm",
+          drawing_orientation: { value: "pcb_top", sources: [land_pattern_source] },
+          pads: model_interface.pins.map((pin, index) => ({
+            pin: pin.physical_pin,
+            kind: "smt",
+            x: index,
+            y: 0,
+            width: 0.5,
+            height: 1,
+            sources: [land_pattern_source],
+          })),
+        },
+        unresolved_ambiguities: [],
       },
-      model_interface,
-      source_plan_sha256: "1".repeat(64),
-      source_pdf_sha256: createHash("sha256").update(test_pdf).digest("hex"),
+      application_plan,
     })
-    await Promise.all([
-      Bun.write(join(model_dir, "AGENTS.md"), "# Test instructions\n"),
-      Bun.write(join(model_dir, "datasheet.pdf"), test_pdf),
-      Bun.write(join(model_dir, "model-interface.json"), `${JSON.stringify(model_interface, null, 2)}\n`),
-      Bun.write(
-        join(model_dir, "application-fixture-contract.json"),
-        `${JSON.stringify(application_fixture, null, 2)}\n`,
-      ),
-    ])
     const run94_text = (
       await readFile(join(import.meta.dir, "fixtures/model-run-replays/run94-ina237-time-graphs.txt"), "utf8")
     ).replaceAll("\\f", "\f")
@@ -2106,17 +2139,7 @@ describe("independent reference-graph observation", () => {
             throw new Error("Run-94 characterization stop must not invoke ngspice")
           },
         },
-        dependency_outputs: {
-          prepare_workspace: {
-            part_number: model_interface.part_number,
-            entry_name: model_interface.entry_name,
-            pin_count: model_interface.pins.length,
-            interface_path: join(model_dir, "model-interface.json"),
-            attempt_dir,
-            application_fixture_path: join(model_dir, "application-fixture-contract.json"),
-            application_fixture_sha256: application_fixture.contract_sha256,
-          },
-        },
+        dependency_outputs: {},
         signal: new AbortController().signal,
       })
     } catch (error) {

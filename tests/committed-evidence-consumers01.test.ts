@@ -12,7 +12,7 @@ import type { AgentClient } from "@/server/infrastructure/agent"
 import { createJobApiHandler } from "@/server/job-api"
 import { restoreJobDirectory } from "@/server/job-restorer/restore-job-directory"
 import { JobStore } from "@/server/job-store"
-import { prepareModelWorkspace } from "@/server/modeling"
+import { prepareReferenceGraphInputs } from "@/server/modeling"
 import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const temporary_directories: string[] = []
@@ -211,31 +211,16 @@ test("application generation rejects a plan outside its committed snapshot", asy
   expect(agent_called).toBe(false)
 })
 
-test("model workspaces materialize committed evidence and fail closed on tampering", async () => {
+test("reference graph inputs materialize committed evidence and fail closed on tampering", async () => {
   const job_dir = await createCommittedJob()
   const evidence_dir = await committedEvidenceDir(job_dir)
-  const component_source = 'export default () => <chip name="U1" />\n'
-  const component_circuit_json = [
-    { type: "source_component", source_component_id: "source_component_u1", name: "U1" },
-    ...[
-      ["1", "INPUT"],
-      ["2", "RETURN"],
-    ].map(([pin, label]) => ({
-      type: "source_port",
-      source_port_id: `source_port_${pin}`,
-      source_component_id: "source_component_u1",
-      pin_number: pin,
-      name: label,
-      port_hints: [`pin${pin}`, label],
-    })),
-  ]
-  await Promise.all([
-    Bun.write(join(job_dir, "component.circuit.tsx"), component_source),
-    Bun.write(join(job_dir, "component.circuit.json"), `${JSON.stringify(component_circuit_json)}\n`),
-  ])
   const model_dir = join(job_dir, "spice")
 
-  const model_interface = await prepareModelWorkspace({ job_dir, model_dir })
+  const { model_interface } = await prepareReferenceGraphInputs({
+    job_dir,
+    model_dir,
+    invocation_id: "initial",
+  })
   expect(model_interface.part_number).toBe("SOLID-2")
   expect(await Bun.file(join(model_dir, "component-evidence.json")).text()).toBe(
     await Bun.file(join(evidence_dir, "component-evidence.json")).text(),
@@ -246,6 +231,8 @@ test("model workspaces materialize committed evidence and fail closed on tamperi
   expect(await Bun.file(join(model_dir, "datasheet.pdf")).text()).toBe(
     await Bun.file(join(job_dir, "datasheet.pdf")).text(),
   )
+  expect(await Bun.file(join(model_dir, "component.circuit.tsx")).exists()).toBe(false)
+  expect(await Bun.file(join(model_dir, "component.circuit.json")).exists()).toBe(false)
 
   const mutable_plan = (await Bun.file(join(evidence_dir, "typical-application-plan.json")).json()) as {
     title: string
@@ -256,13 +243,17 @@ test("model workspaces materialize committed evidence and fail closed on tamperi
     `${JSON.stringify(mutable_plan, null, 2)}\n`,
   )
   const rejected_model_dir = join(job_dir, "spice-after-tamper")
-  await expect(prepareModelWorkspace({ job_dir, model_dir: rejected_model_dir })).rejects.toThrow(
-    "Committed evidence integrity check failed for typical-application-plan.json",
-  )
+  await expect(
+    prepareReferenceGraphInputs({
+      job_dir,
+      model_dir: rejected_model_dir,
+      invocation_id: "tampered",
+    }),
+  ).rejects.toThrow("Committed evidence integrity check failed for typical-application-plan.json")
   expect(await Bun.file(rejected_model_dir).exists()).toBe(false)
 })
 
-test("model workspace creation rejects legacy evidence that does not bind a source PDF", async () => {
+test("reference graph inputs reject legacy evidence that does not bind a source PDF", async () => {
   const job_dir = await createCommittedJob()
   const relative_paths = [
     "component-evidence.json",
@@ -288,7 +279,7 @@ test("model workspace creation rejects legacy evidence that does not bind a sour
   )
 
   const model_dir = join(job_dir, "spice-legacy-evidence")
-  await expect(prepareModelWorkspace({ job_dir, model_dir })).rejects.toThrow(
+  await expect(prepareReferenceGraphInputs({ job_dir, model_dir, invocation_id: "legacy" })).rejects.toThrow(
     "requires PDF-bound evidence version 2 or newer",
   )
   expect(await Bun.file(model_dir).exists()).toBe(false)
@@ -452,7 +443,7 @@ test("approved evidence and model setup reject loose files without a commit mark
 
   await expect(readApprovedEvidence(job_dir)).rejects.toThrow("evidence-commit.json has not been published")
   const model_dir = join(job_dir, "spice")
-  await expect(prepareModelWorkspace({ job_dir, model_dir })).rejects.toThrow(
+  await expect(prepareReferenceGraphInputs({ job_dir, model_dir, invocation_id: "loose" })).rejects.toThrow(
     "evidence-commit.json has not been published",
   )
   expect(await Bun.file(model_dir).exists()).toBe(false)

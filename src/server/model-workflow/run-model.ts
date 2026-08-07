@@ -8,7 +8,10 @@ import { ModelStrategyRegistry } from "../modeling"
 import { projectPublicPipelineSnapshot, runPipeline } from "../pipeline"
 import { executeLocalNgspice } from "../spice-validation"
 import { MODEL_PIPELINE } from "./model-pipeline"
-import { waitForComponentBeforeModelPipeline } from "./stages/wait-for-component"
+import {
+  waitForComponentBeforePublication,
+  waitForEvidenceBeforeModelPipeline,
+} from "./stages/wait-for-component"
 import { appendModelLog, updateModelProgress } from "./stage-helpers"
 import type { ModelRunnerContext } from "./types"
 
@@ -80,7 +83,7 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
     model_run_id: input.model_run_id,
     state: "running",
   })
-  await waitForComponentBeforeModelPipeline({
+  await waitForEvidenceBeforeModelPipeline({
     job_id: model_run.job_id,
     model_run_id: input.model_run_id,
     job_store: context.job_store,
@@ -126,6 +129,16 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
     },
     task_input_root: job_dir,
     signal,
+    before_stage_start: ({ stage_id, signal: stage_signal }) =>
+      stage_id === "wait_for_component"
+        ? waitForComponentBeforePublication({
+            job_id: model_run.job_id,
+            model_run_id: input.model_run_id,
+            job_store: context.job_store,
+            model_run_store: context.model_run_store,
+            signal: stage_signal,
+          })
+        : undefined,
     on_snapshot: (snapshot) => {
       context.model_run_store.updateModelRun(input.model_run_id, {
         pipeline: projectPublicPipelineSnapshot({

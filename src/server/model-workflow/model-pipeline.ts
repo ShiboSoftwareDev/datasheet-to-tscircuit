@@ -5,7 +5,6 @@ import { compareSimulationOutputsStage } from "./stages/compare-simulation-outpu
 import { createSimulationTsxStage } from "./stages/create-simulation-tsx"
 import { designValidationStage } from "./stages/design-validation"
 import { generateModelStage } from "./stages/generate-model"
-import { prepareWorkspaceStage } from "./stages/prepare-workspace"
 import { publishModelStage } from "./stages/publish-model"
 import { repairModelStage } from "./stages/repair-model"
 import { runSimulationsStage } from "./stages/validate-model"
@@ -19,8 +18,6 @@ export const MODEL_PIPELINE: PipelineDefinition<
 > = Object.freeze({
   pipeline_id: "spice_generation",
   stages: Object.freeze([
-    waitForComponentStage,
-    prepareWorkspaceStage,
     characterizeStage,
     designValidationStage,
     generateModelStage,
@@ -28,6 +25,7 @@ export const MODEL_PIPELINE: PipelineDefinition<
     runSimulationsStage,
     compareSimulationOutputsStage,
     repairModelStage,
+    waitForComponentStage,
     publishModelStage,
   ]),
 })

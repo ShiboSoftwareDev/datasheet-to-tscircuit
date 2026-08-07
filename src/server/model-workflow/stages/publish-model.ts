@@ -5,6 +5,7 @@ import { buildTscircuitSource } from "../../infrastructure/tscircuit"
 import {
   assertCircuitEmbedsModel,
   assertValidationCircuitEmbedsModel,
+  parseModelInterface,
   requireModelCompletionIntegrity,
   validateViewerSimulation,
   writeIntegratedComponent,
@@ -23,7 +24,7 @@ import { defineModelStage } from "./stage-factory"
 
 export const publishModelStage = defineModelStage({
   id: "publish",
-  depends_on: ["repair_spice_model"],
+  depends_on: ["repair_spice_model", "wait_for_component"],
   async execute({ context, services, dependency_outputs, signal }) {
     updateModelProgress({
       store: services.model_run_store,
@@ -59,6 +60,10 @@ export const publishModelStage = defineModelStage({
     }
     const plan = completion_integrity.plan
     const result = completion_integrity.result
+    const component_input = dependency_outputs.wait_for_component
+    const integration_interface = parseModelInterface(
+      await readJson(component_input.integration_interface_path),
+    )
     const circuit_json_by_case = await readVerifiedViewerCircuitJson({
       validation_dir: dirname(dependency_outputs.repair_spice_model.result_path),
       plan,
@@ -71,13 +76,13 @@ export const publishModelStage = defineModelStage({
         const integration_workspace = await createStageWorkspace({
           prefix: "model-integration",
           files: [
-            { source: join(context.model_dir, "component.circuit.tsx") },
-            { source: join(context.model_dir, "component.circuit.json") },
-            { source: join(context.model_dir, "model-interface.json") },
-            { source: join(context.model_dir, "package.json"), required: false },
-            { source: join(context.model_dir, "tsconfig.json"), required: false },
-            { source: join(context.model_dir, "tscircuit.config.json"), required: false },
-            { source: join(context.model_dir, "tscircuit.config.ts"), required: false },
+            { source: component_input.component_source_path },
+            { source: component_input.component_circuit_json_path },
+            { source: component_input.integration_interface_path },
+            { source: join(component_input.integration_dir, "package.json"), required: false },
+            { source: join(component_input.integration_dir, "tsconfig.json"), required: false },
+            { source: join(component_input.integration_dir, "tscircuit.config.json"), required: false },
+            { source: join(component_input.integration_dir, "tscircuit.config.ts"), required: false },
           ],
         })
         try {
@@ -100,7 +105,7 @@ export const publishModelStage = defineModelStage({
           if (build.errors.length > 0) {
             throw new Error(`Integrated component build failed: ${build.errors.join("; ")}`)
           }
-          assertCircuitEmbedsModel(build.circuit_json, generated.source, contract.interface)
+          assertCircuitEmbedsModel(build.circuit_json, generated.source, integration_interface)
           const viewer_failures = plan.cases.flatMap((validation_case) => {
             const circuit_json = circuit_json_by_case[validation_case.id]
             if (!circuit_json) return [`${validation_case.id}: no validation Circuit JSON was retained`]

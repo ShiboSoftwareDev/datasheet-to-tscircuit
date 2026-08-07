@@ -52,9 +52,6 @@ export function assertCircuitEmbedsModel(
   if (!isCircuitJson(value)) throw new Error("Integrated component build produced invalid Circuit JSON")
   const models = value.filter((element) => element.type === "simulation_spice_subcircuit")
   const embedded = models[0]
-  const expected_mapping = Object.fromEntries(
-    model_interface.pins.map(({ spice_node, source_port_id }) => [spice_node, source_port_id]),
-  )
   const actual_mapping =
     embedded &&
     "spice_pin_to_source_port_map" in embedded &&
@@ -63,18 +60,41 @@ export function assertCircuitEmbedsModel(
     !Array.isArray(embedded.spice_pin_to_source_port_map)
       ? embedded.spice_pin_to_source_port_map
       : undefined
-  const orderedEntries = (mapping: Record<string, unknown>) =>
-    Object.entries(mapping).sort(([left], [right]) => left.localeCompare(right))
+  const expected_nodes = [...model_interface.pins.map(({ spice_node }) => spice_node)].sort()
+  const actual_nodes = actual_mapping ? Object.keys(actual_mapping).sort() : []
+  const ports_by_id = new Map(
+    value.flatMap((element) =>
+      element.type === "source_port" && typeof element.source_port_id === "string"
+        ? [[element.source_port_id, element] as const]
+        : [],
+    ),
+  )
+  const pins_match =
+    actual_mapping !== undefined &&
+    model_interface.pins.every(({ component_pin, spice_node }) => {
+      const port_id = actual_mapping[spice_node]
+      const port = typeof port_id === "string" ? ports_by_id.get(port_id) : undefined
+      return (
+        port?.source_component_id === embedded?.source_component_id &&
+        Array.isArray(port.port_hints) &&
+        port.port_hints.includes(component_pin)
+      )
+    })
   if (
     models.length !== 1 ||
     !("subcircuit_source" in embedded!) ||
     typeof embedded.subcircuit_source !== "string" ||
     normalizeModelSource(embedded.subcircuit_source) !== normalizeModelSource(model_source) ||
     !actual_mapping ||
-    JSON.stringify(orderedEntries(actual_mapping)) !== JSON.stringify(orderedEntries(expected_mapping))
+    JSON.stringify(actual_nodes) !== JSON.stringify(expected_nodes) ||
+    !pins_match
   ) {
     throw new Error(
-      "Integrated component must embed exactly the canonical model.lib subcircuit and server-owned pin mapping",
+      "Integrated component must embed exactly the canonical model.lib subcircuit and server-owned pin mapping " +
+        `(models=${models.length}, source_matches=${
+          typeof embedded?.subcircuit_source === "string" &&
+          normalizeModelSource(embedded.subcircuit_source) === normalizeModelSource(model_source)
+        }, expected_nodes=${JSON.stringify(expected_nodes)}, actual_nodes=${JSON.stringify(actual_nodes)}, pins_match=${pins_match})`,
     )
   }
 }

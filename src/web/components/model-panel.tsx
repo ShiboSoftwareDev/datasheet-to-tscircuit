@@ -65,7 +65,6 @@ function getProgressPhaseCopy(model_run: ModelRun): string {
 
 const PROGRESS_PHASE_COPY: Record<ModelProgressPhase, string> = {
   queued: "Queued",
-  preparing_workspace: "Preparing workspace",
   characterizing: "Characterizing device",
   designing_validation: "Designing validation",
   generating_model: "Generating model",

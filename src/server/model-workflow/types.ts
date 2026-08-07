@@ -60,22 +60,10 @@ export interface ModelRunnerContext {
 }
 
 export type ModelPipelineOutputs = {
-  wait_for_component: {
-    job_id: string
-    component_source: string
-  }
-  prepare_workspace: {
-    part_number: string
-    entry_name: string
-    pin_count: number
-    interface_path: string
-    attempt_dir: string
-    application_fixture_path: string
-    application_fixture_sha256: string
-  }
   find_reference_graphs: {
     found_reference_ids: string[]
     evidence_dir: string
+    model_interface_path: string
     application_fixture_path: string
     application_fixture_sha256: string
     time_graph_hints_path: string
@@ -149,6 +137,13 @@ export type ModelPipelineOutputs = {
     passed: boolean
     repair_attempts: number
     revision: string
+  }
+  wait_for_component: {
+    job_id: string
+    component_source_path: string
+    component_circuit_json_path: string
+    integration_interface_path: string
+    integration_dir: string
   }
   publish: {
     attached: boolean

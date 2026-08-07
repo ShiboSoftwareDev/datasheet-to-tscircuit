@@ -1,10 +1,5 @@
 import { join } from "node:path"
-import {
-  type ApplicationFixtureContract,
-  type ModelInterface,
-  parseApplicationFixtureContract,
-  parseModelInterface,
-} from "../../modeling"
+import { prepareReferenceGraphInputs } from "../../modeling"
 import {
   assertHasEligibleTimeDomainGraph,
   assertObserverFoundEligibleTimeDomainGraph,
@@ -13,30 +8,33 @@ import { findReferenceGraphs } from "../characterization/source-inventory"
 import { materializeFoundReferenceEvidence } from "../found-reference-evidence"
 import { projectFoundReferencesUi } from "../found-reference-ui"
 import { foundObservedGraphs } from "../reference-graph-observation"
-import { modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
+import { modelArtifact, updateModelProgress } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
 
 export { assertHasEligibleTimeDomainGraph, assertObserverFoundEligibleTimeDomainGraph }
 
 export const characterizeStage = defineModelStage({
   id: "find_reference_graphs",
-  depends_on: ["prepare_workspace"],
-  async execute({ context, services, dependency_outputs, signal, debug_dir }) {
+  depends_on: [],
+  async execute({ context, services, signal, debug_dir }) {
     services.model_run_store.startSegment(context.model_run_id)
+    services.model_run_store.updateModelRun(context.model_run_id, {
+      status: "setting_up",
+      is_complete: false,
+      has_errors: false,
+    })
     updateModelProgress({
       store: services.model_run_store,
       model_run_id: context.model_run_id,
       phase: "characterizing",
-      message: "Finding source reference graphs in the datasheet",
+      message: "Loading committed datasheet evidence for reference discovery",
     })
-
-    const model_interface: ModelInterface = parseModelInterface(
-      await readJson(join(context.model_dir, "model-interface.json")),
-    )
-    const application_fixture: ApplicationFixtureContract = parseApplicationFixtureContract(
-      await readJson(join(context.model_dir, "application-fixture-contract.json")),
-    )
-    const attempt_dir = dependency_outputs.prepare_workspace.attempt_dir
+    const prepared = await prepareReferenceGraphInputs({
+      job_dir: context.job_dir,
+      model_dir: context.model_dir,
+      invocation_id: context.invocation_id,
+    })
+    const { model_interface, application_fixture, attempt_dir } = prepared
 
     updateModelProgress({
       store: services.model_run_store,
@@ -80,12 +78,19 @@ export const characterizeStage = defineModelStage({
       output: {
         found_reference_ids: references.map(({ graph_id }) => graph_id),
         evidence_dir,
-        application_fixture_path: join(attempt_dir, "application-fixture-contract.json"),
+        model_interface_path: prepared.interface_path,
+        application_fixture_path: prepared.application_fixture_path,
         application_fixture_sha256: application_fixture.contract_sha256,
         time_graph_hints_path: inventory.time_graph_hints_path,
         reference_observation_path,
       },
       artifacts: [
+        await modelArtifact({
+          id: "model_interface",
+          path: prepared.interface_path,
+          media_type: "application/json",
+          role: "model_contract",
+        }),
         await modelArtifact({
           id: "application_fixture_contract",
           path: join(attempt_dir, "application-fixture-contract.json"),

@@ -32,11 +32,9 @@ export const designValidationStage = defineModelStage({
     })
     const found = dependency_outputs.find_reference_graphs
     const attempt_dir = dirname(found.reference_observation_path)
-    const model_interface = parseModelInterface(
-      await readJson(join(context.model_dir, "model-interface.json")),
-    )
+    const model_interface = parseModelInterface(await readJson(found.model_interface_path))
     const application_fixture = parseApplicationFixtureContract(
-      await readJson(join(context.model_dir, "application-fixture-contract.json")),
+      await readJson(found.application_fixture_path),
     )
     const inventory = await digitizeReferenceGraphs({
       context,

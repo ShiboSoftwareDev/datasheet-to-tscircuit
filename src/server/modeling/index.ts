@@ -39,7 +39,11 @@ export {
   requireModelCompletionIntegrity,
   validateModelCompletionIntegrity,
 } from "./model-completion-integrity"
-export { createModelInterface } from "./model-interface"
+export {
+  assertModelInterfaceIntegrationCompatible,
+  createEvidenceModelInterface,
+  createModelInterface,
+} from "./model-interface"
 export {
   commitModelPublication,
   FRESH_MODEL_PUBLICATION_POLICY,
@@ -101,7 +105,7 @@ export {
   validateViewerSimulation,
 } from "./viewer-simulation"
 export {
-  prepareModelWorkspace,
+  prepareReferenceGraphInputs,
   readModelContract,
   writeModelContract,
 } from "./workspace"

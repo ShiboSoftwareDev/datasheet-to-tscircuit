@@ -1,5 +1,6 @@
-import { readdir, readFile } from "node:fs/promises"
+import { copyFile, readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { ensureJobTscircuitRuntimeConfig } from "../../job-scaffold"
 import {
   createModelManifest,
   type GeneratedModel,
@@ -10,6 +11,18 @@ import type { ValidationPlan } from "../../spice-validation"
 import { generateModelCandidate } from "../model-candidate"
 import { appendModelLog, modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
+
+async function materializeCandidateRuntime(input: { job_dir: string; model_dir: string }): Promise<void> {
+  await Promise.all([
+    ensureJobTscircuitRuntimeConfig(input.model_dir),
+    ...["package.json", "tsconfig.json", "tscircuit.config.json"].map(async (file_name) => {
+      const source = join(input.job_dir, file_name)
+      if (await Bun.file(source).exists()) {
+        await copyFile(source, join(input.model_dir, file_name))
+      }
+    }),
+  ])
+}
 
 async function retainedCandidateForRetry(input: {
   model_dir: string
@@ -81,6 +94,7 @@ export const generateModelStage = defineModelStage({
       contract.characterization.strategy,
       contract.characterization.family,
     )
+    await materializeCandidateRuntime({ job_dir: context.job_dir, model_dir: context.model_dir })
     const current_run = services.model_run_store.getModelRun(context.model_run_id)
     signal.throwIfAborted()
     const retained = await retainedCandidateForRetry({

@@ -174,11 +174,16 @@ describe("server-owned model interface", () => {
       subcircuit_source: source,
     }
     expect(() =>
-      assertCircuitEmbedsModel([embedded] as AnyCircuitElement[], source, model_interface),
+      assertCircuitEmbedsModel(
+        [...component_circuit, embedded] as AnyCircuitElement[],
+        source,
+        model_interface,
+      ),
     ).not.toThrow()
     expect(() =>
       assertCircuitEmbedsModel(
         [
+          ...component_circuit,
           {
             ...embedded,
             spice_pin_to_source_port_map: { INPOS: "wrong_port" },

@@ -243,6 +243,42 @@ test("runnable stages retain a complete content-addressed input filesystem", asy
   }
 })
 
+test("runtime synchronization completes before a task input filesystem is retained", async () => {
+  const temporary_root = await mkdtemp(join(tmpdir(), "pipeline-synchronized-input-"))
+  const job_dir = join(temporary_root, "job")
+  const workspace_dir = join(job_dir, "runs", "basic_generation", "synchronized_run")
+  try {
+    await mkdir(workspace_dir, { recursive: true })
+    const result = await runPipeline({
+      definition: createBasicDefinition([]),
+      run_id: "synchronized_run",
+      workspace_dir,
+      context: { source_text: "source", artifact_path: join(job_dir, "report.txt") },
+      services: { write_text: (path, content) => Bun.write(path, content).then(() => undefined) },
+      task_input_root: job_dir,
+      async before_stage_start({ stage_id }) {
+        if (stage_id === "normalize_text") {
+          await Bun.write(join(job_dir, "synchronized.txt"), "captured after the barrier")
+        }
+      },
+    })
+
+    const before = await loadPipelineTaskInputBundle(
+      join(result.pipeline_dir, "stages", "01-read_source", "input.json"),
+    )
+    const after = await loadPipelineTaskInputBundle(
+      join(result.pipeline_dir, "stages", "02-normalize_text", "input.json"),
+    )
+    expect(before.manifest.files.some(({ path }) => path === "synchronized.txt")).toBe(false)
+    expect(after.manifest.files.find(({ path }) => path === "synchronized.txt")).toMatchObject({
+      path: "synchronized.txt",
+      hash: createHash("sha256").update("captured after the barrier").digest("hex"),
+    })
+  } finally {
+    await rm(temporary_root, { recursive: true, force: true })
+  }
+})
+
 test("pipeline records artifacts, append-only events, and complete per-stage debug bundles", async () => {
   const workspace_dir = await mkdtemp(join(tmpdir(), "pipeline-debug-"))
   const artifact_path = join(workspace_dir, "report.txt")
