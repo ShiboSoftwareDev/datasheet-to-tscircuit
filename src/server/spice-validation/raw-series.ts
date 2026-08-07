@@ -135,7 +135,11 @@ export function extractObservationSeries(input: {
   const y_values =
     compiled.observation.type === "voltage"
       ? getDifferentialVoltage(input.plot, compiled.positive_node ?? "", compiled.negative_node ?? "")
-      : getCurrent(input.plot, compiled)
+      : getCurrent(input.plot, compiled).map((value) =>
+          compiled.observation.type === "current" && compiled.observation.direction === "negative_to_positive"
+            ? -value
+            : value,
+        )
   if (x_values.length !== y_values.length) {
     throw new MissingRawVectorError(
       compiled.saved_vectors,

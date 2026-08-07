@@ -1,4 +1,8 @@
-import type { ModelInterface, ModelReferenceCropRegion } from "../../modeling/types"
+import type {
+  ModelInterface,
+  ModelReferenceChannelMeasurement,
+  ModelReferenceCropRegion,
+} from "../../modeling/types"
 import {
   MODEL_REFERENCE_CROP_DPI,
   MODEL_REFERENCE_CROP_MIN_HEIGHT,
@@ -10,8 +14,9 @@ import {
 } from "../../modeling/reference-electrical-binding"
 import type {
   ObservedReferenceGraph,
+  ObservedReferenceChannel,
   ObservedReferencePoint,
-  ObservedVoltageTimeCurve,
+  ObservedTimeCurve,
   ReferenceGraphAxisAnchor,
   ReferenceGraphAxisCalibration,
   ReferenceGraphAxisRange,
@@ -31,6 +36,7 @@ export const MAX_NORMALIZED_RMSE = 0.05
 export const MAX_NORMALIZED_ERROR = 0.1
 export const MAX_OBSERVED_GRAPHS = 64
 export const MAX_ELIGIBLE_GRAPHS = 32
+export const MAX_CHANNELS_PER_GRAPH = 12
 
 export function minimumTracePointCount(horizontal_axis_pixel_span: number): number {
   return Math.min(
@@ -167,7 +173,7 @@ function parseDigitizedCurve(
   path: string,
   crop: ModelReferenceCropRegion,
   point_field_policy: ReferencePointFieldPolicy,
-): ObservedVoltageTimeCurve {
+): ObservedTimeCurve {
   if (!isRecord(value)) throw new Error(`${path} must be an object`)
   rejectUnknownKeys(
     value,
@@ -191,8 +197,13 @@ function parseDigitizedCurve(
   }
   if (value.x_quantity !== "time") throw new Error(`${path}.x_quantity must be time`)
   if (value.x_unit !== "s") throw new Error(`${path}.x_unit must be s`)
-  if (value.y_quantity !== "voltage") throw new Error(`${path}.y_quantity must be voltage`)
-  if (value.y_unit !== "V") throw new Error(`${path}.y_unit must be V`)
+  if (value.y_quantity !== "voltage" && value.y_quantity !== "current") {
+    throw new Error(`${path}.y_quantity must be voltage or current`)
+  }
+  const expected_y_unit = value.y_quantity === "voltage" ? "V" : "A"
+  if (value.y_unit !== expected_y_unit) {
+    throw new Error(`${path}.y_unit must be ${expected_y_unit} for ${value.y_quantity}`)
+  }
   // x_range/y_range are accepted as redundant observer hints. The calibrated
   // anchors are the single source of truth, and the server derives canonical
   // ranges from them instead of asking an agent to keep duplicate numbers in
@@ -212,7 +223,7 @@ function parseDigitizedCurve(
     throw new Error(`${path}.x_axis anchors must progress from minimum to maximum time`)
   }
   if (!(y_axis.second.value > y_axis.first.value)) {
-    throw new Error(`${path}.y_axis anchors must progress from minimum to maximum voltage`)
+    throw new Error(`${path}.y_axis anchors must progress from minimum to maximum value`)
   }
   for (const [axis_name, axis, limit] of [
     ["x_axis", x_axis, crop.width_px],
@@ -275,7 +286,7 @@ function parseDigitizedCurve(
   })
   if (points.some(({ x }) => x < 0)) {
     throw new Error(
-      `${path}.points cannot contain negative elapsed time derived from the pixel-axis calibration; move the zero-time anchor to or before the earliest traced point`,
+      `${path}.points cannot contain negative elapsed time derived from the pixel-axis calibration; move the zero-time anchor to or before the earliest valid traced point. If source proof requires a later grid-line anchor, remove or retrace only earlier points that do not follow the rendered waveform before moving the anchor`,
     )
   }
   const x_pixel_direction = Math.sign(x_axis.second.pixel - x_axis.first.pixel)
@@ -320,8 +331,8 @@ function parseDigitizedCurve(
     method: value.method,
     x_quantity: "time",
     x_unit: "s",
-    y_quantity: "voltage",
-    y_unit: "V",
+    y_quantity: value.y_quantity,
+    y_unit: expected_y_unit,
     x_range,
     y_range,
     x_axis,
@@ -329,6 +340,153 @@ function parseDigitizedCurve(
     trace_color: parseTraceColor(value.trace_color, `${path}.trace_color`),
     points,
   }
+}
+
+function parseChannelMeasurement(
+  value: unknown,
+  path: string,
+  model_interface: ModelInterface,
+): ModelReferenceChannelMeasurement {
+  if (!isRecord(value)) throw new Error(`${path} must be an object`)
+  if (value.type === "voltage") {
+    rejectUnknownKeys(value, ["type", "positive", "negative"], path)
+    const positive = nonEmptyString(value.positive, `${path}.positive`)
+    const negative = nonEmptyString(value.negative, `${path}.negative`)
+    const valid_endpoints = new Set([
+      "gnd",
+      ...model_interface.pins.map(({ spice_node }) => `dut.${spice_node}`),
+    ])
+    if (!valid_endpoints.has(positive)) throw new Error(`${path}.positive must name gnd or a public DUT pin`)
+    if (!valid_endpoints.has(negative)) throw new Error(`${path}.negative must name gnd or a public DUT pin`)
+    if (positive === negative) throw new Error(`${path} voltage endpoints must be distinct`)
+    return {
+      type: "voltage",
+      positive: positive as Extract<ModelReferenceChannelMeasurement, { type: "voltage" }>["positive"],
+      negative: negative as Extract<ModelReferenceChannelMeasurement, { type: "voltage" }>["negative"],
+    }
+  }
+  if (value.type === "current") {
+    rejectUnknownKeys(value, ["type", "element_id", "direction"], path)
+    const element_id = nonEmptyString(value.element_id, `${path}.element_id`)
+    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(element_id)) {
+      throw new Error(`${path}.element_id must be a stable fixture identifier`)
+    }
+    if (value.direction !== "positive_to_negative" && value.direction !== "negative_to_positive") {
+      throw new Error(`${path}.direction must be positive_to_negative or negative_to_positive`)
+    }
+    return { type: "current", element_id, direction: value.direction }
+  }
+  throw new Error(`${path}.type must be voltage or current`)
+}
+
+function measurementsEqual(
+  left: ModelReferenceChannelMeasurement,
+  right: ModelReferenceChannelMeasurement,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function parseReferenceChannels(input: {
+  value: unknown
+  path: string
+  crop: ModelReferenceCropRegion
+  model_interface: ModelInterface
+  point_field_policy: ReferencePointFieldPolicy
+  electrical_binding: ReturnType<typeof parseModelReferenceElectricalBinding>
+}): ObservedReferenceChannel[] {
+  if (!Array.isArray(input.value)) throw new Error(`${input.path} must be an array`)
+  if (input.value.length < 1 || input.value.length > MAX_CHANNELS_PER_GRAPH) {
+    throw new Error(`${input.path} must contain 1 through ${MAX_CHANNELS_PER_GRAPH} plotted channels`)
+  }
+  const channel_results = input.value.map((value, index) => {
+    const path = `${input.path}[${index}]`
+    try {
+      if (!isRecord(value)) throw new Error(`${path} must be an object`)
+      rejectUnknownKeys(value, ["channel_id", "label", "role", "measurement", "digitized_curve"], path)
+      const channel_id = nonEmptyString(value.channel_id, `${path}.channel_id`)
+      if (!/^[a-z][a-z0-9_]{0,63}$/.test(channel_id)) {
+        throw new Error(`${path}.channel_id must use snake_case`)
+      }
+      if (value.role !== "response" && value.role !== "stimulus") {
+        throw new Error(`${path}.role must be response or stimulus`)
+      }
+      const measurement = parseChannelMeasurement(
+        value.measurement,
+        `${path}.measurement`,
+        input.model_interface,
+      )
+      const digitized_curve = parseDigitizedCurve(
+        value.digitized_curve,
+        `${path}.digitized_curve`,
+        input.crop,
+        input.point_field_policy,
+      )
+      if (digitized_curve.y_quantity !== measurement.type) {
+        throw new Error(`${path}.digitized_curve quantity must match its ${measurement.type} measurement`)
+      }
+      return {
+        channel: {
+          channel_id,
+          label: nonEmptyString(value.label, `${path}.label`),
+          role: value.role,
+          measurement,
+          digitized_curve,
+        } satisfies ObservedReferenceChannel,
+      }
+    } catch (error) {
+      return { error: error instanceof Error ? error : new Error(String(error)) }
+    }
+  })
+  const channel_errors = channel_results.flatMap((result) => (result.error ? [result.error] : []))
+  if (channel_errors.length > 0) {
+    const details = [...new Set(channel_errors.map((error) => error.message))]
+    throw new AggregateError(
+      channel_errors,
+      `${input.path} contains ${channel_errors.length} invalid plotted channel${channel_errors.length === 1 ? "" : "s"}:\n${details.map((detail) => `- ${detail}`).join("\n")}`,
+    )
+  }
+  const channels = channel_results.flatMap((result) => (result.channel ? [result.channel] : []))
+  if (new Set(channels.map(({ channel_id }) => channel_id)).size !== channels.length) {
+    throw new Error(`${input.path} channel ids must be unique within the source graph`)
+  }
+  const measurement_keys = channels.map(({ measurement }) => JSON.stringify(measurement))
+  if (new Set(measurement_keys).size !== measurement_keys.length) {
+    throw new Error(`${input.path} must not compare the same simulation measurement more than once`)
+  }
+  const time_calibrations = channels.map(({ digitized_curve }) =>
+    JSON.stringify({ x_range: digitized_curve.x_range, x_axis: digitized_curve.x_axis }),
+  )
+  if (new Set(time_calibrations).size !== 1) {
+    throw new Error(`${input.path} channels from one plotted graph must share one exact time calibration`)
+  }
+  const response_measurement: ModelReferenceChannelMeasurement = {
+    type: "voltage",
+    positive: input.electrical_binding.response.positive,
+    negative: input.electrical_binding.response.negative,
+  }
+  const response_channels = channels.filter(
+    ({ role, measurement }) => role === "response" && measurementsEqual(measurement, response_measurement),
+  )
+  if (response_channels.length !== 1) {
+    throw new Error(`${input.path} must contain exactly one response channel bound to the printed response`)
+  }
+  if (input.electrical_binding.stimulus.type !== "steady_state") {
+    const stimulus = input.electrical_binding.stimulus
+    const expected_measurement: ModelReferenceChannelMeasurement =
+      stimulus.type === "voltage_step"
+        ? { type: "voltage", positive: stimulus.positive, negative: stimulus.negative }
+        : { type: "current", element_id: "stimulus", direction: "positive_to_negative" }
+    const stimulus_channels = channels.filter(
+      ({ role, measurement }) => role === "stimulus" && measurementsEqual(measurement, expected_measurement),
+    )
+    const all_stimulus_channels = channels.filter(({ role }) => role === "stimulus")
+    if (stimulus_channels.length !== all_stimulus_channels.length || all_stimulus_channels.length > 1) {
+      throw new Error(
+        `${input.path} may assign stimulus role only to the one plotted channel matching the bound step`,
+      )
+    }
+  }
+  return channels
 }
 
 function parseCrop(value: unknown, path: string): ModelReferenceCropRegion {
@@ -370,7 +528,7 @@ export function parseGraph(
       "reason",
       "crop",
       "electrical_binding",
-      "digitized_curve",
+      "channels",
     ],
     path,
   )
@@ -393,23 +551,8 @@ export function parseGraph(
   const crop = parseCrop(value.crop, `${path}.crop`)
   const page = safeInteger(value.page, `${path}.page`, 1)
   if (crop.page !== page) throw new Error(`${path}.crop.page must match ${path}.page`)
-  const digitized_curve =
-    value.digitized_curve === undefined
-      ? undefined
-      : parseDigitizedCurve(value.digitized_curve, `${path}.digitized_curve`, crop, point_field_policy)
-  if (phase === "find" && digitized_curve) {
-    throw new Error(`${path}.digitized_curve belongs to Create Comparison Graphs and must be omitted`)
-  }
   const is_eligible =
     response_quantity === "voltage" && value.public_pin_observable && value.fixture_reproducible
-  if (phase === "comparison" && is_eligible && !digitized_curve) {
-    throw new Error(`${path}.digitized_curve is required for every eligible voltage graph`)
-  }
-  if (response_quantity !== "voltage" && digitized_curve) {
-    throw new Error(
-      `${path}.digitized_curve is supported only for voltage-versus-time graphs in the current runtime`,
-    )
-  }
   const electrical_binding =
     value.electrical_binding === undefined
       ? undefined
@@ -430,6 +573,26 @@ export function parseGraph(
       path: `${path}.electrical_binding`,
     })
   }
+  const channels =
+    value.channels === undefined || !electrical_binding
+      ? undefined
+      : parseReferenceChannels({
+          value: value.channels,
+          path: `${path}.channels`,
+          crop,
+          model_interface,
+          point_field_policy,
+          electrical_binding,
+        })
+  if (phase === "find" && value.channels !== undefined) {
+    throw new Error(`${path}.channels belongs to Create Comparison Graphs and must be omitted`)
+  }
+  if (phase === "comparison" && is_eligible && !channels) {
+    throw new Error(`${path}.channels is required for every eligible source graph`)
+  }
+  if (!is_eligible && value.channels !== undefined) {
+    throw new Error(`${path}.channels is supported only for eligible source graphs`)
+  }
   return {
     graph_id,
     page,
@@ -442,6 +605,6 @@ export function parseGraph(
     reason: nonEmptyString(value.reason, `${path}.reason`),
     crop,
     ...(electrical_binding ? { electrical_binding } : {}),
-    ...(digitized_curve ? { digitized_curve } : {}),
+    ...(channels ? { channels } : {}),
   }
 }

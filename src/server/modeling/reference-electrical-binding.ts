@@ -1,6 +1,7 @@
 import type {
   ModelInterface,
   ModelPublicElectricalEndpoint,
+  ModelReferenceChannelMeasurement,
   ModelReferenceAuxiliaryFixture,
   ModelReferenceElectricalBinding,
   ModelReferencePulse,
@@ -19,7 +20,9 @@ function exactKeys(value: UnknownRecord, keys: readonly string[], path: string):
   const allowed = new Set(keys)
   const unknown = Object.keys(value).filter((key) => !allowed.has(key))
   if (unknown.length > 0) {
-    throw new Error(`${path} contains unsupported fields: ${unknown.join(", ")}`)
+    throw new Error(
+      `${path} contains unsupported fields: ${unknown.join(", ")}. Allowed fields: ${keys.join(", ")}`,
+    )
   }
 }
 
@@ -29,6 +32,59 @@ function endpoint(value: unknown, path: string): ModelPublicElectricalEndpoint {
     return value as `dut.${string}`
   }
   throw new Error(`${path} must be gnd or dut.<spice_node>`)
+}
+
+export function parseModelReferenceChannelMeasurement(
+  value: unknown,
+  path = "measurement",
+): ModelReferenceChannelMeasurement {
+  const measurement = record(value, path)
+  if (measurement.type === "voltage") {
+    exactKeys(measurement, ["type", "positive", "negative"], path)
+    const positive = endpoint(measurement.positive, `${path}.positive`)
+    const negative = endpoint(measurement.negative, `${path}.negative`)
+    assertDistinctEndpoints(positive, negative, path)
+    return { type: "voltage", positive, negative }
+  }
+  if (measurement.type === "current") {
+    exactKeys(measurement, ["type", "element_id", "direction"], path)
+    if (
+      typeof measurement.element_id !== "string" ||
+      !/^[a-z][a-z0-9_-]{0,63}$/.test(measurement.element_id)
+    ) {
+      throw new Error(`${path}.element_id must be a stable fixture identifier`)
+    }
+    if (
+      measurement.direction !== "positive_to_negative" &&
+      measurement.direction !== "negative_to_positive"
+    ) {
+      throw new Error(`${path}.direction must be positive_to_negative or negative_to_positive`)
+    }
+    return {
+      type: "current",
+      element_id: measurement.element_id,
+      direction: measurement.direction,
+    }
+  }
+  throw new Error(`${path}.type must be voltage or current`)
+}
+
+export function assertModelReferenceChannelMeasurementInterface(input: {
+  measurement: ModelReferenceChannelMeasurement
+  model_interface: ModelInterface
+  path?: string
+}): void {
+  if (input.measurement.type === "current") return
+  const path = input.path ?? "measurement"
+  const public_endpoints = new Set(input.model_interface.pins.map(({ spice_node }) => `dut.${spice_node}`))
+  for (const [name, value] of [
+    ["positive", input.measurement.positive],
+    ["negative", input.measurement.negative],
+  ] as const) {
+    if (value !== "gnd" && !public_endpoints.has(value)) {
+      throw new Error(`${path}.${name} does not name a public SPICE node in model-interface.json`)
+    }
+  }
 }
 
 function assertDistinctEndpoints(

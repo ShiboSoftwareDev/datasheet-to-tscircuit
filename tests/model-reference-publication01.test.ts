@@ -164,6 +164,10 @@ const contract: ModelContract = {
         conditions: {},
         expected: { unit: "V", min: 0, max: 1 },
         reference_curve: {
+          channel_id: "output_voltage",
+          channel_label: "OUT",
+          channel_role: "response",
+          measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
           x_quantity: "time",
           x_unit: "s",
           y_quantity: "voltage",
@@ -573,33 +577,41 @@ async function writeReferenceProof(
         reason: "The public OUT pin is plotted against elapsed time for a public IN voltage step.",
         crop: { page: 1, render_dpi: 200, x_px: 0, y_px: 0, width_px: 240, height_px: 160 },
         electrical_binding,
-        digitized_curve: {
-          method: "manual_pixel_trace",
-          x_quantity: "time",
-          x_unit: "s",
-          y_quantity: "voltage",
-          y_unit: "V",
-          x_range: { min: 0, max: 0.0007 },
-          y_range: { min: 0.8, max: 1.2 },
-          x_axis: {
-            scale: "linear",
-            first: { pixel: 35, value: 0 },
-            second: { pixel: 140, value: 0.0007 },
+        channels: [
+          {
+            channel_id: "output_voltage",
+            label: "OUT",
+            role: "response",
+            measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
+            digitized_curve: {
+              method: "manual_pixel_trace",
+              x_quantity: "time",
+              x_unit: "s",
+              y_quantity: "voltage",
+              y_unit: "V",
+              x_range: { min: 0, max: 0.0007 },
+              y_range: { min: 0.8, max: 1.2 },
+              x_axis: {
+                scale: "linear",
+                first: { pixel: 35, value: 0 },
+                second: { pixel: 140, value: 0.0007 },
+              },
+              y_axis: {
+                scale: "linear",
+                first: { pixel: 100, value: 0.8 },
+                second: { pixel: 20, value: 1.2 },
+              },
+              trace_color: { r: 20, g: 80, b: 180, tolerance: 24 },
+              points: Array.from({ length: 20 }, (_, index) => {
+                const ratio = index / 19
+                return {
+                  pixel_x: 35 + ratio * 105,
+                  pixel_y: 60 - Math.sin(ratio * Math.PI * 2) * 10,
+                }
+              }),
+            },
           },
-          y_axis: {
-            scale: "linear",
-            first: { pixel: 100, value: 0.8 },
-            second: { pixel: 20, value: 1.2 },
-          },
-          trace_color: { r: 20, g: 80, b: 180, tolerance: 24 },
-          points: Array.from({ length: 20 }, (_, index) => {
-            const ratio = index / 19
-            return {
-              pixel_x: 35 + ratio * 105,
-              pixel_y: 60 - Math.sin(ratio * Math.PI * 2) * 10,
-            }
-          }),
-        },
+        ],
       },
     ],
   }

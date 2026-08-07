@@ -61,7 +61,7 @@ async function readRun105Replay() {
   }
 }
 
-test("run 105 is rejected at the observer boundary before negative elapsed time reaches characterization", async () => {
+test("run 105 graph-level curve is rejected by the channel contract", async () => {
   const { replay, model_interface, application_fixture } = await readRun105Replay()
 
   expect(() =>
@@ -71,16 +71,27 @@ test("run 105 is rejected at the observer boundary before negative elapsed time 
       model_interface,
       application_fixture,
     ),
-  ).toThrow(
-    /digitized_curve\.points cannot contain negative elapsed time derived from the pixel-axis calibration/,
-  )
+  ).toThrow(/unsupported fields: digitized_curve/)
 })
 
 test("a source-aligned correction of run 105 survives fresh contract and validation-plan boundaries", async () => {
   const { replay, model_interface, application_fixture } = await readRun105Replay()
   const corrected_observation = structuredClone(replay.observation)
-  const curve = corrected_observation.graphs[0]?.digitized_curve
+  const graph = corrected_observation.graphs[0]
+  const curve = graph?.digitized_curve
   if (!curve) throw new Error("run 105 replay lost its digitized curve")
+  delete graph.digitized_curve
+  Object.assign(graph, {
+    channels: [
+      {
+        channel_id: "output_voltage",
+        label: "VOUT",
+        role: "response",
+        measurement: { type: "voltage", positive: "dut.VOUT", negative: "gnd" },
+        digitized_curve: curve,
+      },
+    ],
+  })
 
   // Run 105 used pixel 63 as zero while tracing from pixel 25. Align zero to
   // the first source-recognized vertical grid line and retain the printed
@@ -102,7 +113,7 @@ test("a source-aligned correction of run 105 survives fresh contract and validat
     model_interface,
     application_fixture,
   )
-  const points = observation.graphs[0]?.digitized_curve?.points
+  const points = observation.graphs[0]?.channels?.[0]?.digitized_curve.points
   if (!points) throw new Error("corrected run 105 replay was unexpectedly demoted")
   expect(points).toHaveLength(39)
   expect(Math.min(...points.map(({ x }) => x))).toBeGreaterThanOrEqual(0)

@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ProcessRunner } from "../../infrastructure/process"
-import type { ModelReferenceCropRegion } from "../../modeling/types"
-import { eligibleObservedGraphs, type ObservedReferenceGraph } from "../reference-graph-observation"
+import type { ModelReferenceCropRegion, ModelReferenceElectricalBinding } from "../../modeling/types"
+import type { ObservedReferenceGraph } from "../reference-graph-observation"
 import { normalizeFigureLabel } from "../time-graph-hints"
 import { sha256, SOURCE_LOCAL_TEXT_GAP_PDF_POINTS, valuesAgree } from "./shared"
 import type { ReferenceGraphFigureIdentityReceipt } from "./types"
@@ -111,7 +111,7 @@ export function figureIdentityFromPdfText(input: {
 }
 
 export function nominalVoltageFromPdfText(input: {
-  graph: ReturnType<typeof eligibleObservedGraphs>[number]
+  graph: ObservedReferenceGraph & { electrical_binding: ModelReferenceElectricalBinding }
   bbox_html: string
 }):
   | {

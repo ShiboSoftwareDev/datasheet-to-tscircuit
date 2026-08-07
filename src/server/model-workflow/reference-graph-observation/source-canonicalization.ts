@@ -6,15 +6,16 @@ import type { ModelInterface, ModelReferenceElectricalBinding } from "../../mode
 import type { TimeGraphDiscovery, TimeGraphTransientFixtureEvidence } from "../time-graph-hints"
 import {
   assertBindingMatchesPrintedFixture,
+  assertCurrentChannelsUseResolvedFixtures,
   assertPrintedFixtureEndpointsResolvable,
   FixtureEndpointResolutionError,
   reconcileGraphPassiveConstraints,
 } from "./fixture-reconciliation"
-import type { ObservedReferenceGraph, ObservedVoltageTimeCurve } from "./types"
+import type { ObservedReferenceGraph } from "./types"
 import type { ReferenceGraphArtifactPhase } from "./schema"
 
 function withoutComparisonState(graph: ObservedReferenceGraph): ObservedReferenceGraph {
-  const { electrical_binding: _binding, digitized_curve: _curve, ...found } = graph
+  const { electrical_binding: _binding, channels: _channels, ...found } = graph
   return found
 }
 
@@ -151,7 +152,7 @@ export function canonicalizeObservedGraphSource(input: {
       throw error
     }
     throw new Error(
-      `Graph ${graph.graph_id} cannot be marked fixture_reproducible:false: server-owned printed conditions resolve to one public response and a tscircuit-supported transient fixture. Mark it true and provide electrical_binding plus digitized_curve.`,
+      `Graph ${graph.graph_id} cannot be marked fixture_reproducible:false: server-owned printed conditions resolve to one public response and a tscircuit-supported transient fixture. Mark it true and provide electrical_binding plus every simulatable plotted channel.`,
     )
   }
 
@@ -183,7 +184,7 @@ export function canonicalizeObservedGraphSource(input: {
     assertBindingMatchesPrintedFixture({
       graph: graph as ObservedReferenceGraph & {
         electrical_binding: ModelReferenceElectricalBinding
-        digitized_curve: ObservedVoltageTimeCurve
+        channels: NonNullable<ObservedReferenceGraph["channels"]>
       },
       evidence: printed_fixture_evidence!,
       model_interface,
@@ -207,6 +208,13 @@ export function canonicalizeObservedGraphSource(input: {
         `Eligible graph ${graph.graph_id} must omit application fixture digests because canonical evidence explicitly declares availability not_present`,
       )
     }
+    assertCurrentChannelsUseResolvedFixtures({
+      graph: graph as ObservedReferenceGraph & {
+        channels: NonNullable<ObservedReferenceGraph["channels"]>
+      },
+      fixture_ids: new Set(),
+      stimulus_available: binding.stimulus.type !== "steady_state",
+    })
     return graph
   }
 
@@ -219,6 +227,13 @@ export function canonicalizeObservedGraphSource(input: {
   const resolved_application = resolveApplicationFixtureForBinding({
     contract: application_fixture,
     binding: unbound,
+  })
+  assertCurrentChannelsUseResolvedFixtures({
+    graph: graph as ObservedReferenceGraph & {
+      channels: NonNullable<ObservedReferenceGraph["channels"]>
+    },
+    fixture_ids: new Set(resolved_application.fixtures.map(({ id }) => id)),
+    stimulus_available: binding.stimulus.type !== "steady_state",
   })
   if (
     (binding.application_fixture_sha256 !== undefined &&

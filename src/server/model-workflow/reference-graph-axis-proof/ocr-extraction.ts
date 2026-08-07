@@ -55,6 +55,10 @@ function parseDivisionScale(
     .replace(/v{2,}/gi, "v")
     // Another common anti-aliased V artifact is "m\V/div".
     .replace(/\\(?=v)/gi, "")
+    // On compact oscilloscope panels, Tesseract commonly reads the micro glyph
+    // in "us/div" as a lowercase y. Y is not a valid SI prefix, so this
+    // normalization is unambiguous when it occurs immediately before s/div.
+    .replace(/y(?=s\/?div$)/i, "u")
   const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(p|n|u|µ|μ|m)?(s|v)\/?div$/i.exec(normalized)
   if (!match) return undefined
   const numeric = Number(match[1])

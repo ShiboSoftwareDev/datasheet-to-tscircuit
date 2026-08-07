@@ -1,4 +1,5 @@
 import type { ModelReferenceCropRegion } from "../../modeling/types"
+import type { TimeGraphTransientFixtureEvidence } from "../time-graph-hints"
 
 export interface OcrBoundingBox {
   left: number
@@ -145,10 +146,57 @@ export interface ScopeDivisionReferenceGraphAxisCalibrationReceipt
   }
 }
 
+export interface PrintedExperimentScopeDivisionReferenceGraphAxisCalibrationReceipt
+  extends Omit<ScopeDivisionReferenceGraphAxisCalibrationReceiptBase, "y_axis"> {
+  algorithm: "canonical_pdf_tesseract_scope_divisions_v3"
+  y_axis: Omit<
+    ScopeDivisionReferenceGraphAxisCalibrationReceiptBase["y_axis"],
+    "nominal_source_text" | "nominal_source_bbox_pdf_points"
+  > & {
+    nominal_baseline_pixel: number
+    nominal_source: {
+      algorithm: "printed_experiment_conditions_v3"
+      source_excerpts: TimeGraphTransientFixtureEvidence["source_excerpts"]
+      signal: string
+      nominal_volts: number
+    }
+  }
+}
+
+interface ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceiptBase
+  extends Omit<ScopeDivisionReferenceGraphAxisCalibrationReceiptBase, "x_axis" | "y_axis"> {
+  x_axis: {
+    quantity: "time"
+    unit: "s"
+    first: ReferenceAxisSourceTick
+    second: ReferenceAxisSourceTick
+    grid: ReferenceGridCalibrationSource
+    declared_seconds_per_pixel: number
+    source_seconds_per_pixel: number
+    supporting_tick_count: number
+  }
+  y_axis: ScopeDivisionReferenceGraphAxisCalibrationReceipt["y_axis"]
+}
+
+/** Explicit printed time ticks combined with a channel-local scope voltage control. */
+export interface ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
+  extends ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceiptBase {
+  algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v1"
+}
+
+export interface PrintedExperimentExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
+  extends Omit<ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceiptBase, "y_axis"> {
+  algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v2"
+  y_axis: PrintedExperimentScopeDivisionReferenceGraphAxisCalibrationReceipt["y_axis"]
+}
+
 export type ReferenceGraphAxisCalibrationReceipt =
   | ExplicitReferenceGraphAxisCalibrationReceipt
   | LegacyScopeDivisionReferenceGraphAxisCalibrationReceipt
   | ScopeDivisionReferenceGraphAxisCalibrationReceipt
+  | PrintedExperimentScopeDivisionReferenceGraphAxisCalibrationReceipt
+  | ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
+  | PrintedExperimentExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
 
 export type ReferenceGraphAxisProofResult =
   | {

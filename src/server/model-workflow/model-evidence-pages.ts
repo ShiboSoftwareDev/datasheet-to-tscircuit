@@ -20,6 +20,7 @@ import {
 
 const MAX_MODEL_EVIDENCE_PAGES = 16
 const MAX_RENDERED_EVIDENCE_BYTES = 64 * 1024 * 1024
+const REFERENCE_FIGURE_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/
 
 interface PngDimensions {
   width: number
@@ -28,6 +29,40 @@ interface PngDimensions {
 
 export interface DecodedModelEvidencePng extends PngDimensions {
   rgbAt(x: number, y: number): [number, number, number]
+}
+
+/**
+ * Every plotted channel in one source graph must cite the same retained crop.
+ * Channel requirements keep distinct curves, measurements, and result panels;
+ * only their immutable source pixels are shared.
+ */
+export function modelReferenceFigureId(requirement: ModelRequirement): string {
+  const graph_id = requirement.conditions.graph_id
+  return typeof graph_id === "string" && REFERENCE_FIGURE_ID_PATTERN.test(graph_id)
+    ? graph_id
+    : requirement.requirement_id
+}
+
+export function modelReferenceFigureImage(requirement: ModelRequirement): string {
+  return `evidence/figures/${modelReferenceFigureId(requirement)}.png`
+}
+
+export function modelReferenceFigureFile(evidence_dir: string, requirement: ModelRequirement): string {
+  return join(evidence_dir, "figures", `${modelReferenceFigureId(requirement)}.png`)
+}
+
+export function modelReferenceCropsEqual(
+  left: ModelReferenceCropRegion,
+  right: ModelReferenceCropRegion,
+): boolean {
+  return (
+    left.page === right.page &&
+    left.render_dpi === right.render_dpi &&
+    left.x_px === right.x_px &&
+    left.y_px === right.y_px &&
+    left.width_px === right.width_px &&
+    left.height_px === right.height_px
+  )
 }
 
 async function readPngDimensions(path: string): Promise<PngDimensions> {
@@ -255,6 +290,27 @@ export async function materializeModelEvidencePages(input: {
     assertCropShape(requirement, crop)
     return [{ requirement, crop }]
   })
+  const cropped_figures = new Map<
+    string,
+    { figure_id: string; requirement_id: string; crop: ModelReferenceCropRegion }
+  >()
+  for (const { requirement, crop } of cropped_requirements) {
+    const figure_id = modelReferenceFigureId(requirement)
+    const existing = cropped_figures.get(figure_id)
+    if (existing) {
+      if (!modelReferenceCropsEqual(existing.crop, crop)) {
+        throw new Error(
+          `Reference graph ${figure_id} uses different crops for requirements ${existing.requirement_id} and ${requirement.requirement_id}`,
+        )
+      }
+      continue
+    }
+    cropped_figures.set(figure_id, {
+      figure_id,
+      requirement_id: requirement.requirement_id,
+      crop,
+    })
+  }
   const evidence_dir = join(input.workspace, "evidence")
   const evidence_metadata = await lstat(evidence_dir).catch(() => undefined)
   if (evidence_metadata && (!evidence_metadata.isDirectory() || evidence_metadata.isSymbolicLink())) {
@@ -327,16 +383,16 @@ export async function materializeModelEvidencePages(input: {
     if (cropped_requirements.length > 0) {
       await mkdir(join(rendered_evidence_dir, "figures"), { recursive: true })
     }
-    for (const { requirement, crop } of cropped_requirements) {
+    for (const { figure_id, requirement_id, crop } of cropped_figures.values()) {
       input.signal.throwIfAborted()
       const dimensions = page_dimensions.get(crop.page)
       if (!dimensions) {
         throw new Error(
-          `Reference crop for requirement ${requirement.requirement_id} cites PDF page ${crop.page}, but no canonical page rendering exists`,
+          `Reference crop for requirement ${requirement_id} cites PDF page ${crop.page}, but no canonical page rendering exists`,
         )
       }
-      assertCropFitsPage({ requirement_id: requirement.requirement_id, crop, page: dimensions })
-      const output_prefix = join(rendered_evidence_dir, "figures", requirement.requirement_id)
+      assertCropFitsPage({ requirement_id, crop, page: dimensions })
+      const output_prefix = join(rendered_evidence_dir, "figures", figure_id)
       try {
         await input.process_runner.run({
           command: [
@@ -360,7 +416,7 @@ export async function materializeModelEvidencePages(input: {
             join(render_workspace.path, "datasheet.pdf"),
             output_prefix,
           ],
-          command_label: `Render model reference graph ${requirement.requirement_id}`,
+          command_label: `Render model reference graph ${figure_id}`,
           cwd: render_workspace.path,
           signal: input.signal,
           wall_timeout_ms: 120_000,
@@ -370,28 +426,28 @@ export async function materializeModelEvidencePages(input: {
       } catch (error) {
         input.signal.throwIfAborted()
         throw new Error(
-          `The server could not render the reference crop for requirement ${requirement.requirement_id} from PDF page ${crop.page}`,
+          `The server could not render the reference crop for requirement ${requirement_id} from PDF page ${crop.page}`,
           { cause: error },
         )
       }
     }
     await validateStageDirectory({
       root: rendered_evidence_dir,
-      max_files: pages.length + cropped_requirements.length,
+      max_files: pages.length + cropped_figures.size,
       max_total_bytes: MAX_RENDERED_EVIDENCE_BYTES,
       validate_file: validatePngArtifact,
     })
-    for (const { requirement, crop } of cropped_requirements) {
-      const crop_path = join(rendered_evidence_dir, "figures", `${requirement.requirement_id}.png`)
+    for (const { figure_id, requirement_id, crop } of cropped_figures.values()) {
+      const crop_path = join(rendered_evidence_dir, "figures", `${figure_id}.png`)
       const actual = await readPngDimensions(crop_path)
       if (actual.width !== crop.width_px || actual.height !== crop.height_px) {
         throw new Error(
-          `Reference crop for requirement ${requirement.requirement_id} rendered as ${actual.width}x${actual.height} pixels; expected exactly ${crop.width_px}x${crop.height_px}`,
+          `Reference crop for requirement ${requirement_id} rendered as ${actual.width}x${actual.height} pixels; expected exactly ${crop.width_px}x${crop.height_px}`,
         )
       }
       // This is deliberately a pixel-presence check only. The independent
       // source observer and rectangle-overlap receipt establish graph identity.
-      await assertPngContainsVisibleContent(crop_path, requirement.requirement_id)
+      await assertPngContainsVisibleContent(crop_path, requirement_id)
     }
     await Promise.all(
       pages.map((page) =>
@@ -411,7 +467,7 @@ export async function materializeModelEvidencePages(input: {
         source: join("evidence", "figures"),
         destination_root: input.workspace,
         destination: join("evidence", "figures"),
-        max_files: cropped_requirements.length,
+        max_files: cropped_figures.size,
         max_total_bytes: MAX_RENDERED_EVIDENCE_BYTES,
         validate_file: validatePngArtifact,
         signal: input.signal,
@@ -443,7 +499,7 @@ export async function materializeModelEvidencePages(input: {
       }
       const primary_page = requirement.sources[0]!.page
       const canonical_image = cloned_reference_curve?.crop
-        ? `evidence/figures/${requirement.requirement_id}.png`
+        ? modelReferenceFigureImage(requirement)
         : `evidence/source-page-${primary_page}.png`
       return {
         ...requirement,

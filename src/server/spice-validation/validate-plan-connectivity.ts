@@ -275,7 +275,10 @@ export function validateCaseConnectivity(input: {
           "must observe a node in the DUT-connected fixture graph; ground alone does not connect independent branches",
         )
       }
-      if (isVoltageClamped(validation_case, observation.positive, observation.negative)) {
+      if (
+        observation.role !== "stimulus" &&
+        isVoltageClamped(validation_case, observation.positive, observation.negative)
+      ) {
         collector.add(
           observation_path,
           "insensitive_voltage_observation",
@@ -291,7 +294,7 @@ export function validateCaseConnectivity(input: {
           "must reference a fixture element in the same case",
         )
       } else {
-        if (fixture.type === "current_source") {
+        if (observation.role !== "stimulus" && fixture.type === "current_source") {
           collector.add(
             observation_path,
             "insensitive_current_observation",

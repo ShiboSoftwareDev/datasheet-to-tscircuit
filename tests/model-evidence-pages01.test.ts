@@ -312,6 +312,47 @@ test("modeled requirement citations become deterministic server-rendered referen
   expect(characterization.requirements[0]?.reference_curve?.image).toBe("evidence/agent-crop.png")
 })
 
+test("channels from one source graph share one canonical reference crop", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "model-evidence-shared-graph-"))
+  temporary_directories.push(workspace)
+  await Bun.write(join(workspace, "datasheet.pdf"), "%PDF canonical fixture")
+  const crop: ModelReferenceCropRegion = {
+    page: 1,
+    render_dpi: 200,
+    x_px: 10,
+    y_px: 20,
+    width_px: 96,
+    height_px: 64,
+  }
+  const characterization = characterizationWithCrop(crop)
+  const response = characterization.requirements[0]!
+  response.requirement_id = "figure_1__output_voltage"
+  response.conditions = { graph_id: "figure_1", channel_id: "output_voltage" }
+  const stimulus = structuredClone(response)
+  stimulus.requirement_id = "figure_1__load_current"
+  stimulus.conditions = { graph_id: "figure_1", channel_id: "load_current" }
+  characterization.requirements.push(stimulus)
+  const runner = new PdfPageRunner()
+
+  const materialized = await materializeModelEvidencePages({
+    workspace,
+    datasheet_path: join(workspace, "datasheet.pdf"),
+    characterization,
+    process_runner: runner,
+    signal: new AbortController().signal,
+  })
+
+  expect(runner.pages).toEqual([1, 1])
+  expect(materialized.requirements.map((requirement) => requirement.reference_curve?.image)).toEqual([
+    "evidence/figures/figure_1.png",
+    "evidence/figures/figure_1.png",
+  ])
+  expect(await Bun.file(join(workspace, "evidence", "figures", "figure_1.png")).exists()).toBe(true)
+  expect(await Bun.file(join(workspace, "evidence", "figures", "figure_1__load_current.png")).exists()).toBe(
+    false,
+  )
+})
+
 test("server evidence rendering rejects out-of-bounds, full-page, and clamped graph crops", async () => {
   const cases: Array<{
     label: string

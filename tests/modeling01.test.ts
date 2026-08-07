@@ -261,7 +261,7 @@ describe("model characterization contract", () => {
     expect(buildCharacterizationPrompt()).toContain("typical-application-plan.json")
     expect(buildCharacterizationPrompt()).toContain("complete datasheet.pdf from first page\nto last page")
     expect(buildCharacterizationPrompt()).toContain('x_quantity exactly "time"')
-    expect(buildCharacterizationPrompt()).toContain("evidence/figures/<requirement_id>.png")
+    expect(buildCharacterizationPrompt()).toContain("evidence/figures/<graph_id>.png")
     expect(buildCharacterizationPrompt()).toContain("do not use a scalar requirement as an escape")
     expect(buildCharacterizationPrompt()).toContain(
       "model-characterization.json already exists, it is the exact retained candidate",
@@ -611,6 +611,10 @@ describe("model characterization contract", () => {
       limitations: [],
     }
     const transientReferenceCurve = {
+      channel_id: "output_voltage",
+      channel_label: "VOUT",
+      channel_role: "response",
+      measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
       x_quantity: "time",
       x_unit: "s",
       y_quantity: "voltage",
@@ -661,7 +665,7 @@ describe("model characterization contract", () => {
         },
         { policy: "fresh" },
       ),
-    ).toThrow(/reference_curve\.y_quantity must be voltage/)
+    ).toThrow(/reference_curve quantity\/unit and expected\.unit must match/)
     const documented_only = parseModelCharacterization(
       {
         ...base,
@@ -710,6 +714,10 @@ describe("model characterization contract", () => {
           conditions: { supply_voltage: 5 },
           expected: { unit: "V", min: 0, max: 5 },
           reference_curve: {
+            channel_id: "output_voltage",
+            channel_label: "VOUT",
+            channel_role: "response",
+            measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
             x_quantity: "time",
             x_unit: "s",
             y_quantity: "voltage",
@@ -767,7 +775,15 @@ describe("model characterization contract", () => {
               expected: { unit: "A", min: 0, max: 1 },
               reference_curve: {
                 ...valid.requirements[0]!.reference_curve,
-                y_quantity: "supply current",
+                channel_id: "supply_current",
+                channel_label: "IIN",
+                channel_role: "stimulus",
+                measurement: {
+                  type: "current",
+                  element_id: "stimulus",
+                  direction: "positive_to_negative",
+                },
+                y_quantity: "current",
                 y_unit: "A",
               },
             },
@@ -775,7 +791,7 @@ describe("model characterization contract", () => {
         },
         { policy: "fresh" },
       ),
-    ).toThrow(/current tscircuit runtime does not emit transient current graphs/)
+    ).not.toThrow()
     expect(() =>
       parseModelCharacterization(
         {

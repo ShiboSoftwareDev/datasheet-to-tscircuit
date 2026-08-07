@@ -278,15 +278,68 @@ export function probeForObservation(input: {
   }
 }
 
+export function currentProbeForObservation(input: {
+  circuit_json: readonly AnyCircuitElement[]
+  observation: Extract<ValidationCase["observations"][number], { type: "current" }>
+}):
+  | {
+      probe: CircuitRecord & { simulation_current_probe_id: string }
+      error?: never
+    }
+  | { probe?: never; error: ValidationExecutionError } {
+  const { circuit_json, observation } = input
+  const expected_probe_name = `probe_${observation.id}`
+  const probes = circuit_json.flatMap((element) => {
+    const record = asRecord(element)
+    return record.type === "simulation_current_probe" && record.name === expected_probe_name ? [record] : []
+  })
+  if (probes.length !== 1) {
+    return {
+      error: simulatorError(
+        "viewer_probe_count",
+        `Observation ${observation.id} resolved to ${probes.length} named tscircuit current probes; exactly one ${expected_probe_name} probe is required`,
+        `observations.${observation.id}`,
+      ),
+    }
+  }
+  const probe = probes[0]!
+  const components = circuit_json.flatMap((element) => {
+    const record = asRecord(element)
+    return record.type === "source_component" && record.name === expected_probe_name ? [record] : []
+  })
+  if (
+    typeof probe.simulation_current_probe_id !== "string" ||
+    components.length !== 1 ||
+    components[0]!.ftype !== "simple_ammeter" ||
+    probe.source_component_id !== components[0]!.source_component_id
+  ) {
+    return {
+      error: simulatorError(
+        "viewer_probe_identity_mismatch",
+        `Current probe ${expected_probe_name} is not bound one-to-one to its named inline ammeter`,
+        `observations.${observation.id}`,
+      ),
+    }
+  }
+  return {
+    probe: probe as CircuitRecord & { simulation_current_probe_id: string },
+  }
+}
+
 export function graphsForProbe(input: {
   circuit_json: readonly AnyCircuitElement[]
   experiment_id: string
   probe_id: string
+  observation_type: ValidationCase["observations"][number]["type"]
 }): CircuitRecord[] {
-  const { circuit_json, experiment_id, probe_id } = input
+  const { circuit_json, experiment_id, probe_id, observation_type } = input
+  const graph_type =
+    observation_type === "voltage"
+      ? "simulation_transient_voltage_graph"
+      : "simulation_transient_current_graph"
   return circuit_json.flatMap((element) => {
     const graph = asRecord(element)
-    return graph.type === "simulation_transient_voltage_graph" &&
+    return graph.type === graph_type &&
       graph.simulation_experiment_id === experiment_id &&
       graph.source_probe_id === probe_id
       ? [graph]

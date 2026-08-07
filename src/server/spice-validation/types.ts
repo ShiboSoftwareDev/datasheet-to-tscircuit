@@ -108,6 +108,8 @@ export type ReferenceContract =
 
 interface ObservationBase {
   id: string
+  /** Fresh graph-derived observations always set this; older generic plans default to response. */
+  role?: "response" | "stimulus"
   /** The immutable contract requirement that owns this comparison. */
   requirement_id: string
   scale: "linear" | "log"
@@ -125,6 +127,8 @@ export interface VoltageObservation extends ObservationBase {
 export interface CurrentObservation extends ObservationBase {
   type: "current"
   element_id: string
+  /** Fresh graph-derived observations always set this; the canonical default is positive-to-negative. */
+  direction?: "positive_to_negative" | "negative_to_positive"
   unit: "A"
 }
 

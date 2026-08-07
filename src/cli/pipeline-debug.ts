@@ -1,12 +1,19 @@
-import { lstat, mkdir, realpath } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import type { PublicPipelineSnapshot } from "@/shared/job-types"
-import type { LocalRunMode } from "@/shared/local-run"
+import type { LocalRunMode, LocalRunSummary } from "@/shared/local-run"
+import type { PipelineJsonValue, PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
 import { JobStore } from "../server/job-store"
 import { restorePersistedJobs } from "../server/job-restorer"
-import { listLocalRuns } from "../server/local-runs"
+import { isLocalRunId, listLocalRuns, readLocalRunSummary } from "../server/local-runs"
 import { ModelRunStore } from "../server/model-run-store"
-import { loadPipelineTaskInputBundle } from "../server/pipeline"
+import {
+  loadPipelineTaskInput,
+  loadPipelineTaskInputBundle,
+  retainPipelineTaskInputFiles,
+  type PipelineTaskInputBundle,
+} from "../server/pipeline"
 import {
   PIPELINE_REGISTRY,
   PIPELINE_TASK_CATALOG,
@@ -20,7 +27,7 @@ Commands:
   debug catalog
   debug job list [--root <repo>]
   debug local list [--root <repo>]
-  debug local run <job-id> --pipeline <id> [--task <id> | --from <id>] [--output <dir>]
+  debug local run <job-or-local-run-id> --pipeline <id> [--task <id> | --from <id>] [--output <dir>]
   debug task inspect --input <input.json>
   debug task run --input <input.json> [--output <dir>]
   debug pipeline run --input <input.json> [--output <dir>]
@@ -126,6 +133,120 @@ async function inspectInput(path: string) {
   }
 }
 
+async function resolveLocalRunInput(input: {
+  rootDir: string
+  localRunId: string
+  pipelineId: RegisteredPipelineId
+  taskId: string
+}): Promise<{ inputPath: string; source: LocalRunSummary }> {
+  const source = await readLocalRunSummary(join(input.rootDir, ".runtime", "local"), input.localRunId)
+  if (source.status === "running") {
+    throw new Error(`Local run ${input.localRunId} is still running`)
+  }
+  if (source.pipeline_id !== input.pipelineId) {
+    throw new Error(`Local run ${input.localRunId} belongs to ${source.pipeline_id}, not ${input.pipelineId}`)
+  }
+  if (!isRecord(source.stage_results)) {
+    throw new Error(`Local run ${input.localRunId} has no retained stage results`)
+  }
+  const stage = source.stage_results[input.taskId]
+  if (!isRecord(stage) || stage.stage_id !== input.taskId || typeof stage.debug_dir !== "string") {
+    throw new Error(
+      `Local run ${input.localRunId} has no retained input for ${input.pipelineId}/${input.taskId}`,
+    )
+  }
+  const executionRoot = resolve(source.execution_dir)
+  const debugDir = resolve(stage.debug_dir)
+  const debugRef = relative(executionRoot, debugDir)
+  if (debugRef.startsWith("..") || isAbsolute(debugRef)) {
+    throw new Error(`Local run ${input.localRunId} has an invalid debug directory`)
+  }
+  return {
+    inputPath: await resolveInputPath({ jobDir: executionRoot, debugRef }),
+    source,
+  }
+}
+
+function asPipelineJsonValue(value: unknown, path: string): PipelineJsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (Array.isArray(value)) {
+    return value.map((entry, index) => asPipelineJsonValue(entry, `${path}[${index}]`))
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, asPipelineJsonValue(entry, `${path}.${key}`)]),
+    )
+  }
+  throw new Error(`Local run has a non-JSON value at ${path}`)
+}
+
+function taskInputExcludedRoots(pipelineId: RegisteredPipelineId): readonly string[] | undefined {
+  return pipelineId === "spice_generation" ? undefined : ["spice"]
+}
+
+async function loadLocalRunTaskBundle(input: {
+  source: LocalRunSummary
+  inputPath: string
+  pipelineId: RegisteredPipelineId
+  taskId: string
+}): Promise<{ bundle: PipelineTaskInputBundle; cleanup?: () => Promise<void> }> {
+  const envelope = await loadPipelineTaskInput(input.inputPath)
+  if (envelope.input_files) {
+    return { bundle: await loadPipelineTaskInputBundle(input.inputPath) }
+  }
+  if (!isRecord(input.source.stage_results)) {
+    throw new Error(`Local run ${input.source.local_run_id} has no retained stage results`)
+  }
+
+  const dependencyStatuses: Record<string, string> = {}
+  const dependencyOutputs: Record<string, PipelineJsonValue> = {}
+  for (const dependencyId of envelope.depends_on) {
+    const dependency = input.source.stage_results[dependencyId]
+    if (!isRecord(dependency) || typeof dependency.status !== "string") {
+      throw new Error(`Local run ${input.source.local_run_id} has no result for dependency ${dependencyId}`)
+    }
+    dependencyStatuses[dependencyId] = dependency.status
+    if (dependency.status !== "completed" || !("output" in dependency)) {
+      throw new Error(
+        `Local run ${input.source.local_run_id} cannot continue at ${input.taskId}: dependency ${dependencyId} is ${dependency.status}`,
+      )
+    }
+    dependencyOutputs[dependencyId] = asPipelineJsonValue(
+      dependency.output,
+      `stage_results.${dependencyId}.output`,
+    )
+  }
+
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "pipeline-local-continuation-"))
+  try {
+    const debugDir = join(temporaryRoot, "stages", input.taskId)
+    await mkdir(debugDir, { recursive: true })
+    const inputFiles = await retainPipelineTaskInputFiles({
+      root_dir: input.source.workspace_dir,
+      debug_dir: debugDir,
+      objects_dir: join(temporaryRoot, "input-objects"),
+      excluded_roots: taskInputExcludedRoots(input.pipelineId),
+    })
+    const derivedEnvelope: PipelineTaskInputEnvelope = {
+      ...envelope,
+      dependency_statuses: dependencyStatuses,
+      dependency_outputs: dependencyOutputs,
+      input_files: inputFiles,
+    }
+    const derivedInputPath = join(debugDir, "input.json")
+    await writeFile(derivedInputPath, `${JSON.stringify(derivedEnvelope, null, 2)}\n`, "utf8")
+    const bundle = await loadPipelineTaskInputBundle(derivedInputPath)
+    return {
+      bundle,
+      cleanup: () => rm(temporaryRoot, { recursive: true, force: true }),
+    }
+  } catch (error) {
+    await rm(temporaryRoot, { recursive: true, force: true })
+    throw error
+  }
+}
+
 async function runLocalJob({ args, rootDir }: { args: readonly string[]; rootDir: string }) {
   const jobId = args[2]
   if (!jobId || jobId.startsWith("--")) throw new Error("local run requires a job id")
@@ -144,27 +265,58 @@ async function runLocalJob({ args, rootDir }: { args: readonly string[]; rootDir
 
   const state = await restoredState(rootDir)
   const jobDir = state.jobStore.getJobDir(jobId)
-  if (!jobDir) throw new Error(`Job ${jobId} was not found`)
-  const snapshot = snapshotForPipeline({
-    pipelineId: registeredPipelineId,
-    jobId,
-    jobStore: state.jobStore,
-    modelRunStore: state.modelRunStore,
-  })
-  const retainedTask = snapshot?.stage_results[taskId]
-  if (!retainedTask) throw new Error(`Job ${jobId} has no retained input for ${pipelineId}/${taskId}`)
-  const inputPath = await resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
-  const bundle = await loadPipelineTaskInputBundle(inputPath)
+  let bundle: PipelineTaskInputBundle
+  let parentLocalRunId: string | undefined
+  let protectedDirs: readonly string[] | undefined
+  let cleanup: (() => Promise<void>) | undefined
+  if (jobDir) {
+    const snapshot = snapshotForPipeline({
+      pipelineId: registeredPipelineId,
+      jobId,
+      jobStore: state.jobStore,
+      modelRunStore: state.modelRunStore,
+    })
+    const retainedTask = snapshot?.stage_results[taskId]
+    if (!retainedTask) throw new Error(`Job ${jobId} has no retained input for ${pipelineId}/${taskId}`)
+    const inputPath = await resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
+    bundle = await loadPipelineTaskInputBundle(inputPath)
+  } else if (isLocalRunId(jobId)) {
+    const localInput = await resolveLocalRunInput({
+      rootDir,
+      localRunId: jobId,
+      pipelineId: registeredPipelineId,
+      taskId,
+    })
+    const localBundle = await loadLocalRunTaskBundle({
+      source: localInput.source,
+      inputPath: localInput.inputPath,
+      pipelineId: registeredPipelineId,
+      taskId,
+    })
+    bundle = localBundle.bundle
+    cleanup = localBundle.cleanup
+    parentLocalRunId = localInput.source.local_run_id
+    protectedDirs = [localInput.source.execution_dir]
+  } else {
+    throw new Error(`Job or Local run ${jobId} was not found`)
+  }
   if (bundle.envelope.pipeline_id !== registeredPipelineId || bundle.envelope.task_id !== taskId) {
+    await cleanup?.()
     throw new Error("Retained task input identity does not match the requested task")
   }
-  return runPipelineLocal({
-    rootDir,
-    bundle,
-    mode,
-    taskId: mode === "pipeline" ? undefined : taskId,
-    outputDir: option({ args, name: "--output" }),
-  })
+  try {
+    return await runPipelineLocal({
+      rootDir,
+      bundle,
+      mode,
+      taskId: mode === "pipeline" ? undefined : taskId,
+      outputDir: option({ args, name: "--output" }),
+      ...(parentLocalRunId ? { parentLocalRunId } : {}),
+      ...(protectedDirs ? { protectedDirs } : {}),
+    })
+  } finally {
+    await cleanup?.()
+  }
 }
 
 export async function runDebugCli(args = Bun.argv.slice(2)): Promise<unknown> {

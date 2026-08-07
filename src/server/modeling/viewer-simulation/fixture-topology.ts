@@ -1,5 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
-import type { FixtureElement, ValidationExecutionError } from "../../spice-validation/types"
+import type { FixtureElement, ValidationCase, ValidationExecutionError } from "../../spice-validation/types"
 import { asRecord, simulatorError } from "./errors"
 import {
   expectedNativeFixtureIdentity,
@@ -21,6 +21,7 @@ export function validateFixtureEndpoints(input: {
   circuit_json: readonly AnyCircuitElement[]
   component_id: string
   model?: CircuitRecord
+  current_observation?: Extract<ValidationCase["observations"][number], { type: "current" }>
 }): ValidationExecutionError[] {
   const path = `fixtures.${input.fixture.id}`
   const pulsed =
@@ -48,6 +49,79 @@ export function validateFixtureEndpoints(input: {
       subject: `fixture ${input.fixture.id}`,
       path: `${path}.${terminal.side}`,
     })
+    if (input.current_observation && terminal.side === "positive") {
+      const probe_name = `probe_${input.current_observation.id}`
+      const ammeters = input.circuit_json.flatMap((element) => {
+        const record = asRecord(element)
+        return record.type === "source_component" &&
+          record.name === probe_name &&
+          record.ftype === "simple_ammeter"
+          ? [record]
+          : []
+      })
+      const ammeter_id = ammeters[0]?.source_component_id
+      const positive_to_negative = input.current_observation.direction !== "negative_to_positive"
+      const fixture_side_port =
+        typeof ammeter_id === "string"
+          ? nativeFixturePort({
+              circuit_json: input.circuit_json,
+              component_id: ammeter_id,
+              port_name: positive_to_negative ? "pin2" : "pin1",
+            })
+          : undefined
+      const endpoint_side_port =
+        typeof ammeter_id === "string"
+          ? nativeFixturePort({
+              circuit_json: input.circuit_json,
+              component_id: ammeter_id,
+              port_name: positive_to_negative ? "pin1" : "pin2",
+            })
+          : undefined
+      const fixture_port_id = port?.source_port_id
+      const fixture_side_port_id = fixture_side_port?.source_port_id
+      const endpoint_side_port_id = endpoint_side_port?.source_port_id
+      const source_traces = input.circuit_json.flatMap((element) => {
+        const trace = asRecord(element)
+        if (trace.type !== "source_trace") return []
+        const port_ids = Array.isArray(trace.connected_source_port_ids)
+          ? trace.connected_source_port_ids.filter((id): id is string => typeof id === "string")
+          : []
+        const net_ids = Array.isArray(trace.connected_source_net_ids)
+          ? trace.connected_source_net_ids.filter((id): id is string => typeof id === "string")
+          : []
+        return [{ port_ids, net_ids }]
+      })
+      const fixture_to_ammeter = source_traces.filter(
+        ({ port_ids, net_ids }) =>
+          typeof fixture_port_id === "string" &&
+          typeof fixture_side_port_id === "string" &&
+          net_ids.length === 0 &&
+          port_ids.length === 2 &&
+          new Set(port_ids).size === 2 &&
+          port_ids.includes(fixture_port_id) &&
+          port_ids.includes(fixture_side_port_id),
+      )
+      if (
+        ammeters.length !== 1 ||
+        typeof endpoint_side_port_id !== "string" ||
+        fixture_to_ammeter.length !== 1 ||
+        resolved.error ||
+        !traceExactlyConnectsFixturePort({
+          circuit_json: input.circuit_json,
+          fixture_port_id: endpoint_side_port_id,
+          endpoint: resolved.endpoint,
+        })
+      ) {
+        errors.push(
+          simulatorError(
+            "viewer_current_probe_topology_mismatch",
+            `Fixture ${input.fixture.id} is not measured by exactly one correctly oriented inline ammeter from its planned positive endpoint`,
+            `${path}.${terminal.side}`,
+          ),
+        )
+      }
+      continue
+    }
     if (
       typeof port_id !== "string" ||
       resolved.error ||
@@ -73,6 +147,7 @@ function validatePulseFixture(input: {
   fixture: PulsedSourceFixture
   circuit_json: readonly AnyCircuitElement[]
   component: CircuitRecord
+  current_observation?: Extract<ValidationCase["observations"][number], { type: "current" }>
 }): ValidationExecutionError[] {
   const path = `fixtures.${input.fixture.id}`
   const component_id = input.component.source_component_id
@@ -123,6 +198,7 @@ function validatePulseFixture(input: {
     circuit_json: input.circuit_json,
     component_id,
     model,
+    current_observation: input.current_observation,
   })
 }
 
@@ -130,6 +206,7 @@ function validateNativeFixture(input: {
   fixture: FixtureElement
   circuit_json: readonly AnyCircuitElement[]
   component: CircuitRecord
+  current_observation?: Extract<ValidationCase["observations"][number], { type: "current" }>
 }): ValidationExecutionError[] {
   const path = `fixtures.${input.fixture.id}`
   const component_id = input.component.source_component_id
@@ -165,12 +242,14 @@ function validateNativeFixture(input: {
     fixture: input.fixture,
     circuit_json: input.circuit_json,
     component_id,
+    current_observation: input.current_observation,
   })
 }
 
 export function validateFixture(input: {
   fixture: FixtureElement
   circuit_json: readonly AnyCircuitElement[]
+  current_observation?: Extract<ValidationCase["observations"][number], { type: "current" }>
 }): ValidationExecutionError[] {
   const path = `fixtures.${input.fixture.id}`
   const components = namedFixtureComponents(input)
@@ -194,11 +273,13 @@ export function validateFixture(input: {
       fixture: input.fixture as PulsedSourceFixture,
       circuit_json: input.circuit_json,
       component: components[0]!,
+      current_observation: input.current_observation,
     })
   }
   return validateNativeFixture({
     fixture: input.fixture,
     circuit_json: input.circuit_json,
     component: components[0]!,
+    current_observation: input.current_observation,
   })
 }

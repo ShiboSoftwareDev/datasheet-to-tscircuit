@@ -234,6 +234,10 @@ describe("ValidationPlan contract", () => {
         x_unit: "s",
         y_quantity: "voltage",
         y_unit: "V",
+        channel_id: "output_voltage",
+        channel_label: "VOUT",
+        channel_role: "response",
+        measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
         tolerance: 0.05,
         points: [
           { x: 0, y: 0 },
@@ -323,7 +327,7 @@ describe("ValidationPlan contract", () => {
       throw new Error("Expected bound multi-requirement case rejection")
     } catch (error) {
       expect((error as ValidationPlanError).errors.map(({ code }) => code)).toEqual(
-        expect.arrayContaining(["bound_case_requirement_count", "bound_case_observation_mismatch"]),
+        expect.arrayContaining(["mixed_bound_case_requirements"]),
       )
     }
 

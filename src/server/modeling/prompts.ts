@@ -87,7 +87,8 @@ identify the graph rectangle precisely. The crop must be in bounds, have positiv
 width and height, be at least 96x64 pixels, and exclude unrelated page content; a whole-page crop is
 rejected. Do not set reference_curve.image: the server renders the cited source
 page and materializes the canonical crop as
-evidence/figures/<requirement_id>.png.
+evidence/figures/<graph_id>.png. Every channel from the same source graph shares
+that immutable crop while retaining its own reference curve and observation.
 Digitize 8 through 48 points distributed across the graph's full elapsed-time
 range only when no server_verified_reference_curve is supplied. When it is
 supplied, copy its points exactly even when it contains fewer than 48 points;

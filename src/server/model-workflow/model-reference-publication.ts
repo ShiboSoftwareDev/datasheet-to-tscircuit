@@ -8,7 +8,7 @@ import {
   validateStageDirectory,
 } from "../infrastructure/artifacts"
 import { BunProcessRunner, type ProcessRunner } from "../infrastructure/process"
-import type { ModelContract } from "../modeling/types"
+import type { ModelContract, ModelReferenceCropRegion, ModelRequirement } from "../modeling/types"
 import { stableStringify } from "../spice-validation"
 import {
   parseCanonicalReferenceGraphObservation,
@@ -20,9 +20,15 @@ import {
   applyReferenceGraphSourceEligibility,
   buildReferenceGraphSourceProof,
   parseReferenceGraphSourceProof,
+  printedNominalSourcesByGraphId,
 } from "./reference-graph-axis-proof"
 import { parseTimeGraphDiscovery } from "./time-graph-hints"
-import { decodeModelEvidencePng } from "./model-evidence-pages"
+import {
+  decodeModelEvidencePng,
+  modelReferenceCropsEqual,
+  modelReferenceFigureFile,
+  modelReferenceFigureId,
+} from "./model-evidence-pages"
 
 export const MODEL_REFERENCE_TRACE_FILES = [
   "time-graph-hints.json",
@@ -118,12 +124,24 @@ async function verifyCanonicalReferenceCropRenders(input: {
   process_runner: ProcessRunner
   signal?: AbortSignal
 }): Promise<void> {
-  const cropped_requirements = input.contract.characterization.requirements.flatMap((requirement) =>
-    requirement.support.status === "modeled" && requirement.reference_curve?.crop
-      ? [{ requirement_id: requirement.requirement_id, crop: requirement.reference_curve.crop }]
-      : [],
-  )
-  if (cropped_requirements.length === 0) return
+  const cropped_figures = new Map<
+    string,
+    {
+      requirement: ModelRequirement
+      crop: ModelReferenceCropRegion
+    }
+  >()
+  for (const requirement of input.contract.characterization.requirements) {
+    const crop = requirement.support.status === "modeled" ? requirement.reference_curve?.crop : undefined
+    if (!crop) continue
+    const figure_id = modelReferenceFigureId(requirement)
+    const existing = cropped_figures.get(figure_id)
+    if (existing && !modelReferenceCropsEqual(existing.crop, crop)) {
+      throw new Error(`Reference graph ${figure_id} uses different retained crops`)
+    }
+    cropped_figures.set(figure_id, { requirement, crop })
+  }
+  if (cropped_figures.size === 0) return
   const signal = input.signal ?? new AbortController().signal
   const workspace = await createStageWorkspace({
     prefix: "model-publication-reference-render",
@@ -132,8 +150,9 @@ async function verifyCanonicalReferenceCropRenders(input: {
   try {
     const rendered_dir = join(workspace.path, "figures")
     await mkdir(rendered_dir, { recursive: true })
-    for (const [index, { requirement_id, crop }] of cropped_requirements.entries()) {
+    for (const [index, { requirement, crop }] of [...cropped_figures.values()].entries()) {
       signal.throwIfAborted()
+      const requirement_id = requirement.requirement_id
       const output_prefix = join(rendered_dir, `crop-${index}`)
       await input.process_runner.run({
         command: [
@@ -164,7 +183,7 @@ async function verifyCanonicalReferenceCropRenders(input: {
         max_output_chars: 20_000,
       })
       await assertSameRenderedPixels({
-        retained_path: join(input.evidence_dir, "figures", `${requirement_id}.png`),
+        retained_path: modelReferenceFigureFile(input.evidence_dir, requirement),
         canonical_path: `${output_prefix}.png`,
         requirement_id,
       })
@@ -232,6 +251,7 @@ export async function revalidateModelReferencePublication(input: {
     datasheet_path: input.datasheet_path,
     process_runner,
     signal: input.signal ?? new AbortController().signal,
+    printed_nominal_sources_by_graph_id: printedNominalSourcesByGraphId({ observation, discovery }),
   })
   if (stableStringify(stored_source_proof) !== stableStringify(recomputed_source_proof)) {
     throw new Error(

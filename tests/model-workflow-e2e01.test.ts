@@ -117,6 +117,10 @@ const characterization = {
       conditions: { load_resistance_ohms: 10_000 },
       expected: { unit: "V", min: 0, max: 2 },
       reference_curve: {
+        channel_id: "output_voltage",
+        channel_label: "OUT",
+        channel_role: "response",
+        measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
         x_quantity: "time",
         x_unit: "s",
         y_quantity: "voltage",
@@ -250,7 +254,8 @@ function deterministicAgent(calls: string[]): AgentClient {
       calls.push(input.phase_label)
       if (
         input.phase_label === "Independent datasheet graph discovery" ||
-        input.phase_label === "Independent datasheet graph inventory"
+        input.phase_label === "Independent datasheet graph inventory" ||
+        input.phase_label.startsWith("Digitize reference graph ")
       ) {
         const discovery = JSON.parse(
           await Bun.file(join(input.workspace, "time-graph-hints.json")).text(),
@@ -310,34 +315,42 @@ function deterministicAgent(calls: string[]): AgentClient {
                       },
                     },
                   },
-                  digitized_curve: {
-                    method: "manual_pixel_trace",
-                    x_quantity: "time",
-                    x_unit: "s",
-                    y_quantity: "voltage",
-                    y_unit: "V",
-                    x_range: { min: 0, max: 0.003 },
-                    y_range: { min: 0, max: 2 },
-                    x_axis: {
-                      scale: "linear",
-                      first: { pixel: 8, value: 0 },
-                      second: { pixel: 88, value: 0.003 },
+                  channels: [
+                    {
+                      channel_id: "output_voltage",
+                      label: "OUT",
+                      role: "response",
+                      measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
+                      digitized_curve: {
+                        method: "manual_pixel_trace",
+                        x_quantity: "time",
+                        x_unit: "s",
+                        y_quantity: "voltage",
+                        y_unit: "V",
+                        x_range: { min: 0, max: 0.003 },
+                        y_range: { min: 0, max: 2 },
+                        x_axis: {
+                          scale: "linear",
+                          first: { pixel: 8, value: 0 },
+                          second: { pixel: 88, value: 0.003 },
+                        },
+                        y_axis: {
+                          scale: "linear",
+                          first: { pixel: 56, value: 0 },
+                          second: { pixel: 8, value: 2 },
+                        },
+                        trace_color: { r: 0, g: 0, b: 0, tolerance: 24 },
+                        points: Array.from({ length: 13 }, (_, index) => {
+                          const x = (index / 12) * 0.003
+                          const y = Math.min(2, x * 2_000)
+                          return {
+                            pixel_x: 8 + (x / 0.003) * 80,
+                            pixel_y: 56 - (y / 2) * 48,
+                          }
+                        }),
+                      },
                     },
-                    y_axis: {
-                      scale: "linear",
-                      first: { pixel: 56, value: 0 },
-                      second: { pixel: 8, value: 2 },
-                    },
-                    trace_color: { r: 0, g: 0, b: 0, tolerance: 24 },
-                    points: Array.from({ length: 13 }, (_, index) => {
-                      const x = (index / 12) * 0.003
-                      const y = Math.min(2, x * 2_000)
-                      return {
-                        pixel_x: 8 + (x / 0.003) * 80,
-                        pixel_y: 56 - (y / 2) * 48,
-                      }
-                    }),
-                  },
+                  ],
                 },
               ],
             },
@@ -345,6 +358,28 @@ function deterministicAgent(calls: string[]): AgentClient {
             2,
           )}\n`,
         )
+        if (input.phase_label.startsWith("Digitize reference graph ")) {
+          const candidate = (await Bun.file(
+            join(input.workspace, "model-reference-observation.json"),
+          ).json()) as { graphs: Array<Record<string, unknown>> }
+          const seed = (await Bun.file(join(input.workspace, "model-reference-graph.json")).json()) as Record<
+            string,
+            unknown
+          >
+          const candidate_graph = candidate.graphs[0]!
+          await Bun.write(
+            join(input.workspace, "model-reference-graph.json"),
+            `${JSON.stringify(
+              {
+                ...seed,
+                electrical_binding: candidate_graph.electrical_binding,
+                channels: candidate_graph.channels,
+              },
+              null,
+              2,
+            )}\n`,
+          )
+        }
         if (input.phase_label === "Independent datasheet graph discovery") {
           const found = (await Bun.file(
             join(input.workspace, "model-reference-observation.json"),
@@ -352,7 +387,7 @@ function deterministicAgent(calls: string[]): AgentClient {
             graphs: Array<Record<string, unknown>>
           }
           delete found.graphs[0]!.electrical_binding
-          delete found.graphs[0]!.digitized_curve
+          delete found.graphs[0]!.channels
           await Bun.write(
             join(input.workspace, "model-reference-observation.json"),
             `${JSON.stringify(found, null, 2)}\n`,
@@ -742,7 +777,7 @@ testWithProductionSimulation(
     ])
     expect(agent_calls).toEqual([
       "Independent datasheet graph discovery",
-      "Independent datasheet graph inventory",
+      "Digitize reference graph transient_gain",
       "SPICE model generation",
     ])
     expect(
@@ -838,13 +873,13 @@ testWithProductionSimulation(
     const retained_observation = JSON.parse(
       await readFile(join(accepted_dir, "model-reference-observation.json"), "utf8"),
     )
-    expect(retained_observation.graphs[0].digitized_curve.points).toHaveLength(13)
+    expect(retained_observation.graphs[0].channels[0].digitized_curve.points).toHaveLength(13)
     const retained_verification = JSON.parse(
       await readFile(join(accepted_dir, "model-reference-verification.json"), "utf8"),
     )
     expect(retained_verification.matches[0]).toMatchObject({
-      requirement_id: "transient_gain",
-      graph_id: "transient_gain",
+      requirement_id: "transient_gain__output_voltage",
+      graph_id: "transient_gain__output_voltage",
       curve_fidelity: {
         observer_curve_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         candidate_curve_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),

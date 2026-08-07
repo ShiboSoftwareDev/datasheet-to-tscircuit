@@ -106,14 +106,16 @@ function indexProbeSeries(input: {
   const failures = probeExecutionFailures(input.result)
   const expected_keys = new Set(
     input.plan.cases.flatMap((validation_case) =>
-      validation_case.observations.map((observation) => seriesKey(validation_case.id, observation.id)),
+      validation_case.observations.flatMap((observation) =>
+        observation.role === "stimulus" ? [] : [seriesKey(validation_case.id, observation.id)],
+      ),
     ),
   )
   const series_by_key = new Map<string, ValidationSeriesResult>()
   for (const validation_case of input.result.cases) {
     for (const series of validation_case.series) {
       const key = seriesKey(validation_case.case_id, series.observation_id)
-      if (!expected_keys.has(key)) failures.push(`${key}: probe returned an unexpected observation`)
+      if (!expected_keys.has(key)) continue
       if (series_by_key.has(key)) failures.push(`${key}: probe returned the observation more than once`)
       series_by_key.set(key, series)
     }

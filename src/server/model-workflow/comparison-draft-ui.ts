@@ -3,7 +3,8 @@ import { join } from "node:path"
 import { createStageWorkspace, promoteStageDirectory } from "../infrastructure/artifacts"
 import type { ModelRunStore } from "../model-run-store"
 import type { ModelContract, ModelRequirement } from "../modeling"
-import { projectReferenceComparisonDraft } from "../modeling/ui-projection"
+import { projectModelReferencePreview } from "../modeling/ui-projection"
+import type { ValidationPlan } from "../spice-validation"
 import { writeJson } from "./stage-helpers"
 
 function sourceImage(requirement: ModelRequirement): string {
@@ -18,6 +19,7 @@ export async function projectComparisonGraphsUi(input: {
   model_run_id: string
   model_dir: string
   contract: ModelContract
+  plan: ValidationPlan
   evidence_dir: string
   signal: AbortSignal
 }): Promise<void> {
@@ -36,26 +38,38 @@ export async function projectComparisonGraphsUi(input: {
     const cases_dir = join(bundle, "cases")
     await mkdir(cases_dir, { recursive: true })
     const updated_at = new Date().toISOString()
+    const requirement_by_id = new Map(
+      requirements.map((requirement) => [requirement.requirement_id, requirement]),
+    )
     const selected_previews = Object.fromEntries(
-      requirements.map((requirement) => [
-        requirement.requirement_id,
-        { reference_preview: projectReferenceComparisonDraft({ requirement, updated_at }) },
+      input.plan.cases.map((validation_case) => [
+        validation_case.id,
+        { reference_preview: projectModelReferencePreview({ validation_case, updated_at }) },
       ]),
     )
     await Promise.all([
       writeJson(join(bundle, "reference-index.json"), {
         version: 1,
-        references: requirements.map((requirement) => ({
-          benchmark_id: requirement.requirement_id,
-          requirement_ids: [requirement.requirement_id],
-          sources: [
-            {
-              page: requirement.reference_curve?.crop?.page ?? requirement.sources[0]?.page,
-              figure: requirement.sources[0]?.locator,
-              image: sourceImage(requirement),
-            },
-          ],
-        })),
+        references: input.plan.cases.map((validation_case) => {
+          const case_requirements = validation_case.requirement_ids.map((requirement_id) => {
+            const requirement = requirement_by_id.get(requirement_id)
+            if (!requirement) throw new Error(`Missing comparison requirement ${requirement_id}`)
+            return requirement
+          })
+          const first_requirement = case_requirements[0]
+          if (!first_requirement) throw new Error(`Comparison case ${validation_case.id} has no requirements`)
+          return {
+            benchmark_id: validation_case.id,
+            requirement_ids: validation_case.requirement_ids,
+            sources: [
+              {
+                page: first_requirement.reference_curve?.crop?.page ?? first_requirement.sources[0]?.page,
+                figure: first_requirement.sources[0]?.locator,
+                image: sourceImage(first_requirement),
+              },
+            ],
+          }
+        }),
       }),
       ...Object.entries(selected_previews).map(([case_id, preview]) =>
         writeJson(join(cases_dir, `${case_id}.preview.json`), preview),
@@ -70,12 +84,16 @@ export async function projectComparisonGraphsUi(input: {
       max_total_bytes: 96 * 1024 * 1024,
       signal: input.signal,
     })
-    const preview_options = requirements.map((requirement) => ({
-      benchmark_id: requirement.requirement_id,
-      title: requirement.title,
-      circuit_file: `validation/cases/${requirement.requirement_id}.circuit.tsx`,
-      reference_file: sourceImage(requirement),
-    }))
+    const preview_options = input.plan.cases.map((validation_case) => {
+      const first_requirement = requirement_by_id.get(validation_case.requirement_ids[0] ?? "")
+      if (!first_requirement) throw new Error(`Comparison case ${validation_case.id} has no requirement`)
+      return {
+        benchmark_id: validation_case.id,
+        title: validation_case.title ?? first_requirement.title,
+        circuit_file: `validation/cases/${validation_case.id}.circuit.tsx`,
+        reference_file: sourceImage(first_requirement),
+      }
+    })
     const first = preview_options[0]
       ? selected_previews[preview_options[0].benchmark_id]?.reference_preview
       : undefined

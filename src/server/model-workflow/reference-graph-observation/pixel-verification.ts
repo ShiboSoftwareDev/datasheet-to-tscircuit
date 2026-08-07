@@ -9,9 +9,9 @@ import {
 import type { ProcessRunner } from "../../infrastructure/process"
 import type { ModelCharacterization } from "../../modeling/types"
 import { MODEL_REFERENCE_CROP_DPI } from "../../modeling/types"
-import { decodeModelEvidencePng } from "../model-evidence-pages"
+import { decodeModelEvidencePng, modelReferenceFigureFile } from "../model-evidence-pages"
 import { assertExactCanonicalReferenceCrop } from "../reference-graph-crop-proof"
-import { eligibleObservedGraphs, type EligibleObservedReferenceGraph } from "./eligibility"
+import { eligibleObservedChannels, type EligibleObservedReferenceChannel } from "./eligibility"
 import { sha256Json } from "./numeric-verification"
 import type {
   ModelReferenceNumericVerification,
@@ -52,18 +52,22 @@ function pointTouchesTrace(input: {
   pixel_y: number
   color: ReferenceGraphTraceColor
   search_radius?: number
+  horizontal_search_radius?: number
+  vertical_search_radius?: number
 }): boolean {
   const center_x = Math.round(input.pixel_x)
   const center_y = Math.round(input.pixel_y)
   const search_radius = input.search_radius ?? 4
+  const horizontal_search_radius = input.horizontal_search_radius ?? search_radius
+  const vertical_search_radius = input.vertical_search_radius ?? search_radius
   for (
-    let y = Math.max(0, center_y - search_radius);
-    y <= Math.min(input.height - 1, center_y + search_radius);
+    let y = Math.max(0, center_y - vertical_search_radius);
+    y <= Math.min(input.height - 1, center_y + vertical_search_radius);
     y += 1
   ) {
     for (
-      let x = Math.max(0, center_x - search_radius);
-      x <= Math.min(input.width - 1, center_x + search_radius);
+      let x = Math.max(0, center_x - horizontal_search_radius);
+      x <= Math.min(input.width - 1, center_x + horizontal_search_radius);
       x += 1
     ) {
       if (colorDistance(input.rgbAt(x, y), input.color) <= input.color.tolerance) return true
@@ -155,120 +159,72 @@ interface PixelTraceMeasurement {
   trace_color_coverage: number
   search_radius_px: 4
   segment_support_ratio: number
-  minimum_segment_support_ratio: 0.75
+  minimum_segment_support_ratio: 0.85
   segment_search_radius_px: 6
 }
 
-interface TraceConnectivity {
-  pointsConnected(input: {
-    start: { pixel_x: number; pixel_y: number }
-    end: { pixel_x: number; pixel_y: number }
-    search_radius: number
-  }): boolean
+const MINIMUM_SEGMENT_SUPPORT_RATIO = 0.85
+
+function bandColorMatches(
+  actual: readonly [number, number, number],
+  expected: ReferenceGraphTraceColor,
+): boolean {
+  const expected_mean = (expected.r + expected.g + expected.b) / 3
+  const actual_mean = (actual[0] + actual[1] + actual[2]) / 3
+  const expected_chroma = [
+    expected.r - expected_mean,
+    expected.g - expected_mean,
+    expected.b - expected_mean,
+  ] as const
+  const actual_chroma = [actual[0] - actual_mean, actual[1] - actual_mean, actual[2] - actual_mean] as const
+  const expected_norm = Math.hypot(...expected_chroma)
+  const actual_norm = Math.hypot(...actual_chroma)
+  if (expected_norm < 30 || actual_norm < 12) {
+    return colorDistance(actual, expected) <= expected.tolerance
+  }
+  const chroma_cosine =
+    expected_chroma.reduce((sum, value, index) => sum + value * actual_chroma[index]!, 0) /
+    (expected_norm * actual_norm)
+  return chroma_cosine >= 0.8 && colorDistance(actual, expected) <= Math.min(230, expected.tolerance + 140)
 }
 
-function buildTraceConnectivity(input: {
+function pointIsVerticallyBracketedByTrace(input: {
   width: number
   height: number
   rgbAt(x: number, y: number): [number, number, number]
+  pixel_x: number
+  pixel_y: number
   color: ReferenceGraphTraceColor
-  horizontal_dilation_radius: number
-  vertical_dilation_radius: number
-}): TraceConnectivity {
-  const pixel_count = input.width * input.height
-  const trace_mask = new Uint8Array(pixel_count)
-  for (let y = 0; y < input.height; y += 1) {
-    for (let x = 0; x < input.width; x += 1) {
-      if (colorDistance(input.rgbAt(x, y), input.color) > input.color.tolerance) continue
-      for (
-        let mask_y = Math.max(0, y - input.vertical_dilation_radius);
-        mask_y <= Math.min(input.height - 1, y + input.vertical_dilation_radius);
-        mask_y += 1
-      ) {
-        const row_offset = mask_y * input.width
-        for (
-          let mask_x = Math.max(0, x - input.horizontal_dilation_radius);
-          mask_x <= Math.min(input.width - 1, x + input.horizontal_dilation_radius);
-          mask_x += 1
-        ) {
-          trace_mask[row_offset + mask_x] = 1
-        }
+  horizontal_search_radius: number
+  minimum_vertical_offset: number
+  maximum_vertical_offset: number
+}): boolean {
+  const center_x = Math.round(input.pixel_x)
+  const center_y = Math.round(input.pixel_y)
+  let above = false
+  let below = false
+  for (
+    let x = Math.max(0, center_x - input.horizontal_search_radius);
+    x <= Math.min(input.width - 1, center_x + input.horizontal_search_radius);
+    x += 1
+  ) {
+    for (let offset = input.minimum_vertical_offset; offset <= input.maximum_vertical_offset; offset += 1) {
+      const above_y = center_y - offset
+      const below_y = center_y + offset
+      if (above_y >= 0 && bandColorMatches(input.rgbAt(x, above_y), input.color)) {
+        above = true
       }
+      if (below_y < input.height && bandColorMatches(input.rgbAt(x, below_y), input.color)) {
+        below = true
+      }
+      if (above && below) return true
     }
   }
-
-  const visited = new Int32Array(pixel_count)
-  const queue = new Int32Array(pixel_count)
-  let visit_id = 0
-
-  return {
-    pointsConnected({ start, end, search_radius }) {
-      visit_id += 1
-      const horizontal_span = Math.abs(end.pixel_x - start.pixel_x)
-      const vertical_margin = Math.max(
-        search_radius + input.vertical_dilation_radius,
-        Math.min(32, Math.ceil(horizontal_span)),
-      )
-      const min_x = Math.max(0, Math.floor(Math.min(start.pixel_x, end.pixel_x) - search_radius))
-      const max_x = Math.min(input.width - 1, Math.ceil(Math.max(start.pixel_x, end.pixel_x) + search_radius))
-      const min_y = Math.max(0, Math.floor(Math.min(start.pixel_y, end.pixel_y) - vertical_margin))
-      const max_y = Math.min(
-        input.height - 1,
-        Math.ceil(Math.max(start.pixel_y, end.pixel_y) + vertical_margin),
-      )
-      const target_x = Math.round(end.pixel_x)
-      const target_y = Math.round(end.pixel_y)
-      const start_x = Math.round(start.pixel_x)
-      const start_y = Math.round(start.pixel_y)
-
-      let queue_start = 0
-      let queue_end = 0
-      for (
-        let y = Math.max(min_y, start_y - search_radius);
-        y <= Math.min(max_y, start_y + search_radius);
-        y += 1
-      ) {
-        const row_offset = y * input.width
-        for (
-          let x = Math.max(min_x, start_x - search_radius);
-          x <= Math.min(max_x, start_x + search_radius);
-          x += 1
-        ) {
-          const pixel = row_offset + x
-          if (trace_mask[pixel] === 0 || visited[pixel] === visit_id) continue
-          visited[pixel] = visit_id
-          queue[queue_end++] = pixel
-        }
-      }
-
-      while (queue_start < queue_end) {
-        const pixel = queue[queue_start++]!
-        const x = pixel % input.width
-        const y = Math.floor(pixel / input.width)
-        if (Math.abs(x - target_x) <= search_radius && Math.abs(y - target_y) <= search_radius) {
-          return true
-        }
-        for (let neighbor_y = Math.max(min_y, y - 1); neighbor_y <= Math.min(max_y, y + 1); neighbor_y += 1) {
-          const row_offset = neighbor_y * input.width
-          for (
-            let neighbor_x = Math.max(min_x, x - 1);
-            neighbor_x <= Math.min(max_x, x + 1);
-            neighbor_x += 1
-          ) {
-            const neighbor = row_offset + neighbor_x
-            if (trace_mask[neighbor] === 0 || visited[neighbor] === visit_id) continue
-            visited[neighbor] = visit_id
-            queue[queue_end++] = neighbor
-          }
-        }
-      }
-      return false
-    },
-  }
+  return false
 }
 
 async function measureReferenceGraphTracePixels(input: {
-  graph: EligibleObservedReferenceGraph
+  graph: EligibleObservedReferenceChannel
   image_path: string
   expected_width: number
   expected_height: number
@@ -300,6 +256,15 @@ async function measureReferenceGraphTracePixels(input: {
       pixel_y,
       color: input.graph.digitized_curve.trace_color,
       search_radius: validation_radius,
+    }) ||
+    pointIsVerticallyBracketedByTrace({
+      ...decoded,
+      pixel_x,
+      pixel_y,
+      color: input.graph.digitized_curve.trace_color,
+      horizontal_search_radius: 4,
+      minimum_vertical_offset: 5,
+      maximum_vertical_offset: 24,
     })
       ? []
       : [
@@ -324,12 +289,6 @@ async function measureReferenceGraphTracePixels(input: {
     )
   }
   const segment_search_radius = 6
-  const trace_connectivity = buildTraceConnectivity({
-    ...decoded,
-    color: input.graph.digitized_curve.trace_color,
-    horizontal_dilation_radius: 5,
-    vertical_dilation_radius: segment_search_radius,
-  })
   let segment_sample_count = 0
   let supported_segment_sample_count = 0
   const segment_diagnostics: Array<{
@@ -348,12 +307,50 @@ async function measureReferenceGraphTracePixels(input: {
     )
     const weighted_sample_count = sample_count + 1
     segment_sample_count += weighted_sample_count
-    const connected = trace_connectivity.pointsConnected({
-      start,
-      end,
-      search_radius: validation_radius,
-    })
-    const segment_supported_sample_count = connected ? weighted_sample_count : 0
+    const localized_raster_discontinuity =
+      Math.abs(end.pixel_x - start.pixel_x) <= Math.max(2, Math.min(8, decoded.width * 0.0125)) &&
+      Math.abs(end.pixel_y - start.pixel_y) >= 8 &&
+      pointTouchesTrace({
+        ...decoded,
+        pixel_x: start.pixel_x,
+        pixel_y: start.pixel_y,
+        color: input.graph.digitized_curve.trace_color,
+        search_radius: validation_radius,
+      }) &&
+      pointTouchesTrace({
+        ...decoded,
+        pixel_x: end.pixel_x,
+        pixel_y: end.pixel_y,
+        color: input.graph.digitized_curve.trace_color,
+        search_radius: validation_radius,
+      })
+    let segment_supported_sample_count = localized_raster_discontinuity ? weighted_sample_count : 0
+    if (!localized_raster_discontinuity) {
+      for (let sample_index = 0; sample_index < weighted_sample_count; sample_index += 1) {
+        const ratio = sample_index / Math.max(1, weighted_sample_count - 1)
+        const sample = {
+          ...decoded,
+          pixel_x: start.pixel_x + (end.pixel_x - start.pixel_x) * ratio,
+          pixel_y: start.pixel_y + (end.pixel_y - start.pixel_y) * ratio,
+          color: input.graph.digitized_curve.trace_color,
+        }
+        if (
+          pointTouchesTrace({
+            ...sample,
+            horizontal_search_radius: 1,
+            vertical_search_radius: validation_radius,
+          }) ||
+          pointIsVerticallyBracketedByTrace({
+            ...sample,
+            horizontal_search_radius: 4,
+            minimum_vertical_offset: 5,
+            maximum_vertical_offset: 24,
+          })
+        ) {
+          segment_supported_sample_count += 1
+        }
+      }
+    }
     supported_segment_sample_count += segment_supported_sample_count
     segment_diagnostics.push({
       point_index,
@@ -365,7 +362,7 @@ async function measureReferenceGraphTracePixels(input: {
   }
   const segment_support_ratio =
     segment_sample_count === 0 ? 0 : supported_segment_sample_count / segment_sample_count
-  if (segment_support_ratio < 0.75) {
+  if (segment_support_ratio < MINIMUM_SEGMENT_SUPPORT_RATIO) {
     const weakest_segments = [...segment_diagnostics]
       .sort(
         (left, right) =>
@@ -377,11 +374,11 @@ async function measureReferenceGraphTracePixels(input: {
       .slice(0, 6)
       .map(({ point_index, start, end, sample_count, supported_sample_count }) => {
         const support_percent = ((supported_sample_count / sample_count) * 100).toFixed(1)
-        return `#${point_index} (${formatPixelCoordinate(start.pixel_x)}, ${formatPixelCoordinate(start.pixel_y)}) -> #${point_index + 1} (${formatPixelCoordinate(end.pixel_x)}, ${formatPixelCoordinate(end.pixel_y)}): ${supported_sample_count}/${sample_count} connected-span weight (${support_percent}%) belongs to one declared-color trace component`
+        return `#${point_index} (${formatPixelCoordinate(start.pixel_x)}, ${formatPixelCoordinate(start.pixel_y)}) -> #${point_index + 1} (${formatPixelCoordinate(end.pixel_x)}, ${formatPixelCoordinate(end.pixel_y)}): ${supported_sample_count}/${sample_count} straight-span samples (${support_percent}%) touch or are vertically bracketed by the declared-color trace`
       })
       .join("; ")
     throw new Error(
-      `Independent pixel-trace proof for ${input.error_subject} has disconnected point samples instead of a continuous rendered waveform: ${(segment_support_ratio * 100).toFixed(1)}% aggregate connected-span support; at least 75.0% is required. Weakest point-to-point segments: ${weakest_segments}. Inspect the original-resolution crop and replace every point inside each weak segment as needed so consecutive samples belong to one continuous response centerline, not another same-colored scope channel. Preserve the required point count, 90% axis coverage, and maximum-gap rule; relocate existing points first, and only remove a redundant flat-span point one-for-one with an added transition point.`,
+      `Independent pixel-trace proof for ${input.error_subject} has disconnected or shortcut point samples instead of a polyline that follows the rendered waveform: ${(segment_support_ratio * 100).toFixed(1)}% aggregate trace-following span support; at least ${(MINIMUM_SEGMENT_SUPPORT_RATIO * 100).toFixed(1)}% is required. Weakest point-to-point segments: ${weakest_segments}. Inspect the original-resolution crop and add or replace points inside every weak segment so the straight segment between each consecutive pair stays on the rendered response centerline, not another same-colored scope channel or a shortcut around a visible feature. Never remove, flatten, or reduce a visible spike, dip, edge, local maximum, or local minimum to satisfy continuity. Keep each visible extremum and insert intermediate points through its rendered path; reclaim point slots only from truly flat spans away from transitions. Preserve the required point count, 90% axis coverage, and maximum-gap rule.`,
     )
   }
   const pixel_count = decoded.width * decoded.height
@@ -414,7 +411,7 @@ async function measureReferenceGraphTracePixels(input: {
     trace_color_coverage,
     search_radius_px: 4,
     segment_support_ratio,
-    minimum_segment_support_ratio: 0.75,
+    minimum_segment_support_ratio: MINIMUM_SEGMENT_SUPPORT_RATIO,
     segment_search_radius_px: segment_search_radius,
   }
 }
@@ -427,7 +424,7 @@ export async function verifyReferenceGraphObservationPixels(input: {
   signal: AbortSignal
   on_output?: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
 }): Promise<void> {
-  const eligible = eligibleObservedGraphs(input.observation)
+  const eligible = eligibleObservedChannels(input.observation)
   if (eligible.length === 0) return
   const workspace = await createStageWorkspace({
     prefix: "model-reference-pixel-proof",
@@ -515,7 +512,7 @@ export async function verifyReferenceGraphTracePixels(input: {
   const requirements = new Map(
     input.characterization.requirements.map((requirement) => [requirement.requirement_id, requirement]),
   )
-  const graphs = new Map(eligibleObservedGraphs(input.observation).map((graph) => [graph.graph_id, graph]))
+  const graphs = new Map(eligibleObservedChannels(input.observation).map((graph) => [graph.graph_id, graph]))
   const matches: ModelReferenceVerification["matches"] = []
   for (const match of input.numeric_verification.matches) {
     const requirement = requirements.get(match.requirement_id)
@@ -530,7 +527,7 @@ export async function verifyReferenceGraphTracePixels(input: {
         `Independent graph pixel proof has a stale canonical crop receipt for ${match.requirement_id}`,
       )
     }
-    const image_path = join(input.evidence_dir, "figures", `${requirement.requirement_id}.png`)
+    const image_path = modelReferenceFigureFile(input.evidence_dir, requirement)
     const pixel_trace = await measureReferenceGraphTracePixels({
       graph,
       image_path,

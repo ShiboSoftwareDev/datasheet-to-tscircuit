@@ -5,7 +5,11 @@ import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { runDebugCli } from "@/cli/pipeline-debug"
 import { JobStore } from "@/server/job-store"
-import { loadPipelineTaskInput, retainPipelineTaskInputFiles } from "@/server/pipeline"
+import {
+  loadPipelineTaskInput,
+  loadPipelineTaskInputBundle,
+  retainPipelineTaskInputFiles,
+} from "@/server/pipeline"
 import type { LocalRunSummary } from "@/shared/local-run"
 import type { PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
 
@@ -164,6 +168,70 @@ test("standalone and retained-job task commands use the exact portable input wit
     expect(oldJobSummary.status).toBe("completed")
     expect(oldJobSummary.workspace_dir).not.toBe(sourceJobDir)
     expect(await readFile(join(sourceJobDir, "job.json"), "utf8")).toBe(sourceCheckpointBefore)
+
+    const sourceLocal = (await runDebugCli([
+      "local",
+      "run",
+      "local-job",
+      "--pipeline",
+      "component_generation",
+      "--task",
+      "prepare",
+      "--root",
+      temporaryRoot,
+    ])) as LocalRunSummary
+    const sourceLocalSummaryBefore = await readFile(sourceLocal.summary_path, "utf8")
+    const sourceStageResults = sourceLocal.stage_results as Record<
+      string,
+      { debug_dir: string; status: string }
+    >
+    const continuationInputPath = join(sourceStageResults.extract_evidence.debug_dir, "input.json")
+    const continuationBundle = await loadPipelineTaskInputBundle(continuationInputPath)
+    expect(continuationBundle.envelope.dependency_statuses).toEqual({ prepare: "completed" })
+    expect(continuationBundle.envelope.dependency_outputs.prepare).toBeDefined()
+
+    // Older task-only Local runs retained a skeleton for skipped stages. Keep
+    // supporting those existing Local baselines by deriving from their final workspace.
+    const sourceTaskInputPath = join(sourceStageResults.prepare.debug_dir, "input.json")
+    const sourceTaskInput = await loadPipelineTaskInput(sourceTaskInputPath)
+    const { input_files: _inputFiles, ...legacySourceTaskInput } = sourceTaskInput
+    await writeFile(sourceTaskInputPath, `${JSON.stringify(legacySourceTaskInput, null, 2)}\n`, "utf8")
+    const legacySourceTaskInputBefore = await readFile(sourceTaskInputPath, "utf8")
+    const clonedLocal = (await runDebugCli([
+      "local",
+      "run",
+      sourceLocal.local_run_id,
+      "--pipeline",
+      "component_generation",
+      "--task",
+      "prepare",
+      "--root",
+      temporaryRoot,
+    ])) as LocalRunSummary
+    expect(clonedLocal.status).toBe("completed")
+    expect(clonedLocal.parent_local_run_id).toBe(sourceLocal.local_run_id)
+    expect(clonedLocal.source_run_id).toBe(sourceLocal.local_run_id)
+    expect(clonedLocal.workspace_dir).not.toBe(sourceLocal.workspace_dir)
+    expect(await readFile(sourceLocal.summary_path, "utf8")).toBe(sourceLocalSummaryBefore)
+    expect(await readFile(sourceTaskInputPath, "utf8")).toBe(legacySourceTaskInputBefore)
+
+    const forbiddenLocalOutput = join(sourceLocal.execution_dir, "nested-output")
+    await expect(
+      runDebugCli([
+        "local",
+        "run",
+        sourceLocal.local_run_id,
+        "--pipeline",
+        "component_generation",
+        "--task",
+        "prepare",
+        "--root",
+        temporaryRoot,
+        "--output",
+        forbiddenLocalOutput,
+      ]),
+    ).rejects.toThrow("historical jobs directory")
+    expect(await pathExists(forbiddenLocalOutput)).toBe(false)
 
     const forbiddenOutput = join(sourceJobDir, "local-output")
     await expect(

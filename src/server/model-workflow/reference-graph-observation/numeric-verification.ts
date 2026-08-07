@@ -3,7 +3,7 @@ import type { ModelCharacterization, ModelReferencePoint, ModelRequirement } fro
 import { modelReferenceElectricalBindingsEqual } from "../../modeling/reference-electrical-binding"
 import type { ReferenceGraphSourceProof } from "../reference-graph-axis-proof"
 import { assertExactCanonicalReferenceCrop, matchingReferenceGraphs } from "../reference-graph-crop-proof"
-import { eligibleObservedGraphs, type EligibleObservedReferenceGraph } from "./eligibility"
+import { eligibleObservedChannels, type EligibleObservedReferenceChannel } from "./eligibility"
 import {
   finiteNumber,
   MAX_TRACE_POINTS,
@@ -40,13 +40,14 @@ function interpolateLinear(points: readonly ModelReferencePoint[], x: number): n
 function parseCandidateCurve(
   requirement: ModelRequirement,
   minimum_points: number,
+  expected: { quantity: "voltage" | "current"; unit: "V" | "A" },
 ): {
   points: ModelReferencePoint[]
   digest: string
 } {
   if (requirement.analysis !== "transient") {
     throw new Error(
-      `Modeled requirement ${requirement.requirement_id} must remain a transient voltage-versus-time requirement`,
+      `Modeled requirement ${requirement.requirement_id} must remain a transient time-domain requirement`,
     )
   }
   const curve = requirement.reference_curve
@@ -54,12 +55,12 @@ function parseCandidateCurve(
     !curve ||
     curve.x_quantity !== "time" ||
     curve.x_unit !== "s" ||
-    curve.y_quantity !== "voltage" ||
-    curve.y_unit !== "V" ||
-    requirement.expected.unit !== "V"
+    curve.y_quantity !== expected.quantity ||
+    curve.y_unit !== expected.unit ||
+    requirement.expected.unit !== expected.unit
   ) {
     throw new Error(
-      `Modeled requirement ${requirement.requirement_id} must use a time (s) to voltage (V) reference curve`,
+      `Modeled requirement ${requirement.requirement_id} must use a time (s) to ${expected.quantity} (${expected.unit}) reference curve`,
     )
   }
   if (curve.points.length < minimum_points || curve.points.length > MAX_TRACE_POINTS) {
@@ -91,12 +92,13 @@ function parseCandidateCurve(
 
 function compareCurveFidelity(input: {
   requirement: ModelRequirement
-  graph: EligibleObservedReferenceGraph
+  graph: EligibleObservedReferenceChannel
 }): ModelReferenceNumericVerification["matches"][number]["curve_fidelity"] {
   const observer_curve = input.graph.digitized_curve
   const candidate = parseCandidateCurve(
     input.requirement,
     minimumTracePointCount(observer_curve.x_axis.second.pixel - observer_curve.x_axis.first.pixel),
+    { quantity: observer_curve.y_quantity, unit: observer_curve.y_unit },
   )
   const observer_points = observer_curve.points.map(({ x, y }) => ({ x, y }))
   const observer_start = observer_points[0]!.x
@@ -156,11 +158,11 @@ export function verifyCharacterizationGraphEvidence(input: {
   source_proof?: ReferenceGraphSourceProof
 }): ModelReferenceNumericVerification {
   const modeled = input.characterization.requirements.filter(({ support }) => support.status === "modeled")
-  const eligible = eligibleObservedGraphs(input.observation)
+  const eligible = eligibleObservedChannels(input.observation)
   if (modeled.length === 0 && eligible.length > 0) {
     throw new Error(
-      `The independent datasheet observer found eligible elapsed-time voltage graph${eligible.length === 1 ? "" : "s"}: ${eligible
-        .map(({ page, locator }) => `PDF page ${page} ${locator}`)
+      `The independent datasheet observer found eligible elapsed-time comparison channel${eligible.length === 1 ? "" : "s"}: ${eligible
+        .map(({ page, locator, channel_label }) => `PDF page ${page} ${locator} (${channel_label})`)
         .join(
           "; ",
         )}. Create a modeled requirement for every eligible graph instead of returning an all-documented characterization.`,
@@ -170,10 +172,10 @@ export function verifyCharacterizationGraphEvidence(input: {
     const graph_matches = matchingReferenceGraphs({ requirement, graphs: eligible })
     if (graph_matches.length !== 1) {
       throw new Error(
-        `Modeled requirement ${requirement.requirement_id} must match exactly one independently observed public-pin elapsed-time voltage graph; found ${graph_matches.length}`,
+        `Modeled requirement ${requirement.requirement_id} must match exactly one independently observed simulatable elapsed-time channel; found ${graph_matches.length}`,
       )
     }
-    const graph = graph_matches[0] as EligibleObservedReferenceGraph
+    const graph = graph_matches[0] as EligibleObservedReferenceChannel
     const crop_proof = assertExactCanonicalReferenceCrop({ requirement, graph })
     const candidate_binding = requirement.reference_curve?.electrical_binding
     if (
@@ -181,7 +183,7 @@ export function verifyCharacterizationGraphEvidence(input: {
       !modelReferenceElectricalBindingsEqual(candidate_binding, graph.electrical_binding)
     ) {
       throw new Error(
-        `Modeled requirement ${requirement.requirement_id} must preserve the independent graph's exact voltage response and pulsed stimulus, including source kind, DUT endpoints, levels, and timing`,
+        `Modeled requirement ${requirement.requirement_id} must preserve the independent graph's exact experiment binding, including source kind, DUT endpoints, levels, and timing`,
       )
     }
     return {
@@ -194,11 +196,11 @@ export function verifyCharacterizationGraphEvidence(input: {
               (
                 result,
               ): result is Extract<ReferenceGraphSourceProof["results"][number], { status: "verified" }> =>
-                result.status === "verified" && result.graph_id === graph.graph_id,
+                result.status === "verified" && result.graph_id === graph.source_graph_id,
             )
             if (receipts.length !== 1) {
               throw new Error(
-                `Independent graph ${graph.graph_id} does not have exactly one verified axis receipt`,
+                `Independent source graph ${graph.source_graph_id} does not have exactly one verified axis receipt`,
               )
             }
             return receipts[0]!.receipt_sha256
@@ -210,14 +212,17 @@ export function verifyCharacterizationGraphEvidence(input: {
   const matched_graph_ids = new Set(matches.map(({ graph_id }) => graph_id))
   if (matched_graph_ids.size !== matches.length) {
     throw new Error(
-      "Each modeled requirement must map one-to-one with a different independently eligible graph",
+      "Each modeled requirement must map one-to-one with a different independently eligible plotted channel",
     )
   }
   const unmatched_graphs = eligible.filter(({ graph_id }) => !matched_graph_ids.has(graph_id))
   if (unmatched_graphs.length > 0) {
     throw new Error(
-      `Every independently eligible graph must become a modeled requirement; missing ${unmatched_graphs
-        .map(({ graph_id, page, locator }) => `${graph_id} (PDF page ${page}, ${locator})`)
+      `Every independently eligible plotted channel must become a modeled requirement; missing ${unmatched_graphs
+        .map(
+          ({ graph_id, page, locator, channel_label }) =>
+            `${graph_id} (${channel_label}, PDF page ${page}, ${locator})`,
+        )
         .join("; ")}`,
     )
   }

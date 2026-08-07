@@ -3,7 +3,10 @@
  * Source extraction, calibration strategies, parsing, and eligibility live in
  * cohesive modules under `reference-graph-axis-proof/`.
  */
-export { buildReferenceGraphSourceProof } from "./reference-graph-axis-proof/builder"
+export {
+  buildReferenceGraphSourceProof,
+  printedNominalSourcesByGraphId,
+} from "./reference-graph-axis-proof/builder"
 export {
   applyReferenceGraphSourceEligibility,
   axisReceiptForGraph,
@@ -12,6 +15,7 @@ export {
 export { parseReferenceGraphSourceProof } from "./reference-graph-axis-proof/parser"
 export type {
   ExplicitReferenceGraphAxisCalibrationReceipt,
+  ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt,
   OcrBoundingBox,
   ReferenceAxisSourceTick,
   ReferenceDivisionScaleSource,

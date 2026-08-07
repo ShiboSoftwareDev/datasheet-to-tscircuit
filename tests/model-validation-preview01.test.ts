@@ -255,18 +255,16 @@ testWithRealSimulation(
       expect(load_circuit_json && hasCompletedTransientSimulation(load_circuit_json)).toBe(true)
 
       const current_circuit_json = build.circuit_json_by_case["current-transient"]
-      expect(build.errors_by_case["current-transient"]).toContain(
-        "tscircuit does not currently emit a transient current graph",
-      )
+      expect(build.errors_by_case["current-transient"]).toBeUndefined()
       expect(build.circuit_build_errors_by_case["current-transient"]).toBeUndefined()
-      expect(build.viewer_validation_by_case["current-transient"]).toBeUndefined()
-      expect(current_circuit_json && hasCompletedTransientSimulation(current_circuit_json)).toBe(false)
+      expect(build.viewer_validation_by_case["current-transient"]?.passed).toBe(true)
+      expect(current_circuit_json && hasCompletedTransientSimulation(current_circuit_json)).toBe(true)
       expect(
         current_circuit_json?.filter(({ type }) => type === "simulation_transient_current_graph"),
-      ).toHaveLength(0)
+      ).toHaveLength(1)
       expect(current_circuit_json?.filter(({ type }) => type === "simulation_current_probe")).toHaveLength(1)
 
-      const unsupported_preview = projectModelCircuitPreview({
+      const current_preview = projectModelCircuitPreview({
         validation_case: plan.cases[2]!,
         manifest: generated.manifest,
         model_source: generated.source,
@@ -274,9 +272,9 @@ testWithRealSimulation(
         updated_at: new Date().toISOString(),
         circuit_json: current_circuit_json,
       })
-      expect(unsupported_preview.build_status).toBe("ready")
-      expect(unsupported_preview.analog_simulation_status).toBe("unsupported")
-      expect(unsupported_preview.circuit_json).toBe(current_circuit_json)
+      expect(current_preview.build_status).toBe("ready")
+      expect(current_preview.analog_simulation_status).toBe("available")
+      expect(current_preview.circuit_json).toBe(current_circuit_json)
     } finally {
       await rm(model_dir, { recursive: true, force: true })
     }

@@ -107,6 +107,8 @@ function canonicalRequirementEvidence(requirement: ModelRequirement): Validation
     metadata.x_unit = requirement.reference_curve.x_unit
     metadata.y_quantity = requirement.reference_curve.y_quantity
     metadata.y_unit = requirement.reference_curve.y_unit
+    if (requirement.reference_curve.channel_id) metadata.channel_id = requirement.reference_curve.channel_id
+    if (requirement.reference_curve.channel_role) metadata.role = requirement.reference_curve.channel_role
   }
 
   const page = source && Number.isInteger(source.page) && source.page > 0 ? source.page : undefined
@@ -251,6 +253,20 @@ export function parseObservation(
   if (scale_value && scale_value !== "linear" && scale_value !== "log") {
     collector.add(`${path}.scale`, "unsupported_scale", 'must be "linear" or "log"')
   }
+  const role_value = record.role === undefined ? "response" : collector.string(record.role, `${path}.role`)
+  const role = role_value === "stimulus" ? "stimulus" : "response"
+  if (role_value !== "response" && role_value !== "stimulus") {
+    collector.add(`${path}.role`, "unsupported_role", "must be response or stimulus")
+  }
+  const expected_measurement = requirement?.reference_curve?.measurement
+  const expected_role = requirement?.reference_curve?.channel_role
+  if (expected_role && role !== expected_role) {
+    collector.add(
+      `${path}.role`,
+      "requirement_channel_role_mismatch",
+      `must match requirement ${JSON.stringify(requirement_id)} channel role ${expected_role}`,
+    )
+  }
   const supplied_evidence = parseEvidence(record.evidence, `${path}.evidence`, collector)
   const evidence = requirement ? canonicalRequirementEvidence(requirement) : supplied_evidence
   if (requirement && record.evidence !== undefined && !evidenceEqual(evidence, supplied_evidence)) {
@@ -264,7 +280,18 @@ export function parseObservation(
   if (type === "voltage") {
     collector.rejectUnknownKeys(
       record,
-      ["type", "id", "requirement_id", "positive", "negative", "unit", "scale", "reference", "evidence"],
+      [
+        "type",
+        "id",
+        "role",
+        "requirement_id",
+        "positive",
+        "negative",
+        "unit",
+        "scale",
+        "reference",
+        "evidence",
+      ],
       path,
     )
     if (record.unit !== "V") collector.add(`${path}.unit`, "invalid_unit", 'must be "V"')
@@ -283,24 +310,31 @@ export function parseObservation(
     }
     const positive = parseEndpoint(record.positive, `${path}.positive`, collector)
     const negative = parseEndpoint(record.negative, `${path}.negative`, collector)
-    const electrical_binding = requirement?.reference_curve?.electrical_binding
-    if (electrical_binding && positive !== electrical_binding.response.positive) {
+    if (expected_measurement && expected_measurement.type !== "voltage") {
+      collector.add(
+        `${path}.type`,
+        "requirement_channel_type_mismatch",
+        `requirement ${JSON.stringify(requirement_id)} is bound to a current channel`,
+      )
+    }
+    if (expected_measurement?.type === "voltage" && positive !== expected_measurement.positive) {
       collector.add(
         `${path}.positive`,
         "requirement_response_endpoint_mismatch",
-        `must exactly match requirement ${JSON.stringify(requirement_id)} response.positive (${JSON.stringify(electrical_binding.response.positive)})`,
+        `must exactly match requirement ${JSON.stringify(requirement_id)} measurement.positive (${JSON.stringify(expected_measurement.positive)})`,
       )
     }
-    if (electrical_binding && negative !== electrical_binding.response.negative) {
+    if (expected_measurement?.type === "voltage" && negative !== expected_measurement.negative) {
       collector.add(
         `${path}.negative`,
         "requirement_response_endpoint_mismatch",
-        `must exactly match requirement ${JSON.stringify(requirement_id)} response.negative (${JSON.stringify(electrical_binding.response.negative)})`,
+        `must exactly match requirement ${JSON.stringify(requirement_id)} measurement.negative (${JSON.stringify(expected_measurement.negative)})`,
       )
     }
     return {
       type,
       id,
+      role,
       requirement_id,
       positive,
       negative,
@@ -313,7 +347,18 @@ export function parseObservation(
   if (type === "current") {
     collector.rejectUnknownKeys(
       record,
-      ["type", "id", "requirement_id", "element_id", "unit", "scale", "reference", "evidence"],
+      [
+        "type",
+        "id",
+        "role",
+        "requirement_id",
+        "element_id",
+        "direction",
+        "unit",
+        "scale",
+        "reference",
+        "evidence",
+      ],
       path,
     )
     const element_id = collector.string(record.element_id, `${path}.element_id`)
@@ -321,11 +366,38 @@ export function parseObservation(
       collector.add(`${path}.element_id`, "invalid_identifier", "must be a stable fixture identifier")
     }
     if (record.unit !== "A") collector.add(`${path}.unit`, "invalid_unit", 'must be "A"')
-    if (requirement?.reference_curve?.electrical_binding) {
+    const direction_value =
+      record.direction === undefined
+        ? "positive_to_negative"
+        : collector.string(record.direction, `${path}.direction`)
+    const direction =
+      direction_value === "negative_to_positive" ? "negative_to_positive" : "positive_to_negative"
+    if (direction_value !== "positive_to_negative" && direction_value !== "negative_to_positive") {
+      collector.add(
+        `${path}.direction`,
+        "unsupported_current_direction",
+        "must be positive_to_negative or negative_to_positive",
+      )
+    }
+    if (expected_measurement && expected_measurement.type !== "current") {
       collector.add(
         `${path}.type`,
         "requirement_response_type_mismatch",
-        `requirement ${JSON.stringify(requirement_id)} is bound to a public-pin voltage response`,
+        `requirement ${JSON.stringify(requirement_id)} is bound to a voltage channel`,
+      )
+    }
+    if (expected_measurement?.type === "current" && element_id !== expected_measurement.element_id) {
+      collector.add(
+        `${path}.element_id`,
+        "requirement_current_element_mismatch",
+        `must exactly match requirement ${JSON.stringify(requirement_id)} measurement element ${JSON.stringify(expected_measurement.element_id)}`,
+      )
+    }
+    if (expected_measurement?.type === "current" && direction !== expected_measurement.direction) {
+      collector.add(
+        `${path}.direction`,
+        "requirement_current_direction_mismatch",
+        `must exactly match requirement ${JSON.stringify(requirement_id)} current direction ${expected_measurement.direction}`,
       )
     }
     const reference = requirement
@@ -344,8 +416,10 @@ export function parseObservation(
     return {
       type,
       id,
+      role,
       requirement_id,
       element_id,
+      direction,
       unit: "A",
       scale,
       reference,
@@ -356,6 +430,7 @@ export function parseObservation(
   return {
     type: "voltage",
     id,
+    role,
     requirement_id,
     positive: "gnd",
     negative: "gnd",

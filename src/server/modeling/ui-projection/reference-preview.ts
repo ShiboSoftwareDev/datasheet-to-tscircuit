@@ -117,7 +117,7 @@ function projectReferenceSeries(input: {
   return {
     series_id: input.observation.id,
     title: titleFromIdentifier(input.observation.id),
-    role: "response",
+    role: input.observation.role ?? "response",
     quantity: observationQuantity(input.observation),
     unit: metadataValue(input.observation, "y_unit") ?? input.observation.unit,
     source_file: observationSourceFile(input.observation),

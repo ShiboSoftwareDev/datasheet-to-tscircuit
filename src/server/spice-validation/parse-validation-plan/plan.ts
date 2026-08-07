@@ -189,10 +189,16 @@ export function parseAgentValidationPlan(value: unknown, context: ValidationCont
         )?.reference_curve?.electrical_binding
         return binding ? [binding] : []
       })
-      if (bound_requirements.length === 1 && context.application_fixture?.availability === "documented") {
+      const shared_binding = bound_requirements[0]
+      if (
+        shared_binding &&
+        bound_requirements.length === requirement_ids.length &&
+        bound_requirements.every((binding) => JSON.stringify(binding) === JSON.stringify(shared_binding)) &&
+        context.application_fixture?.availability === "documented"
+      ) {
         const application_fixture = resolveApplicationFixtureForBinding({
           contract: context.application_fixture,
-          binding: bound_requirements[0]!,
+          binding: shared_binding,
         })
         validation_case.application_fixture = application_fixture
         const expected_nets = exactApplicationNetIds(application_fixture)

@@ -1,4 +1,7 @@
-import type { ObservedReferenceGraph, ReferenceGraphAxisAnchor } from "../reference-graph-observation"
+import type {
+  EligibleObservedReferenceChannel,
+  ReferenceGraphAxisAnchor,
+} from "../reference-graph-observation"
 import { ANCHOR_PIXEL_TOLERANCE, OCR_SCALE, ORTHOGONAL_ALIGNMENT_TOLERANCE, valuesAgree } from "./shared"
 import type { MeasurementCandidate, ReferenceAxisSourceTick } from "./types"
 
@@ -50,10 +53,170 @@ function orthogonalCenter(tick: ReferenceAxisSourceTick, axis: "x" | "y"): numbe
     : (tick.ocr_bbox_px.left + tick.ocr_bbox_px.width / 2) / OCR_SCALE
 }
 
-export function axisTicks(input: {
-  graph: ObservedReferenceGraph & {
-    digitized_curve: NonNullable<ObservedReferenceGraph["digitized_curve"]>
+function candidateAxisPixel(candidate: MeasurementCandidate, axis: "x" | "y"): number {
+  return (
+    (axis === "x"
+      ? candidate.bbox.left + candidate.bbox.width / 2
+      : candidate.bbox.top + candidate.bbox.height / 2) / OCR_SCALE
+  )
+}
+
+function candidateOrthogonalPixel(candidate: MeasurementCandidate, axis: "x" | "y"): number {
+  return (
+    (axis === "x"
+      ? candidate.bbox.top + candidate.bbox.height / 2
+      : candidate.bbox.left + candidate.bbox.width / 2) / OCR_SCALE
+  )
+}
+
+function calibrationTick(input: {
+  candidate: MeasurementCandidate
+  axis: "x" | "y"
+  slope: number
+  intercept: number
+}): ReferenceAxisSourceTick {
+  const observer_axis_pixel = candidateAxisPixel(input.candidate, input.axis)
+  return {
+    raw_text: input.candidate.raw_text,
+    normalized_unit: input.candidate.unit,
+    value_si: input.candidate.value_si,
+    confidence: input.candidate.confidence,
+    ocr_bbox_px: input.candidate.bbox,
+    observer_axis_pixel,
+    observer_axis_pixel_error: Math.abs(
+      (input.candidate.value_si - input.intercept) / input.slope - observer_axis_pixel,
+    ),
   }
+}
+
+/**
+ * Derives a source-owned linear scale from a row or column of printed ticks.
+ * At least three labels must agree with one line, so a lone nearby
+ * measurement cannot masquerade as an axis. The maximum-consensus fit also
+ * rejects isolated OCR unit mistakes without silently correcting their text.
+ */
+export function alignedExplicitAxisCalibration(input: {
+  axis: "x" | "y"
+  unit: "s" | "V"
+  candidates: readonly MeasurementCandidate[]
+}):
+  | {
+      first: ReferenceAxisSourceTick
+      second: ReferenceAxisSourceTick
+      units_per_pixel: number
+      supporting_tick_count: number
+    }
+  | undefined {
+  const candidates = input.candidates
+    .filter(
+      (candidate) =>
+        candidate.unit === input.unit && candidate.confidence >= 35 && Number.isFinite(candidate.value_si),
+    )
+    .filter(
+      (candidate, index, all) =>
+        all.findIndex(
+          (other) =>
+            valuesAgree(other.value_si, candidate.value_si) &&
+            Math.abs(candidateAxisPixel(other, input.axis) - candidateAxisPixel(candidate, input.axis)) <=
+              0.5,
+        ) === index,
+    )
+  const fits: Array<{
+    slope: number
+    intercept: number
+    support: MeasurementCandidate[]
+    pixel_span: number
+    confidence: number
+  }> = []
+  for (let first_index = 0; first_index < candidates.length; first_index += 1) {
+    for (let second_index = first_index + 1; second_index < candidates.length; second_index += 1) {
+      const first = candidates[first_index]!
+      const second = candidates[second_index]!
+      if (
+        Math.abs(candidateOrthogonalPixel(first, input.axis) - candidateOrthogonalPixel(second, input.axis)) >
+        ORTHOGONAL_ALIGNMENT_TOLERANCE
+      ) {
+        continue
+      }
+      const first_pixel = candidateAxisPixel(first, input.axis)
+      const second_pixel = candidateAxisPixel(second, input.axis)
+      const pixel_delta = second_pixel - first_pixel
+      if (Math.abs(pixel_delta) < 8) continue
+      const slope = (second.value_si - first.value_si) / pixel_delta
+      if (!Number.isFinite(slope) || slope === 0 || (input.axis === "x" && slope < 0)) continue
+      const intercept = first.value_si - slope * first_pixel
+      const support = candidates.filter((candidate) => {
+        if (
+          Math.abs(
+            candidateOrthogonalPixel(candidate, input.axis) - candidateOrthogonalPixel(first, input.axis),
+          ) > ORTHOGONAL_ALIGNMENT_TOLERANCE
+        ) {
+          return false
+        }
+        const predicted = intercept + slope * candidateAxisPixel(candidate, input.axis)
+        return Math.abs(predicted - candidate.value_si) <= Math.max(1e-12, Math.abs(slope) * 2.5)
+      })
+      if (support.length < 3) continue
+      const support_pixels = support.map((candidate) => candidateAxisPixel(candidate, input.axis))
+      fits.push({
+        slope,
+        intercept,
+        support,
+        pixel_span: Math.max(...support_pixels) - Math.min(...support_pixels),
+        confidence: support.reduce((sum, candidate) => sum + candidate.confidence, 0),
+      })
+    }
+  }
+  fits.sort(
+    (left, right) =>
+      right.support.length - left.support.length ||
+      right.pixel_span - left.pixel_span ||
+      right.confidence - left.confidence ||
+      Math.abs(left.slope) - Math.abs(right.slope),
+  )
+  const best = fits[0]
+  if (!best) return undefined
+  const mean_pixel =
+    best.support.reduce((sum, candidate) => sum + candidateAxisPixel(candidate, input.axis), 0) /
+    best.support.length
+  const mean_value =
+    best.support.reduce((sum, candidate) => sum + candidate.value_si, 0) / best.support.length
+  const covariance = best.support.reduce((sum, candidate) => {
+    const pixel_delta = candidateAxisPixel(candidate, input.axis) - mean_pixel
+    return sum + pixel_delta * (candidate.value_si - mean_value)
+  }, 0)
+  const variance = best.support.reduce((sum, candidate) => {
+    const pixel_delta = candidateAxisPixel(candidate, input.axis) - mean_pixel
+    return sum + pixel_delta * pixel_delta
+  }, 0)
+  if (!(variance > 0)) return undefined
+  const fitted_slope = covariance / variance
+  const fitted_intercept = mean_value - fitted_slope * mean_pixel
+  const ordered = [...best.support].sort(
+    (left, right) => candidateAxisPixel(left, input.axis) - candidateAxisPixel(right, input.axis),
+  )
+  const first = ordered[0]!
+  const second = ordered.at(-1)!
+  return {
+    first: calibrationTick({
+      candidate: first,
+      axis: input.axis,
+      slope: fitted_slope,
+      intercept: fitted_intercept,
+    }),
+    second: calibrationTick({
+      candidate: second,
+      axis: input.axis,
+      slope: fitted_slope,
+      intercept: fitted_intercept,
+    }),
+    units_per_pixel: Math.abs(fitted_slope),
+    supporting_tick_count: best.support.length,
+  }
+}
+
+export function axisTicks(input: {
+  graph: EligibleObservedReferenceChannel
   candidates: readonly MeasurementCandidate[]
 }):
   | {

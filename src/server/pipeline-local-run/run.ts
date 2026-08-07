@@ -316,6 +316,7 @@ export async function createPipelineLocalRun(input: {
   outputDir?: string
   localRunId?: string
   parentLocalRunId?: string
+  protectedDirs?: readonly string[]
 }): Promise<PreparedPipelineLocalRun> {
   validateLocalInput(input)
   const envelope = input.bundle.envelope
@@ -325,7 +326,7 @@ export async function createPipelineLocalRun(input: {
     bundle: input.bundle,
     localRunId,
     executionDir: input.outputDir ?? join(input.rootDir, ".runtime", "local", localRunId),
-    protectedDirs: [join(input.rootDir, ".runtime", "jobs")],
+    protectedDirs: [join(input.rootDir, ".runtime", "jobs"), ...(input.protectedDirs ?? [])],
   })
   // Verify the retained copy before advertising the run as independently runnable.
   await loadPipelineTaskInputBundle(local.inputPath)
@@ -416,6 +417,7 @@ export async function runPipelineLocal(input: {
   taskId?: string
   outputDir?: string
   parentLocalRunId?: string
+  protectedDirs?: readonly string[]
 }): Promise<LocalRunSummary> {
   return (await createPipelineLocalRun(input)).execute()
 }

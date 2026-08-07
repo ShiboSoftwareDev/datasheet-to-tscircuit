@@ -82,10 +82,6 @@ export function getAnalogProjectionIssue(validation_case: ValidationCase): strin
   if (validation_case.analysis.type !== "transient") {
     return `tscircuit analogsimulation does not support ${validation_case.analysis.type} analysis`
   }
-  const current_observation = validation_case.observations.find(({ type }) => type === "current")
-  if (current_observation) {
-    return `tscircuit does not currently emit a transient current graph for observation ${current_observation.id}`
-  }
   return undefined
 }
 
@@ -144,12 +140,18 @@ export function renderValidationCaseTsx(input: {
     const [positive, negative] = fixtureTerminals(fixture)
     const current_observation = current_observation_by_element.get(fixture.id)
     if (current_observation) {
+      const positive_to_negative = current_observation.direction !== "negative_to_positive"
       return [
         `      <ammeter name=${JSON.stringify(`probe_${current_observation.id}`)} graphDisplayName=${JSON.stringify(current_observation.id)} connections={${JSON.stringify(
-          {
-            pos: endpointSelector(positive, manifest),
-            neg: `.${fixture.id} > .pin1`,
-          },
+          positive_to_negative
+            ? {
+                pos: endpointSelector(positive, manifest),
+                neg: `.${fixture.id} > .pin1`,
+              }
+            : {
+                pos: `.${fixture.id} > .pin1`,
+                neg: endpointSelector(positive, manifest),
+              },
         )}} />`,
         `      <trace from=${JSON.stringify(`.${fixture.id} > .pin2`)} to=${JSON.stringify(endpointSelector(negative, manifest))} />`,
       ]

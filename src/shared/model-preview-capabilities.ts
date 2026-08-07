@@ -20,9 +20,9 @@ function isStrictlyIncreasing(values: readonly number[]): boolean {
 
 /**
  * The analog viewer is useful only when tscircuit actually ran a transient
- * experiment and retained at least one time-domain voltage waveform. The
- * installed runtime does not emit current graphs, and a schematic-only Circuit
- * JSON document must never be treated as a simulation result.
+ * experiment and retained at least one time-domain voltage or current
+ * waveform. A schematic-only Circuit JSON document must never be treated as a
+ * simulation result.
  */
 export function hasCompletedTransientSimulation(circuit_json: readonly AnyCircuitElement[]): boolean {
   const experiments = circuit_json.flatMap((element) => {
@@ -51,35 +51,54 @@ export function hasCompletedTransientSimulation(circuit_json: readonly AnyCircui
   })
   if (
     graph_records.length === 0 ||
-    graph_records.some(({ type }) => type !== "simulation_transient_voltage_graph")
+    graph_records.some(
+      ({ type }) =>
+        type !== "simulation_transient_voltage_graph" && type !== "simulation_transient_current_graph",
+    )
   ) {
     return false
   }
 
-  const probes = circuit_json.flatMap((element) => {
+  const voltage_probes = circuit_json.flatMap((element) => {
     const record = asRecord(element)
     return record.type === "simulation_voltage_probe" &&
       typeof record.simulation_voltage_probe_id === "string"
       ? [record.simulation_voltage_probe_id]
       : []
   })
-  if (new Set(probes).size !== probes.length) return false
-  const graph_probe_ids = new Set<string>()
+  const current_probes = circuit_json.flatMap((element) => {
+    const record = asRecord(element)
+    return record.type === "simulation_current_probe" &&
+      typeof record.simulation_current_probe_id === "string"
+      ? [record.simulation_current_probe_id]
+      : []
+  })
+  if (
+    new Set(voltage_probes).size !== voltage_probes.length ||
+    new Set(current_probes).size !== current_probes.length
+  ) {
+    return false
+  }
+  const graph_probe_keys = new Set<string>()
   for (const graph of graph_records) {
+    const is_voltage = graph.type === "simulation_transient_voltage_graph"
+    const probes = is_voltage ? voltage_probes : current_probes
+    const levels = is_voltage ? graph.voltage_levels : graph.current_levels
     const probe_id = graph.source_probe_id
+    const probe_key = `${is_voltage ? "voltage" : "current"}:${String(probe_id)}`
     if (
       graph.simulation_experiment_id !== experiment.simulation_experiment_id ||
       typeof probe_id !== "string" ||
       probes.filter((candidate) => candidate === probe_id).length !== 1 ||
-      graph_probe_ids.has(probe_id) ||
+      graph_probe_keys.has(probe_key) ||
       !isFiniteNumberArray(graph.timestamps_ms) ||
       !isStrictlyIncreasing(graph.timestamps_ms) ||
-      !isFiniteNumberArray(graph.voltage_levels) ||
-      graph.voltage_levels.length !== graph.timestamps_ms.length
+      !isFiniteNumberArray(levels) ||
+      levels.length !== graph.timestamps_ms.length
     ) {
       return false
     }
-    graph_probe_ids.add(probe_id)
+    graph_probe_keys.add(probe_key)
   }
   return true
 }

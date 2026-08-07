@@ -2,6 +2,10 @@ import { createHash } from "node:crypto"
 import type { ModelCharacterization, ModelReferenceCropRegion, ModelRequirement } from "../modeling/types"
 import { modelReferenceElectricalBindingsEqual } from "../modeling/reference-electrical-binding"
 import type { ObservedReferenceGraph, ReferenceGraphObservation } from "./reference-graph-observation"
+import {
+  eligibleObservedChannels,
+  type EligibleObservedReferenceChannel,
+} from "./reference-graph-observation"
 import { normalizeFigureLabel } from "./time-graph-hints"
 
 export interface CanonicalReferenceCropProof {
@@ -21,10 +25,15 @@ function cropsEqual(left: ModelReferenceCropRegion, right: ModelReferenceCropReg
   )
 }
 
-function graphIdentityMatches(graph: ObservedReferenceGraph, requirement: ModelRequirement): boolean {
+function graphIdentityMatches(
+  graph: EligibleObservedReferenceChannel,
+  requirement: ModelRequirement,
+): boolean {
   const curve = requirement.reference_curve
   if (!curve?.electrical_binding || !graph.electrical_binding) return false
   if (!modelReferenceElectricalBindingsEqual(curve.electrical_binding, graph.electrical_binding)) return false
+  if (curve.channel_id !== graph.channel_id) return false
+  if (JSON.stringify(curve.measurement) !== JSON.stringify(graph.measurement)) return false
   const cited_on_page = requirement.sources.filter(({ page }) => page === graph.page)
   if (cited_on_page.length === 0) return false
   const graph_figure = normalizeFigureLabel(graph.locator)
@@ -51,14 +60,8 @@ export function canonicalizeCharacterizationReferenceCrops(input: {
   observation: ReferenceGraphObservation
   eligible_graph_ids?: ReadonlySet<string>
 }): ModelCharacterization {
-  const eligible = input.observation.graphs.filter(
-    (graph) =>
-      graph.response_quantity === "voltage" &&
-      graph.public_pin_observable &&
-      graph.fixture_reproducible &&
-      graph.electrical_binding !== undefined &&
-      graph.digitized_curve !== undefined &&
-      (!input.eligible_graph_ids || input.eligible_graph_ids.has(graph.graph_id)),
+  const eligible = eligibleObservedChannels(input.observation).filter(
+    (graph) => !input.eligible_graph_ids || input.eligible_graph_ids.has(graph.graph_id),
   )
   return {
     ...input.characterization,
@@ -87,7 +90,7 @@ export function canonicalizeCharacterizationReferenceCrops(input: {
 
 export function assertExactCanonicalReferenceCrop(input: {
   requirement: ModelRequirement
-  graph: ObservedReferenceGraph
+  graph: EligibleObservedReferenceChannel
 }): CanonicalReferenceCropProof {
   const candidate = input.requirement.reference_curve?.crop
   if (!candidate || !cropsEqual(candidate, input.graph.crop)) {
@@ -100,7 +103,7 @@ export function assertExactCanonicalReferenceCrop(input: {
 
 export function matchingReferenceGraphs(input: {
   requirement: ModelRequirement
-  graphs: readonly ObservedReferenceGraph[]
-}): ObservedReferenceGraph[] {
+  graphs: readonly EligibleObservedReferenceChannel[]
+}): EligibleObservedReferenceChannel[] {
   return input.graphs.filter((graph) => graphIdentityMatches(graph, input.requirement))
 }

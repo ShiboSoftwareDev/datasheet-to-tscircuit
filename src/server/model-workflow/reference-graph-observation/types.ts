@@ -1,5 +1,7 @@
 import type {
   ModelReferenceCropRegion,
+  ModelReferenceChannelMeasurement,
+  ModelReferenceChannelRole,
   ModelReferenceElectricalBinding,
   ModelReferencePoint,
 } from "../../modeling/types"
@@ -40,18 +42,26 @@ export interface ObservedReferencePoint extends ModelReferencePoint {
  * exact 200-DPI graph crop, so the numeric values are not free assertions: the
  * parser recomputes them from two independent axis anchors.
  */
-export interface ObservedVoltageTimeCurve {
+export interface ObservedTimeCurve {
   method: "manual_pixel_trace" | "image_color_trace"
   x_quantity: "time"
   x_unit: "s"
-  y_quantity: "voltage"
-  y_unit: "V"
+  y_quantity: "voltage" | "current"
+  y_unit: "V" | "A"
   x_range: ReferenceGraphAxisRange
   y_range: ReferenceGraphAxisRange
   x_axis: ReferenceGraphAxisCalibration
   y_axis: ReferenceGraphAxisCalibration
   trace_color: ReferenceGraphTraceColor
   points: ObservedReferencePoint[]
+}
+
+export interface ObservedReferenceChannel {
+  channel_id: string
+  label: string
+  role: ModelReferenceChannelRole
+  measurement: ModelReferenceChannelMeasurement
+  digitized_curve: ObservedTimeCurve
 }
 
 export interface ObservedReferenceGraph {
@@ -65,10 +75,10 @@ export interface ObservedReferenceGraph {
   fixture_reproducible: boolean
   reason: string
   crop: ModelReferenceCropRegion
-  /** Required electrical identity for every eligible voltage-versus-time graph. */
+  /** Required experiment identity for every eligible source graph. */
   electrical_binding?: ModelReferenceElectricalBinding
-  /** Required for eligible voltage plots; optional on ineligible voltage plots. */
-  digitized_curve?: ObservedVoltageTimeCurve
+  /** One independently traced comparison for every simulatable plotted channel. */
+  channels?: ObservedReferenceChannel[]
 }
 
 export interface ReferenceGraphObservation {
@@ -120,7 +130,7 @@ export interface ModelReferenceVerification {
         trace_color_coverage: number
         search_radius_px: 4
         segment_support_ratio: number
-        minimum_segment_support_ratio: 0.75
+        minimum_segment_support_ratio: 0.85
         segment_search_radius_px: 6
       }
     }
@@ -132,15 +142,19 @@ export interface CharacterizerReferenceGraphObservation {
   source_pdf_sha256: string
   reviewed_hints: ReferenceGraphObservation["reviewed_hints"]
   graphs: Array<
-    Omit<ObservedReferenceGraph, "digitized_curve"> & {
-      server_verified_reference_curve?: {
+    Omit<ObservedReferenceGraph, "channels"> & {
+      server_verified_reference_channels?: Array<{
+        channel_id: string
+        label: string
+        role: ModelReferenceChannelRole
+        measurement: ModelReferenceChannelMeasurement
         provenance: "canonical_pdf_axis_and_pixel_trace_v1"
         x_quantity: "time"
         x_unit: "s"
-        y_quantity: "voltage"
-        y_unit: "V"
+        y_quantity: "voltage" | "current"
+        y_unit: "V" | "A"
         points: ModelReferencePoint[]
-      }
+      }>
     }
   >
 }

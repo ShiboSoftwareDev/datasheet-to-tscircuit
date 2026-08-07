@@ -10,7 +10,12 @@ import {
   validateTransientGraphTiming,
 } from "./timing"
 import type { CircuitRecord, ViewerSimulationValidation } from "./types"
-import { graphPoints, graphsForProbe, probeForObservation } from "./waveform-probes"
+import {
+  currentProbeForObservation,
+  graphPoints,
+  graphsForProbe,
+  probeForObservation,
+} from "./waveform-probes"
 
 /**
  * Verifies the exact Circuit JSON consumed by Runframe, then scores its
@@ -32,15 +37,6 @@ export function validateViewerSimulation(input: {
     )
   }
   for (const observation of validation_case.observations) {
-    if (observation.type !== "voltage") {
-      errors.push(
-        simulatorError(
-          "viewer_observation_not_voltage",
-          `Observation ${observation.id} measures current; the installed tscircuit runtime currently emits only transient voltage graphs for model comparison`,
-          `observations.${observation.id}.type`,
-        ),
-      )
-    }
     if (observation.reference.type !== "curve") {
       errors.push(
         simulatorError(
@@ -52,7 +48,11 @@ export function validateViewerSimulation(input: {
     }
   }
   for (const fixture of validation_case.fixtures) {
-    errors.push(...validateFixture({ fixture, circuit_json }))
+    const current_observation = validation_case.observations.find(
+      (observation): observation is Extract<typeof observation, { type: "current" }> =>
+        observation.type === "current" && observation.element_id === fixture.id,
+    )
+    errors.push(...validateFixture({ fixture, circuit_json, current_observation }))
   }
   errors.push(...validateApplicationNodeGroups({ validation_case, circuit_json }))
 
@@ -123,9 +123,13 @@ export function validateViewerSimulation(input: {
       ? [record]
       : []
   })
-  const voltage_graphs = simulation_graphs.filter(({ type }) => type === "simulation_transient_voltage_graph")
+  const supported_graphs = simulation_graphs.filter(
+    ({ type }) =>
+      type === "simulation_transient_voltage_graph" || type === "simulation_transient_current_graph",
+  )
   const unsupported_graphs = simulation_graphs.filter(
-    ({ type }) => type !== "simulation_transient_voltage_graph",
+    ({ type }) =>
+      type !== "simulation_transient_voltage_graph" && type !== "simulation_transient_current_graph",
   )
   if (unsupported_graphs.length > 0) {
     errors.push(
@@ -133,13 +137,13 @@ export function validateViewerSimulation(input: {
         "viewer_unsupported_simulation_graph",
         `Validation case ${validation_case.id} produced unsupported simulation graph types: ${[
           ...new Set(unsupported_graphs.map(({ type }) => String(type))),
-        ].join(", ")}; only planned transient voltage graphs may be exposed to Runframe`,
+        ].join(", ")}; only planned transient voltage/current graphs may be exposed to Runframe`,
         "circuit_json",
       ),
     )
   }
 
-  const matched_voltage_graphs = new Set<CircuitRecord>()
+  const matched_graphs = new Set<CircuitRecord>()
   const series = validation_case.observations.map((observation) => {
     if (typeof experiment_id !== "string") {
       return failedSeries(
@@ -151,22 +155,34 @@ export function validateViewerSimulation(input: {
         ),
       )
     }
-    if (observation.type !== "voltage") {
+    const probe_resolution =
+      observation.type === "voltage"
+        ? probeForObservation({ circuit_json, observation })
+        : currentProbeForObservation({ circuit_json, observation })
+    if (probe_resolution.error) return failedSeries(observation, probe_resolution.error)
+    const probe_id =
+      observation.type === "voltage"
+        ? "simulation_voltage_probe_id" in probe_resolution.probe
+          ? probe_resolution.probe.simulation_voltage_probe_id
+          : undefined
+        : "simulation_current_probe_id" in probe_resolution.probe
+          ? probe_resolution.probe.simulation_current_probe_id
+          : undefined
+    if (typeof probe_id !== "string") {
       return failedSeries(
         observation,
         simulatorError(
-          "viewer_probe_binding_unsupported",
-          `Cannot bind unsupported current observation ${observation.id} to a tscircuit voltage probe`,
+          "viewer_probe_missing_id",
+          `Cannot resolve the tscircuit ${observation.type} probe id for ${observation.id}`,
           `observations.${observation.id}`,
         ),
       )
     }
-    const probe_resolution = probeForObservation({ circuit_json, observation })
-    if (probe_resolution.error) return failedSeries(observation, probe_resolution.error)
     const graphs = graphsForProbe({
       circuit_json,
       experiment_id,
-      probe_id: probe_resolution.probe.simulation_voltage_probe_id,
+      probe_id,
+      observation_type: observation.type,
     })
     if (graphs.length !== 1) {
       return failedSeries(
@@ -178,7 +194,7 @@ export function validateViewerSimulation(input: {
         ),
       )
     }
-    matched_voltage_graphs.add(graphs[0]!)
+    matched_graphs.add(graphs[0]!)
     errors.push(
       ...validateTransientGraphTiming({
         validation_case,
@@ -190,12 +206,12 @@ export function validateViewerSimulation(input: {
     if (!Array.isArray(points)) return failedSeries(observation, points)
     return scoreObservation(observation, normalizeTransientBoundaryPoint(validation_case, points))
   })
-  const unexpected_voltage_graphs = voltage_graphs.filter((graph) => !matched_voltage_graphs.has(graph))
-  if (unexpected_voltage_graphs.length > 0) {
+  const unexpected_graphs = supported_graphs.filter((graph) => !matched_graphs.has(graph))
+  if (unexpected_graphs.length > 0) {
     errors.push(
       simulatorError(
-        "viewer_unexpected_voltage_graph",
-        `Validation case ${validation_case.id} produced ${unexpected_voltage_graphs.length} transient voltage graph(s) that are not the one-to-one waveform of a planned, endpoint-bound observation`,
+        "viewer_unexpected_simulation_graph",
+        `Validation case ${validation_case.id} produced ${unexpected_graphs.length} transient graph(s) that are not the one-to-one waveform of a planned, electrically bound observation`,
         "circuit_json",
       ),
     )

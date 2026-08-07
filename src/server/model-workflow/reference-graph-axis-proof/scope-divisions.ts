@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ProcessRunner } from "../../infrastructure/process"
 import { decodeModelEvidencePng } from "../model-evidence-pages"
-import { eligibleObservedGraphs } from "../reference-graph-observation"
+import type { EligibleObservedReferenceChannel } from "../reference-graph-observation"
 import { divisionScaleCandidates, measurementCandidates, parseTesseractTsv } from "./ocr-extraction"
 import { ANCHOR_PIXEL_TOLERANCE, MAX_TSV_BYTES, OCR_DPI, OCR_SCALE, sha256 } from "./shared"
 import type { ReferenceDivisionScaleSource, ReferenceGridCalibrationSource, TesseractWord } from "./types"
@@ -10,7 +10,7 @@ import type { ReferenceDivisionScaleSource, ReferenceGridCalibrationSource, Tess
 const MAX_RIGHT_EDGE_PANEL_FALLBACK_WIDTH = 1_024 * OCR_SCALE
 
 export async function ocrScopePanels(input: {
-  graph: ReturnType<typeof eligibleObservedGraphs>[number]
+  graph: EligibleObservedReferenceChannel
   full_words: readonly TesseractWord[]
   render_width: number
   render_height: number
@@ -141,7 +141,7 @@ export async function ocrScopePanels(input: {
 export function neutralGridProfile(input: {
   decoded: Awaited<ReturnType<typeof decodeModelEvidencePng>>
   axis: "x" | "y"
-  graph: ReturnType<typeof eligibleObservedGraphs>[number]
+  graph: EligibleObservedReferenceChannel
 }): number[] {
   const point_x = input.graph.digitized_curve.points.map(({ pixel_x }) => pixel_x * OCR_SCALE)
   const point_y = input.graph.digitized_curve.points.map(({ pixel_y }) => pixel_y * OCR_SCALE)
@@ -250,6 +250,43 @@ export function uniqueDivisionScale(
   return relevant
     .filter(({ value_per_division_si }) => value_per_division_si === values[0])
     .sort((left, right) => right.confidence - left.confidence)[0]
+}
+
+/** Selects the printed channel scale aligned with the trace being proved. */
+export function divisionScaleNearestTrace(input: {
+  candidates: readonly ReferenceDivisionScaleSource[]
+  unit: "s" | "V"
+  graph: EligibleObservedReferenceChannel
+}): ReferenceDivisionScaleSource | undefined {
+  const relevant = input.candidates.filter(
+    ({ normalized_unit, confidence }) => normalized_unit === input.unit && confidence >= 15,
+  )
+  if (relevant.length === 0) return undefined
+  // Axis anchors commonly span the entire scope plot and therefore overlap
+  // every stacked channel control. The rendered trace itself owns the local
+  // vertical band used to associate its printed V/div setting.
+  const curve_pixels = input.graph.digitized_curve.points.map(({ pixel_y }) => pixel_y)
+  const curve_min = Math.min(...curve_pixels)
+  const curve_max = Math.max(...curve_pixels)
+  const distanceToCurve = (candidate: ReferenceDivisionScaleSource) => {
+    const center = (candidate.ocr_bbox_px.top + candidate.ocr_bbox_px.height / 2) / OCR_SCALE
+    return center < curve_min ? curve_min - center : center > curve_max ? center - curve_max : 0
+  }
+  const ranked = relevant
+    .map((candidate) => ({ candidate, distance: distanceToCurve(candidate) }))
+    .sort(
+      (left, right) =>
+        left.distance - right.distance ||
+        right.candidate.confidence - left.candidate.confidence ||
+        left.candidate.ocr_bbox_px.top - right.candidate.ocr_bbox_px.top,
+    )
+  const nearest = ranked[0]
+  if (!nearest || nearest.distance > 48) return undefined
+  const equally_local = ranked.filter(({ distance }) => distance <= nearest.distance + 8)
+  if (new Set(equally_local.map(({ candidate }) => candidate.value_per_division_si)).size !== 1) {
+    return undefined
+  }
+  return equally_local[0]!.candidate
 }
 
 /**

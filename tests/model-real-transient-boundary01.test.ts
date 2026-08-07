@@ -90,6 +90,10 @@ const requirement: ModelRequirement = {
   conditions: { input_pulse_volts: 2 },
   expected: { unit: "V", min: 0, max: 1 },
   reference_curve: {
+    channel_id: "output_voltage",
+    channel_label: "OUT",
+    channel_role: "response",
+    measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
     x_quantity: "time",
     x_unit: "s",
     y_quantity: "voltage",

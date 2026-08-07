@@ -232,7 +232,15 @@ function observerValue(discovery: TimeGraphDiscovery) {
             },
           ],
         },
-        digitized_curve: digitizedCurve(),
+        channels: [
+          {
+            channel_id: "output_voltage",
+            label: "VOUT",
+            role: "response",
+            measurement: { type: "voltage", positive: "dut.VOUT", negative: "gnd" },
+            digitized_curve: digitizedCurve(),
+          },
+        ],
       },
     ],
   }

@@ -488,7 +488,7 @@ test("viewer validation rejects a current graph beside the planned voltage graph
   const result = validateViewerSimulation({ validation_case: transient_case, circuit_json: forged })
 
   expect(result.simulation_valid).toBe(false)
-  expect(result.errors.map(({ code }) => code)).toContain("viewer_unsupported_simulation_graph")
+  expect(result.errors.map(({ code }) => code)).toContain("viewer_unexpected_simulation_graph")
 })
 
 test("viewer validation rejects an extra voltage graph not bound to a planned observation", () => {
@@ -508,7 +508,7 @@ test("viewer validation rejects an extra voltage graph not bound to a planned ob
   const result = validateViewerSimulation({ validation_case: transient_case, circuit_json: forged })
 
   expect(result.simulation_valid).toBe(false)
-  expect(result.errors.map(({ code }) => code)).toContain("viewer_unexpected_voltage_graph")
+  expect(result.errors.map(({ code }) => code)).toContain("viewer_unexpected_simulation_graph")
 })
 
 test("viewer validation accepts exact voltage/current sources, R/C/L, and diode fixtures", () => {

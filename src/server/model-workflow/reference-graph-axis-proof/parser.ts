@@ -113,6 +113,31 @@ function parsePointBox(value: unknown, path: string) {
   }
 }
 
+function parsePrintedExperimentNominalSource(value: unknown, path: string) {
+  const record = proofRecord(value, path)
+  proofKeys(record, ["algorithm", "source_excerpts", "signal", "nominal_volts"], path)
+  if (record.algorithm !== "printed_experiment_conditions_v3" || !Array.isArray(record.source_excerpts)) {
+    throw new Error(`${path} must retain printed_experiment_conditions_v3 source excerpts`)
+  }
+  return {
+    algorithm: "printed_experiment_conditions_v3" as const,
+    source_excerpts: record.source_excerpts.map((value, index) => {
+      const excerpt_path = `${path}.source_excerpts[${index}]`
+      const excerpt = proofRecord(value, excerpt_path)
+      proofKeys(excerpt, ["scope", "text"], excerpt_path)
+      if (excerpt.scope !== "summary_row" && excerpt.scope !== "graph_caption") {
+        throw new Error(`${excerpt_path}.scope is unsupported`)
+      }
+      return {
+        scope: excerpt.scope === "summary_row" ? ("summary_row" as const) : ("graph_caption" as const),
+        text: proofString(excerpt.text, `${excerpt_path}.text`),
+      }
+    }),
+    signal: proofString(record.signal, `${path}.signal`),
+    nominal_volts: proofNumber(record.nominal_volts, `${path}.nominal_volts`),
+  }
+}
+
 function parseFigureIdentity(value: unknown, path: string): ReferenceGraphFigureIdentityReceipt {
   const record = proofRecord(value, path)
   proofKeys(
@@ -247,7 +272,10 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
     receipt.version !== 1 ||
     (receipt.algorithm !== "canonical_pdf_tesseract_explicit_ticks_v1" &&
       receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v1" &&
-      receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v2")
+      receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v2" &&
+      receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v3" &&
+      receipt.algorithm !== "canonical_pdf_tesseract_explicit_time_scope_voltage_v1" &&
+      receipt.algorithm !== "canonical_pdf_tesseract_explicit_time_scope_voltage_v2")
   ) {
     throw new Error(`${path} uses an unsupported receipt version or algorithm`)
   }
@@ -263,8 +291,20 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
   const ocr = proofRecord(receipt.ocr, `${path}.ocr`)
   const is_scope =
     receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v1" ||
-    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2"
-  const is_server_calibrated_scope = receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2"
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2" ||
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v3" ||
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v1" ||
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v2"
+  const has_explicit_time =
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v1" ||
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v2"
+  const is_server_calibrated_scope =
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2" ||
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v3" ||
+    has_explicit_time
+  const is_printed_experiment_scope =
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v3" ||
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v2"
   proofKeys(
     ocr,
     [
@@ -349,7 +389,25 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
   const x = proofRecord(receipt.x_axis, `${path}.x_axis`)
   proofKeys(
     x,
-    ["quantity", "unit", "division_scale", "grid", "declared_seconds_per_pixel", "source_seconds_per_pixel"],
+    has_explicit_time
+      ? [
+          "quantity",
+          "unit",
+          "first",
+          "second",
+          "grid",
+          "declared_seconds_per_pixel",
+          "source_seconds_per_pixel",
+          "supporting_tick_count",
+        ]
+      : [
+          "quantity",
+          "unit",
+          "division_scale",
+          "grid",
+          "declared_seconds_per_pixel",
+          "source_seconds_per_pixel",
+        ],
     `${path}.x_axis`,
   )
   const y = proofRecord(receipt.y_axis, `${path}.y_axis`)
@@ -363,8 +421,9 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
       "declared_volts_per_pixel",
       "source_volts_per_pixel",
       "nominal_baseline_volts",
-      "nominal_source_text",
-      "nominal_source_bbox_pdf_points",
+      ...(is_printed_experiment_scope
+        ? ["nominal_source"]
+        : ["nominal_source_text", "nominal_source_bbox_pdf_points"]),
       ...(is_server_calibrated_scope ? ["nominal_baseline_pixel"] : []),
       "nominal_trace_point_indexes",
     ],
@@ -379,30 +438,82 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
   if (y.quantity !== "voltage" || y.unit !== "V") {
     throw new Error(`${path}.y_axis must retain voltage in V`)
   }
-  const x_division_scale = parseDivisionSource(x.division_scale, `${path}.x_axis.division_scale`)
+  const x_division_scale = has_explicit_time
+    ? undefined
+    : parseDivisionSource(x.division_scale, `${path}.x_axis.division_scale`)
   const y_division_scale = parseDivisionSource(y.division_scale, `${path}.y_axis.division_scale`)
-  if (x_division_scale.normalized_unit !== "s" || y_division_scale.normalized_unit !== "V") {
+  if (
+    (!has_explicit_time && x_division_scale?.normalized_unit !== "s") ||
+    y_division_scale.normalized_unit !== "V"
+  ) {
     throw new Error(`${path} division scales do not match their axes`)
   }
+  const x_grid = parseGridSource(x.grid, `${path}.x_axis.grid`)
+  const explicit_x_axis = has_explicit_time
+    ? {
+        quantity: "time" as const,
+        unit: "s" as const,
+        first: parseProofTick(x.first, `${path}.x_axis.first`),
+        second: parseProofTick(x.second, `${path}.x_axis.second`),
+        grid: x_grid,
+        declared_seconds_per_pixel: proofNumber(
+          x.declared_seconds_per_pixel,
+          `${path}.x_axis.declared_seconds_per_pixel`,
+        ),
+        source_seconds_per_pixel: proofNumber(
+          x.source_seconds_per_pixel,
+          `${path}.x_axis.source_seconds_per_pixel`,
+        ),
+        supporting_tick_count: proofNumber(x.supporting_tick_count, `${path}.x_axis.supporting_tick_count`),
+      }
+    : undefined
+  if (explicit_x_axis) {
+    if (explicit_x_axis.first.normalized_unit !== "s" || explicit_x_axis.second.normalized_unit !== "s") {
+      throw new Error(`${path}.x_axis explicit ticks must retain normalized unit s`)
+    }
+    if (
+      !Number.isSafeInteger(explicit_x_axis.supporting_tick_count) ||
+      explicit_x_axis.supporting_tick_count < 3
+    ) {
+      throw new Error(`${path}.x_axis.supporting_tick_count must be an integer of at least three`)
+    }
+    const tick_pixel_span = Math.abs(
+      explicit_x_axis.second.observer_axis_pixel - explicit_x_axis.first.observer_axis_pixel,
+    )
+    const tick_value_span = Math.abs(explicit_x_axis.second.value_si - explicit_x_axis.first.value_si)
+    const tick_seconds_per_pixel = tick_value_span / tick_pixel_span
+    if (
+      !Number.isFinite(tick_seconds_per_pixel) ||
+      tick_seconds_per_pixel <= 0 ||
+      Math.abs(explicit_x_axis.source_seconds_per_pixel - tick_seconds_per_pixel) >
+        tick_seconds_per_pixel * 0.04 ||
+      Math.abs(explicit_x_axis.declared_seconds_per_pixel - explicit_x_axis.source_seconds_per_pixel) >
+        explicit_x_axis.source_seconds_per_pixel * 0.04
+    ) {
+      throw new Error(`${path}.x_axis explicit tick scale is internally inconsistent`)
+    }
+  }
+  const division_x_axis = !has_explicit_time
+    ? {
+        quantity: "time" as const,
+        unit: "s" as const,
+        division_scale: x_division_scale!,
+        grid: x_grid,
+        declared_seconds_per_pixel: proofNumber(
+          x.declared_seconds_per_pixel,
+          `${path}.x_axis.declared_seconds_per_pixel`,
+        ),
+        source_seconds_per_pixel: proofNumber(
+          x.source_seconds_per_pixel,
+          `${path}.x_axis.source_seconds_per_pixel`,
+        ),
+      }
+    : undefined
   const scope_common = {
     ...common,
     ocr: {
       ...common_ocr,
       panel_tsv_sha256: proofSha(ocr.panel_tsv_sha256, `${path}.ocr.panel_tsv_sha256`),
-    },
-    x_axis: {
-      quantity: "time" as const,
-      unit: "s" as const,
-      division_scale: x_division_scale,
-      grid: parseGridSource(x.grid, `${path}.x_axis.grid`),
-      declared_seconds_per_pixel: proofNumber(
-        x.declared_seconds_per_pixel,
-        `${path}.x_axis.declared_seconds_per_pixel`,
-      ),
-      source_seconds_per_pixel: proofNumber(
-        x.source_seconds_per_pixel,
-        `${path}.x_axis.source_seconds_per_pixel`,
-      ),
     },
     y_axis: {
       quantity: "voltage" as const,
@@ -415,32 +526,68 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
       ),
       source_volts_per_pixel: proofNumber(y.source_volts_per_pixel, `${path}.y_axis.source_volts_per_pixel`),
       nominal_baseline_volts: proofNumber(y.nominal_baseline_volts, `${path}.y_axis.nominal_baseline_volts`),
-      nominal_source_text: proofString(y.nominal_source_text, `${path}.y_axis.nominal_source_text`),
-      nominal_source_bbox_pdf_points: parsePointBox(
-        y.nominal_source_bbox_pdf_points,
-        `${path}.y_axis.nominal_source_bbox_pdf_points`,
-      ),
       nominal_trace_point_indexes: y.nominal_trace_point_indexes.map((index, item_index) =>
         proofNumber(index, `${path}.y_axis.nominal_trace_point_indexes[${item_index}]`),
       ),
     },
   }
+  if (is_printed_experiment_scope) {
+    const y_axis = {
+      ...scope_common.y_axis,
+      nominal_source: parsePrintedExperimentNominalSource(y.nominal_source, `${path}.y_axis.nominal_source`),
+      nominal_baseline_pixel: proofNumber(y.nominal_baseline_pixel, `${path}.y_axis.nominal_baseline_pixel`),
+    }
+    if (has_explicit_time) {
+      return {
+        ...scope_common,
+        algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v2",
+        x_axis: explicit_x_axis!,
+        y_axis,
+      }
+    }
+    return {
+      ...scope_common,
+      algorithm: "canonical_pdf_tesseract_scope_divisions_v3",
+      x_axis: division_x_axis!,
+      y_axis,
+    }
+  }
+  const pdf_nominal_source = {
+    nominal_source_text: proofString(y.nominal_source_text, `${path}.y_axis.nominal_source_text`),
+    nominal_source_bbox_pdf_points: parsePointBox(
+      y.nominal_source_bbox_pdf_points,
+      `${path}.y_axis.nominal_source_bbox_pdf_points`,
+    ),
+  }
   if (is_server_calibrated_scope) {
+    const y_axis = {
+      ...scope_common.y_axis,
+      ...pdf_nominal_source,
+      nominal_baseline_pixel: proofNumber(y.nominal_baseline_pixel, `${path}.y_axis.nominal_baseline_pixel`),
+    }
+    if (has_explicit_time) {
+      return {
+        ...scope_common,
+        algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v1",
+        x_axis: explicit_x_axis!,
+        y_axis,
+      }
+    }
     return {
       ...scope_common,
       algorithm: "canonical_pdf_tesseract_scope_divisions_v2",
-      y_axis: {
-        ...scope_common.y_axis,
-        nominal_baseline_pixel: proofNumber(
-          y.nominal_baseline_pixel,
-          `${path}.y_axis.nominal_baseline_pixel`,
-        ),
-      },
+      x_axis: division_x_axis!,
+      y_axis,
     }
   }
   return {
     ...scope_common,
     algorithm: "canonical_pdf_tesseract_scope_divisions_v1",
+    x_axis: division_x_axis!,
+    y_axis: {
+      ...scope_common.y_axis,
+      ...pdf_nominal_source,
+    },
   }
 }
 

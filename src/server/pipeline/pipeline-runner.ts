@@ -23,6 +23,7 @@ import type {
   PipelineStageResult,
   PipelineStageResults,
   PipelineTaskInputEnvelope,
+  PipelineTaskInputFiles,
   RegisteredPipelineStage,
 } from "@/shared/pipeline-types"
 import { snapshotPipelineArtifacts } from "./artifact-snapshot"
@@ -596,6 +597,20 @@ export const runPipeline = async <
       stage_index === target_index ||
       (target.mode === "from_stage" && stage_index > target_index)
     if (!selected) {
+      const is_continuation_candidate = stage_index > target_index
+      const dependency_state = is_continuation_candidate
+        ? getDependencyState(stage, mutable_results)
+        : undefined
+      let input_files: PipelineTaskInputFiles | undefined
+      if (dependency_state?.incomplete_dependencies.length === 0 && options.task_input_root) {
+        await mkdir(debug_dir, { recursive: true })
+        input_files = await retainPipelineTaskInputFiles({
+          root_dir: options.task_input_root,
+          debug_dir,
+          objects_dir: join(pipeline_dir, "input-objects"),
+          excluded_roots: options.task_input_excluded_roots,
+        })
+      }
       const completed_at = now().toISOString()
       const reason = "Stage was not selected for this isolated pipeline invocation"
       const result = Object.freeze({
@@ -617,8 +632,9 @@ export const runPipeline = async <
         run_id: options.run_id,
         execution_context: executionContext,
         depends_on: [...stage.depends_on],
-        dependency_statuses: {},
-        dependency_outputs: {},
+        dependency_statuses: dependency_state?.dependency_statuses ?? {},
+        dependency_outputs: dependency_state?.dependency_outputs ?? {},
+        ...(input_files ? { input_files } : {}),
       } satisfies PipelineTaskInputEnvelope)
       await writeInitialDebugBundle(debug_dir, debug_input)
       await writeTerminalDebugBundle(debug_dir, result)

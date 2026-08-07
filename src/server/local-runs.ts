@@ -1,6 +1,6 @@
 import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
-import type { Job, ModelRun } from "@/shared/job-types"
+import type { Job, ModelProgress, ModelRun } from "@/shared/job-types"
 import type { LocalRunMode, LocalRunStatus, LocalRunSummary } from "@/shared/local-run"
 import { JobStore } from "./job-store"
 import { restorePersistedJobs } from "./job-restorer"
@@ -142,6 +142,46 @@ export interface LocalRunWorkspaceContext {
   readonly model_run?: ModelRun
 }
 
+export function projectCompletedLocalTaskModelRun(input: { summary: LocalRunSummary; model_run: ModelRun }):
+  | {
+      update: Pick<
+        ModelRun,
+        "status" | "is_complete" | "has_errors" | "error_message" | "warnings" | "completed_at"
+      >
+      progress: ModelProgress
+    }
+  | undefined {
+  if (
+    input.summary.pipeline_id !== "spice_generation" ||
+    input.summary.mode !== "task" ||
+    input.summary.status !== "completed" ||
+    !input.summary.task_id
+  ) {
+    return undefined
+  }
+  const completed_at = input.summary.completed_at ?? input.model_run.updated_at
+  const warning = `Local task ${input.summary.task_id} completed. Later SPICE generation tasks were intentionally not run.`
+  return {
+    update: {
+      status: "complete",
+      is_complete: true,
+      has_errors: false,
+      error_message: undefined,
+      warnings: [...new Set([...(input.model_run.warnings ?? []), warning])],
+      completed_at,
+    },
+    progress: {
+      sequence: (input.model_run.progress?.sequence ?? 0) + 1,
+      phase: "complete",
+      message: `Local task ${input.summary.task_id} completed`,
+      updated_at: completed_at,
+      ...(input.model_run.progress?.iteration === undefined
+        ? {}
+        : { iteration: input.model_run.progress.iteration }),
+    },
+  }
+}
+
 export async function loadLocalRunWorkspace(
   localRoot: string,
   localRunId: string,
@@ -158,6 +198,16 @@ export async function loadLocalRunWorkspace(
   const job = jobStore.getJob(summary.source_job_id)
   if (!job) throw new Error(`Local run ${localRunId} has no displayable job output`)
   const modelRunId = modelRunStore.getModelRunIdForJob(summary.source_job_id)
+  if (modelRunId) {
+    const modelRun = modelRunStore.getModelRun(modelRunId)
+    const projection = modelRun
+      ? projectCompletedLocalTaskModelRun({ summary, model_run: modelRun })
+      : undefined
+    if (projection) {
+      modelRunStore.updateProgress(modelRunId, projection.progress)
+      modelRunStore.updateModelRun(modelRunId, projection.update)
+    }
+  }
   const projectedJob: Job = {
     ...job,
     display_status:

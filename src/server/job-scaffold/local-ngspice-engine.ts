@@ -93,7 +93,7 @@ function parseTransientParameters(spice_source: string): TransientParameters {
 
 function parseProbeMetadata(spice_source: string): ProbeMetadata[] {
   return spice_source.split(/\r?\n/).flatMap((line) => {
-    const match = line.match(/^\s*\*\s*tscircuit_probe\s+(.+)\s*$/i)
+    const match = line.match(/^\s*\*\s*tscircuit_(?:current_)?probe\s+(.+)\s*$/i)
     if (!match?.[1]) return []
     try {
       const value: unknown = JSON.parse(match[1])

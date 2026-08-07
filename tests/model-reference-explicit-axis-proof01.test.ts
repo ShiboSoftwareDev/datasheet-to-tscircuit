@@ -5,9 +5,59 @@ import { join } from "node:path"
 import { afterEach, expect, test } from "bun:test"
 import { BunProcessRunner } from "@/server/infrastructure/process"
 import { buildReferenceGraphSourceProof } from "@/server/model-workflow/reference-graph-axis-proof"
+import { alignedExplicitAxisCalibration } from "@/server/model-workflow/reference-graph-axis-proof/explicit-ticks"
 import type { ReferenceGraphObservation } from "@/server/model-workflow/reference-graph-observation"
 
 const temporary_directories: string[] = []
+
+test("derives an explicit time scale from the maximum consistent tick sequence", () => {
+  const candidates = [
+    ["200 us", 200e-6, 696],
+    ["300 us", 300e-6, 821],
+    ["400 us", 400e-6, 945],
+    ["500 us", 500e-6, 1_070],
+    ["600 ps", 600e-12, 1_196],
+    ["700 us", 700e-6, 1_321],
+  ].map(([raw_text, value_si, left]) => ({
+    raw_text: String(raw_text),
+    unit: "s" as const,
+    value_si: Number(value_si),
+    confidence: 90,
+    bbox: { left: Number(left), top: 850, width: 10, height: 32 },
+  }))
+
+  const result = alignedExplicitAxisCalibration({ axis: "x", unit: "s", candidates })
+
+  expect(result?.supporting_tick_count).toBe(5)
+  expect(result?.first.raw_text).toBe("200 us")
+  expect(result?.second.raw_text).toBe("700 us")
+  expect(result?.units_per_pixel).toBeCloseTo(2.4e-6, 8)
+})
+
+test("does not accept only two nearby measurements as an explicit axis", () => {
+  const result = alignedExplicitAxisCalibration({
+    axis: "x",
+    unit: "s",
+    candidates: [
+      {
+        raw_text: "200 us",
+        unit: "s",
+        value_si: 200e-6,
+        confidence: 90,
+        bbox: { left: 600, top: 850, width: 20, height: 30 },
+      },
+      {
+        raw_text: "300 us",
+        unit: "s",
+        value_si: 300e-6,
+        confidence: 90,
+        bbox: { left: 720, top: 850, width: 20, height: 30 },
+      },
+    ],
+  })
+
+  expect(result).toBeUndefined()
+})
 
 afterEach(async () => {
   await Promise.all(temporary_directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
@@ -117,27 +167,35 @@ function observationForPdf(source_pdf_sha256: string): ReferenceGraphObservation
             },
           },
         },
-        digitized_curve: {
-          method: "manual_pixel_trace",
-          x_quantity: "time",
-          x_unit: "s",
-          y_quantity: "voltage",
-          y_unit: "V",
-          x_range: { min: 0, max: 0.001 },
-          y_range: { min: 0, max: 2 },
-          x_axis: {
-            scale: "linear",
-            first: { pixel: 200, value: 0 },
-            second: { pixel: 600, value: 0.001 },
+        channels: [
+          {
+            channel_id: "output_voltage",
+            label: "OUT",
+            role: "response",
+            measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
+            digitized_curve: {
+              method: "manual_pixel_trace",
+              x_quantity: "time",
+              x_unit: "s",
+              y_quantity: "voltage",
+              y_unit: "V",
+              x_range: { min: 0, max: 0.001 },
+              y_range: { min: 0, max: 2 },
+              x_axis: {
+                scale: "linear",
+                first: { pixel: 200, value: 0 },
+                second: { pixel: 600, value: 0.001 },
+              },
+              y_axis: {
+                scale: "linear",
+                first: { pixel: 400, value: 0 },
+                second: { pixel: 140, value: 2 },
+              },
+              trace_color: { r: 20, g: 80, b: 180, tolerance: 24 },
+              points,
+            },
           },
-          y_axis: {
-            scale: "linear",
-            first: { pixel: 400, value: 0 },
-            second: { pixel: 140, value: 2 },
-          },
-          trace_color: { r: 20, g: 80, b: 180, tolerance: 24 },
-          points,
-        },
+        ],
       },
     ],
   }

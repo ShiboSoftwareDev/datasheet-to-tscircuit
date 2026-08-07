@@ -84,6 +84,7 @@ export const designValidationStage = defineModelStage({
       model_run_id: context.model_run_id,
       model_dir: context.model_dir,
       contract,
+      plan,
       evidence_dir,
       signal,
     })

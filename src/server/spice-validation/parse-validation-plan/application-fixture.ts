@@ -187,12 +187,22 @@ export function validateRequirementElectricalBindings(input: {
     return binding ? [{ requirement_id, requirement_index, binding }] : []
   })
   if (bound_requirements.length === 0) return undefined
-  if (bound_requirements.length !== 1 || input.requirement_ids.length !== 1) {
+  if (bound_requirements.length !== input.requirement_ids.length) {
     input.collector.add(
       `${input.path}.requirement_ids`,
-      "bound_case_requirement_count",
-      "a case containing a fresh graph electrical binding must cover exactly one modeled requirement",
+      "mixed_bound_case_requirements",
+      "a case containing fresh graph channels must contain only requirements from that one graph experiment",
     )
+  }
+  const primary_bound_requirement = bound_requirements[0]!
+  for (const { binding, requirement_index } of bound_requirements.slice(1)) {
+    if (stableStringify(binding) !== stableStringify(primary_bound_requirement.binding)) {
+      input.collector.add(
+        `${input.path}.requirement_ids[${requirement_index}]`,
+        "mixed_graph_electrical_bindings",
+        "all channel requirements in one case must share the exact same graph electrical binding",
+      )
+    }
   }
 
   const pulsed_sources = input.fixtures.flatMap((fixture, fixture_index) =>
@@ -201,7 +211,7 @@ export function validateRequirementElectricalBindings(input: {
       : [],
   )
   const matched_fixture_indexes = new Set<number>()
-  for (const { requirement_id, requirement_index, binding } of bound_requirements) {
+  for (const { requirement_id, requirement_index, binding } of [primary_bound_requirement]) {
     if (binding.stimulus.type !== "steady_state") {
       const expected_type = binding.stimulus.type === "voltage_step" ? "voltage_source" : "current_source"
       const matches = pulsed_sources.filter(
@@ -255,7 +265,11 @@ export function validateRequirementElectricalBindings(input: {
       }
       if (input.analysis.type === "transient") {
         const reference_max = Math.max(
-          ...(input.requirement_by_id.get(requirement_id)?.reference_curve?.points ?? []).map(({ x }) => x),
+          ...bound_requirements.flatMap(({ requirement_id: channel_requirement_id }) =>
+            (input.requirement_by_id.get(channel_requirement_id)?.reference_curve?.points ?? []).map(
+              ({ x }) => x,
+            ),
+          ),
           0,
         )
         const minimum_stop = Math.max(expected_pulse.delay + expected_pulse.rise, reference_max)
@@ -429,5 +443,5 @@ export function validateRequirementElectricalBindings(input: {
       }
     })
   }
-  return bound_requirements.length === 1 ? bound_requirements[0]!.requirement_id : undefined
+  return primary_bound_requirement.requirement_id
 }

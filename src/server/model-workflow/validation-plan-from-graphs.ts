@@ -3,6 +3,7 @@ import type {
   ModelReferenceAuxiliaryFixture,
   ModelReferenceElectricalBinding,
 } from "../modeling"
+import { modelReferenceElectricalBindingsEqual } from "../modeling/reference-electrical-binding"
 import { parseAgentValidationPlan, type FixtureElement, type ValidationPlan } from "../spice-validation"
 
 function fixtureForAuxiliary(auxiliary: ModelReferenceAuxiliaryFixture, index: number): FixtureElement {
@@ -82,11 +83,12 @@ function transientAnalysis(points: readonly { x: number }[], binding: ModelRefer
   const stimulus_end =
     binding.stimulus.type === "steady_state" ? 0 : binding.stimulus.pulse.delay + binding.stimulus.pulse.rise
   const stop = Math.max(maximum, stimulus_end) + step
+  const start = Math.max(0, minimum - step)
   return {
     type: "transient" as const,
     step,
     stop,
-    ...(minimum > 0 ? { start: minimum } : {}),
+    ...(start > 0 ? { start } : {}),
   }
 }
 
@@ -114,21 +116,47 @@ function protectedEndpoints(binding: ModelReferenceElectricalBinding): Set<strin
 export function buildGraphValidationPlan(contract: ModelContract): ValidationPlan {
   const modeled = contract.characterization.requirements.filter(({ support }) => support.status === "modeled")
   const has_documented_application = contract.application_fixture?.availability === "documented"
-  const cases = modeled.map((requirement) => {
-    const curve = requirement.reference_curve
+  const groups = new Map<string, typeof modeled>()
+  for (const requirement of modeled) {
+    const graph_id = String(requirement.conditions.graph_id ?? "")
+    if (!graph_id) throw new Error(`Modeled requirement ${requirement.requirement_id} has no source graph id`)
+    const group = groups.get(graph_id) ?? []
+    group.push(requirement)
+    groups.set(graph_id, group)
+  }
+  const cases = [...groups.entries()].map(([graph_id, requirements]) => {
+    const first_requirement = requirements[0]!
+    const curve = first_requirement.reference_curve
     const binding = curve?.electrical_binding
     if (
-      requirement.analysis !== "transient" ||
+      first_requirement.analysis !== "transient" ||
       !curve ||
       curve.x_quantity !== "time" ||
       curve.x_unit !== "s" ||
-      curve.y_quantity !== "voltage" ||
-      curve.y_unit !== "V" ||
+      !curve.measurement ||
+      !curve.channel_id ||
+      !curve.channel_role ||
       !binding
     ) {
       throw new Error(
-        `Modeled requirement ${requirement.requirement_id} is not a bound voltage-versus-time graph`,
+        `Modeled requirement ${first_requirement.requirement_id} is not a bound time-domain channel`,
       )
+    }
+    for (const requirement of requirements) {
+      const candidate = requirement.reference_curve
+      if (
+        requirement.analysis !== "transient" ||
+        !candidate ||
+        candidate.x_quantity !== "time" ||
+        candidate.x_unit !== "s" ||
+        !candidate.measurement ||
+        !candidate.channel_id ||
+        !candidate.channel_role ||
+        !candidate.electrical_binding ||
+        !modelReferenceElectricalBindingsEqual(candidate.electrical_binding, binding)
+      ) {
+        throw new Error(`Modeled requirement ${requirement.requirement_id} is not a channel in ${graph_id}`)
+      }
     }
     const stimulus_fixture = stimulusFixture(binding)
     const fixtures: FixtureElement[] = [
@@ -159,23 +187,40 @@ export function buildGraphValidationPlan(contract: ModelContract): ValidationPla
       }
     }
     return {
-      id: requirement.requirement_id,
-      title: requirement.title,
-      requirement_ids: [requirement.requirement_id],
+      id: graph_id,
+      title: first_requirement.title.replace(/\s+—\s+.+$/, ""),
+      requirement_ids: requirements.map(({ requirement_id }) => requirement_id),
       nets: [],
       fixtures,
-      analysis: transientAnalysis(curve.points, binding),
-      observations: [
-        {
-          id: "response",
+      analysis: transientAnalysis(
+        requirements.flatMap((requirement) => requirement.reference_curve!.points),
+        binding,
+      ),
+      observations: requirements.map((requirement) => {
+        const reference = requirement.reference_curve!
+        const measurement = reference.measurement!
+        const common = {
+          id: reference.channel_id!,
+          role: reference.channel_role!,
           requirement_id: requirement.requirement_id,
-          type: "voltage",
-          positive: binding.response.positive,
-          negative: binding.response.negative,
-          unit: "V",
-          scale: "linear",
-        },
-      ],
+          scale: "linear" as const,
+        }
+        return measurement.type === "voltage"
+          ? {
+              ...common,
+              type: "voltage" as const,
+              positive: measurement.positive,
+              negative: measurement.negative,
+              unit: "V" as const,
+            }
+          : {
+              ...common,
+              type: "current" as const,
+              element_id: measurement.element_id,
+              direction: measurement.direction,
+              unit: "A" as const,
+            }
+      }),
     }
   })
   return parseAgentValidationPlan(

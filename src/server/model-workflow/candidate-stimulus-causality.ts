@@ -74,7 +74,9 @@ function flattenBoundPulses(input: { plan: ValidationPlan; contract: ModelContra
     if (bindings.length === 0) return validation_case
     const relevant_observation_ids = new Set(
       validation_case.observations.flatMap((observation) =>
-        bindingForRequirement(input.contract, observation.requirement_id) ? [observation.id] : [],
+        observation.role !== "stimulus" && bindingForRequirement(input.contract, observation.requirement_id)
+          ? [observation.id]
+          : [],
       ),
     )
     relevant_observation_ids_by_case.set(validation_case.id, relevant_observation_ids)

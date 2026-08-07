@@ -124,6 +124,10 @@ const contract: ModelContract = {
         conditions: {},
         expected: { unit: "V", min: 0, max: 1 },
         reference_curve: {
+          channel_id: "output_voltage",
+          channel_label: "OUT",
+          channel_role: "response",
+          measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
           x_quantity: "time",
           x_unit: "s",
           y_quantity: "voltage",
@@ -193,6 +197,8 @@ const plan: ValidationPlan = {
               x_unit: "s",
               y_quantity: "voltage",
               y_unit: "V",
+              channel_id: "output_voltage",
+              role: "response",
             },
           },
         },
@@ -214,11 +220,18 @@ function generatedModel(volts: number): GeneratedModel {
   }
 }
 
-function passingResult(generated: GeneratedModel): ValidationRunResult {
+function passingResult(
+  generated: GeneratedModel,
+  validation_plan: ValidationPlan = plan,
+): ValidationRunResult {
   return {
     version: 1,
     passed: true,
-    hashes: hashValidationInputs({ plan, model_source: generated.source, manifest: generated.manifest }),
+    hashes: hashValidationInputs({
+      plan: validation_plan,
+      model_source: generated.source,
+      manifest: generated.manifest,
+    }),
     cases: [
       {
         case_id: "output_voltage",
@@ -252,7 +265,11 @@ function passingResult(generated: GeneratedModel): ValidationRunResult {
       version: 1,
       method: "bound_pulse_flatten_v2",
       status: "passed",
-      hashes: hashValidationInputs({ plan, model_source: generated.source, manifest: generated.manifest }),
+      hashes: hashValidationInputs({
+        plan: validation_plan,
+        model_source: generated.source,
+        manifest: generated.manifest,
+      }),
       checked_case_count: 1,
       checked_observation_count: 1,
     },
@@ -586,33 +603,41 @@ async function writeReferenceProof(input: { model_dir: string; evidence_dir: str
         reason: "The public OUT voltage responds to a public current step.",
         crop: { page: 1, render_dpi: 200, x_px: 0, y_px: 0, width_px: 96, height_px: 64 },
         electrical_binding,
-        digitized_curve: {
-          method: "manual_pixel_trace",
-          x_quantity: "time",
-          x_unit: "s",
-          y_quantity: "voltage",
-          y_unit: "V",
-          x_range: { min: 0, max: 0.0007 },
-          y_range: { min: 0, max: 1 },
-          x_axis: {
-            scale: "linear",
-            first: { pixel: 4, value: 0 },
-            second: { pixel: 91, value: 0.0007 },
+        channels: [
+          {
+            channel_id: "output_voltage",
+            label: "OUT",
+            role: "response",
+            measurement: { type: "voltage", positive: "dut.OUT", negative: "gnd" },
+            digitized_curve: {
+              method: "manual_pixel_trace",
+              x_quantity: "time",
+              x_unit: "s",
+              y_quantity: "voltage",
+              y_unit: "V",
+              x_range: { min: 0, max: 0.0007 },
+              y_range: { min: 0, max: 1 },
+              x_axis: {
+                scale: "linear",
+                first: { pixel: 4, value: 0 },
+                second: { pixel: 91, value: 0.0007 },
+              },
+              y_axis: {
+                scale: "linear",
+                first: { pixel: 58, value: 0 },
+                second: { pixel: 5, value: 1 },
+              },
+              trace_color: { r: 20, g: 80, b: 180, tolerance: 24 },
+              points: Array.from({ length: 8 }, (_, index) => {
+                const ratio = index / 7
+                return {
+                  pixel_x: 4 + ratio * 87,
+                  pixel_y: 58 - ratio * 53,
+                }
+              }),
+            },
           },
-          y_axis: {
-            scale: "linear",
-            first: { pixel: 58, value: 0 },
-            second: { pixel: 5, value: 1 },
-          },
-          trace_color: { r: 20, g: 80, b: 180, tolerance: 24 },
-          points: Array.from({ length: 8 }, (_, index) => {
-            const ratio = index / 7
-            return {
-              pixel_x: 4 + ratio * 87,
-              pixel_y: 58 - ratio * 53,
-            }
-          }),
-        },
+        ],
       },
     ],
   }
@@ -1238,7 +1263,7 @@ test("a failed integrated build cannot replace the prior accepted root files or 
     model_requirements: contract.characterization.requirements,
     model_family: contract.characterization.family,
   })
-  const candidate_result = passingResult(candidate)
+  const candidate_result = passingResult(candidate, canonical_plan)
   await Promise.all([mkdir(validation_dir, { recursive: true }), mkdir(attempt_dir, { recursive: true })])
   await Promise.all([
     Bun.write(join(candidate_dir, "model.lib"), candidate.source),

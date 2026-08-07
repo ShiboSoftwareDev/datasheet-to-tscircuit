@@ -10,9 +10,16 @@ export {
   parseReferenceGraphObservation,
 } from "./reference-graph-observation/artifact"
 export {
+  eligibleObservedChannels,
   eligibleObservedGraphs,
   foundObservedGraphs,
+  primaryResponseChannel,
   projectReferenceGraphObservationForCharacterizer,
+  referenceChannelKey,
+} from "./reference-graph-observation/eligibility"
+export type {
+  EligibleObservedReferenceChannel,
+  EligibleObservedReferenceGraph,
 } from "./reference-graph-observation/eligibility"
 export { verifyCharacterizationGraphEvidence } from "./reference-graph-observation/numeric-verification"
 export {
@@ -25,14 +32,16 @@ export {
   buildComparisonReferenceGraphObserverPrompt,
   buildFoundReferenceGraphObserverPrompt,
   buildReferenceGraphObserverPrompt,
+  buildSingleComparisonReferenceGraphObserverPrompt,
 } from "./reference-graph-observation/prompt"
 export type {
   CharacterizerReferenceGraphObservation,
   ModelReferenceNumericVerification,
   ModelReferenceVerification,
+  ObservedReferenceChannel,
   ObservedReferenceGraph,
   ObservedReferencePoint,
-  ObservedVoltageTimeCurve,
+  ObservedTimeCurve,
   ReferenceGraphAxisAnchor,
   ReferenceGraphAxisCalibration,
   ReferenceGraphAxisRange,

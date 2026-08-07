@@ -6,6 +6,7 @@ import { runDebugCli } from "@/cli/pipeline-debug"
 import { JobStore } from "@/server/job-store"
 import { restorePersistedJobs } from "@/server/job-restorer"
 import { createLocalRunApiHandler } from "@/server/local-run-api"
+import { projectCompletedLocalTaskModelRun } from "@/server/local-runs"
 import { ModelRunStore } from "@/server/model-run-store"
 import { retainPipelineTaskInputFiles } from "@/server/pipeline"
 import type { LocalRunDetail, LocalRunSummary } from "@/shared/local-run"
@@ -84,6 +85,55 @@ async function waitForLocalCompletion(handler: LocalHandler, localRunId: string)
   }
   throw new Error(`Local run ${localRunId} did not complete`)
 }
+
+test("a completed task-only SPICE run is not presented as an interrupted full pipeline", () => {
+  const projection = projectCompletedLocalTaskModelRun({
+    summary: {
+      pipeline_id: "spice_generation",
+      mode: "task",
+      status: "completed",
+      task_id: "create_comparison_graphs",
+      completed_at: "2026-08-07T18:02:20.132Z",
+    } as LocalRunSummary,
+    model_run: {
+      model_run_id: "model-local",
+      job_id: "job-local",
+      created_at: "2026-08-07T16:58:05.305Z",
+      updated_at: "2026-08-07T18:02:20.132Z",
+      status: "failed",
+      is_complete: true,
+      has_errors: true,
+      warnings: [],
+      effort_multiplier: 1,
+      elapsed_time_ms: 3_854_031,
+      iteration: 0,
+      logs: [],
+      progress_history: [],
+      preview_options: [],
+      progress: {
+        sequence: 5,
+        phase: "designing_validation",
+        message: "Building comparison graphs",
+        updated_at: "2026-08-07T16:58:05.751Z",
+      },
+    },
+  })
+
+  expect(projection?.update).toMatchObject({
+    status: "complete",
+    is_complete: true,
+    has_errors: false,
+    error_message: undefined,
+  })
+  expect(projection?.update.warnings).toEqual([
+    "Local task create_comparison_graphs completed. Later SPICE generation tasks were intentionally not run.",
+  ])
+  expect(projection?.progress).toMatchObject({
+    sequence: 6,
+    phase: "complete",
+    message: "Local task create_comparison_graphs completed",
+  })
+})
 
 test("the server lists CLI Local runs, displays their output, and starts another Local run", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-api-"))

@@ -126,6 +126,20 @@ export interface ModelReferenceElectricalBinding {
   auxiliary_fixtures?: ModelReferenceAuxiliaryFixture[]
 }
 
+export type ModelReferenceChannelRole = "response" | "stimulus"
+
+export type ModelReferenceChannelMeasurement =
+  | {
+      type: "voltage"
+      positive: ModelPublicElectricalEndpoint
+      negative: ModelPublicElectricalEndpoint
+    }
+  | {
+      type: "current"
+      element_id: string
+      direction: "positive_to_negative" | "negative_to_positive"
+    }
+
 export interface ModelRequirement {
   requirement_id: string
   title: string
@@ -142,6 +156,10 @@ export interface ModelRequirement {
     tolerance?: number
   }
   reference_curve?: {
+    channel_id?: string
+    channel_label?: string
+    channel_role?: ModelReferenceChannelRole
+    measurement?: ModelReferenceChannelMeasurement
     x_quantity: string
     x_unit: string
     y_quantity: string

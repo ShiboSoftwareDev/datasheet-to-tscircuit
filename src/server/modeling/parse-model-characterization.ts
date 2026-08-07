@@ -2,6 +2,7 @@ import type {
   ModelAnalysis,
   ModelCharacterization,
   ModelFamily,
+  ModelReferenceChannelMeasurement,
   ModelReferenceCropRegion,
   ModelReferenceElectricalBinding,
   ModelReferencePoint,
@@ -15,7 +16,10 @@ import {
   MODEL_REFERENCE_CROP_MIN_WIDTH,
 } from "./types"
 import { MIN_FRESH_REFERENCE_CURVE_POINTS } from "./model-training-contract"
-import { parseModelReferenceElectricalBinding } from "./reference-electrical-binding"
+import {
+  parseModelReferenceChannelMeasurement,
+  parseModelReferenceElectricalBinding,
+} from "./reference-electrical-binding"
 
 const MODEL_FAMILIES = new Set<ModelFamily>([
   "passive",
@@ -304,6 +308,10 @@ function readRequirement(
       reader.onlyKeys(
         record.reference_curve,
         [
+          "channel_id",
+          "channel_label",
+          "channel_role",
+          "measurement",
           "x_quantity",
           "x_unit",
           "y_quantity",
@@ -370,7 +378,38 @@ function readRequirement(
           reader.errors.push(error instanceof Error ? error.message : String(error))
         }
       }
+      const channel_id =
+        record.reference_curve.channel_id === undefined
+          ? undefined
+          : reader.string(record.reference_curve.channel_id, `${path}.reference_curve.channel_id`)
+      const channel_label =
+        record.reference_curve.channel_label === undefined
+          ? undefined
+          : reader.string(record.reference_curve.channel_label, `${path}.reference_curve.channel_label`)
+      const channel_role =
+        record.reference_curve.channel_role === "response" ||
+        record.reference_curve.channel_role === "stimulus"
+          ? record.reference_curve.channel_role
+          : undefined
+      if (record.reference_curve.channel_role !== undefined && channel_role === undefined) {
+        reader.errors.push(`${path}.reference_curve.channel_role must be response or stimulus`)
+      }
+      let measurement: ModelReferenceChannelMeasurement | undefined
+      if (record.reference_curve.measurement !== undefined) {
+        try {
+          measurement = parseModelReferenceChannelMeasurement(
+            record.reference_curve.measurement,
+            `${path}.reference_curve.measurement`,
+          )
+        } catch (error) {
+          reader.errors.push(error instanceof Error ? error.message : String(error))
+        }
+      }
       reference_curve = {
+        channel_id,
+        channel_label,
+        channel_role,
+        measurement,
         x_quantity: reader.string(record.reference_curve.x_quantity, `${path}.reference_curve.x_quantity`),
         x_unit: reader.string(record.reference_curve.x_unit, `${path}.reference_curve.x_unit`),
         y_quantity: reader.string(record.reference_curve.y_quantity, `${path}.reference_curve.y_quantity`),
@@ -415,11 +454,6 @@ function readRequirement(
         `${path}.expected.unit must be V or A for modeled behavior; express ratios and other quantities as an observable base-unit response`,
       )
     }
-    if (enforce_fresh_policy && expected.unit !== "V") {
-      reader.errors.push(
-        `${path}.expected.unit must be V for fresh modeled requirements; the current tscircuit runtime does not emit transient current graphs`,
-      )
-    }
     if (reference_curve) {
       if (!BASE_OBSERVATION_UNITS.has(reference_curve.y_unit)) {
         reader.errors.push(`${path}.reference_curve.y_unit must be V or A for modeled behavior`)
@@ -429,14 +463,28 @@ function readRequirement(
           `${path}.reference_curve.electrical_binding is required for fresh modeled requirements so the datasheet response and pulsed stimulus cannot be reassigned to different DUT pins`,
         )
       }
-      if (enforce_fresh_policy && reference_curve.y_unit !== "V") {
+      if (
+        enforce_fresh_policy &&
+        (!reference_curve.channel_id ||
+          !reference_curve.channel_label ||
+          !reference_curve.channel_role ||
+          !reference_curve.measurement)
+      ) {
         reader.errors.push(
-          `${path}.reference_curve.y_unit must be V for fresh modeled requirements; the current tscircuit runtime does not emit transient current graphs`,
+          `${path}.reference_curve must identify channel_id, channel_label, channel_role, and measurement for every fresh modeled comparison`,
         )
       }
-      if (enforce_fresh_policy && reference_curve.y_quantity !== "voltage") {
+      const expected_quantity = reference_curve.measurement?.type
+      const expected_unit =
+        expected_quantity === "voltage" ? "V" : expected_quantity === "current" ? "A" : undefined
+      if (
+        enforce_fresh_policy &&
+        (reference_curve.y_quantity !== expected_quantity ||
+          reference_curve.y_unit !== expected_unit ||
+          expected.unit !== expected_unit)
+      ) {
         reader.errors.push(
-          `${path}.reference_curve.y_quantity must be voltage for fresh modeled requirements`,
+          `${path}.reference_curve quantity/unit and expected.unit must match its voltage or current measurement`,
         )
       }
       if (analysis === "operating_point") {

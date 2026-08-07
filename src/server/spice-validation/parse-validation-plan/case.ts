@@ -90,10 +90,12 @@ export function parseCase(
     const binding = requirement_by_id.get(requirement_id)?.reference_curve?.electrical_binding
     return binding ? [{ binding, requirement_index }] : []
   })
+  const shared_binding = bound_requirements[0]?.binding
   const application_fixture =
-    bound_requirements.length === 1
+    shared_binding &&
+    bound_requirements.every(({ binding }) => JSON.stringify(binding) === JSON.stringify(shared_binding))
       ? expectedApplicationFixture({
-          binding: bound_requirements[0]!.binding,
+          binding: shared_binding,
           contract: application_contract,
           path: `${path}.requirement_ids[${bound_requirements[0]!.requirement_index}]`,
           collector,
@@ -146,7 +148,7 @@ export function parseCase(
     collector.add(
       `${path}.application_fixture`,
       "unexpected_application_fixture",
-      "server-resolved application topology is supported only for one documented-application bound requirement",
+      "server-resolved application topology is supported only when all case requirements share one documented graph experiment",
     )
   }
   requirement_ids.forEach((requirement_id, requirement_index) => {
@@ -172,17 +174,6 @@ export function parseCase(
       new Set(requirement_ids),
     ),
   )
-  if (bound_requirement_id) {
-    observations.forEach((observation, observation_index) => {
-      if (observation.requirement_id !== bound_requirement_id) {
-        collector.add(
-          `${path}.observations[${observation_index}].requirement_id`,
-          "bound_case_observation_mismatch",
-          `every observation in this exact datasheet experiment must name bound requirement ${JSON.stringify(bound_requirement_id)}`,
-        )
-      }
-    })
-  }
   const evidence_sources = new Set(
     observations.map((observation) =>
       JSON.stringify({

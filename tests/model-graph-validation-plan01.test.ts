@@ -2,20 +2,28 @@ import { expect, test } from "bun:test"
 import { buildGraphValidationPlan } from "@/server/model-workflow/validation-plan-from-graphs"
 import type { ModelContract, ModelRequirement } from "@/server/modeling"
 
-function loadTransientRequirement(id: string): ModelRequirement {
+function loadTransientRequirement(
+  id: string,
+  graph_id = id,
+  channel_id = "output_voltage",
+): ModelRequirement {
   return {
     requirement_id: id,
     title: id,
     behavior: "Reproduce the documented output-voltage load transient.",
     analysis: "transient",
     support: { status: "modeled" },
-    conditions: {},
+    conditions: { graph_id, channel_id, channel_role: "response" },
     expected: { unit: "V", min: 3.2, max: 3.4 },
     reference_curve: {
       x_quantity: "time",
       x_unit: "s",
       y_quantity: "voltage",
       y_unit: "V",
+      channel_id,
+      channel_label: "VOUT",
+      channel_role: "response",
+      measurement: { type: "voltage", positive: "dut.VOUT", negative: "gnd" },
       tolerance: 0.1,
       points: [
         { x: 0, y: 3.3 },
@@ -44,6 +52,94 @@ function loadTransientRequirement(id: string): ModelRequirement {
     sources: [{ page: 1, locator: id, statement: "Documented graph" }],
   }
 }
+
+test("one source graph produces one comparison observation per plotted channel", () => {
+  const response = loadTransientRequirement("figure_10_21__output_voltage", "figure_10_21", "output_voltage")
+  response.reference_curve!.image = "evidence/figures/figure_10_21.png"
+  response.sources[0]!.image = "evidence/source-page-1.png"
+  const stimulus = structuredClone(response)
+  stimulus.requirement_id = "figure_10_21__load_current"
+  stimulus.title = "Figure 10-21 — ILOAD"
+  stimulus.conditions.channel_id = "load_current"
+  stimulus.conditions.channel_role = "stimulus"
+  stimulus.expected = { unit: "A", min: 0.1, max: 0.5 }
+  stimulus.reference_curve = {
+    ...stimulus.reference_curve!,
+    y_quantity: "current",
+    y_unit: "A",
+    channel_id: "load_current",
+    channel_label: "ILOAD",
+    channel_role: "stimulus",
+    measurement: {
+      type: "current",
+      element_id: "stimulus",
+      direction: "positive_to_negative",
+    },
+    points: [
+      { x: 0, y: 0.1 },
+      { x: 0.0005, y: 0.5 },
+      { x: 0.001, y: 0.1 },
+    ],
+  }
+  const contract: ModelContract = {
+    version: 1,
+    interface: {
+      version: 1,
+      part_number: "TEST-CONVERTER",
+      entry_name: "TEST_CONVERTER",
+      pins: [
+        {
+          physical_pin: "1",
+          component_pin: "pin1",
+          source_port_id: "source_port_1",
+          spice_node: "VIN",
+          labels: ["VIN"],
+          role: "power_input",
+        },
+        {
+          physical_pin: "2",
+          component_pin: "pin2",
+          source_port_id: "source_port_2",
+          spice_node: "VOUT",
+          labels: ["VOUT"],
+          role: "power_output",
+        },
+      ],
+    },
+    characterization: {
+      version: 1,
+      family: "power_converter",
+      strategy: "behavioral",
+      requirements: [response, stimulus],
+      assumptions: [],
+      limitations: [],
+    },
+  }
+
+  const plan = buildGraphValidationPlan(contract)
+
+  expect(plan.cases).toHaveLength(1)
+  expect(plan.cases[0]).toMatchObject({
+    id: "figure_10_21",
+    requirement_ids: ["figure_10_21__output_voltage", "figure_10_21__load_current"],
+    observations: [
+      {
+        id: "output_voltage",
+        role: "response",
+        type: "voltage",
+        positive: "dut.VOUT",
+        negative: "gnd",
+      },
+      {
+        id: "load_current",
+        role: "stimulus",
+        type: "current",
+        element_id: "stimulus",
+        direction: "positive_to_negative",
+      },
+    ],
+  })
+})
 
 test("every independent graph receives fallback biasing when no application topology exists", () => {
   const contract: ModelContract = {
@@ -158,4 +254,54 @@ test("steady switching references use static fixtures without inventing a pulse"
     resistance_ohms: 10,
   })
   expect(validation_case.analysis.type).toBe("transient")
+})
+
+test("nonzero reference curves are bracketed by the transient output window", () => {
+  const requirement = loadTransientRequirement("delayed_reference")
+  requirement.reference_curve!.points = [
+    { x: 0.0001, y: 3.3 },
+    { x: 0.0005, y: 3.2 },
+    { x: 0.001, y: 3.3 },
+  ]
+  const contract: ModelContract = {
+    version: 1,
+    interface: {
+      version: 1,
+      part_number: "TEST-CONVERTER",
+      entry_name: "TEST_CONVERTER",
+      pins: [
+        {
+          physical_pin: "1",
+          component_pin: "pin1",
+          source_port_id: "source_port_1",
+          spice_node: "VIN",
+          labels: ["VIN"],
+          role: "power_input",
+        },
+        {
+          physical_pin: "2",
+          component_pin: "pin2",
+          source_port_id: "source_port_2",
+          spice_node: "VOUT",
+          labels: ["VOUT"],
+          role: "power_output",
+        },
+      ],
+    },
+    characterization: {
+      version: 1,
+      family: "power_converter",
+      strategy: "behavioral",
+      requirements: [requirement],
+      assumptions: [],
+      limitations: [],
+    },
+  }
+
+  const analysis = buildGraphValidationPlan(contract).cases[0]!.analysis
+  expect(analysis.type).toBe("transient")
+  if (analysis.type !== "transient") throw new Error("Expected a transient analysis")
+  expect(analysis.start).toBeLessThan(0.0001)
+  expect(analysis.stop).toBeGreaterThan(0.001)
+  expect(analysis.start).toBeCloseTo(0.0001 - analysis.step, 15)
 })

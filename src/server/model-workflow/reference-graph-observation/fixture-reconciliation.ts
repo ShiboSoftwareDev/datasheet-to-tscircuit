@@ -8,7 +8,7 @@ import type {
   TimeGraphLocalCondition,
   TimeGraphTransientFixtureEvidence,
 } from "../time-graph-hints"
-import type { ObservedReferenceGraph, ObservedVoltageTimeCurve } from "./types"
+import type { ObservedReferenceGraph } from "./types"
 import {
   classifyElectricalSignal,
   electricalSignalMatches,
@@ -179,7 +179,7 @@ function uniquePrintedSignalEndpoint(input: {
 export function assertBindingMatchesPrintedFixture(input: {
   graph: ObservedReferenceGraph & {
     electrical_binding: ModelReferenceElectricalBinding
-    digitized_curve: ObservedVoltageTimeCurve
+    channels: NonNullable<ObservedReferenceGraph["channels"]>
   }
   evidence: TimeGraphTransientFixtureEvidence
   model_interface: ModelInterface
@@ -192,6 +192,47 @@ export function assertBindingMatchesPrintedFixture(input: {
     path,
   })
   const binding = graph.electrical_binding
+  const expected_printed_binding = {
+    response: {
+      type: "voltage" as const,
+      positive: response_positive,
+      negative: "gnd" as const,
+      nominal_volts: evidence.response.nominal_volts,
+    },
+    stimulus:
+      evidence.stimulus.type === "steady_state"
+        ? { type: "steady_state" as const }
+        : {
+            type: evidence.stimulus.type,
+            positive: stimulus_positive,
+            negative: "gnd" as const,
+            pulse: {
+              low: evidence.stimulus.low,
+              high: evidence.stimulus.high,
+              rise: evidence.stimulus.rise,
+              fall: evidence.stimulus.fall,
+            },
+          },
+    auxiliary_fixtures,
+  }
+  const received_printed_binding = {
+    response: binding.response,
+    stimulus:
+      binding.stimulus.type === "steady_state"
+        ? { type: binding.stimulus.type }
+        : {
+            type: binding.stimulus.type,
+            positive: binding.stimulus.positive,
+            negative: binding.stimulus.negative,
+            pulse: {
+              low: binding.stimulus.pulse.low,
+              high: binding.stimulus.pulse.high,
+              rise: binding.stimulus.pulse.rise,
+              fall: binding.stimulus.pulse.fall,
+            },
+          },
+    auxiliary_fixtures: binding.auxiliary_fixtures ?? [],
+  }
   const common_mismatch =
     binding.response.positive !== response_positive ||
     binding.response.negative !== "gnd" ||
@@ -210,11 +251,18 @@ export function assertBindingMatchesPrintedFixture(input: {
         binding.stimulus.pulse.fall !== evidence.stimulus.fall
   if (common_mismatch || stimulus_mismatch) {
     throw new Error(
-      `${path} electrical_binding must exactly match the server-extracted printed response nominal, stimulus, and every auxiliary fixture`,
+      `${path} electrical_binding must exactly match the server-extracted printed response nominal, stimulus, and every auxiliary fixture. Expected printed binding ${JSON.stringify(expected_printed_binding)}; received ${JSON.stringify(received_printed_binding)}`,
     )
   }
   if (binding.stimulus.type === "steady_state") return
-  const { min, max } = graph.digitized_curve.x_range
+  const response_curve = graph.channels.find(
+    ({ measurement }) =>
+      measurement.type === "voltage" &&
+      measurement.positive === binding.response.positive &&
+      measurement.negative === binding.response.negative,
+  )?.digitized_curve
+  if (!response_curve) throw new Error(`${path} is missing its printed response channel`)
+  const { min, max } = response_curve.x_range
   const pulse = binding.stimulus.pulse
   const falling_edge_start = pulse.delay + pulse.rise + pulse.width
   const falling_edge_end = pulse.delay + pulse.rise + pulse.width + pulse.fall
@@ -231,6 +279,29 @@ export function assertBindingMatchesPrintedFixture(input: {
     throw new Error(
       `${path} PULSE timing must place the printed first edge inside the non-negative calibrated time window, either place the second edge fully inside or hold it beyond the window, and keep the next period beyond that window`,
     )
+  }
+}
+
+export function assertCurrentChannelsUseResolvedFixtures(input: {
+  graph: ObservedReferenceGraph & { channels: NonNullable<ObservedReferenceGraph["channels"]> }
+  fixture_ids: ReadonlySet<string>
+  stimulus_available: boolean
+}): void {
+  for (const channel of input.graph.channels) {
+    if (channel.measurement.type !== "current") continue
+    if (channel.measurement.element_id === "stimulus") {
+      if (!input.stimulus_available) {
+        throw new Error(
+          `Eligible graph ${input.graph.graph_id} channel ${channel.channel_id} cannot measure a steady-state stimulus`,
+        )
+      }
+      continue
+    }
+    if (!input.fixture_ids.has(channel.measurement.element_id)) {
+      throw new Error(
+        `Eligible graph ${input.graph.graph_id} channel ${channel.channel_id} names unknown current fixture ${channel.measurement.element_id}; use stimulus or one exact resolved application passive id`,
+      )
+    }
   }
 }
 
