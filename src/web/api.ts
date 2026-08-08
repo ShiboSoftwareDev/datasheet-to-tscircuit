@@ -255,6 +255,7 @@ export function getModelFoundReferenceImageUrl(
 }
 
 export type ModelRunFileKind =
+  | "development_model"
   | "model"
   | "manifest"
   | "report"

@@ -38,10 +38,10 @@ export default function App() {
   } = useActiveJob()
   const local_run_state = useLocalRuns()
   const active_local_run_id = local_run_state.active_local_run_id
-  const job = active_local_run_id ? local_run_state.detail?.job : task_job
-  const load_error = active_local_run_id ? local_run_state.load_error : task_load_error
+  const job = task_job
+  const load_error = task_load_error ?? local_run_state.load_error
   const action_error = local_run_state.action_error ?? task_action_error
-  const model_run_state = useModelRun(job?.job_id, active_local_run_id)
+  const model_run_state = useModelRun(job?.job_id)
   const [is_sidebar_open, setIsSidebarOpen] = useState(false)
   const [is_terminal_open, setIsTerminalOpen] = useState(false)
   const [workspace_tab, setWorkspaceTab] = useState<"component" | "model">(getInitialWorkspaceTab)
@@ -49,12 +49,17 @@ export default function App() {
   const [sidebar_view, setSidebarView] = useState<"tasks" | "local">(active_local_run_id ? "local" : "tasks")
 
   const selectLocalRun = (localRun: (typeof local_run_state.local_runs)[number]) => {
-    startNewTask()
     local_run_state.selectLocalRun(localRun)
+    if (localRun.target_job_id) selectTask(localRun.target_job_id)
     setSidebarView("local")
   }
 
   const clearLocalRun = () => local_run_state.setActiveLocalRunId(undefined)
+
+  useEffect(() => {
+    const targetJobId = local_run_state.detail?.local_run.target_job_id
+    if (active_local_run_id && targetJobId && targetJobId !== active_job_id) selectTask(targetJobId)
+  }, [active_job_id, active_local_run_id, local_run_state.detail?.local_run.target_job_id])
 
   useEffect(() => {
     try {
@@ -177,15 +182,9 @@ export default function App() {
             {workspace_tab === "component" ? (
               <AgentLogs
                 job={job}
-                is_stopping={
-                  !active_local_run_id &&
-                  (job.display_status === "cancelling" || cancelling_job_ids.has(job.job_id))
-                }
-                on_cancel={() => {
-                  if (!active_local_run_id) void cancelTask(job.job_id)
-                }}
+                is_stopping={job.display_status === "cancelling" || cancelling_job_ids.has(job.job_id)}
+                on_cancel={() => void cancelTask(job.job_id)}
                 on_close={() => setIsTerminalOpen(false)}
-                local_run_id={active_local_run_id}
               />
             ) : (
               <ModelAgentLogs model_run_state={model_run_state} on_close={() => setIsTerminalOpen(false)} />
@@ -195,7 +194,7 @@ export default function App() {
       )}
 
       <div className="app-content">
-        {!active_job_id && !active_local_run_id ? (
+        {!active_job_id ? (
           <main className="landing-main">
             <UploadPanel
               on_job_created={(nextJob) => {
@@ -232,7 +231,6 @@ export default function App() {
                 job={job}
                 model_run={model_run_state.model_run}
                 is_model_loading={model_run_state.is_loading}
-                local_run_id={active_local_run_id}
               />
               <nav className="workspace-tabs" aria-label="Datasheet artifacts">
                 <button
@@ -253,14 +251,7 @@ export default function App() {
               <PipelineDebugger
                 job={job}
                 model_run={model_run_state.model_run}
-                local_run={local_run_state.detail?.local_run}
-                is_rerunning_local={
-                  active_local_run_id
-                    ? local_run_state.rerunning_local_run_ids.has(active_local_run_id)
-                    : false
-                }
-                on_local_run_started={selectLocalRun}
-                on_rerun_local={(localRunId) => void local_run_state.runAgain(localRunId)}
+                on_run_started={selectLocalRun}
               />
             </div>
             <div className="workspace-body">
@@ -272,7 +263,6 @@ export default function App() {
                       job={job}
                       active_tab={component_preview_tab}
                       on_active_tab_change={setComponentPreviewTab}
-                      local_run_id={active_local_run_id}
                     />
                   </div>
                 </div>

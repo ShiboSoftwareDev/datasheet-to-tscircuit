@@ -1,6 +1,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
 import { Boxes, ChevronRight, CircuitBoard, Download, FlaskConical } from "lucide-react"
 import type { Job, JobDisplayStatus, ModelRun, ModelRunStatus } from "@/shared/job-types"
+import { isModelRunPaused } from "@/shared/model-run-status"
 import { hasRetainedAcceptedModel } from "@/shared/model-warnings"
 import { getJobFileUrl, getModelRunFileUrl } from "../api"
 import { ArtifactWarningsDialog } from "./artifact-warnings"
@@ -42,6 +43,7 @@ function getStatusTone(status: string): StatusTone {
 function getModelStatus(model_run: ModelRun | undefined, is_loading: boolean): string {
   if (is_loading) return "Loading"
   if (!model_run) return "Not started"
+  if (isModelRunPaused(model_run)) return "Paused"
   if (model_run.status === "complete" && (model_run.warnings?.length ?? 0) > 0) {
     return "Ready with warnings"
   }

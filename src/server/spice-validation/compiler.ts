@@ -123,10 +123,11 @@ function getCurrentVector(element: FixtureElement, element_name: string): string
     case "voltage_source":
     case "inductor":
       return `i(${element_name})`
-    case "current_source":
     case "resistor":
     case "capacitor":
       return `@${element_name}[i]`
+    case "current_source":
+      return `@${element_name}[current]`
     case "diode":
       return `@${element_name}[id]`
   }

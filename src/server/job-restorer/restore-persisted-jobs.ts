@@ -1,5 +1,6 @@
 import { readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
+import type { Job } from "@/shared/job-types"
 import type { JobStore } from "../job-store"
 import type { ModelRunStore } from "../model-run-store"
 import { JobRestoreMarkerError, restoreJobDirectory } from "./restore-job-directory"
@@ -9,6 +10,50 @@ export interface PersistedJobRestoreFailure {
   job_id: string
   error_code: JobRestoreMarkerError["code"] | "job_restore_failed"
   cause: string
+}
+
+async function restorePersistedModelForJob(input: {
+  job: Job
+  job_dir: string
+  job_store: JobStore
+  model_run_store: ModelRunStore
+}) {
+  const model_run = await restoreModelDirectory({
+    job_id: input.job.job_id,
+    model_dir: join(input.job_dir, "spice"),
+    model_run_store: input.model_run_store,
+  })
+  if (model_run) {
+    if (input.job.use_openai === undefined && model_run.use_openai !== undefined) {
+      input.job_store.updateJob(input.job.job_id, { use_openai: model_run.use_openai })
+    } else if (input.job.use_openai !== undefined && model_run.use_openai !== input.job.use_openai) {
+      input.model_run_store.updateModelRun(model_run.model_run_id, {
+        use_openai: input.job.use_openai,
+      })
+    }
+  }
+  return model_run
+}
+
+export async function restorePersistedJob(input: {
+  job_id: string
+  job_dir: string
+  job_store: JobStore
+  model_run_store: ModelRunStore
+}) {
+  const job = await restoreJobDirectory({
+    job_id: input.job_id,
+    job_dir: input.job_dir,
+    job_store: input.job_store,
+  })
+  if (!job) return {}
+  const model_run = await restorePersistedModelForJob({
+    job,
+    job_dir: input.job_dir,
+    job_store: input.job_store,
+    model_run_store: input.model_run_store,
+  })
+  return { job, model_run }
 }
 
 export async function restorePersistedJobs(input: {
@@ -28,24 +73,20 @@ export async function restorePersistedJobs(input: {
     }
     const job_dir = join(input.jobs_root, entry.name)
     try {
-      const job = await restoreJobDirectory({ job_id: entry.name, job_dir, job_store: input.job_store })
+      const job = await restoreJobDirectory({
+        job_id: entry.name,
+        job_dir,
+        job_store: input.job_store,
+      })
       if (!job) continue
       jobs_restored += 1
-      const model_run = await restoreModelDirectory({
-        job_id: entry.name,
-        model_dir: join(job_dir, "spice"),
+      const model_run = await restorePersistedModelForJob({
+        job,
+        job_dir,
+        job_store: input.job_store,
         model_run_store: input.model_run_store,
       })
-      if (model_run) {
-        model_runs_restored += 1
-        if (job.use_openai === undefined && model_run.use_openai !== undefined) {
-          input.job_store.updateJob(job.job_id, { use_openai: model_run.use_openai })
-        } else if (job.use_openai !== undefined && model_run.use_openai !== job.use_openai) {
-          input.model_run_store.updateModelRun(model_run.model_run_id, {
-            use_openai: job.use_openai,
-          })
-        }
-      }
+      if (model_run) model_runs_restored += 1
     } catch (error) {
       const failure = {
         job_id: entry.name,

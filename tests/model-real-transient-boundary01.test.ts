@@ -179,7 +179,11 @@ function agentPlanProposal(): unknown {
             resistance_ohms: 10_000,
           },
         ],
-        analysis: { type: "transient", step: 0.00005, stop: 0.003 },
+        analysis: {
+          type: "transient",
+          step: 0.000050000000123,
+          stop: 0.0030004681647940075,
+        },
         observations: [
           {
             id: "out_response",

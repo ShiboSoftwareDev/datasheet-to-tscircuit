@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -10,6 +11,7 @@ import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import { getModelRunFile } from "@/server/model-run-api/get-model-run-file"
 import type { ModelRunApiContext } from "@/server/model-run-api/model-run-api-context"
+import { isModelRunPaused } from "@/shared/model-run-status"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 
 test("persisted component and model jobs survive a server restart and deletion removes both", async () => {
@@ -769,6 +771,96 @@ test("legacy completed model runs fail closed without a server validation result
   expect(restored_models.getModelRunForJob("legacy_job")?.error_message).toContain(
     "no passing server-owned validation result",
   )
+
+  await rm(jobs_root, { recursive: true, force: true })
+})
+
+test("restart preserves a successful partial SPICE pipeline as a paused development run", async () => {
+  const jobs_root = await mkdtemp(join(tmpdir(), "datasheet-partial-model-restore-"))
+  const job_id = "partial_model_job"
+  const job_dir = join(jobs_root, job_id)
+  const model_dir = join(job_dir, "spice")
+  const timestamp = "2026-08-08T12:00:00.000Z"
+  const development_source = ".SUBCKT PARTIAL IN OUT\nR1 IN OUT 1k\n.ENDS PARTIAL\n"
+  const revision = createHash("sha256").update(development_source.trim()).digest("hex").slice(0, 16)
+  await mkdir(model_dir, { recursive: true })
+  await Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\npartial pipeline fixture")
+
+  const original_jobs = new JobStore()
+  original_jobs.createJob({ job_id, job_dir, file_name: "partial.pdf" })
+  const original_models = new ModelRunStore()
+  original_models.createModelRun({
+    model_run_id: "partial_model",
+    job_id,
+    model_dir,
+    effort_multiplier: 1,
+  })
+  original_models.updateModelRun("partial_model", {
+    status: "complete",
+    is_complete: true,
+    has_errors: false,
+    completed_at: timestamp,
+    development_model: {
+      model_source: development_source,
+      model_card: "Development model; not published.",
+      manifest: {
+        version: 1,
+        part_number: "PARTIAL",
+        dialect: "portable",
+        entry_name: "PARTIAL",
+        model_file: "model.lib",
+        revision,
+        simulator: "ngspice",
+        generated_at: timestamp,
+        pins: [
+          { component_pin: "1", spice_node: "IN" },
+          { component_pin: "2", spice_node: "OUT" },
+        ],
+      },
+    },
+    pipeline: {
+      pipeline_id: "spice_generation",
+      status: "completed",
+      sequence: 4,
+      started_at: timestamp,
+      updated_at: timestamp,
+      stage_results: {
+        find_reference_graphs: {
+          stage_id: "find_reference_graphs",
+          status: "completed",
+          debug_ref: "spice/runs/local/.pipeline/stages/01-find-reference-graphs",
+          started_at: timestamp,
+          completed_at: timestamp,
+          duration_ms: 1,
+        },
+        infer_spice_model: {
+          stage_id: "infer_spice_model",
+          status: "completed",
+          debug_ref: "spice/runs/local/.pipeline/stages/04-infer-spice-model",
+          started_at: timestamp,
+          completed_at: timestamp,
+          duration_ms: 1,
+        },
+        publish: {
+          stage_id: "publish",
+          status: "pending",
+          debug_ref: "spice/runs/local/.pipeline/stages/09-publish",
+        },
+      },
+    },
+  })
+
+  const restored_jobs = new JobStore()
+  const restored_models = new ModelRunStore()
+  await restorePersistedJobs({ jobs_root, job_store: restored_jobs, model_run_store: restored_models })
+
+  const restored = restored_models.getModelRunForJob(job_id)
+  expect(restored?.status).toBe("complete")
+  expect(isModelRunPaused(restored!)).toBe(true)
+  expect(restored?.pipeline?.stage_results.infer_spice_model.status).toBe("completed")
+  expect(restored?.pipeline?.stage_results.publish.status).toBe("pending")
+  expect(restored?.development_model?.model_source).toBe(development_source)
+  expect(restored?.model_source).toBeUndefined()
 
   await rm(jobs_root, { recursive: true, force: true })
 })

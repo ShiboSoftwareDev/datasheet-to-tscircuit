@@ -1,9 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog"
-import * as Popover from "@radix-ui/react-popover"
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronDown,
   Clock3,
   Download,
   FileCode2,
@@ -16,7 +14,12 @@ import {
   X,
 } from "lucide-react"
 import { useEffect, useState } from "react"
-import type { Job, ModelProgressPhase, ModelRun, ModelRunStatus } from "@/shared/job-types"
+import type { Job, ModelRun, ModelRunStatus } from "@/shared/job-types"
+import {
+  getModelPipelineElapsedTime,
+  getModelPipelineProgress,
+  isModelRunPaused,
+} from "@/shared/model-run-status"
 import { isRetainedAcceptedWarning } from "@/shared/model-warnings"
 import { getModelRunFileUrl } from "../api"
 import type { useModelRun } from "../use-model-run"
@@ -37,6 +40,7 @@ const STATUS_COPY: Record<ModelRunStatus, string> = {
 }
 
 function getStatusCopy(model_run: ModelRun): string {
+  if (isModelRunPaused(model_run)) return "Paused"
   if (model_run.status === "complete" && (model_run.warnings?.length ?? 0) > 0) {
     return "Available with warnings"
   }
@@ -53,40 +57,6 @@ function getStatusCopy(model_run: ModelRun): string {
   return STATUS_COPY[model_run.status]
 }
 
-function getProgressPhaseCopy(model_run: ModelRun): string {
-  if (
-    model_run.progress?.phase === "timed_out" &&
-    !model_run.progress.message.toLowerCase().includes("no output")
-  ) {
-    return "Ran out of iterations"
-  }
-  return PROGRESS_PHASE_COPY[model_run.progress?.phase ?? "queued"]
-}
-
-const PROGRESS_PHASE_COPY: Record<ModelProgressPhase, string> = {
-  queued: "Queued",
-  characterizing: "Characterizing device",
-  designing_validation: "Designing validation",
-  generating_model: "Generating model",
-  repairing: "Repairing model",
-  publishing: "Publishing model",
-  extracting_datasheet: "Reading datasheet",
-  digitizing_graphs: "Digitizing graphs",
-  preparing_benchmarks: "Preparing references",
-  waiting_for_component: "Waiting for component",
-  locking_benchmarks: "Locking benchmarks",
-  building_baseline: "Building baseline",
-  simulating: "Simulating",
-  scoring: "Scoring",
-  refining: "Refining model",
-  finalizing: "Finalizing champion",
-  validating: "Validating champion",
-  complete: "Complete",
-  timed_out: "Timed out",
-  failed: "Failed",
-  cancelled: "Stopped",
-}
-
 function formatDuration(milliseconds: number): string {
   const total_seconds = Math.max(0, Math.floor(milliseconds / 1000))
   const hours = Math.floor(total_seconds / 3600)
@@ -95,18 +65,6 @@ function formatDuration(milliseconds: number): string {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
     : `${minutes}:${String(seconds).padStart(2, "0")}`
-}
-
-function getElapsedTime(model_run: ModelRun, now: number): number {
-  if (!model_run.segment_started_at) return model_run.elapsed_time_ms
-  const segment_start = new Date(model_run.segment_started_at).valueOf()
-  return model_run.elapsed_time_ms + (Number.isFinite(segment_start) ? Math.max(0, now - segment_start) : 0)
-}
-
-function formatProgressTime(value: string): string {
-  const date = new Date(value)
-  if (!Number.isFinite(date.valueOf())) return "now"
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
 }
 
 export function getModelMatchMetrics(model_run: ModelRun): {
@@ -294,68 +252,13 @@ export function ModelValidationScope({ model_run }: { model_run: ModelRun }) {
   )
 }
 
-function PreviousTasks({ model_run, current_task }: { model_run: ModelRun; current_task: string }) {
-  const history = model_run.progress_history
-    .filter((event) => event.sequence !== model_run.progress?.sequence)
-    .slice(-8)
-    .reverse()
-
-  return (
-    <Popover.Root>
-      <Popover.Trigger asChild>
-        <button
-          className="model-header-stat model-current-task-stat model-history-trigger"
-          type="button"
-          disabled={history.length === 0}
-          title={history.length === 0 ? "No previous tasks" : "Show previous tasks"}
-        >
-          <span>Current task</span>
-          <span className="model-current-task-row">
-            <strong title={current_task}>{current_task}</strong>
-            <ChevronDown size={18} />
-          </span>
-          <small>
-            {getProgressPhaseCopy(model_run)}
-            {model_run.progress ? ` · updated ${formatProgressTime(model_run.progress.updated_at)}` : ""}
-          </small>
-        </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content className="model-history-popover" align="start" side="bottom" sideOffset={3}>
-          <header>
-            <strong>Previous tasks</strong>
-            <small>{history.length} recent</small>
-          </header>
-          <ol>
-            {history.map((event) => (
-              <li key={`${event.sequence}-${event.updated_at}`}>
-                <i />
-                <span>
-                  <strong>{PROGRESS_PHASE_COPY[event.phase]}</strong>
-                  <small>{event.message}</small>
-                </span>
-                <time dateTime={event.updated_at}>{formatProgressTime(event.updated_at)}</time>
-              </li>
-            ))}
-          </ol>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
-  )
-}
-
 function ModelSourceDialog({ model_run, local_run_id }: { model_run: ModelRun; local_run_id?: string }) {
-  const is_showing_candidate = model_run.validation?.artifact_state === "candidate"
+  const development_model = model_run.development_model
   return (
     <Dialog.Root>
       <Dialog.Trigger asChild>
-        <button type="button" disabled={!model_run.model_source}>
-          <FileCode2 size={14} />{" "}
-          {model_run.model_source
-            ? is_showing_candidate
-              ? "View accepted model"
-              : "View model"
-            : "Model pending"}
+        <button type="button" disabled={!development_model}>
+          <FileCode2 size={14} /> {development_model ? "View development model" : "Development model pending"}
         </button>
       </Dialog.Trigger>
       <Dialog.Portal>
@@ -363,13 +266,14 @@ function ModelSourceDialog({ model_run, local_run_id }: { model_run: ModelRun; l
         <Dialog.Content className="model-dialog-content">
           <header>
             <div>
-              <Dialog.Title>{is_showing_candidate ? "Accepted SPICE model" : "SPICE model"}</Dialog.Title>
+              <Dialog.Title>Development SPICE model</Dialog.Title>
               <Dialog.Description>
-                model.lib{model_run.manifest?.dialect ? ` · ${model_run.manifest.dialect}` : ""}
+                model.lib
+                {development_model?.manifest.dialect ? ` · ${development_model.manifest.dialect}` : ""}
               </Dialog.Description>
             </div>
             <div className="model-dialog-actions">
-              <a href={getModelRunFileUrl(model_run.job_id, "model", local_run_id)}>
+              <a href={getModelRunFileUrl(model_run.job_id, "development_model", local_run_id)}>
                 <Download size={14} /> Download
               </a>
               <Dialog.Close asChild>
@@ -380,7 +284,7 @@ function ModelSourceDialog({ model_run, local_run_id }: { model_run: ModelRun; l
             </div>
           </header>
           <pre className="model-source-code">
-            <code>{model_run.model_source}</code>
+            <code>{development_model?.model_source}</code>
           </pre>
         </Dialog.Content>
       </Dialog.Portal>
@@ -393,6 +297,7 @@ export function ModelCandidateProvenance({ model_run }: { model_run: ModelRun })
   if (validation?.artifact_state !== "candidate") return null
   const candidate_revision = validation.model_revision ?? "unknown revision"
   const accepted_revision = model_run.manifest?.revision
+  const development_revision = model_run.development_model?.manifest.revision
   return (
     <section className="model-candidate-provenance" role="status">
       <AlertTriangle size={16} />
@@ -401,8 +306,11 @@ export function ModelCandidateProvenance({ model_run }: { model_run: ModelRun })
         <p>
           The TSX, reference evidence, graphs, and checks below belong to candidate{" "}
           <code>{candidate_revision}</code>.{" "}
+          {development_revision
+            ? `The development model dialog shows revision ${development_revision}. `
+            : ""}
           {accepted_revision
-            ? `View accepted model and downloads still refer to accepted revision ${accepted_revision}.`
+            ? `Published downloads still refer to accepted revision ${accepted_revision}.`
             : "No SPICE model has been accepted or attached yet."}
         </p>
       </div>
@@ -571,29 +479,25 @@ export function ModelPanel({
     )
   }
 
-  const elapsed_time = getElapsedTime(model_run, now)
-  const stage_results = Object.values(model_run.pipeline?.stage_results ?? {})
-  const completed_stages = stage_results.filter(
-    ({ status }) =>
-      status === "completed" || status === "skipped" || status === "failed" || status === "cancelled",
-  ).length
-  const progress = stage_results.length > 0 ? (completed_stages / stage_results.length) * 100 : 0
+  const elapsed_time = getModelPipelineElapsedTime(model_run, now)
+  const stage_progress = getModelPipelineProgress(model_run)
+  const progress = stage_progress.total > 0 ? (stage_progress.completed / stage_progress.total) * 100 : 0
   const is_running = !model_run.is_complete
   const is_restartable = model_run.is_complete
   const is_waiting = model_run.status === "queued" || model_run.status === "waiting_for_component"
-  const current_task = model_run.error_message ?? model_run.progress?.message ?? getStatusCopy(model_run)
   const header_stats = getModelHeaderStats(model_run)
+  const is_paused = isModelRunPaused(model_run)
 
   return (
     <div className="model-workspace">
-      <section className={`model-run-header model-status-${model_run.status}`}>
+      <section className={`model-run-header model-status-${is_paused ? "paused" : model_run.status}`}>
         <div className="model-header-copy">
           <div className="model-header-title-row">
             <h2>{model_run.manifest?.part_number ?? job.file_name.replace(/\.pdf$/i, "")}</h2>
             <span className="model-status-label">
               {is_running && model_run.status !== "cancelling" ? (
                 <LoaderCircle className="spin" size={14} />
-              ) : model_run.status === "complete" ? (
+              ) : model_run.status === "complete" && !is_paused ? (
                 <CheckCircle2 size={14} />
               ) : (
                 <FlaskConical size={14} />
@@ -610,7 +514,6 @@ export function ModelPanel({
               <strong>{stat.value}</strong>
             </div>
           ))}
-          <PreviousTasks model_run={model_run} current_task={current_task} />
         </section>
 
         <div className="model-header-actions">
@@ -649,8 +552,8 @@ export function ModelPanel({
               {is_waiting ? "Waiting to start" : `${formatDuration(elapsed_time)} elapsed`}
             </span>
             <span>
-              {completed_stages}/{stage_results.length || 8} stages · {model_run.effort_multiplier}× repair
-              budget
+              {stage_progress.completed}/{stage_progress.total || 8} stages · {model_run.effort_multiplier}×
+              repair budget
               {model_run.iteration > 0 && ` · repair ${model_run.iteration}`}
             </span>
           </div>

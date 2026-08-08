@@ -12,6 +12,19 @@ function millisecondsApproximatelyEqual(actual: unknown, expected: number): bool
   return Math.abs(actual - expected) <= tolerance
 }
 
+/**
+ * circuit-json-to-spice currently serializes transient values with six
+ * significant digits before ngspice sees them. The experiment record retains
+ * the original value, while graph metadata is reconstructed from that
+ * serialized netlist. Keep the plan-to-experiment check strict and allow only
+ * the maximum rounding error introduced at this graph boundary.
+ */
+function spiceSerializedMillisecondsApproximatelyEqual(actual: unknown, expected: number): boolean {
+  if (typeof actual !== "number" || !Number.isFinite(actual)) return false
+  const tolerance = Math.max(1e-9, Math.abs(expected) * 5e-6)
+  return Math.abs(actual - expected) <= tolerance
+}
+
 function expectedTransientTimestamps(input: {
   start_ms: number
   step_ms: number
@@ -62,13 +75,26 @@ function redundantTerminalSampleIndex(
 export function normalizeTransientBoundaryPoint(
   validation_case: ValidationCase,
   points: ValidationSeriesPoint[],
+  graph: CircuitRecord,
 ): ValidationSeriesPoint[] {
   if (validation_case.analysis.type !== "transient") return points
-  const analysis = validation_case.analysis
+  const start_ms = graph.start_time_ms
+  const step_ms = graph.time_per_step
+  const stop_ms = graph.end_time_ms
+  if (
+    typeof start_ms !== "number" ||
+    !Number.isFinite(start_ms) ||
+    typeof step_ms !== "number" ||
+    !Number.isFinite(step_ms) ||
+    typeof stop_ms !== "number" ||
+    !Number.isFinite(stop_ms)
+  ) {
+    return points
+  }
   const expected_ms = expectedTransientTimestamps({
-    start_ms: (analysis.start ?? 0) * 1_000,
-    step_ms: analysis.step * 1_000,
-    stop_ms: analysis.stop * 1_000,
+    start_ms,
+    step_ms,
+    stop_ms,
   })
   const redundant_index = redundantTerminalSampleIndex(
     points.map(({ x }) => x * 1_000),
@@ -119,9 +145,9 @@ export function validateTransientGraphTiming(input: {
   const expected_stop_ms = analysis.stop * 1_000
   const path = `observations.${input.observation_id}`
   if (
-    !millisecondsApproximatelyEqual(input.graph.start_time_ms, expected_start_ms) ||
-    !millisecondsApproximatelyEqual(input.graph.time_per_step, expected_step_ms) ||
-    !millisecondsApproximatelyEqual(input.graph.end_time_ms, expected_stop_ms)
+    !spiceSerializedMillisecondsApproximatelyEqual(input.graph.start_time_ms, expected_start_ms) ||
+    !spiceSerializedMillisecondsApproximatelyEqual(input.graph.time_per_step, expected_step_ms) ||
+    !spiceSerializedMillisecondsApproximatelyEqual(input.graph.end_time_ms, expected_stop_ms)
   ) {
     return [
       simulatorError(
@@ -131,12 +157,15 @@ export function validateTransientGraphTiming(input: {
       ),
     ]
   }
+  const graph_start_ms = input.graph.start_time_ms as number
+  const graph_step_ms = input.graph.time_per_step as number
+  const graph_stop_ms = input.graph.end_time_ms as number
   const timestamps = input.graph.timestamps_ms
   if (!Array.isArray(timestamps)) return []
   const expected = expectedTransientTimestamps({
-    start_ms: expected_start_ms,
-    step_ms: expected_step_ms,
-    stop_ms: expected_stop_ms,
+    start_ms: graph_start_ms,
+    step_ms: graph_step_ms,
+    stop_ms: graph_stop_ms,
   })
   const exact_coverage =
     timestamps.length === expected.length &&

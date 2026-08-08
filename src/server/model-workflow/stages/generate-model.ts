@@ -141,6 +141,11 @@ export const generateModelStage = defineModelStage({
     const model_path = join(attempt.value.artifact_dir, "model.lib")
     const model_card_path = join(attempt.value.artifact_dir, "model-card.md")
     const manifest_path = join(attempt.value.artifact_dir, "model-manifest.json")
+    services.model_run_store.projectDevelopmentModel(context.model_run_id, {
+      model_source: attempt.value.source,
+      model_card: attempt.value.card,
+      manifest: attempt.value.manifest,
+    })
     return {
       status: "completed",
       output: {

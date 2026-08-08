@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path"
-import { parseFreshModelContract } from "../../modeling"
+import { readFile } from "node:fs/promises"
+import { type GeneratedModel, parseFreshModelContract } from "../../modeling"
 import { PipelineError } from "../../pipeline"
 import type { ValidationPlan, ValidationRunResult } from "../../spice-validation"
 import {
@@ -77,20 +78,32 @@ export const repairModelStage = defineModelStage({
   id: "repair_spice_model",
   depends_on: ["compare_simulation_outputs"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
-    if (dependency_outputs.compare_simulation_outputs.passed) {
+    const comparison = dependency_outputs.compare_simulation_outputs
+    const [comparison_model_source, comparison_model_card, comparison_manifest] = await Promise.all([
+      readFile(comparison.model_path, "utf8"),
+      readFile(comparison.model_card_path, "utf8"),
+      readJson(comparison.manifest_path),
+    ])
+    services.model_run_store.projectDevelopmentModel(context.model_run_id, {
+      model_source: comparison_model_source,
+      model_card: comparison_model_card,
+      manifest: comparison_manifest as GeneratedModel["manifest"],
+    })
+
+    if (comparison.passed) {
       return {
         status: "completed",
         output: {
-          result_path: dependency_outputs.compare_simulation_outputs.result_path,
-          model_path: dependency_outputs.compare_simulation_outputs.model_path,
-          model_card_path: dependency_outputs.compare_simulation_outputs.model_card_path,
-          manifest_path: dependency_outputs.compare_simulation_outputs.manifest_path,
-          contract_path: dependency_outputs.compare_simulation_outputs.contract_path,
-          plan_path: dependency_outputs.compare_simulation_outputs.plan_path,
-          evidence_dir: dependency_outputs.compare_simulation_outputs.evidence_dir,
+          result_path: comparison.result_path,
+          model_path: comparison.model_path,
+          model_card_path: comparison.model_card_path,
+          manifest_path: comparison.manifest_path,
+          contract_path: comparison.contract_path,
+          plan_path: comparison.plan_path,
+          evidence_dir: comparison.evidence_dir,
           passed: true,
           repair_attempts: 0,
-          revision: dependency_outputs.compare_simulation_outputs.revision,
+          revision: comparison.revision,
         },
         metrics: { repair_attempts: 0 },
       }
@@ -183,6 +196,14 @@ export const repairModelStage = defineModelStage({
         debug_dir: join(debug_dir, `candidate-${repair_attempt}`),
         on_output: (stream, message) =>
           appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+      })
+      const previous_development_model = services.model_run_store.getModelRun(
+        context.model_run_id,
+      )?.development_model
+      services.model_run_store.projectDevelopmentModel(context.model_run_id, {
+        model_source: candidate.value.source,
+        model_card: candidate.value.card,
+        manifest: candidate.value.manifest,
       })
       services.model_run_store.updateModelRun(context.model_run_id, { status: "validating" })
       updateModelProgress({
@@ -319,6 +340,9 @@ export const repairModelStage = defineModelStage({
           revision: previous_candidate.revision,
           signal,
         })
+        if (previous_development_model) {
+          services.model_run_store.projectDevelopmentModel(context.model_run_id, previous_development_model)
+        }
         await appendModelLog(
           services.model_run_store,
           context.model_run_id,

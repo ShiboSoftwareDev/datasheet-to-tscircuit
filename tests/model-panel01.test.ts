@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import type { ModelRun } from "@/shared/job-types"
+import { getModelPipelineElapsedTime, getModelPipelineProgress } from "@/shared/model-run-status"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 import {
   getModelHeaderStats,
@@ -35,6 +36,66 @@ test("model header derives match percentage from authoritative normalized RMSE",
 
   expect(metrics.normalized_rmse).toBe(0.4)
   expect(metrics.match_score).toBe(0.6)
+})
+
+test("model progress stops at the furthest completed stage and ignores later skips", () => {
+  const timestamp = "2026-08-08T04:23:46.738Z"
+  const model_run = {
+    elapsed_time_ms: 87_155_348,
+    pipeline: {
+      pipeline_id: "spice_generation",
+      status: "completed",
+      sequence: 9,
+      started_at: timestamp,
+      updated_at: "2026-08-08T04:26:07.494Z",
+      stage_results: {
+        find_reference_graphs: {
+          stage_id: "find_reference_graphs",
+          status: "skipped",
+          debug_ref: "",
+        },
+        create_comparison_graphs: {
+          stage_id: "create_comparison_graphs",
+          status: "skipped",
+          debug_ref: "",
+        },
+        infer_spice_model: {
+          stage_id: "infer_spice_model",
+          status: "completed",
+          debug_ref: "",
+        },
+        create_simulation_tsx: {
+          stage_id: "create_simulation_tsx",
+          status: "skipped",
+          debug_ref: "",
+        },
+        run_simulations: {
+          stage_id: "run_simulations",
+          status: "skipped",
+          debug_ref: "",
+        },
+        compare_simulation_outputs: {
+          stage_id: "compare_simulation_outputs",
+          status: "skipped",
+          debug_ref: "",
+        },
+        repair_spice_model: {
+          stage_id: "repair_spice_model",
+          status: "skipped",
+          debug_ref: "",
+        },
+        wait_for_component: {
+          stage_id: "wait_for_component",
+          status: "skipped",
+          debug_ref: "",
+        },
+        publish: { stage_id: "publish", status: "skipped", debug_ref: "" },
+      },
+    },
+  } as const
+
+  expect(getModelPipelineProgress(model_run)).toEqual({ completed: 3, total: 9 })
+  expect(getModelPipelineElapsedTime(model_run, Date.now())).toBe(140_756)
 })
 
 test("model header clamps derived match percentage at zero", () => {
@@ -287,7 +348,7 @@ test("failed candidate diagnostics are visible while repair is still running", (
   expect(html).toContain("Viewer produced no completed transient waveform.")
 })
 
-test("model panel keeps compact progress without rendering the execution trace", () => {
+test("model panel keeps pipeline progress without duplicating agent or task history", () => {
   const timestamp = "2026-08-04T00:00:00.000Z"
   const html = renderToStaticMarkup(
     createElement(ModelPanel, {
@@ -358,13 +419,15 @@ test("model panel keeps compact progress without rendering the execution trace",
     } as Parameters<typeof ModelPanel>[0]),
   )
 
-  expect(html).toContain("Generating candidate")
   expect(html).toContain("1/2 stages")
   expect(html).toContain("Waiting for benchmark TSX")
   expect(html).toContain("Waiting for analog simulation")
   expect(html).toContain("Reference graph comparison")
   expect(html).not.toContain("Model execution trace")
   expect(html).not.toContain("internal only stage")
+  expect(html).not.toContain("Generating candidate")
+  expect(html).not.toContain("Current task")
+  expect(html).not.toContain("Previous tasks")
 })
 
 test("model panel offers to restart successful SPICE generation", () => {
@@ -415,4 +478,71 @@ test("model panel offers to restart successful SPICE generation", () => {
   )
 
   expect(html).toContain("Restart SPICE generation")
+})
+
+test("model header opens the development model independently of publication", () => {
+  const timestamp = "2026-08-04T00:00:00.000Z"
+  const html = renderToStaticMarkup(
+    createElement(ModelPanel, {
+      job: {
+        job_id: "job-development-model",
+        file_name: "TPS63802.pdf",
+        created_at: timestamp,
+        display_status: "complete",
+        is_complete: true,
+        has_errors: false,
+        logs: [],
+      },
+      model_run_state: {
+        model_run: {
+          model_run_id: "model-development",
+          job_id: "job-development-model",
+          created_at: timestamp,
+          updated_at: timestamp,
+          status: "complete",
+          is_complete: true,
+          has_errors: false,
+          effort_multiplier: 1,
+          elapsed_time_ms: 1_000,
+          iteration: 0,
+          logs: [],
+          progress_history: [],
+          preview_options: [],
+          development_model: {
+            model_source: ".SUBCKT TPS63802 VIN VOUT GND\n.ENDS TPS63802\n",
+            model_card: "Development candidate",
+            manifest: {
+              version: 1,
+              part_number: "TPS63802",
+              dialect: "portable",
+              entry_name: "TPS63802",
+              model_file: "model.lib",
+              revision: "1234567890abcdef",
+              simulator: "ngspice",
+              generated_at: timestamp,
+              pins: [
+                { component_pin: "1", spice_node: "VIN" },
+                { component_pin: "2", spice_node: "VOUT" },
+              ],
+            },
+          },
+        },
+        is_loading: false,
+        is_starting: false,
+        is_extending: false,
+        is_cancelling: false,
+        is_retrying: false,
+        error_message: undefined,
+        local_run_id: undefined,
+        is_read_only: false,
+        start: async () => undefined,
+        extend: async () => undefined,
+        cancel: async () => undefined,
+        retry: async () => undefined,
+      },
+    } as Parameters<typeof ModelPanel>[0]),
+  )
+
+  expect(html).toContain("View development model")
+  expect(html).not.toContain("Development model pending")
 })

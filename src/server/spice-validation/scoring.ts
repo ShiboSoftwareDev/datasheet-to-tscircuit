@@ -35,13 +35,32 @@ function failureResult(
 }
 
 function metricsFromErrors(errors: number[], normalization: number): ObservationComparisonMetrics {
-  const squared_sum = errors.reduce((sum, error) => sum + error * error, 0)
-  const max_absolute_error = errors.reduce((maximum, error) => Math.max(maximum, Math.abs(error)), 0)
+  let rms_scale = 0
+  let scaled_squared_sum = 0
+  let max_absolute_error = 0
+  for (const error of errors) {
+    const absolute_error = Number.isFinite(error) ? Math.abs(error) : Number.MAX_VALUE
+    max_absolute_error = Math.max(max_absolute_error, absolute_error)
+    if (absolute_error === 0) continue
+    if (absolute_error > rms_scale) {
+      const ratio = rms_scale / absolute_error
+      scaled_squared_sum = scaled_squared_sum * ratio * ratio + 1
+      rms_scale = absolute_error
+    } else {
+      const ratio = absolute_error / rms_scale
+      scaled_squared_sum += ratio * ratio
+    }
+  }
+  const root_mean_square = rms_scale === 0 ? 0 : rms_scale * Math.sqrt(scaled_squared_sum / errors.length)
   const denominator = Math.max(Math.abs(normalization), NORMALIZATION_FLOOR)
+  const finite_ratio = (value: number) => {
+    const ratio = value / denominator
+    return Number.isFinite(ratio) ? ratio : Number.MAX_VALUE
+  }
   return {
     sample_count: errors.length,
-    normalized_rmse: Math.sqrt(squared_sum / errors.length) / denominator,
-    normalized_max_error: max_absolute_error / denominator,
+    normalized_rmse: finite_ratio(root_mean_square),
+    normalized_max_error: finite_ratio(max_absolute_error),
     max_absolute_error,
   }
 }

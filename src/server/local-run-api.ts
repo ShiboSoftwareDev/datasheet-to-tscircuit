@@ -4,15 +4,14 @@ import type { PublicPipelineSnapshot } from "@/shared/job-types"
 import type { LocalRunMode } from "@/shared/local-run"
 import type { DebugPipelineId, DebugRunMode } from "@/shared/pipeline-debug"
 import type { JobRunnerContext } from "./component-workflow/types"
-import { getJobFile } from "./job-api/get-job-file"
-import type { JobStore } from "./job-store"
-import { listLocalRuns, loadLocalRunWorkspace, readLocalRunSummary } from "./local-runs"
-import { createModelRunApiHandler } from "./model-run-api"
-import type { ModelRunStore } from "./model-run-store"
+import { JobStore } from "./job-store"
+import { restorePersistedJob } from "./job-restorer"
+import { listLocalRuns, readLocalRunSummary } from "./local-runs"
+import { ModelRunStore } from "./model-run-store"
 import type { ModelRunnerContext } from "./model-workflow/types"
 import { loadPipelineTaskInputBundle } from "./pipeline"
 import { PIPELINE_REGISTRY, type RegisteredPipelineId } from "./pipeline-registry"
-import { createPipelineLocalRun } from "./pipeline-local-run"
+import { createPipelineJobRun } from "./pipeline-local-run"
 
 interface LocalRunApiContext extends JobRunnerContext, ModelRunnerContext {
   root_dir: string
@@ -120,9 +119,18 @@ async function prepareFromTask(request: StartLocalRunRequest, context: LocalRunA
   }
   const mode: LocalRunMode =
     request.mode === "pipeline" ? "pipeline" : request.mode === "stage" ? "task" : "from_task"
-  return createPipelineLocalRun({
-    rootDir: context.root_dir,
+  return createPipelineJobRun({
+    context: {
+      rootDir: context.root_dir,
+      jobsRoot: context.jobs_root,
+      localRunsRoot: context.local_runs_root,
+      jobStore: context.job_store,
+      modelRunStore: context.model_run_store,
+    },
     bundle,
+    targetJobId: request.job_id,
+    sourceJobId: request.job_id,
+    executionKind: "in_place",
     mode,
     ...(mode === "pipeline" ? {} : { taskId }),
   })
@@ -130,17 +138,29 @@ async function prepareFromTask(request: StartLocalRunRequest, context: LocalRunA
 
 async function prepareFromLocal(localRunId: string, context: LocalRunApiContext) {
   const source = await readLocalRunSummary(context.local_runs_root, localRunId)
+  if (source.version !== 2 || !source.target_job_id) {
+    throw new Error("This historical isolated run has no regular target job")
+  }
   const bundle = await loadPipelineTaskInputBundle(source.input_path)
-  return createPipelineLocalRun({
-    rootDir: context.root_dir,
+  return createPipelineJobRun({
+    context: {
+      rootDir: context.root_dir,
+      jobsRoot: context.jobs_root,
+      localRunsRoot: context.local_runs_root,
+      jobStore: context.job_store,
+      modelRunStore: context.model_run_store,
+    },
     bundle,
+    targetJobId: source.target_job_id,
+    sourceJobId: source.source_job_id,
+    executionKind: "in_place",
     mode: source.mode,
     ...(source.task_id ? { taskId: source.task_id } : {}),
     parentLocalRunId: source.local_run_id,
   })
 }
 
-function launchLocalRun(prepared: Awaited<ReturnType<typeof createPipelineLocalRun>>): void {
+function launchLocalRun(prepared: Awaited<ReturnType<typeof createPipelineJobRun>>): void {
   void prepared.execute().catch((error) => {
     console.error("[local-run] execution_failed", {
       local_run_id: prepared.summary.local_run_id,
@@ -149,23 +169,102 @@ function launchLocalRun(prepared: Awaited<ReturnType<typeof createPipelineLocalR
   })
 }
 
+async function synchronizeCompletedCliRun(
+  summary: Awaited<ReturnType<typeof readLocalRunSummary>>,
+  context: LocalRunApiContext,
+): Promise<void> {
+  if (summary.version !== 2 || summary.status === "running" || !summary.target_job_id) return
+  const diskJobs = new JobStore({
+    checkpoint_writer: () => undefined,
+    log_writer: async () => undefined,
+  })
+  const diskModels = new ModelRunStore({
+    checkpoint_writer: () => undefined,
+    log_writer: async () => undefined,
+  })
+  const targetJobDir = join(context.jobs_root, summary.target_job_id)
+  await restorePersistedJob({
+    job_id: summary.target_job_id,
+    job_dir: targetJobDir,
+    job_store: diskJobs,
+    model_run_store: diskModels,
+  })
+  const job = diskJobs.getJob(summary.target_job_id)
+  const jobDir = diskJobs.getJobDir(summary.target_job_id)
+  if (!job || !jobDir) throw new Error(`Local run ${summary.local_run_id} target job is unavailable`)
+  const retrySource = diskJobs.getJobRetrySource(summary.target_job_id)
+  context.job_store.refreshRestoredJob({
+    ...job,
+    job_dir: jobDir,
+    warnings: job.warnings ?? [],
+    ...(retrySource?.additional_instructions
+      ? { additional_instructions: retrySource.additional_instructions }
+      : {}),
+  })
+  const modelRun = diskModels.getModelRunForJob(summary.target_job_id)
+  if (modelRun) {
+    const modelDir = diskModels.getModelDir(modelRun.model_run_id)
+    if (!modelDir) throw new Error(`Local run ${summary.local_run_id} model workspace is unavailable`)
+    context.model_run_store.refreshRestoredModelRun({
+      model_dir: modelDir,
+      model_run: modelRun,
+      logs: modelRun.logs,
+    })
+  }
+}
+
 export function createLocalRunApiHandler(context: LocalRunApiContext) {
+  const synchronizedCliRuns = new Set<string>()
+  const synchronizingCliRuns = new Map<string, Promise<void>>()
+  const serverLaunchedRuns = new Set<string>()
+  const synchronize = async (summary: Awaited<ReturnType<typeof readLocalRunSummary>>) => {
+    if (serverLaunchedRuns.has(summary.local_run_id)) return
+    const key = `${summary.local_run_id}:${summary.status}:${summary.completed_at ?? ""}`
+    if (summary.status === "running" || synchronizedCliRuns.has(key)) return
+    const existing = synchronizingCliRuns.get(key)
+    if (existing) return existing
+    const pending = synchronizeCompletedCliRun(summary, context)
+      .then(() => {
+        synchronizedCliRuns.add(key)
+      })
+      .finally(() => synchronizingCliRuns.delete(key))
+    synchronizingCliRuns.set(key, pending)
+    return pending
+  }
   return async (request: Request): Promise<Response | undefined> => {
     const requestUrl = new URL(request.url)
 
     if (requestUrl.pathname === "/api/local-runs" && request.method === "GET") {
-      return Response.json({ local_runs: await listLocalRuns(context.local_runs_root) })
+      const local_runs = (await listLocalRuns(context.local_runs_root)).filter(
+        (summary) => summary.version === 2,
+      )
+      for (const summary of [...local_runs].reverse()) {
+        void synchronize(summary).catch((error) => {
+          console.error("[local-run] checkpoint_refresh_failed", {
+            local_run_id: summary.local_run_id,
+            cause: error instanceof Error ? error.message : String(error),
+          })
+        })
+      }
+      return Response.json({ local_runs })
     }
     if (requestUrl.pathname === "/api/local-run/get" && request.method === "GET") {
       const localRunId = requestUrl.searchParams.get("local_run_id")?.trim()
       if (!localRunId) return errorResponse(400, "local_run_id_required", "local_run_id is required.")
       try {
-        const local = await loadLocalRunWorkspace(context.local_runs_root, localRunId)
-        return Response.json({
-          local_run: local.summary,
-          job: local.job,
-          ...(local.model_run ? { model_run: local.model_run } : {}),
-        })
+        const summary = await readLocalRunSummary(context.local_runs_root, localRunId)
+        if (summary.version === 2 && summary.target_job_id) {
+          await synchronize(summary)
+          const job = context.job_store.getJob(summary.target_job_id)
+          if (!job) throw new Error(`Local run ${localRunId} target job is unavailable`)
+          const model_run = context.model_run_store.getModelRunForJob(summary.target_job_id)
+          return Response.json({ local_run: summary, job, ...(model_run ? { model_run } : {}) })
+        }
+        return errorResponse(
+          410,
+          "historical_local_run",
+          "This historical isolated output predates mutable Local jobs.",
+        )
       } catch (error) {
         return errorResponse(
           404,
@@ -179,6 +278,7 @@ export function createLocalRunApiHandler(context: LocalRunApiContext) {
       if (!parsed) return errorResponse(400, "invalid_local_run_request", "Invalid Local run request.")
       try {
         const prepared = await prepareFromTask(parsed, context)
+        serverLaunchedRuns.add(prepared.summary.local_run_id)
         launchLocalRun(prepared)
         return Response.json({ local_run: prepared.summary }, { status: 202 })
       } catch (error) {
@@ -195,6 +295,7 @@ export function createLocalRunApiHandler(context: LocalRunApiContext) {
       if (!localRunId) return errorResponse(400, "local_run_id_required", "local_run_id is required.")
       try {
         const prepared = await prepareFromLocal(localRunId, context)
+        serverLaunchedRuns.add(prepared.summary.local_run_id)
         launchLocalRun(prepared)
         return Response.json({ local_run: prepared.summary }, { status: 202 })
       } catch (error) {
@@ -206,30 +307,23 @@ export function createLocalRunApiHandler(context: LocalRunApiContext) {
       }
     }
 
+    // A page refresh retains local_run_id in the browser URL. Let the normal
+    // application/static-file handler serve non-API requests.
+    if (!requestUrl.pathname.startsWith("/api/")) return undefined
+
     const localRunId = requestUrl.searchParams.get("local_run_id")?.trim()
     if (!localRunId) return undefined
-    let local: Awaited<ReturnType<typeof loadLocalRunWorkspace>>
-    try {
-      local = await loadLocalRunWorkspace(context.local_runs_root, localRunId)
-    } catch (error) {
-      return errorResponse(404, "local_run_not_found", error instanceof Error ? error.message : String(error))
+    const summary = await readLocalRunSummary(context.local_runs_root, localRunId).catch(() => undefined)
+    // Version 2 Local records target the main stores, so ordinary API handlers
+    // serve them exactly like any other job even when an old URL retains this query.
+    if (summary?.version === 2) return undefined
+    if (summary?.version === 1) {
+      return errorResponse(
+        410,
+        "historical_local_run",
+        "This historical isolated output predates mutable Local jobs.",
+      )
     }
-    if (requestUrl.pathname === "/api/job/file" && request.method === "GET") {
-      return getJobFile(requestUrl, {
-        ...context,
-        jobs_root: join(context.local_runs_root, localRunId, "workspace"),
-        job_store: local.job_store,
-        model_run_store: local.model_run_store,
-      })
-    }
-    if (requestUrl.pathname.startsWith("/api/model-run/") && request.method === "GET") {
-      const handler = createModelRunApiHandler({
-        ...context,
-        job_store: local.job_store,
-        model_run_store: local.model_run_store,
-      })
-      return handler(request)
-    }
-    return errorResponse(405, "local_run_read_only", "Local run outputs are read-only.")
+    return undefined
   }
 }

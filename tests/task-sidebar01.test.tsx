@@ -150,5 +150,5 @@ test("task sidebar switches to Local runs and exposes a Local-only rerun action"
   expect(html).toContain('role="tab" aria-selected="false">Tasks')
   expect(html).toContain('role="tab" aria-selected="true">Local')
   expect(html).toContain("validate component")
-  expect(html).toContain('title="Run again locally"')
+  expect(html).toContain('title="Run again"')
 })

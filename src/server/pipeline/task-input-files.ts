@@ -8,7 +8,10 @@ import {
   open,
   opendir,
   readFile,
+  readdir,
   realpath,
+  rename,
+  rm,
   unlink,
   writeFile,
   type FileHandle,
@@ -510,5 +513,62 @@ export async function materializePipelineTaskInputFiles(input: {
       await closeQuietly(source)
       if (created && !materialized) await unlinkQuietly(destination)
     }
+  }
+}
+
+/** Restores a selected job to the exact retained pre-task filesystem boundary. */
+export async function restorePipelineTaskInputFiles(input: {
+  bundle: PipelineTaskInputBundle
+  destination_root: string
+  excluded_roots?: readonly string[]
+}): Promise<void> {
+  const destination_root = await realpath(input.destination_root)
+  const temporary_root = join(destination_root, `.restoring-${randomUUID()}`)
+  await mkdir(temporary_root)
+  try {
+    await materializePipelineTaskInputFiles({ bundle: input.bundle, destination_root: temporary_root })
+    const retained_files = new Set(input.bundle.manifest.files.map(({ path }) => path))
+    const retained_directories = new Set(input.bundle.manifest.directories)
+    const excluded_roots = new Set(input.excluded_roots ?? [])
+
+    const prune = async (directory: string, relative_directory = ""): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const relative_path = relative_directory ? join(relative_directory, entry.name) : entry.name
+        const top_level = relative_path.split(sep)[0] ?? ""
+        if (
+          entry.name === basename(temporary_root) ||
+          excluded_roots.has(top_level) ||
+          relative_path === "runs" ||
+          relative_path.startsWith(`runs${sep}`) ||
+          relative_path === join("spice", "runs") ||
+          relative_path.startsWith(`${join("spice", "runs")}${sep}`) ||
+          (entry.isFile() && EXCLUDED_FILE_NAMES.has(entry.name))
+        ) {
+          continue
+        }
+        const path = join(directory, entry.name)
+        if (entry.isDirectory()) {
+          await prune(path, relative_path)
+          if (!retained_directories.has(relative_path)) {
+            await rm(path, { recursive: false }).catch(() => undefined)
+          }
+        } else if (!retained_files.has(relative_path)) {
+          await rm(path, { force: true })
+        }
+      }
+    }
+    await prune(destination_root)
+
+    for (const directory of input.bundle.manifest.directories) {
+      await mkdir(join(destination_root, directory), { recursive: true, mode: 0o700 })
+    }
+    for (const file of input.bundle.manifest.files) {
+      const source = join(temporary_root, file.path)
+      const destination = join(destination_root, file.path)
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
+      await rename(source, destination)
+    }
+  } finally {
+    await rm(temporary_root, { recursive: true, force: true }).catch(() => undefined)
   }
 }

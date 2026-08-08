@@ -741,6 +741,68 @@ test("viewer validation rejects truncated transient waveform coverage", () => {
   expect(result.errors.map(({ code }) => code)).toContain("viewer_waveform_coverage_mismatch")
 })
 
+test("viewer validation accepts only waveform timing precision lost by SPICE serialization", () => {
+  const analysis = {
+    type: "transient" as const,
+    step: 4.6816479400745644e-7,
+    stop: 0.0010004681647940075,
+    start: 0.000001404494382022506,
+  }
+  const graph_start_ms = 0.001404494
+  const graph_step_ms = 0.0004681648
+  const graph_stop_ms = 1.00047
+  const regular_sample_count = Math.floor((graph_stop_ms - graph_start_ms) / graph_step_ms + 1e-9) + 1
+  const timestamps_ms = Array.from(
+    { length: regular_sample_count },
+    (_, index) => graph_start_ms + index * graph_step_ms,
+  )
+  timestamps_ms.push(graph_stop_ms)
+
+  const circuit_json = transientCircuit(timestamps_ms) as MutableCircuitRecord[]
+  const experiment = circuit_json.find((record) => record.type === "simulation_experiment")
+  const graph = circuit_json.find((record) => record.type === "simulation_transient_voltage_graph")
+  if (!experiment || !graph) throw new Error("Missing transient test records")
+  experiment.start_time_ms = analysis.start * 1_000
+  experiment.time_per_step = analysis.step * 1_000
+  experiment.end_time_ms = analysis.stop * 1_000
+  graph.start_time_ms = graph_start_ms
+  graph.time_per_step = graph_step_ms
+  graph.end_time_ms = graph_stop_ms
+  graph.voltage_levels = timestamps_ms.map(() => 0)
+
+  const observation = transient_case.observations[0]
+  if (!observation || observation.type !== "voltage") throw new Error("Missing voltage observation")
+  const validation_case: ValidationCase = {
+    ...transient_case,
+    analysis,
+    observations: [
+      {
+        ...observation,
+        reference: {
+          type: "curve",
+          tolerance: 0.01,
+          points: [
+            { x: analysis.start, y: 0 },
+            { x: analysis.stop, y: 0 },
+          ],
+        },
+      },
+    ],
+  }
+  const result = validateViewerSimulation({ validation_case, circuit_json })
+
+  expect(result.simulation_valid).toBe(true)
+  expect(result.passed).toBe(true)
+  expect(result.series[0]?.points).toHaveLength(timestamps_ms.length)
+
+  experiment.end_time_ms = graph_stop_ms
+  const forged_experiment = validateViewerSimulation({ validation_case, circuit_json })
+  expect(forged_experiment.simulation_valid).toBe(false)
+  expect(forged_experiment.errors.map(({ code }) => code)).toContain(
+    "viewer_transient_experiment_timing_mismatch",
+  )
+})
+
 test("viewer validation rejects gaps hidden inside matching waveform endpoints", () => {
   const forged = transientCircuit() as MutableCircuitRecord[]
   const graph = forged.find((record) => record.type === "simulation_transient_voltage_graph")

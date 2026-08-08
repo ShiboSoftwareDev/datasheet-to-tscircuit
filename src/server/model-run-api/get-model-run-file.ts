@@ -26,6 +26,11 @@ export async function getModelRunFile(request_url: URL, context: ModelRunApiCont
   }
   const file_kind = request_url.searchParams.get("file")
   const files: Record<string, { name: string; content_type: string; max_bytes: number }> = {
+    development_model: {
+      name: "model.lib",
+      content_type: "text/plain; charset=utf-8",
+      max_bytes: 2 * 1024 * 1024,
+    },
     model: { name: "model.lib", content_type: "text/plain; charset=utf-8", max_bytes: 2 * 1024 * 1024 },
     manifest: { name: "model-manifest.json", content_type: "application/json", max_bytes: 2 * 1024 * 1024 },
     report: {
@@ -52,7 +57,17 @@ export async function getModelRunFile(request_url: URL, context: ModelRunApiCont
     return errorResponse({ error_code: "invalid_file", message: "Unknown SPICE model file.", status: 400 })
   }
   let body: Bun.BunFile | Uint8Array<ArrayBuffer>
-  if (file_kind !== "log") {
+  if (file_kind === "development_model") {
+    const source = model_run.development_model?.model_source
+    if (!source?.trim() || Buffer.byteLength(source) > selected.max_bytes) {
+      return errorResponse({
+        error_code: "file_not_ready",
+        message: "The development model is not ready.",
+        status: 404,
+      })
+    }
+    body = new TextEncoder().encode(source)
+  } else if (file_kind !== "log") {
     let publication: Awaited<ReturnType<typeof resolveAcceptedModelPublication>>
     try {
       publication = await resolveAcceptedModelPublication(model_dir, job_id)

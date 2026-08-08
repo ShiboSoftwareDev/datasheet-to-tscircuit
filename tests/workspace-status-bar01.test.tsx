@@ -71,3 +71,37 @@ test("workspace status preserves the latest attempt status while marking the acc
   expect(html).toContain("Failed · Retained")
   expect(html).not.toContain('class="workspace-download-trigger" type="button" disabled=""')
 })
+
+test("workspace status calls a successful partial SPICE pipeline paused instead of ready", () => {
+  const partial_model_run: ModelRun = {
+    ...model_run,
+    warnings: ["Later tasks were intentionally not run."],
+    pipeline: {
+      pipeline_id: "spice_generation",
+      status: "completed",
+      sequence: 3,
+      started_at: "2026-07-24T00:00:00.000Z",
+      updated_at: "2026-07-24T00:01:00.000Z",
+      stage_results: {
+        infer_spice_model: {
+          stage_id: "infer_spice_model",
+          status: "completed",
+          debug_ref: "spice/infer",
+        },
+        publish: {
+          stage_id: "publish",
+          status: "skipped",
+          debug_ref: "spice/publish",
+          reason: "Stage was not selected for this isolated pipeline invocation",
+        },
+      },
+    },
+  }
+  const html = renderToStaticMarkup(
+    <WorkspaceStatusBar job={job} model_run={partial_model_run} is_model_loading={false} />,
+  )
+
+  expect(html).toContain('aria-label="SPICE model status: Paused"')
+  expect(html).toContain(">Paused</span>")
+  expect(html).not.toContain('aria-label="SPICE model status: Ready with warnings"')
+})

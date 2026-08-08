@@ -204,7 +204,7 @@ export function validateViewerSimulation(input: {
     )
     const points = graphPoints(graphs[0]!, observation)
     if (!Array.isArray(points)) return failedSeries(observation, points)
-    return scoreObservation(observation, normalizeTransientBoundaryPoint(validation_case, points))
+    return scoreObservation(observation, normalizeTransientBoundaryPoint(validation_case, points, graphs[0]!))
   })
   const unexpected_graphs = supported_graphs.filter((graph) => !matched_graphs.has(graph))
   if (unexpected_graphs.length > 0) {

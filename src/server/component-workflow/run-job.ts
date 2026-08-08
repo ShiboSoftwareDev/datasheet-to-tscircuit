@@ -25,6 +25,11 @@ export async function runJob(
   const signal = context.job_store.getCancellationSignal(input.job_id)
   const job = context.job_store.getJob(input.job_id)
   if (!job_dir || !signal || !job) throw new Error(`Job ${input.job_id} was not found`)
+  if (!context.job_store.claimPipelineExecution(input.job_id, COMPONENT_PIPELINE.pipeline_id)) return
+  if (!context.job_store.claimPipelineExecution(input.job_id, APPLICATION_PIPELINE.pipeline_id)) {
+    context.job_store.releasePipelineExecution(input.job_id, COMPONENT_PIPELINE.pipeline_id)
+    return
+  }
   const process_runner = context.process_runner ?? new BunProcessRunner()
   const agent_client =
     context.agent_client ??
@@ -212,5 +217,8 @@ export async function runJob(
       error_message: cancelled ? undefined : error_message,
       completed_at: new Date().toISOString(),
     })
+  } finally {
+    context.job_store.releasePipelineExecution(input.job_id, COMPONENT_PIPELINE.pipeline_id)
+    context.job_store.releasePipelineExecution(input.job_id, APPLICATION_PIPELINE.pipeline_id)
   }
 }

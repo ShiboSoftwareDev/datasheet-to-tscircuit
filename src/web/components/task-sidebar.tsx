@@ -336,8 +336,8 @@ export function TaskSidebar({
                         className="task-retry"
                         type="button"
                         disabled={isRerunning}
-                        aria-label={`Run ${localRun.file_name} again locally`}
-                        title="Run again locally"
+                        aria-label={`Run ${localRun.file_name} again`}
+                        title="Run again"
                         onClick={() => on_rerun_local(localRun.local_run_id)}
                       >
                         {isRerunning ? <LoaderCircle className="spin" size={11} /> : <RotateCcw size={11} />}

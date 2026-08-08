@@ -1,25 +1,19 @@
-import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { lstat, mkdir, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import type { PublicPipelineSnapshot } from "@/shared/job-types"
-import type { LocalRunMode, LocalRunSummary } from "@/shared/local-run"
-import type { PipelineJsonValue, PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
+import type { LocalRunMode } from "@/shared/local-run"
 import { JobStore } from "../server/job-store"
 import { restorePersistedJobs } from "../server/job-restorer"
-import { isLocalRunId, listLocalRuns, readLocalRunSummary } from "../server/local-runs"
+import { atomicWriteJsonSync } from "../server/infrastructure/persistence/atomic-write"
+import { listLocalRuns } from "../server/local-runs"
 import { ModelRunStore } from "../server/model-run-store"
-import {
-  loadPipelineTaskInput,
-  loadPipelineTaskInputBundle,
-  retainPipelineTaskInputFiles,
-  type PipelineTaskInputBundle,
-} from "../server/pipeline"
+import { loadPipelineTaskInputBundle } from "../server/pipeline"
 import {
   PIPELINE_REGISTRY,
   PIPELINE_TASK_CATALOG,
   type RegisteredPipelineId,
 } from "../server/pipeline-registry"
-import { runPipelineLocal } from "../server/pipeline-local-run"
+import { clonePipelineJob, createPipelineJobRun, validateLocalInput } from "../server/pipeline-local-run"
 
 const HELP = `datasheet pipeline debugger
 
@@ -27,13 +21,14 @@ Commands:
   debug catalog
   debug job list [--root <repo>]
   debug local list [--root <repo>]
-  debug local run <job-or-local-run-id> --pipeline <id> [--task <id> | --from <id>] [--output <dir>]
+  debug local run <job-id> --pipeline <id> [--task <id> | --from <id>]
+  debug local run --job <source-job-id> --pipeline <id> [--task <id> | --from <id>]
   debug task inspect --input <input.json>
-  debug task run --input <input.json> [--output <dir>]
-  debug pipeline run --input <input.json> [--output <dir>]
+  debug task run --input <input.json>
+  debug pipeline run --input <input.json>
 
-Every command writes machine-readable JSON. Local runs materialize the exact retained
-task input in a fresh workspace under .runtime/local unless --output is supplied.
+Every command writes machine-readable JSON. A positional job is the in-place target.
+--job is a source reference and creates a new regular job before execution.
 `
 
 function option({ args, name }: { args: readonly string[]; name: string }): string | undefined {
@@ -91,15 +86,18 @@ async function resolveInputPath({ jobDir, debugRef }: { jobDir: string; debugRef
 async function restoredState(rootDir: string) {
   const jobsRoot = join(rootDir, ".runtime", "jobs")
   await mkdir(jobsRoot, { recursive: true })
-  // Discovery and input selection are read-only. Local runs get separate stores
-  // backed by the cloned workspace after its input has been resolved.
-  const jobStore = new JobStore({ checkpoint_writer: () => undefined })
-  const modelRunStore = new ModelRunStore({ checkpoint_writer: () => undefined })
+  let restorationComplete = false
+  const checkpointWriter = (path: string, value: unknown) => {
+    if (restorationComplete) atomicWriteJsonSync(path, value)
+  }
+  const jobStore = new JobStore({ checkpoint_writer: checkpointWriter })
+  const modelRunStore = new ModelRunStore({ checkpoint_writer: checkpointWriter })
   const restored = await restorePersistedJobs({
     jobs_root: jobsRoot,
     job_store: jobStore,
     model_run_store: modelRunStore,
   })
+  restorationComplete = true
   return { jobsRoot, jobStore, modelRunStore, restored }
 }
 
@@ -133,123 +131,16 @@ async function inspectInput(path: string) {
   }
 }
 
-async function resolveLocalRunInput(input: {
-  rootDir: string
-  localRunId: string
-  pipelineId: RegisteredPipelineId
-  taskId: string
-}): Promise<{ inputPath: string; source: LocalRunSummary }> {
-  const source = await readLocalRunSummary(join(input.rootDir, ".runtime", "local"), input.localRunId)
-  if (source.status === "running") {
-    throw new Error(`Local run ${input.localRunId} is still running`)
-  }
-  if (source.pipeline_id !== input.pipelineId) {
-    throw new Error(`Local run ${input.localRunId} belongs to ${source.pipeline_id}, not ${input.pipelineId}`)
-  }
-  if (!isRecord(source.stage_results)) {
-    throw new Error(`Local run ${input.localRunId} has no retained stage results`)
-  }
-  const stage = source.stage_results[input.taskId]
-  if (!isRecord(stage) || stage.stage_id !== input.taskId || typeof stage.debug_dir !== "string") {
-    throw new Error(
-      `Local run ${input.localRunId} has no retained input for ${input.pipelineId}/${input.taskId}`,
-    )
-  }
-  const executionRoot = resolve(source.execution_dir)
-  const debugDir = resolve(stage.debug_dir)
-  const debugRef = relative(executionRoot, debugDir)
-  if (debugRef.startsWith("..") || isAbsolute(debugRef)) {
-    throw new Error(`Local run ${input.localRunId} has an invalid debug directory`)
-  }
-  return {
-    inputPath: await resolveInputPath({ jobDir: executionRoot, debugRef }),
-    source,
-  }
-}
-
-function asPipelineJsonValue(value: unknown, path: string): PipelineJsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value
-  if (typeof value === "number" && Number.isFinite(value)) return value
-  if (Array.isArray(value)) {
-    return value.map((entry, index) => asPipelineJsonValue(entry, `${path}[${index}]`))
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, asPipelineJsonValue(entry, `${path}.${key}`)]),
-    )
-  }
-  throw new Error(`Local run has a non-JSON value at ${path}`)
-}
-
-function taskInputExcludedRoots(pipelineId: RegisteredPipelineId): readonly string[] | undefined {
-  return pipelineId === "spice_generation" ? undefined : ["spice"]
-}
-
-async function loadLocalRunTaskBundle(input: {
-  source: LocalRunSummary
-  inputPath: string
-  pipelineId: RegisteredPipelineId
-  taskId: string
-}): Promise<{ bundle: PipelineTaskInputBundle; cleanup?: () => Promise<void> }> {
-  const envelope = await loadPipelineTaskInput(input.inputPath)
-  if (envelope.input_files) {
-    return { bundle: await loadPipelineTaskInputBundle(input.inputPath) }
-  }
-  if (!isRecord(input.source.stage_results)) {
-    throw new Error(`Local run ${input.source.local_run_id} has no retained stage results`)
-  }
-
-  const dependencyStatuses: Record<string, string> = {}
-  const dependencyOutputs: Record<string, PipelineJsonValue> = {}
-  for (const dependencyId of envelope.depends_on) {
-    const dependency = input.source.stage_results[dependencyId]
-    if (!isRecord(dependency) || typeof dependency.status !== "string") {
-      throw new Error(`Local run ${input.source.local_run_id} has no result for dependency ${dependencyId}`)
-    }
-    dependencyStatuses[dependencyId] = dependency.status
-    if (dependency.status !== "completed" || !("output" in dependency)) {
-      throw new Error(
-        `Local run ${input.source.local_run_id} cannot continue at ${input.taskId}: dependency ${dependencyId} is ${dependency.status}`,
-      )
-    }
-    dependencyOutputs[dependencyId] = asPipelineJsonValue(
-      dependency.output,
-      `stage_results.${dependencyId}.output`,
-    )
-  }
-
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "pipeline-local-continuation-"))
-  try {
-    const debugDir = join(temporaryRoot, "stages", input.taskId)
-    await mkdir(debugDir, { recursive: true })
-    const inputFiles = await retainPipelineTaskInputFiles({
-      root_dir: input.source.workspace_dir,
-      debug_dir: debugDir,
-      objects_dir: join(temporaryRoot, "input-objects"),
-      excluded_roots: taskInputExcludedRoots(input.pipelineId),
-    })
-    const derivedEnvelope: PipelineTaskInputEnvelope = {
-      ...envelope,
-      dependency_statuses: dependencyStatuses,
-      dependency_outputs: dependencyOutputs,
-      input_files: inputFiles,
-    }
-    const derivedInputPath = join(debugDir, "input.json")
-    await writeFile(derivedInputPath, `${JSON.stringify(derivedEnvelope, null, 2)}\n`, "utf8")
-    const bundle = await loadPipelineTaskInputBundle(derivedInputPath)
-    return {
-      bundle,
-      cleanup: () => rm(temporaryRoot, { recursive: true, force: true }),
-    }
-  } catch (error) {
-    await rm(temporaryRoot, { recursive: true, force: true })
-    throw error
-  }
-}
-
 async function runLocalJob({ args, rootDir }: { args: readonly string[]; rootDir: string }) {
-  const jobId = args[2]
-  if (!jobId || jobId.startsWith("--")) throw new Error("local run requires a job id")
+  const targetJobId = args[2] && !args[2].startsWith("--") ? args[2] : undefined
+  const referencedJobId = option({ args, name: "--job" })
+  if (targetJobId && referencedJobId) {
+    throw new Error("Select a positional job for in-place execution or use --job to clone, not both")
+  }
+  const sourceJobId = targetJobId ?? referencedJobId
+  if (!sourceJobId) {
+    throw new Error("local run requires a target job or a source reference through --job")
+  }
   const pipelineId = requiredOption({ args, name: "--pipeline" })
   if (!(pipelineId in PIPELINE_REGISTRY)) throw new Error(`Unknown pipeline ${pipelineId}`)
   const registeredPipelineId = pipelineId as RegisteredPipelineId
@@ -264,59 +155,93 @@ async function runLocalJob({ args, rootDir }: { args: readonly string[]; rootDir
   }
 
   const state = await restoredState(rootDir)
-  const jobDir = state.jobStore.getJobDir(jobId)
-  let bundle: PipelineTaskInputBundle
-  let parentLocalRunId: string | undefined
-  let protectedDirs: readonly string[] | undefined
-  let cleanup: (() => Promise<void>) | undefined
-  if (jobDir) {
-    const snapshot = snapshotForPipeline({
-      pipelineId: registeredPipelineId,
-      jobId,
-      jobStore: state.jobStore,
-      modelRunStore: state.modelRunStore,
-    })
-    const retainedTask = snapshot?.stage_results[taskId]
-    if (!retainedTask) throw new Error(`Job ${jobId} has no retained input for ${pipelineId}/${taskId}`)
-    const inputPath = await resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
-    bundle = await loadPipelineTaskInputBundle(inputPath)
-  } else if (isLocalRunId(jobId)) {
-    const localInput = await resolveLocalRunInput({
-      rootDir,
-      localRunId: jobId,
-      pipelineId: registeredPipelineId,
-      taskId,
-    })
-    const localBundle = await loadLocalRunTaskBundle({
-      source: localInput.source,
-      inputPath: localInput.inputPath,
-      pipelineId: registeredPipelineId,
-      taskId,
-    })
-    bundle = localBundle.bundle
-    cleanup = localBundle.cleanup
-    parentLocalRunId = localInput.source.local_run_id
-    protectedDirs = [localInput.source.execution_dir]
-  } else {
-    throw new Error(`Job or Local run ${jobId} was not found`)
+  const jobDir = state.jobStore.getJobDir(sourceJobId)
+  if (!jobDir) throw new Error(`Job ${sourceJobId} was not found`)
+  const snapshot = snapshotForPipeline({
+    pipelineId: registeredPipelineId,
+    jobId: sourceJobId,
+    jobStore: state.jobStore,
+    modelRunStore: state.modelRunStore,
+  })
+  const retainedTask = snapshot?.stage_results[taskId]
+  if (!retainedTask) {
+    throw new Error(`Job ${sourceJobId} has no retained input for ${pipelineId}/${taskId}`)
   }
+  const inputPath = await resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
+  let bundle = await loadPipelineTaskInputBundle(inputPath)
   if (bundle.envelope.pipeline_id !== registeredPipelineId || bundle.envelope.task_id !== taskId) {
-    await cleanup?.()
     throw new Error("Retained task input identity does not match the requested task")
   }
-  try {
-    return await runPipelineLocal({
-      rootDir,
+  const executionContext = {
+    rootDir,
+    jobsRoot: state.jobsRoot,
+    localRunsRoot: join(rootDir, ".runtime", "local"),
+    jobStore: state.jobStore,
+    modelRunStore: state.modelRunStore,
+  }
+  let executionTargetJobId = sourceJobId
+  let executionKind: "in_place" | "clone" = "in_place"
+  if (referencedJobId) {
+    const clone = await clonePipelineJob({
+      context: executionContext,
+      sourceJobId,
       bundle,
+    })
+    executionTargetJobId = clone.jobId
+    bundle = clone.bundle
+    executionKind = "clone"
+  }
+  return (
+    await createPipelineJobRun({
+      context: executionContext,
+      bundle,
+      targetJobId: executionTargetJobId,
+      sourceJobId,
+      executionKind,
       mode,
       taskId: mode === "pipeline" ? undefined : taskId,
-      outputDir: option({ args, name: "--output" }),
-      ...(parentLocalRunId ? { parentLocalRunId } : {}),
-      ...(protectedDirs ? { protectedDirs } : {}),
     })
-  } finally {
-    await cleanup?.()
+  ).execute()
+}
+
+async function runReferencedInput(input: {
+  rootDir: string
+  bundle: Awaited<ReturnType<typeof loadPipelineTaskInputBundle>>
+  mode: LocalRunMode
+}) {
+  validateLocalInput({
+    bundle: input.bundle,
+    mode: input.mode,
+    ...(input.mode === "task" ? { taskId: input.bundle.envelope.task_id } : {}),
+  })
+  const sourceJobId = input.bundle.envelope.execution_context.job_id
+  if (typeof sourceJobId !== "string" || !sourceJobId.trim()) {
+    throw new Error("Retained input has no source job id")
   }
+  const state = await restoredState(input.rootDir)
+  const executionContext = {
+    rootDir: input.rootDir,
+    jobsRoot: state.jobsRoot,
+    localRunsRoot: join(input.rootDir, ".runtime", "local"),
+    jobStore: state.jobStore,
+    modelRunStore: state.modelRunStore,
+  }
+  const clone = await clonePipelineJob({
+    context: executionContext,
+    sourceJobId,
+    bundle: input.bundle,
+  })
+  return (
+    await createPipelineJobRun({
+      context: executionContext,
+      bundle: clone.bundle,
+      targetJobId: clone.jobId,
+      sourceJobId,
+      executionKind: "clone",
+      mode: input.mode,
+      ...(input.mode === "task" ? { taskId: input.bundle.envelope.task_id } : {}),
+    })
+  ).execute()
 }
 
 export async function runDebugCli(args = Bun.argv.slice(2)): Promise<unknown> {
@@ -357,31 +282,21 @@ export async function runDebugCli(args = Bun.argv.slice(2)): Promise<unknown> {
     return inspectInput(requiredOption({ args, name: "--input" }))
   }
   if (args[0] === "task" && args[1] === "run") {
-    assertArguments({ args, positional_count: 2, allowed_options: ["--input", "--output", "--root"] })
+    assertArguments({ args, positional_count: 2, allowed_options: ["--input", "--root"] })
     const bundle = await loadPipelineTaskInputBundle(requiredOption({ args, name: "--input" }))
-    return runPipelineLocal({
-      rootDir,
-      bundle,
-      mode: "task",
-      taskId: bundle.envelope.task_id,
-      outputDir: option({ args, name: "--output" }),
-    })
+    return runReferencedInput({ rootDir, bundle, mode: "task" })
   }
   if (args[0] === "pipeline" && args[1] === "run") {
-    assertArguments({ args, positional_count: 2, allowed_options: ["--input", "--output", "--root"] })
+    assertArguments({ args, positional_count: 2, allowed_options: ["--input", "--root"] })
     const bundle = await loadPipelineTaskInputBundle(requiredOption({ args, name: "--input" }))
-    return runPipelineLocal({
-      rootDir,
-      bundle,
-      mode: "pipeline",
-      outputDir: option({ args, name: "--output" }),
-    })
+    return runReferencedInput({ rootDir, bundle, mode: "pipeline" })
   }
   if (args[0] === "local" && args[1] === "run") {
+    const hasTarget = Boolean(args[2] && !args[2].startsWith("--"))
     assertArguments({
       args,
-      positional_count: 3,
-      allowed_options: ["--pipeline", "--task", "--from", "--output", "--root"],
+      positional_count: hasTarget ? 3 : 2,
+      allowed_options: ["--job", "--pipeline", "--task", "--from", "--root"],
     })
     return runLocalJob({ args, rootDir })
   }

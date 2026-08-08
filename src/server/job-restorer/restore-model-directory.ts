@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { readFile, stat } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
 import type {
@@ -27,6 +28,58 @@ import {
 
 function selectedPreview(value: unknown): ModelSelectedPreview | undefined {
   return tryParseModelSelectedPreview(value)
+}
+
+function parseRestoredDevelopmentModel(value: unknown): ModelRun["development_model"] {
+  if (!isRecord(value)) return undefined
+  const { model_source, model_card, manifest } = value
+  if (
+    typeof model_source !== "string" ||
+    !model_source.trim() ||
+    model_source.length > 2 * 1024 * 1024 ||
+    typeof model_card !== "string" ||
+    model_card.length > 2 * 1024 * 1024 ||
+    !isRecord(manifest) ||
+    manifest.version !== 1 ||
+    typeof manifest.part_number !== "string" ||
+    (manifest.dialect !== "portable" && manifest.dialect !== "ngspice" && manifest.dialect !== "pspice") ||
+    typeof manifest.entry_name !== "string" ||
+    manifest.model_file !== "model.lib" ||
+    typeof manifest.revision !== "string" ||
+    typeof manifest.simulator !== "string" ||
+    typeof manifest.generated_at !== "string" ||
+    !Number.isFinite(Date.parse(manifest.generated_at)) ||
+    !Array.isArray(manifest.pins) ||
+    manifest.pins.length === 0
+  ) {
+    return undefined
+  }
+  const pins = manifest.pins.flatMap((pin) =>
+    isRecord(pin) && typeof pin.component_pin === "string" && typeof pin.spice_node === "string"
+      ? [{ component_pin: pin.component_pin, spice_node: pin.spice_node }]
+      : [],
+  )
+  if (pins.length !== manifest.pins.length) return undefined
+  const revision = createHash("sha256")
+    .update(model_source.replace(/\r\n?/g, "\n").trim())
+    .digest("hex")
+    .slice(0, 16)
+  if (manifest.revision !== revision) return undefined
+  return {
+    model_source,
+    model_card,
+    manifest: {
+      version: 1,
+      part_number: manifest.part_number,
+      dialect: manifest.dialect,
+      entry_name: manifest.entry_name,
+      model_file: "model.lib",
+      revision: manifest.revision,
+      simulator: manifest.simulator,
+      generated_at: manifest.generated_at,
+      pins,
+    },
+  }
 }
 
 function restoredProgressHistory(value: unknown): ModelRun["progress_history"] {
@@ -300,6 +353,12 @@ export async function restoreModelDirectory(input: {
     typeof checkpoint?.status === "string" && MODEL_STATUSES.has(checkpoint.status as ModelRunStatus)
   const ui = isRecord(model_ui) ? model_ui : undefined
   const raw_status = saved_status_is_valid ? (checkpoint.status as ModelRunStatus) : "failed"
+  const saved_pipeline = parsePublicPipelineSnapshot(checkpoint?.pipeline)
+  const partial_pipeline_completion = Boolean(
+    raw_status === "complete" &&
+      saved_pipeline?.pipeline_id === "spice_generation" &&
+      saved_pipeline.stage_results.publish?.status !== "completed",
+  )
   const interrupted = ACTIVE_MODEL_STATUSES.has(raw_status)
   const saved_invocation_id =
     typeof checkpoint?.current_invocation_id === "string" &&
@@ -327,7 +386,7 @@ export async function restoreModelDirectory(input: {
       !publication_matches_invocation,
   )
   const completion_integrity =
-    raw_status === "complete" || publication
+    (raw_status === "complete" && !partial_pipeline_completion) || publication
       ? validateModelCompletionIntegrity({
           model_source,
           manifest,
@@ -446,6 +505,15 @@ export async function restoreModelDirectory(input: {
         iteration: typeof checkpoint?.iteration === "number" ? checkpoint.iteration : undefined,
       }
     : restored_progress
+  const development_model =
+    parseRestoredDevelopmentModel(checkpoint?.development_model) ??
+    (completion_integrity?.valid && typeof model_source === "string" && typeof model_card === "string"
+      ? {
+          model_source,
+          model_card,
+          manifest: completion_integrity.manifest,
+        }
+      : undefined)
   const model_run: ModelRun = {
     model_run_id:
       publication?.commit.model_run_id ??
@@ -473,37 +541,48 @@ export async function restoreModelDirectory(input: {
     current_invocation_id: recovered_publication ? publication!.commit.invocation_id : saved_invocation_id,
     iteration: typeof checkpoint?.iteration === "number" ? checkpoint.iteration : 0,
     logs,
-    model_source: invalid_completion
+    development_model,
+    model_source: partial_pipeline_completion
       ? undefined
-      : publication
-        ? model_source
-        : (model_source ??
-          (typeof checkpoint?.model_source === "string" ? checkpoint.model_source : undefined)),
-    manifest: invalid_completion
+      : invalid_completion
+        ? undefined
+        : publication
+          ? model_source
+          : (model_source ??
+            (typeof checkpoint?.model_source === "string" ? checkpoint.model_source : undefined)),
+    manifest: partial_pipeline_completion
       ? undefined
-      : publication && completion_integrity?.valid
-        ? completion_integrity.manifest
-        : completion_integrity?.valid
+      : invalid_completion
+        ? undefined
+        : publication && completion_integrity?.valid
           ? completion_integrity.manifest
-          : ((isRecord(checkpoint?.manifest) ? checkpoint.manifest : manifest) as ModelManifest | undefined),
+          : completion_integrity?.valid
+            ? completion_integrity.manifest
+            : ((isRecord(checkpoint?.manifest) ? checkpoint.manifest : manifest) as
+                | ModelManifest
+                | undefined),
     validation: invalid_completion
       ? undefined
-      : ((candidate_ui
-          ? candidate_ui.validation
-          : publication
-            ? status === "complete"
-              ? ui?.validation
-              : undefined
-            : isRecord(checkpoint?.validation)
-              ? checkpoint.validation
-              : ui?.validation) as ModelValidationSummary | undefined),
-    model_card: invalid_completion
+      : partial_pipeline_completion
+        ? undefined
+        : ((candidate_ui
+            ? candidate_ui.validation
+            : publication
+              ? status === "complete"
+                ? ui?.validation
+                : undefined
+              : isRecord(checkpoint?.validation)
+                ? checkpoint.validation
+                : ui?.validation) as ModelValidationSummary | undefined),
+    model_card: partial_pipeline_completion
       ? undefined
-      : publication
-        ? model_card
-        : typeof checkpoint?.model_card === "string"
-          ? checkpoint.model_card
-          : model_card,
+      : invalid_completion
+        ? undefined
+        : publication
+          ? model_card
+          : typeof checkpoint?.model_card === "string"
+            ? checkpoint.model_card
+            : model_card,
     progress,
     progress_history: Array.isArray(checkpoint?.progress_history)
       ? (checkpoint.progress_history as ModelRun["progress_history"])
@@ -546,7 +625,7 @@ export async function restoreModelDirectory(input: {
     found_references: Array.isArray(checkpoint?.found_references)
       ? (checkpoint.found_references as NonNullable<ModelRun["found_references"]>)
       : [],
-    pipeline: parsePublicPipelineSnapshot(checkpoint?.pipeline),
+    pipeline: saved_pipeline,
   }
   return input.model_run_store.restoreModelRun({ model_dir: input.model_dir, model_run, logs })
 }

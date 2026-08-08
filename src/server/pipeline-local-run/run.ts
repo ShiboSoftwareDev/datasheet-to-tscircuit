@@ -1,4 +1,3 @@
-import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import type { LocalRunMode, LocalRunSummary } from "@/shared/local-run"
 import type {
@@ -16,11 +15,9 @@ import type {
   ComponentPipelineServices,
 } from "../component-workflow/types"
 import { TsciAgentClient } from "../infrastructure/agent"
-import { atomicWriteJsonSync } from "../infrastructure/persistence/atomic-write"
 import { BunProcessRunner } from "../infrastructure/process"
-import { JobStore } from "../job-store"
-import { restorePersistedJobs } from "../job-restorer"
-import { ModelRunStore } from "../model-run-store"
+import type { JobStore } from "../job-store"
+import type { ModelRunStore } from "../model-run-store"
 import { MODEL_PIPELINE } from "../model-workflow"
 import type {
   ModelPipelineContext,
@@ -29,13 +26,13 @@ import type {
 } from "../model-workflow/types"
 import { ModelStrategyRegistry } from "../modeling"
 import {
-  loadPipelineTaskInputBundle,
   PipelineError,
+  projectPublicPipelineSnapshot,
   runPipeline,
   type PipelineTaskInputBundle,
 } from "../pipeline"
 import { executeLocalNgspice } from "../spice-validation"
-import { createLocalWorkspace, type LocalWorkspace } from "./workspace"
+import type { LocalWorkspace } from "./workspace"
 
 function requiredString({
   record,
@@ -120,18 +117,11 @@ function executionTarget<
   }
 }
 
-function taskResult<Outputs extends PipelineOutputMap>({
-  result,
-  taskId,
-}: {
-  result: PipelineRunResult<Outputs>
-  taskId: string | undefined
+export function validateLocalInput(input: {
+  bundle: PipelineTaskInputBundle
+  mode: LocalRunMode
+  taskId?: string
 }) {
-  if (!taskId) return undefined
-  return result.stage_results[taskId]
-}
-
-function validateLocalInput(input: { bundle: PipelineTaskInputBundle; mode: LocalRunMode; taskId?: string }) {
   if (input.mode !== "pipeline" && !input.taskId) {
     throw new Error(`${input.mode} Local run requires a task id`)
   }
@@ -204,7 +194,7 @@ function validateLocalInput(input: { bundle: PipelineTaskInputBundle; mode: Loca
   return definition
 }
 
-async function executePipeline(input: {
+export async function executePipeline(input: {
   rootDir: string
   local: LocalWorkspace
   jobStore: JobStore
@@ -213,6 +203,7 @@ async function executePipeline(input: {
   mode: LocalRunMode
   taskId?: string
   runDir: string
+  signal?: AbortSignal
 }): Promise<PipelineRunResult<PipelineOutputMap>> {
   const processRunner = new BunProcessRunner()
   const agentClient = new TsciAgentClient({
@@ -239,12 +230,26 @@ async function executePipeline(input: {
       services,
       task_input_root: input.local.jobDir,
       task_input_excluded_roots: ["spice"],
+      signal: input.signal,
       target: executionTarget<ComponentPipelineOutputs, ComponentPipelineContext, ComponentPipelineServices>({
         definition: COMPONENT_PIPELINE,
         mode: input.mode,
         taskId: input.taskId,
         dependencyOutputs: input.local.dependencyOutputs,
       }),
+      on_snapshot: (snapshot) => {
+        const projected = projectPublicPipelineSnapshot({
+          snapshot,
+          artifact_root: input.local.jobDir,
+          private_roots: [input.runDir],
+        })
+        const job = input.jobStore.getJob(componentContext(input.local.context).job_id)
+        if (!job) return
+        input.jobStore.updateJob(job.job_id, {
+          pipeline: projected,
+          pipelines: { ...job.pipelines, component_generation: projected },
+        })
+      },
     })) as PipelineRunResult<PipelineOutputMap>
   }
   if (input.pipelineId === "typical_application") {
@@ -262,6 +267,7 @@ async function executePipeline(input: {
       services,
       task_input_root: input.local.jobDir,
       task_input_excluded_roots: ["spice"],
+      signal: input.signal,
       target: executionTarget<
         ApplicationPipelineOutputs,
         ComponentPipelineContext,
@@ -272,9 +278,22 @@ async function executePipeline(input: {
         taskId: input.taskId,
         dependencyOutputs: input.local.dependencyOutputs,
       }),
+      on_snapshot: (snapshot) => {
+        const projected = projectPublicPipelineSnapshot({
+          snapshot,
+          artifact_root: input.local.jobDir,
+          private_roots: [input.runDir],
+        })
+        const job = input.jobStore.getJob(componentContext(input.local.context).job_id)
+        if (!job) return
+        input.jobStore.updateJob(job.job_id, {
+          pipelines: { ...job.pipelines, typical_application: projected },
+        })
+      },
     })) as PipelineRunResult<PipelineOutputMap>
   }
   if (input.pipelineId === "spice_generation") {
+    const context = modelContext(input.local.context)
     const services: ModelPipelineServices = {
       job_store: input.jobStore,
       model_run_store: input.modelRunStore,
@@ -289,15 +308,25 @@ async function executePipeline(input: {
       definition: MODEL_PIPELINE,
       run_id: input.local.localRunId,
       workspace_dir: input.runDir,
-      context: modelContext(input.local.context),
+      context,
       services,
       task_input_root: input.local.jobDir,
+      signal: input.signal,
       target: executionTarget<ModelPipelineOutputs, ModelPipelineContext, ModelPipelineServices>({
         definition: MODEL_PIPELINE,
         mode: input.mode,
         taskId: input.taskId,
         dependencyOutputs: input.local.dependencyOutputs,
       }),
+      on_snapshot: (snapshot) => {
+        input.modelRunStore.updateModelRun(context.model_run_id, {
+          pipeline: projectPublicPipelineSnapshot({
+            snapshot,
+            artifact_root: input.local.jobDir,
+            private_roots: [context.model_dir, input.runDir],
+          }),
+        })
+      },
     })) as PipelineRunResult<PipelineOutputMap>
   }
   throw new Error(`Unknown pipeline ${input.pipelineId}`)
@@ -306,118 +335,4 @@ async function executePipeline(input: {
 export interface PreparedPipelineLocalRun {
   readonly summary: LocalRunSummary
   execute(): Promise<LocalRunSummary>
-}
-
-export async function createPipelineLocalRun(input: {
-  rootDir: string
-  bundle: PipelineTaskInputBundle
-  mode: LocalRunMode
-  taskId?: string
-  outputDir?: string
-  localRunId?: string
-  parentLocalRunId?: string
-  protectedDirs?: readonly string[]
-}): Promise<PreparedPipelineLocalRun> {
-  validateLocalInput(input)
-  const envelope = input.bundle.envelope
-  const localRunId = input.localRunId ?? `local-${crypto.randomUUID()}`
-  if (!/^local-[a-zA-Z0-9-]{16,80}$/.test(localRunId)) throw new Error("Invalid Local run id")
-  const local = await createLocalWorkspace({
-    bundle: input.bundle,
-    localRunId,
-    executionDir: input.outputDir ?? join(input.rootDir, ".runtime", "local", localRunId),
-    protectedDirs: [join(input.rootDir, ".runtime", "jobs"), ...(input.protectedDirs ?? [])],
-  })
-  // Verify the retained copy before advertising the run as independently runnable.
-  await loadPipelineTaskInputBundle(local.inputPath)
-
-  const jobStore = new JobStore()
-  const modelRunStore = new ModelRunStore()
-  await restorePersistedJobs({
-    jobs_root: local.jobsRoot,
-    job_store: jobStore,
-    model_run_store: modelRunStore,
-  })
-  const jobId = requiredString({ record: local.context, key: "job_id" })
-  const job = jobStore.getJob(jobId)
-  if (!job) throw new Error(`Local workspace could not restore job ${jobId}`)
-
-  const runDir = join(local.executionDir, "run")
-  const pipelineDir = join(runDir, ".pipeline")
-  const eventsPath = join(pipelineDir, "events.ndjson")
-  const summaryPath = join(local.executionDir, "summary.json")
-  await mkdir(runDir, { recursive: true })
-  const initialSummary: LocalRunSummary = {
-    version: 1,
-    local_run_id: local.localRunId,
-    mode: input.mode,
-    pipeline_id: envelope.pipeline_id,
-    ...(input.taskId ? { task_id: input.taskId } : {}),
-    source_run_id: envelope.run_id,
-    source_job_id: jobId,
-    ...(input.parentLocalRunId ? { parent_local_run_id: input.parentLocalRunId } : {}),
-    file_name: job.file_name,
-    status: "running",
-    created_at: new Date().toISOString(),
-    execution_dir: local.executionDir,
-    workspace_dir: local.jobDir,
-    input_path: local.inputPath,
-    pipeline_dir: pipelineDir,
-    events_path: eventsPath,
-    summary_path: summaryPath,
-    stage_results: {},
-  }
-  atomicWriteJsonSync(summaryPath, initialSummary)
-
-  let execution: Promise<LocalRunSummary> | undefined
-  const execute = (): Promise<LocalRunSummary> => {
-    if (execution) return execution
-    execution = executePipeline({
-      rootDir: input.rootDir,
-      local,
-      jobStore,
-      modelRunStore,
-      pipelineId: envelope.pipeline_id,
-      mode: input.mode,
-      taskId: input.taskId,
-      runDir,
-    })
-      .then((result) => {
-        const summary: LocalRunSummary = {
-          ...initialSummary,
-          status: result.status,
-          completed_at: new Date().toISOString(),
-          pipeline_dir: result.pipeline_dir,
-          events_path: result.events_path,
-          stage_results: result.stage_results,
-          ...(input.taskId ? { selected_task_result: taskResult({ result, taskId: input.taskId }) } : {}),
-        }
-        atomicWriteJsonSync(summaryPath, summary)
-        return summary
-      })
-      .catch((error) => {
-        const summary: LocalRunSummary = {
-          ...initialSummary,
-          status: "failed",
-          completed_at: new Date().toISOString(),
-          error_message: error instanceof Error ? error.message : String(error),
-        }
-        atomicWriteJsonSync(summaryPath, summary)
-        throw error
-      })
-    return execution
-  }
-  return { summary: initialSummary, execute }
-}
-
-export async function runPipelineLocal(input: {
-  rootDir: string
-  bundle: PipelineTaskInputBundle
-  mode: LocalRunMode
-  taskId?: string
-  outputDir?: string
-  parentLocalRunId?: string
-  protectedDirs?: readonly string[]
-}): Promise<LocalRunSummary> {
-  return (await createPipelineLocalRun(input)).execute()
 }

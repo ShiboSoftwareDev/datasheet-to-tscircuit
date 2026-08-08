@@ -5,6 +5,8 @@ import { join } from "node:path"
 import { atomicWriteJsonSync } from "@/server/infrastructure/persistence/atomic-write"
 import { RECENT_LOG_EVENT_LIMIT } from "@/server/infrastructure/persistence/bounded-log"
 import { ModelRunStore } from "@/server/model-run-store"
+import { getModelRunFile } from "@/server/model-run-api/get-model-run-file"
+import type { ModelRunApiContext } from "@/server/model-run-api/model-run-api-context"
 import { markAcceptedArtifactsAsRetained } from "@/server/model-workflow/run-model"
 import type { ModelRunnerContext } from "@/server/model-workflow/types"
 import type { JobLog, ModelRun } from "@/shared/job-types"
@@ -88,6 +90,51 @@ test("a failed replacement retains its candidate validation UI without replacing
     expect(store.getModelRun("model_candidate_retention")?.warnings?.[0]).toContain(
       "validation below belongs to the unaccepted candidate",
     )
+  } finally {
+    await rm(model_dir, { recursive: true, force: true })
+  }
+})
+
+test("a development model is persisted and downloaded without becoming the accepted model", async () => {
+  const model_dir = await mkdtemp(join(tmpdir(), "datasheet-development-model-"))
+  const store = new ModelRunStore()
+  try {
+    store.createModelRun({
+      model_run_id: "model_development",
+      job_id: "job_development",
+      model_dir,
+      effort_multiplier: 1,
+    })
+    store.projectDevelopmentModel("model_development", {
+      model_source: ".SUBCKT DEVELOPMENT IN OUT\nR1 IN OUT 1k\n.ENDS DEVELOPMENT\n",
+      model_card: "Current development candidate",
+      manifest: {
+        version: 1,
+        part_number: "DEVELOPMENT",
+        dialect: "portable",
+        entry_name: "DEVELOPMENT",
+        model_file: "model.lib",
+        revision: "development-r1",
+        simulator: "ngspice",
+        generated_at: "2026-08-08T00:00:00.000Z",
+        pins: [
+          { component_pin: "1", spice_node: "IN" },
+          { component_pin: "2", spice_node: "OUT" },
+        ],
+      },
+    })
+
+    expect(store.getModelRun("model_development")?.model_source).toBeUndefined()
+    expect(store.getModelRun("model_development")?.development_model?.model_source).toContain("DEVELOPMENT")
+    const checkpoint = JSON.parse(await readFile(join(model_dir, "model-run.json"), "utf8"))
+    expect(checkpoint.development_model.model_source).toContain("DEVELOPMENT")
+
+    const response = await getModelRunFile(
+      new URL("http://localhost/api/model-run/file?job_id=job_development&file=development_model"),
+      { model_run_store: store } as unknown as ModelRunApiContext,
+    )
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain(".SUBCKT DEVELOPMENT")
   } finally {
     await rm(model_dir, { recursive: true, force: true })
   }

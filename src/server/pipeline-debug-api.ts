@@ -23,7 +23,7 @@ function localOnlyResponse(): Response {
     {
       error: {
         error_code: "local_run_required",
-        message: "Pipeline debugging now creates an isolated Local run. Use /api/local-run/run.",
+        message: "Pipeline debugging now runs in the selected regular job. Use /api/local-run/run.",
       },
     },
     { status: 410 },

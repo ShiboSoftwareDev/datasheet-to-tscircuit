@@ -251,6 +251,13 @@ export interface ModelManifest {
   }>
 }
 
+/** The current server-generated model being developed, whether or not it is accepted yet. */
+export interface ModelDevelopmentArtifact {
+  model_source: string
+  manifest: ModelManifest
+  model_card: string
+}
+
 export type ModelProgressPhase =
   | "queued"
   | "characterizing"
@@ -436,6 +443,8 @@ export interface ModelRun {
   current_invocation_id?: string
   iteration: number
   logs: JobLog[]
+  /** Current generated candidate. This is distinct from the accepted publication below. */
+  development_model?: ModelDevelopmentArtifact
   model_source?: string
   manifest?: ModelManifest
   validation?: ModelValidationSummary

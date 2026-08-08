@@ -59,9 +59,16 @@ export function classifyNgspiceFailure(
   output: string,
   exit_code: number,
 ): ValidationExecutionError | undefined {
-  const convergence_pattern =
-    /timestep too small|singular matrix|converg(?:e|ence|ing)|iteration limit|source stepping failed/i
-  if (convergence_pattern.test(output)) {
+  const fatal_convergence_pattern =
+    /timestep too small|iteration limit|(?:transient|dc|operating point|op)\b[^\n]*(?:converg(?:e|ence|ing)|failed)|convergence failed/i
+  const recoverable_startup_pattern =
+    /singular matrix|converg(?:e|ence|ing)|(?:dynamic |true )?gmin stepping failed|source stepping failed/i
+  const completed_analysis_pattern =
+    /No\. of Data Rows\s*:\s*[1-9]\d*|(?:transient|operating point) op finished successfully/i
+  if (
+    fatal_convergence_pattern.test(output) ||
+    (recoverable_startup_pattern.test(output) && !completed_analysis_pattern.test(output))
+  ) {
     return executionError(
       "convergence",
       "ngspice_convergence_failed",

@@ -1,10 +1,6 @@
 import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
-import type { Job, ModelProgress, ModelRun } from "@/shared/job-types"
 import type { LocalRunMode, LocalRunStatus, LocalRunSummary } from "@/shared/local-run"
-import { JobStore } from "./job-store"
-import { restorePersistedJobs } from "./job-restorer"
-import { ModelRunStore } from "./model-run-store"
 
 const LOCAL_RUN_ID = /^local-[a-zA-Z0-9-]{16,80}$/
 const LOCAL_SUMMARY_MAX_BYTES = 32 * 1024 * 1024
@@ -44,7 +40,7 @@ export function isLocalRunId(value: string): boolean {
 function parseLocalRunSummary(value: unknown, expectedId: string): LocalRunSummary {
   if (!isRecord(value)) throw new Error("Local run summary is malformed")
   if (
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     value.local_run_id !== expectedId ||
     !LOCAL_RUN_MODES.has(value.mode as LocalRunMode) ||
     typeof value.pipeline_id !== "string" ||
@@ -60,6 +56,15 @@ function parseLocalRunSummary(value: unknown, expectedId: string): LocalRunSumma
     typeof value.pipeline_dir !== "string" ||
     typeof value.events_path !== "string" ||
     typeof value.summary_path !== "string"
+  ) {
+    throw new Error("Local run summary is malformed")
+  }
+  if (value.version === 2 && value.execution_kind !== "in_place" && value.execution_kind !== "clone") {
+    throw new Error("Local run summary is malformed")
+  }
+  if (
+    value.version === 2 &&
+    (typeof value.target_job_id !== "string" || basename(value.target_job_id) !== value.target_job_id)
   ) {
     throw new Error("Local run summary is malformed")
   }
@@ -86,13 +91,16 @@ export async function readLocalRunSummary(localRoot: string, localRunId: string)
   if (basename(recordedExecutionDir) !== localRunId) {
     throw new Error("Local run summary has an invalid execution directory")
   }
-  const recordedPaths = [
-    summary.workspace_dir,
-    summary.input_path,
-    summary.pipeline_dir,
-    summary.events_path,
-    summary.summary_path,
-  ]
+  const recordedPaths =
+    summary.version === 1
+      ? [
+          summary.workspace_dir,
+          summary.input_path,
+          summary.pipeline_dir,
+          summary.events_path,
+          summary.summary_path,
+        ]
+      : [summary.input_path, summary.summary_path]
   for (const candidate of recordedPaths) {
     if (!isWithin(recordedExecutionDir, resolve(candidate))) {
       throw new Error("Local run summary references a path outside its workspace")
@@ -100,6 +108,38 @@ export async function readLocalRunSummary(localRoot: string, localRunId: string)
   }
   const rebase = (candidate: string) =>
     join(realExecutionDir, relative(recordedExecutionDir, resolve(candidate)))
+  if (summary.version === 2) {
+    const targetJobId = summary.target_job_id!
+    const recordedWorkspace = resolve(summary.workspace_dir)
+    if (basename(recordedWorkspace) !== targetJobId) {
+      throw new Error("Local run summary has an invalid target workspace")
+    }
+    for (const candidate of [summary.pipeline_dir, summary.events_path]) {
+      if (!isWithin(recordedWorkspace, resolve(candidate))) {
+        throw new Error("Local run summary references a path outside its target job")
+      }
+    }
+    const actualWorkspace = resolve(localRoot, "..", "jobs", targetJobId)
+    const rebaseWorkspace = (value: unknown) =>
+      rebaseRecordedPaths(
+        rebaseRecordedPaths(value, recordedExecutionDir, realExecutionDir),
+        recordedWorkspace,
+        actualWorkspace,
+      )
+    return {
+      ...summary,
+      execution_dir: realExecutionDir,
+      workspace_dir: actualWorkspace,
+      input_path: rebase(summary.input_path),
+      pipeline_dir: join(actualWorkspace, relative(recordedWorkspace, resolve(summary.pipeline_dir))),
+      events_path: join(actualWorkspace, relative(recordedWorkspace, resolve(summary.events_path))),
+      summary_path: rebase(summary.summary_path),
+      stage_results: rebaseWorkspace(summary.stage_results),
+      ...(summary.selected_task_result
+        ? { selected_task_result: rebaseWorkspace(summary.selected_task_result) }
+        : {}),
+    }
+  }
   return {
     ...summary,
     execution_dir: realExecutionDir,
@@ -132,102 +172,4 @@ export async function listLocalRuns(localRoot: string): Promise<LocalRunSummary[
   return summaries
     .filter((summary): summary is LocalRunSummary => summary !== undefined)
     .sort((first, second) => second.created_at.localeCompare(first.created_at))
-}
-
-export interface LocalRunWorkspaceContext {
-  readonly summary: LocalRunSummary
-  readonly job_store: JobStore
-  readonly model_run_store: ModelRunStore
-  readonly job: Job
-  readonly model_run?: ModelRun
-}
-
-export function projectCompletedLocalTaskModelRun(input: { summary: LocalRunSummary; model_run: ModelRun }):
-  | {
-      update: Pick<
-        ModelRun,
-        "status" | "is_complete" | "has_errors" | "error_message" | "warnings" | "completed_at"
-      >
-      progress: ModelProgress
-    }
-  | undefined {
-  if (
-    input.summary.pipeline_id !== "spice_generation" ||
-    input.summary.mode !== "task" ||
-    input.summary.status !== "completed" ||
-    !input.summary.task_id
-  ) {
-    return undefined
-  }
-  const completed_at = input.summary.completed_at ?? input.model_run.updated_at
-  const warning = `Local task ${input.summary.task_id} completed. Later SPICE generation tasks were intentionally not run.`
-  return {
-    update: {
-      status: "complete",
-      is_complete: true,
-      has_errors: false,
-      error_message: undefined,
-      warnings: [...new Set([...(input.model_run.warnings ?? []), warning])],
-      completed_at,
-    },
-    progress: {
-      sequence: (input.model_run.progress?.sequence ?? 0) + 1,
-      phase: "complete",
-      message: `Local task ${input.summary.task_id} completed`,
-      updated_at: completed_at,
-      ...(input.model_run.progress?.iteration === undefined
-        ? {}
-        : { iteration: input.model_run.progress.iteration }),
-    },
-  }
-}
-
-export async function loadLocalRunWorkspace(
-  localRoot: string,
-  localRunId: string,
-): Promise<LocalRunWorkspaceContext> {
-  const summary = await readLocalRunSummary(localRoot, localRunId)
-  const executionDir = resolve(localRoot, localRunId)
-  const jobsRoot = join(executionDir, "workspace")
-  const jobStore = new JobStore({ checkpoint_writer: () => undefined, log_writer: async () => undefined })
-  const modelRunStore = new ModelRunStore({
-    checkpoint_writer: () => undefined,
-    log_writer: async () => undefined,
-  })
-  await restorePersistedJobs({ jobs_root: jobsRoot, job_store: jobStore, model_run_store: modelRunStore })
-  const job = jobStore.getJob(summary.source_job_id)
-  if (!job) throw new Error(`Local run ${localRunId} has no displayable job output`)
-  const modelRunId = modelRunStore.getModelRunIdForJob(summary.source_job_id)
-  if (modelRunId) {
-    const modelRun = modelRunStore.getModelRun(modelRunId)
-    const projection = modelRun
-      ? projectCompletedLocalTaskModelRun({ summary, model_run: modelRun })
-      : undefined
-    if (projection) {
-      modelRunStore.updateProgress(modelRunId, projection.progress)
-      modelRunStore.updateModelRun(modelRunId, projection.update)
-    }
-  }
-  const projectedJob: Job = {
-    ...job,
-    display_status:
-      summary.status === "running"
-        ? "agent_running"
-        : summary.status === "completed"
-          ? "complete"
-          : summary.status === "cancelled"
-            ? "cancelled"
-            : "failed",
-    is_complete: summary.status !== "running",
-    has_errors: summary.status === "failed" || job.has_errors,
-    error_message: summary.error_message ?? job.error_message,
-    ...(summary.completed_at ? { completed_at: summary.completed_at } : {}),
-  }
-  return {
-    summary,
-    job_store: jobStore,
-    model_run_store: modelRunStore,
-    job: projectedJob,
-    ...(modelRunId ? { model_run: modelRunStore.getModelRun(modelRunId) } : {}),
-  }
 }

@@ -223,6 +223,11 @@ async function commitPreparedModelPublicationWithoutCleanup(input: {
   try {
     const projection_result = input.model_run_store.projectCommittedPublication(input.model_run_id, {
       update: {
+        development_model: {
+          model_source: authoritative_generated.source,
+          model_card: authoritative_generated.card,
+          manifest: authoritative_generated.manifest,
+        },
         model_source: authoritative_generated.source,
         model_card: authoritative_generated.card,
         manifest: authoritative_generated.manifest,

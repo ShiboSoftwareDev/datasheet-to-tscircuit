@@ -160,6 +160,7 @@ export class JobStore {
   private job_map = new Map<string, JobRecord>()
   private job_list_subscriber_set = new Set<JobListSubscriber>()
   private job_deletion_lease_map = new Map<string, symbol>()
+  private active_pipeline_execution_map = new Map<string, Set<string>>()
   private readonly checkpoint_writer: CheckpointWriter
   private readonly log_writer: LogEventWriter
 
@@ -204,6 +205,24 @@ export class JobStore {
     this.persist(job_record)
     this.job_map.set(job_record.job_id, job_record)
     return getPublicJob(job_record)
+  }
+
+  /** Refreshes an existing live record from an externally written durable checkpoint. */
+  refreshRestoredJob(input: RestoreJobInput): Job {
+    const existing = this.job_map.get(input.job_id)
+    if (!existing) return this.restoreJob(input)
+    const refreshed: JobRecord = {
+      ...existing,
+      ...input,
+      logs: capRecentLogs(input.logs),
+      cancellation_controller: existing.cancellation_controller,
+      subscriber_set: existing.subscriber_set,
+    }
+    this.job_map.set(input.job_id, refreshed)
+    const job = getPublicJob(refreshed)
+    this.publish(refreshed, { event_type: "job_updated", job })
+    this.publishJobList({ event_type: "job_updated", job: getJobSummary(refreshed) })
+    return job
   }
 
   getJob(job_id: string): Job | undefined {
@@ -266,6 +285,26 @@ export class JobStore {
 
   isJobDeleting(job_id: string): boolean {
     return this.job_deletion_lease_map.has(job_id)
+  }
+
+  claimPipelineExecution(job_id: string, pipeline_id: string): boolean {
+    if (!this.job_map.has(job_id) || this.job_deletion_lease_map.has(job_id)) return false
+    const active = this.active_pipeline_execution_map.get(job_id) ?? new Set<string>()
+    if (active.has(pipeline_id)) return false
+    const job = this.job_map.get(job_id)!
+    if (job.cancellation_controller.signal.aborted) {
+      job.cancellation_controller = new AbortController()
+    }
+    active.add(pipeline_id)
+    this.active_pipeline_execution_map.set(job_id, active)
+    return true
+  }
+
+  releasePipelineExecution(job_id: string, pipeline_id: string): void {
+    const active = this.active_pipeline_execution_map.get(job_id)
+    if (!active) return
+    active.delete(pipeline_id)
+    if (active.size === 0) this.active_pipeline_execution_map.delete(job_id)
   }
 
   requestCancellation(job_id: string): JobCancellationResult {
@@ -359,6 +398,7 @@ export class JobStore {
     if (!job_record?.is_complete) return false
     this.job_map.delete(job_id)
     this.job_deletion_lease_map.delete(job_id)
+    this.active_pipeline_execution_map.delete(job_id)
     this.publishJobList({ event_type: "job_deleted", job_id })
     return true
   }

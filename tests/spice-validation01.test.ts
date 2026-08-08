@@ -10,6 +10,7 @@ import {
   type ModelRequirement,
 } from "@/server/modeling"
 import {
+  classifyNgspiceFailure,
   compileValidationCase,
   extractObservationSeries,
   hashValidationInputs,
@@ -881,6 +882,30 @@ test("compiler emits canonical pins and vectors without executable measures", ()
   expect(compiled.source.match(/^\.(?:op|dc|tran)\b/gm)).toHaveLength(1)
 })
 
+test("compiler uses ngspice's real current-source device parameter", () => {
+  const current_case = structuredClone(validPlan().cases[1]!)
+  current_case.fixtures.push({
+    type: "current_source",
+    id: "load_step",
+    positive: "dut.OUT",
+    negative: "gnd",
+    dc_amps: 0.1,
+  })
+  current_case.observations.push({
+    type: "current",
+    id: "load_current",
+    requirement_id: "transient_gain",
+    element_id: "load_step",
+    unit: "A",
+    scale: "linear",
+    reference: { type: "bounds", min: 0 },
+  })
+
+  const compiled = compileValidationCase(current_case, manifest)
+  expect(compiled.source).toContain(".save @I_load_step[current]")
+  expect(compiled.source).not.toContain("@I_load_step[i]")
+})
+
 const dc_raw = `Title: raw parser test
 Date: Thu Jan  1 00:00:00 2026
 Plotname: DC transfer characteristic
@@ -1003,6 +1028,49 @@ test("current extraction accepts ngspice-wrapped device currents and branch alia
   }
 })
 
+test("current extraction accepts ngspice's wrapped current-source parameter", () => {
+  const raw = parseNgspiceAsciiRaw(dcRawWithCurrentVector("i(@i_load[current])"))
+  const plot = selectAnalysisPlot(raw, {
+    type: "dc_sweep",
+    source_id: "vin",
+    start: 0,
+    stop: 1,
+    step: 1,
+  })
+  const points = extractObservationSeries({
+    plot,
+    analysis: { type: "dc_sweep", source_id: "vin", start: 0, stop: 1, step: 1 },
+    compiled_observation: {
+      observation: {
+        type: "current",
+        id: "load_current",
+        requirement_id: "dc_gain",
+        element_id: "load",
+        unit: "A",
+        scale: "linear",
+        reference: { type: "bounds", min: 0 },
+      },
+      element_name: "I_load",
+      saved_vectors: ["@I_load[current]"],
+    },
+  })
+  expect(points.map((point) => point.y)).toEqual([0.001, 0.002])
+})
+
+test("ngspice startup warnings are not fatal after a completed analysis", () => {
+  const recovered = `Warning: singular matrix: check node floating\nWarning: Dynamic gmin stepping failed\nWarning: source stepping failed\nNote: Transient op finished successfully\nNo. of Data Rows : 2147`
+  expect(classifyNgspiceFailure(recovered, 0)).toBeUndefined()
+  expect(classifyNgspiceFailure("Warning: singular matrix: check node floating", 0)).toMatchObject({
+    code: "ngspice_convergence_failed",
+  })
+  expect(
+    classifyNgspiceFailure(
+      "No. of Data Rows : 17\ndoAnalyses: TRAN: Timestep too small; simulation aborted",
+      0,
+    ),
+  ).toMatchObject({ code: "ngspice_convergence_failed" })
+})
+
 test("scoring checks every scalar sample and interpolates curve references deterministically", () => {
   const target: ValidationObservation = {
     type: "voltage",
@@ -1041,6 +1109,37 @@ test("scoring checks every scalar sample and interpolates curve references deter
   expect(curve_result.passed).toBe(true)
   expect(curve_result.metrics.normalized_rmse).toBe(0)
   expect(curve_result.metrics.normalized_max_error).toBe(0)
+})
+
+test("scoring keeps metrics finite for extreme finite simulator samples", () => {
+  const result = scoreObservation(
+    {
+      type: "voltage",
+      id: "extreme_curve",
+      requirement_id: "dc_gain",
+      positive: "dut.OUT",
+      negative: "gnd",
+      unit: "V",
+      scale: "linear",
+      reference: {
+        type: "curve",
+        tolerance: 0.01,
+        points: [
+          { x: 0, y: 0 },
+          { x: 1, y: 1 },
+        ],
+      },
+    },
+    [
+      { x: 0, y: 1e200 },
+      { x: 1, y: 1e200 },
+    ],
+  )
+
+  expect(result.passed).toBe(false)
+  expect(Number.isFinite(result.metrics.normalized_rmse)).toBe(true)
+  expect(Number.isFinite(result.metrics.normalized_max_error)).toBe(true)
+  expect(result.metrics.normalized_rmse).toBeGreaterThan(1e199)
 })
 
 test("full server scoring includes curve samples withheld from model generation", () => {

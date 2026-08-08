@@ -6,7 +6,6 @@ import { runDebugCli } from "@/cli/pipeline-debug"
 import { JobStore } from "@/server/job-store"
 import { restorePersistedJobs } from "@/server/job-restorer"
 import { createLocalRunApiHandler } from "@/server/local-run-api"
-import { projectCompletedLocalTaskModelRun } from "@/server/local-runs"
 import { ModelRunStore } from "@/server/model-run-store"
 import { retainPipelineTaskInputFiles } from "@/server/pipeline"
 import type { LocalRunDetail, LocalRunSummary } from "@/shared/local-run"
@@ -86,76 +85,13 @@ async function waitForLocalCompletion(handler: LocalHandler, localRunId: string)
   throw new Error(`Local run ${localRunId} did not complete`)
 }
 
-test("a completed task-only SPICE run is not presented as an interrupted full pipeline", () => {
-  const projection = projectCompletedLocalTaskModelRun({
-    summary: {
-      pipeline_id: "spice_generation",
-      mode: "task",
-      status: "completed",
-      task_id: "create_comparison_graphs",
-      completed_at: "2026-08-07T18:02:20.132Z",
-    } as LocalRunSummary,
-    model_run: {
-      model_run_id: "model-local",
-      job_id: "job-local",
-      created_at: "2026-08-07T16:58:05.305Z",
-      updated_at: "2026-08-07T18:02:20.132Z",
-      status: "failed",
-      is_complete: true,
-      has_errors: true,
-      warnings: [],
-      effort_multiplier: 1,
-      elapsed_time_ms: 3_854_031,
-      iteration: 0,
-      logs: [],
-      progress_history: [],
-      preview_options: [],
-      progress: {
-        sequence: 5,
-        phase: "designing_validation",
-        message: "Building comparison graphs",
-        updated_at: "2026-08-07T16:58:05.751Z",
-      },
-    },
-  })
-
-  expect(projection?.update).toMatchObject({
-    status: "complete",
-    is_complete: true,
-    has_errors: false,
-    error_message: undefined,
-  })
-  expect(projection?.update.warnings).toEqual([
-    "Local task create_comparison_graphs completed. Later SPICE generation tasks were intentionally not run.",
-  ])
-  expect(projection?.progress).toMatchObject({
-    sequence: 6,
-    phase: "complete",
-    message: "Local task create_comparison_graphs completed",
-  })
-})
-
-test("the server lists CLI Local runs, displays their output, and starts another Local run", async () => {
+test("the server runs and reruns Local tasks in their selected regular job", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-api-"))
   try {
-    const inputPath = await createPrepareInput(rootDir)
-    const first = (await runDebugCli([
-      "task",
-      "run",
-      "--input",
-      inputPath,
-      "--root",
-      rootDir,
-    ])) as LocalRunSummary
-    expect(first.local_run_id).toStartWith("local-")
-    expect(first.status).toBe("completed")
-    const cliList = (await runDebugCli(["local", "list", "--root", rootDir])) as {
-      local_runs: LocalRunSummary[]
-    }
-    expect(cliList.local_runs.map(({ local_run_id }) => local_run_id)).toContain(first.local_run_id)
+    await createPrepareInput(rootDir)
 
-    const jobStore = new JobStore({ checkpoint_writer: () => undefined })
-    const modelRunStore = new ModelRunStore({ checkpoint_writer: () => undefined })
+    const jobStore = new JobStore()
+    const modelRunStore = new ModelRunStore()
     await restorePersistedJobs({
       jobs_root: join(rootDir, ".runtime", "jobs"),
       job_store: jobStore,
@@ -170,6 +106,40 @@ test("the server lists CLI Local runs, displays their output, and starts another
       agent_bin: join(rootDir, "node_modules", ".bin", "tsci-agent"),
       tsci_bin: join(rootDir, "node_modules", ".bin", "tsci"),
     })
+
+    const startResponse = await handleResponse(
+      handler,
+      new Request("http://localhost/api/local-run/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: "local-api-job",
+          pipeline_id: "component_generation",
+          mode: "stage",
+          stage_id: "prepare",
+        }),
+      }),
+    )
+    expect(startResponse.status).toBe(202)
+    const started = (await startResponse.json()) as { local_run: LocalRunSummary }
+    const firstDetail = await waitForLocalCompletion(handler, started.local_run.local_run_id)
+    const first = firstDetail.local_run
+    expect(first).toMatchObject({
+      version: 2,
+      execution_kind: "in_place",
+      source_job_id: "local-api-job",
+      target_job_id: "local-api-job",
+      status: "completed",
+      workspace_dir: join(rootDir, ".runtime", "jobs", "local-api-job"),
+    })
+
+    const cliList = (await runDebugCli(["local", "list", "--root", rootDir])) as {
+      local_runs: LocalRunSummary[]
+    }
+    expect(cliList.local_runs.map(({ local_run_id }) => local_run_id)).toContain(first.local_run_id)
+    expect(
+      await handler(new Request(`http://localhost/?local_run_id=${encodeURIComponent(first.local_run_id)}`)),
+    ).toBeUndefined()
 
     const listResponse = await handleResponse(handler, new Request("http://localhost/api/local-runs"))
     expect(listResponse.ok).toBe(true)
@@ -187,14 +157,14 @@ test("the server lists CLI Local runs, displays their output, and starts another
     expect(detail.job.file_name).toBe("local-api.pdf")
     expect(detail.job.display_status).toBe("complete")
 
-    const logResponse = await handleResponse(
-      handler,
-      new Request(
-        `http://localhost/api/job/file?job_id=${encodeURIComponent(detail.job.job_id)}&file=log&local_run_id=${encodeURIComponent(first.local_run_id)}`,
+    expect(detail.job.job_id).toBe("local-api-job")
+    expect(
+      await handler(
+        new Request(
+          `http://localhost/api/job/file?job_id=local-api-job&file=log&local_run_id=${encodeURIComponent(first.local_run_id)}`,
+        ),
       ),
-    )
-    expect(logResponse.ok).toBe(true)
-    expect(await logResponse.text()).toContain("Starting typed component pipeline")
+    ).toBeUndefined()
 
     const rerunResponse = await handleResponse(
       handler,
@@ -208,6 +178,7 @@ test("the server lists CLI Local runs, displays their output, and starts another
     const rerun = (await rerunResponse.json()) as { local_run: LocalRunSummary }
     expect(rerun.local_run.local_run_id).not.toBe(first.local_run_id)
     expect(rerun.local_run.parent_local_run_id).toBe(first.local_run_id)
+    expect(rerun.local_run.target_job_id).toBe("local-api-job")
     const completedRerun = await waitForLocalCompletion(handler, rerun.local_run.local_run_id)
     expect(completedRerun.local_run.status).toBe("completed")
   } finally {
@@ -215,31 +186,118 @@ test("the server lists CLI Local runs, displays their output, and starts another
   }
 })
 
-test("Local runs remain listable and runnable after their runtime root is mounted elsewhere", async () => {
-  const sourceRoot = await mkdtemp(join(tmpdir(), "datasheet-local-source-"))
+test("an already-running server imports a regular job created by a separate CLI process", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-cli-sync-"))
   try {
-    const inputPath = await createPrepareInput(sourceRoot)
-    const first = (await runDebugCli([
+    const inputPath = await createPrepareInput(rootDir)
+    const jobStore = new JobStore()
+    const modelRunStore = new ModelRunStore()
+    await restorePersistedJobs({
+      jobs_root: join(rootDir, ".runtime", "jobs"),
+      job_store: jobStore,
+      model_run_store: modelRunStore,
+    })
+    const handler = createLocalRunApiHandler({
+      root_dir: rootDir,
+      jobs_root: join(rootDir, ".runtime", "jobs"),
+      local_runs_root: join(rootDir, ".runtime", "local"),
+      job_store: jobStore,
+      model_run_store: modelRunStore,
+      agent_bin: join(rootDir, "node_modules", ".bin", "tsci-agent"),
+      tsci_bin: join(rootDir, "node_modules", ".bin", "tsci"),
+    })
+
+    const cliRun = (await runDebugCli([
       "task",
       "run",
       "--input",
       inputPath,
       "--root",
-      sourceRoot,
+      rootDir,
     ])) as LocalRunSummary
+    expect(cliRun.execution_kind).toBe("clone")
+    expect(jobStore.getJob(cliRun.target_job_id!)).toBeUndefined()
+
+    const listResponse = await handleResponse(handler, new Request("http://localhost/api/local-runs"))
+    expect(listResponse.ok).toBe(true)
+    const listed = (await listResponse.json()) as { local_runs: LocalRunSummary[] }
+    expect(listed.local_runs.map(({ local_run_id }) => local_run_id)).toContain(cliRun.local_run_id)
+    const detail = await handleResponse(
+      handler,
+      new Request(
+        `http://localhost/api/local-run/get?local_run_id=${encodeURIComponent(cliRun.local_run_id)}`,
+      ),
+    )
+    expect(detail.ok).toBe(true)
+    expect(jobStore.getJob(cliRun.target_job_id!)?.job_id).toBe(cliRun.target_job_id)
+    expect(((await detail.json()) as LocalRunDetail).job.job_id).toBe(cliRun.target_job_id!)
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test("regular-job Local records rebase and remain runnable after the runtime root is mounted elsewhere", async () => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), "datasheet-local-source-"))
+  try {
+    await createPrepareInput(sourceRoot)
+    const sourceJobStore = new JobStore()
+    const sourceModelRunStore = new ModelRunStore()
+    await restorePersistedJobs({
+      jobs_root: join(sourceRoot, ".runtime", "jobs"),
+      job_store: sourceJobStore,
+      model_run_store: sourceModelRunStore,
+    })
+    const sourceHandler = createLocalRunApiHandler({
+      root_dir: sourceRoot,
+      jobs_root: join(sourceRoot, ".runtime", "jobs"),
+      local_runs_root: join(sourceRoot, ".runtime", "local"),
+      job_store: sourceJobStore,
+      model_run_store: sourceModelRunStore,
+      agent_bin: join(sourceRoot, "node_modules", ".bin", "tsci-agent"),
+      tsci_bin: join(sourceRoot, "node_modules", ".bin", "tsci"),
+    })
+    const startResponse = await handleResponse(
+      sourceHandler,
+      new Request("http://localhost/api/local-run/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: "local-api-job",
+          pipeline_id: "component_generation",
+          mode: "stage",
+          stage_id: "prepare",
+        }),
+      }),
+    )
+    const started = (await startResponse.json()) as { local_run: LocalRunSummary }
+    const first = (await waitForLocalCompletion(sourceHandler, started.local_run.local_run_id)).local_run
     const mountedRoot = join(sourceRoot, "container-root")
     const mountedLocalRoot = join(mountedRoot, ".runtime", "local")
     const mountedRunDir = join(mountedLocalRoot, first.local_run_id)
     await mkdir(mountedLocalRoot, { recursive: true })
     await cp(first.execution_dir, mountedRunDir, { recursive: true })
+    await mkdir(join(mountedRoot, ".runtime", "jobs"), { recursive: true })
+    await cp(
+      join(sourceRoot, ".runtime", "jobs", "local-api-job"),
+      join(mountedRoot, ".runtime", "jobs", "local-api-job"),
+      { recursive: true },
+    )
     const realMountedRunDir = await realpath(mountedRunDir)
+
+    const mountedJobStore = new JobStore()
+    const mountedModelRunStore = new ModelRunStore()
+    await restorePersistedJobs({
+      jobs_root: join(mountedRoot, ".runtime", "jobs"),
+      job_store: mountedJobStore,
+      model_run_store: mountedModelRunStore,
+    })
 
     const handler = createLocalRunApiHandler({
       root_dir: mountedRoot,
       jobs_root: join(mountedRoot, ".runtime", "jobs"),
       local_runs_root: mountedLocalRoot,
-      job_store: new JobStore({ checkpoint_writer: () => undefined }),
-      model_run_store: new ModelRunStore({ checkpoint_writer: () => undefined }),
+      job_store: mountedJobStore,
+      model_run_store: mountedModelRunStore,
       agent_bin: join(mountedRoot, "node_modules", ".bin", "tsci-agent"),
       tsci_bin: join(mountedRoot, "node_modules", ".bin", "tsci"),
     })
@@ -250,7 +308,7 @@ test("Local runs remain listable and runnable after their runtime root is mounte
     expect(listed.local_runs[0]).toMatchObject({
       local_run_id: first.local_run_id,
       execution_dir: realMountedRunDir,
-      workspace_dir: join(realMountedRunDir, "workspace", first.source_job_id),
+      workspace_dir: join(mountedRoot, ".runtime", "jobs", "local-api-job"),
     })
     expect(JSON.stringify(listed.local_runs[0]?.selected_task_result)).not.toContain(first.execution_dir)
 

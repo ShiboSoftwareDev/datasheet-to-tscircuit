@@ -63,6 +63,7 @@ export type ModelRunUpdate = Partial<
     | "completed_at"
     | "current_invocation_id"
     | "iteration"
+    | "development_model"
     | "model_source"
     | "manifest"
     | "validation"
@@ -127,6 +128,7 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
     current_invocation_id: record.current_invocation_id,
     iteration: record.iteration,
     logs: [...record.logs],
+    development_model: record.development_model,
     model_source: record.model_source,
     manifest: record.manifest,
     validation: record.validation,
@@ -261,6 +263,30 @@ export class ModelRunStore {
     return model_run
   }
 
+  /** Refreshes an existing live record from an externally written durable checkpoint. */
+  refreshRestoredModelRun(input: RestoreModelRunInput): ModelRun {
+    const existing = this.run_map.get(input.model_run.model_run_id)
+    if (!existing) return this.restoreModelRun(input)
+    const refreshed: ModelRunRecord = {
+      ...existing,
+      ...input.model_run,
+      model_dir: input.model_dir,
+      logs: capRecentLogs(input.logs),
+      warnings: [...(input.model_run.warnings ?? [])],
+      progress_history: [...input.model_run.progress_history],
+      preview_options: [...input.model_run.preview_options],
+      found_references: [...(input.model_run.found_references ?? [])],
+      cancellation_controller: existing.cancellation_controller,
+      subscriber_set: existing.subscriber_set,
+    }
+    this.run_map.set(refreshed.model_run_id, refreshed)
+    this.job_run_map.set(refreshed.job_id, refreshed.model_run_id)
+    const model_run = getPublicModelRun(refreshed)
+    this.publish(refreshed, { event_type: "model_run_updated", model_run })
+    this.publishModelRunList(getModelRunSummary(refreshed))
+    return model_run
+  }
+
   getModelRun(model_run_id: string): ModelRun | undefined {
     const record = this.run_map.get(model_run_id)
     return record ? getPublicModelRun(record) : undefined
@@ -285,6 +311,10 @@ export class ModelRunStore {
 
   claimModelExecution(model_run_id: string): boolean {
     if (!this.run_map.has(model_run_id) || this.active_execution_ids.has(model_run_id)) return false
+    const record = this.run_map.get(model_run_id)!
+    if (record.cancellation_controller.signal.aborted) {
+      record.cancellation_controller = new AbortController()
+    }
     this.active_execution_ids.add(model_run_id)
     return true
   }
@@ -399,6 +429,17 @@ export class ModelRunStore {
     }
     return this.mutateAndPublish(record, (candidate) => {
       candidate.preview_options = preview_options
+    })
+  }
+
+  /** Projects the current generated candidate without changing accepted publication fields. */
+  projectDevelopmentModel(
+    model_run_id: string,
+    development_model: NonNullable<ModelRun["development_model"]>,
+  ): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.development_model = development_model
     })
   }
 
