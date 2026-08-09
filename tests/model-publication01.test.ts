@@ -1955,3 +1955,41 @@ test("live publication state must match the validated immutable bundle", async (
   expect(await pathExists(prepared.accepted_model_dir)).toBe(false)
   expect(await pathExists(prepared.published_component_dir)).toBe(false)
 })
+test("publication leaves a below-target development model unpublished without failing", async () => {
+  const outcome = await publishModelStage.execute({
+    run_id: "below_target",
+    pipeline_id: "spice_generation",
+    stage_id: "publish",
+    debug_dir: "/unused",
+    context: {
+      model_run_id: "below_target",
+      job_id: "job_below_target",
+      job_dir: "/unused",
+      model_dir: "/unused",
+      use_openai: false,
+      invocation_id: "below-target-invocation",
+    },
+    services: {
+      model_run_store: {
+        getModelRun() {
+          return undefined
+        },
+        updateProgress() {},
+        async appendLog() {
+          return {} as never
+        },
+      },
+    } as never,
+    dependency_outputs: {
+      repair_spice_model: { passed: false },
+      wait_for_component: {},
+    } as never,
+    signal: new AbortController().signal,
+  })
+
+  expect(outcome).toEqual({
+    status: "skipped",
+    reason:
+      "The development model remains unpublished because it did not meet the server-owned validation target",
+  })
+})

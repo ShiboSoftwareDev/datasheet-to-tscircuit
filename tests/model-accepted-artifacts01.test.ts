@@ -273,6 +273,20 @@ test("a failed candidate bundle is atomically projected into the live run withou
       signal: new AbortController().signal,
     }),
   ).rejects.toThrow(/does not match its immutable artifact identity/)
+  const incomplete_projection = structuredClone(projection)
+  Reflect.deleteProperty(incomplete_projection.selected_previews, "output")
+  await expect(
+    projectCandidateValidationUi({
+      model_run_store: store,
+      model_run_id: "live_model",
+      model_dir,
+      immutable_artifact_dir,
+      evidence_dir,
+      revision: failed.manifest.revision,
+      projection: incomplete_projection,
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/must retain one complete preview for every benchmark/)
   await projectCandidateValidationUi({
     model_run_store: store,
     model_run_id: "live_model",
@@ -301,7 +315,7 @@ test("a failed candidate bundle is atomically projected into the live run withou
       },
     },
     circuit_preview: { source_file: "validation/cases/output.circuit.tsx" },
-    reference_preview: { benchmark_id: "output", result_status: "failed" },
+    reference_preview: { benchmark_id: "output", result_status: "verified", matches_reference: false },
   })
   expect(
     await loadStoredModelPreview({
@@ -312,7 +326,7 @@ test("a failed candidate bundle is atomically projected into the live run withou
       current_preview_generation: `fixture-${failed.manifest.revision}`,
       current_model_revision: failed.manifest.revision,
     }),
-  ).toMatchObject({ reference_preview: { result_status: "failed" } })
+  ).toMatchObject({ reference_preview: { result_status: "verified", matches_reference: false } })
   expect(await Bun.file(join(model_dir, "model.lib")).exists()).toBe(false)
   expect(await Bun.file(join(model_dir, "current-preview.json")).exists()).toBe(true)
   expect(

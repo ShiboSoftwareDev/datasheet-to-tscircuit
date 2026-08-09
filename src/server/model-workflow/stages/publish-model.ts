@@ -26,6 +26,23 @@ export const publishModelStage = defineModelStage({
   id: "publish",
   depends_on: ["repair_spice_model", "wait_for_component"],
   async execute({ context, services, dependency_outputs, signal }) {
+    if (!dependency_outputs.repair_spice_model.passed) {
+      const reason =
+        "The development model remains unpublished because it did not meet the server-owned validation target"
+      updateModelProgress({
+        store: services.model_run_store,
+        model_run_id: context.model_run_id,
+        phase: "finalizing",
+        message: reason,
+      })
+      await appendModelLog(
+        services.model_run_store,
+        context.model_run_id,
+        "system",
+        `${reason}. The best development model and its synchronized TSX, simulation, and comparison artifacts remain available.\n`,
+      )
+      return { status: "skipped", reason }
+    }
     updateModelProgress({
       store: services.model_run_store,
       model_run_id: context.model_run_id,

@@ -88,7 +88,7 @@ rejected. Do not set reference_curve.image: the server renders the cited source
 page and materializes the canonical crop as
 evidence/figures/<graph_id>.png. Every channel from the same source graph shares
 that immutable crop while retaining its own reference curve and observation.
-Digitize 8 through 48 points distributed across the graph's full elapsed-time
+Digitize 8 through 96 points distributed across the graph's full elapsed-time
 range only when no server_verified_reference_curve is supplied. When it is
 supplied, copy its points exactly even when it contains fewer than 48 points;
 the upstream verifier already enforced the graph-specific density. The server

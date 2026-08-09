@@ -19,6 +19,8 @@ export interface LocalRunSummary {
   readonly file_name: string
   readonly status: LocalRunStatus
   readonly created_at: string
+  /** Refreshed while the owning process is alive so other environments can detect interruption. */
+  readonly heartbeat_at?: string
   readonly completed_at?: string
   readonly error_message?: string
   readonly execution_dir: string

@@ -68,7 +68,7 @@ const createBasicDefinition = (calls: string[]) => {
     }),
     defineBasicStage({
       id: "build_report",
-      depends_on: ["normalize_text"],
+      depends_on: ["read_source", "normalize_text"],
       async execute({ context, dependency_outputs, services }) {
         calls.push("build_report")
         const report = `REPORT: ${dependency_outputs.normalize_text.normalized}`
@@ -162,9 +162,12 @@ test("pipeline executes ordered dependencies and exposes immutable keyed results
 
 test("an isolated stage runs only from its explicit persisted-style input", async () => {
   const workspace_dir = await mkdtemp(join(tmpdir(), "pipeline-isolated-stage-"))
+  const input_root = join(workspace_dir, "retained-input")
   const calls: string[] = []
 
   try {
+    await mkdir(input_root)
+    await Bun.write(join(input_root, "source.txt"), "isolated filesystem")
     const result = await runPipeline({
       definition: createBasicDefinition(calls),
       run_id: "isolated_normalize",
@@ -180,6 +183,7 @@ test("an isolated stage runs only from its explicit persisted-style input", asyn
         stage_id: "normalize_text",
         dependency_outputs: { read_source: { text: "  isolated input  " } },
       },
+      task_input_root: input_root,
     })
 
     expect(calls).toEqual(["normalize_text"])
@@ -206,6 +210,21 @@ test("an isolated stage runs only from its explicit persisted-style input", asyn
       dependency_statuses: { read_source: "provided" },
       dependency_outputs: { read_source: { text: "  isolated input  " } },
     })
+    const continuation = await loadPipelineTaskInputBundle(
+      join(workspace_dir, ".pipeline", "stages", "03-build_report", "input.json"),
+    )
+    expect(continuation.envelope).toMatchObject({
+      task_id: "build_report",
+      dependency_statuses: {
+        read_source: "provided",
+        normalize_text: "completed",
+      },
+      dependency_outputs: {
+        read_source: { text: "  isolated input  " },
+        normalize_text: { normalized: "ISOLATED INPUT" },
+      },
+    })
+    expect(continuation.manifest.files.map(({ path }) => path)).toContain("source.txt")
   } finally {
     await rm(workspace_dir, { recursive: true, force: true })
   }
@@ -332,6 +351,7 @@ test("pipeline records artifacts, append-only events, and complete per-stage deb
       Bun.file(join(debug_dir, "error.json")).json(),
     ])
     expect(input.dependency_outputs).toEqual({
+      read_source: { text: "evidence" },
       normalize_text: { normalized: "EVIDENCE" },
     })
     expect(output.artifacts[0].artifact_id).toBe("generated_report")
@@ -601,6 +621,49 @@ test("typed process failures retain their actionable code in the pipeline trace"
     if (stage.status !== "failed") throw new Error("expected process stage to fail")
     expect(stage.error).toMatchObject({
       code: "process_spawn_failed",
+      operation: "run_external_process",
+      retryable: true,
+    })
+  } finally {
+    await rm(workspace_dir, { recursive: true, force: true })
+  }
+})
+
+test("exhausted provider transport remains retryable in the pipeline trace", async () => {
+  const workspace_dir = await mkdtemp(join(tmpdir(), "pipeline-transport-failure-"))
+  const defineStage = createPipelineStageFactory<
+    { call_agent: { completed: boolean } },
+    Record<string, never>,
+    Record<string, never>
+  >()
+  try {
+    const result = await runPipeline({
+      definition: {
+        pipeline_id: "transport_failure",
+        stages: [
+          defineStage({
+            id: "call_agent",
+            depends_on: [],
+            execute() {
+              throw new ProcessError({
+                code: "process_transport_failed",
+                command_label: "reference agent",
+                message: "reference agent could not reach the AI provider after 4 transport attempts",
+              })
+            },
+          }),
+        ],
+      },
+      run_id: "transport_failure_run",
+      workspace_dir,
+      context: {},
+      services: {},
+    })
+    const stage = result.stage_results.call_agent
+    expect(stage.status).toBe("failed")
+    if (stage.status !== "failed") throw new Error("expected transport stage to fail")
+    expect(stage.error).toMatchObject({
+      code: "process_transport_failed",
       operation: "run_external_process",
       retryable: true,
     })

@@ -8,9 +8,9 @@ import { createJobApiHandler } from "@/server/job-api"
 import { restorePersistedJobs } from "@/server/job-restorer"
 import { readRestoredCircuitJson } from "@/server/job-restorer/read-restored-circuit-json"
 import { JobStore } from "@/server/job-store"
-import { ModelRunStore } from "@/server/model-run-store"
 import { getModelRunFile } from "@/server/model-run-api/get-model-run-file"
 import type { ModelRunApiContext } from "@/server/model-run-api/model-run-api-context"
+import { ModelRunStore } from "@/server/model-run-store"
 import { isModelRunPaused } from "@/shared/model-run-status"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
 
@@ -783,6 +783,20 @@ test("restart preserves a successful partial SPICE pipeline as a paused developm
   const timestamp = "2026-08-08T12:00:00.000Z"
   const development_source = ".SUBCKT PARTIAL IN OUT\nR1 IN OUT 1k\n.ENDS PARTIAL\n"
   const revision = createHash("sha256").update(development_source.trim()).digest("hex").slice(0, 16)
+  const invocation_id = "11111111-2222-4333-8444-555555555555"
+  const preview_generation = `${invocation_id}-${revision}`
+  const preview = {
+    artifact_identity: { preview_generation, model_revision: revision },
+    reference_preview: {
+      benchmark_id: "output",
+      title: "Output comparison",
+      source_file: "validation-plan.json",
+      x_scale: "linear",
+      y_scale: "linear",
+      reference_points: [],
+      updated_at: timestamp,
+    },
+  }
   await mkdir(model_dir, { recursive: true })
   await Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\npartial pipeline fixture")
 
@@ -800,6 +814,7 @@ test("restart preserves a successful partial SPICE pipeline as a paused developm
     is_complete: true,
     has_errors: false,
     completed_at: timestamp,
+    current_invocation_id: invocation_id,
     development_model: {
       model_source: development_source,
       model_card: "Development model; not published.",
@@ -849,6 +864,50 @@ test("restart preserves a successful partial SPICE pipeline as a paused developm
       },
     },
   })
+  await mkdir(join(model_dir, "current-previews", preview_generation, "cases"), { recursive: true })
+  await Promise.all([
+    Bun.write(
+      join(model_dir, "current-preview.json"),
+      JSON.stringify({
+        version: 1,
+        model_run_id: "partial_model",
+        invocation_id,
+        revision,
+        preview_generation,
+        updated_at: timestamp,
+      }),
+    ),
+    Bun.write(
+      join(model_dir, "current-previews", preview_generation, "model-ui.json"),
+      JSON.stringify({
+        validation: {
+          artifact_state: "candidate",
+          model_revision: revision,
+          preview_generation,
+          benchmark_count: 1,
+          passing_count: 0,
+          critical_count: 1,
+          critical_passing_count: 0,
+          all_critical_passed: false,
+          all_passed: false,
+          benchmarks: [{ benchmark_id: "output", title: "Output comparison", passed: false }],
+        },
+        preview_options: [
+          {
+            benchmark_id: "output",
+            title: "Output comparison",
+            circuit_file: "cases/output.circuit.tsx",
+            reference_file: "validation-plan.json",
+          },
+        ],
+        selected_previews: { output: preview },
+      }),
+    ),
+    Bun.write(
+      join(model_dir, "current-previews", preview_generation, "cases", "output.preview.json"),
+      JSON.stringify(preview),
+    ),
+  ])
 
   const restored_jobs = new JobStore()
   const restored_models = new ModelRunStore()
@@ -861,6 +920,14 @@ test("restart preserves a successful partial SPICE pipeline as a paused developm
   expect(restored?.pipeline?.stage_results.publish.status).toBe("pending")
   expect(restored?.development_model?.model_source).toBe(development_source)
   expect(restored?.model_source).toBeUndefined()
+  expect(restored?.validation).toMatchObject({
+    artifact_state: "candidate",
+    model_revision: revision,
+    preview_generation,
+    benchmark_count: 1,
+  })
+  expect(restored?.preview_options).toHaveLength(1)
+  expect(restored?.reference_preview?.benchmark_id).toBe("output")
 
   await rm(jobs_root, { recursive: true, force: true })
 })

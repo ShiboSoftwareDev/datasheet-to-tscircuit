@@ -1,20 +1,20 @@
 import { createHash, randomUUID } from "node:crypto"
-import { createReadStream, constants, type Stats } from "node:fs"
+import { constants, createReadStream, type Stats } from "node:fs"
 import {
   chmod,
+  type FileHandle,
   link,
   lstat,
   mkdir,
   open,
   opendir,
-  readFile,
   readdir,
+  readFile,
   realpath,
   rename,
   rm,
   unlink,
   writeFile,
-  type FileHandle,
 } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path"
 import type { PipelineTaskInputEnvelope, PipelineTaskInputFiles } from "@/shared/pipeline-types"
@@ -521,6 +521,12 @@ export async function restorePipelineTaskInputFiles(input: {
   bundle: PipelineTaskInputBundle
   destination_root: string
   excluded_roots?: readonly string[]
+  /**
+   * Live output roots that belong to the selected job, not to the retained
+   * task input. Existing entries are never removed or overwritten; missing
+   * retained entries may still be restored.
+   */
+  preserved_roots?: readonly string[]
 }): Promise<void> {
   const destination_root = await realpath(input.destination_root)
   const temporary_root = join(destination_root, `.restoring-${randomUUID()}`)
@@ -530,6 +536,7 @@ export async function restorePipelineTaskInputFiles(input: {
     const retained_files = new Set(input.bundle.manifest.files.map(({ path }) => path))
     const retained_directories = new Set(input.bundle.manifest.directories)
     const excluded_roots = new Set(input.excluded_roots ?? [])
+    const preserved_roots = new Set(input.preserved_roots ?? [])
 
     const prune = async (directory: string, relative_directory = ""): Promise<void> => {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -538,6 +545,7 @@ export async function restorePipelineTaskInputFiles(input: {
         if (
           entry.name === basename(temporary_root) ||
           excluded_roots.has(top_level) ||
+          preserved_roots.has(top_level) ||
           relative_path === "runs" ||
           relative_path.startsWith(`runs${sep}`) ||
           relative_path === join("spice", "runs") ||
@@ -565,6 +573,10 @@ export async function restorePipelineTaskInputFiles(input: {
     for (const file of input.bundle.manifest.files) {
       const source = join(temporary_root, file.path)
       const destination = join(destination_root, file.path)
+      const top_level = file.path.split(sep)[0] ?? ""
+      if (preserved_roots.has(top_level) && (await lstat(destination).catch(() => undefined))) {
+        continue
+      }
       await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
       await rename(source, destination)
     }

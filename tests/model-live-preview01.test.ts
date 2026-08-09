@@ -8,6 +8,7 @@ import {
   getGraphAxisLayout,
   getModelPreviewBundleScopeKey,
   getRunframeCircuitJson,
+  getSourceRuntimeAnalogCircuitJson,
   hasRunnableAnalogPreviewBundle,
   hasRunnableAnalogSimulation,
   MODEL_ANALOG_ONLY_TABS,
@@ -171,6 +172,25 @@ test("the analog viewer requires a completed tscircuit transient waveform", () =
   expect(hasRunnableAnalogSimulation({ ...transient, analog_simulation_status: "failed" })).toBe(false)
   expect(hasRunnableAnalogSimulation({ ...transient, analog_simulation_status: undefined })).toBe(false)
   expect(hasRunnableAnalogSimulation({ ...transient, analysis_type: undefined })).toBe(false)
+
+  const source_ready = {
+    ...transient,
+    build_status: "source_ready" as const,
+    analog_simulation_status: undefined,
+    circuit_json: undefined,
+  }
+  expect(
+    getSourceRuntimeAnalogCircuitJson({
+      preview: source_ready,
+      runtime_circuit_json: transient.circuit_json,
+    }),
+  ).toBe(transient.circuit_json)
+  expect(
+    getSourceRuntimeAnalogCircuitJson({
+      preview: { ...source_ready, analysis_type: "operating_point" },
+      runtime_circuit_json: transient.circuit_json,
+    }),
+  ).toBeUndefined()
 })
 
 test("analog rendering requires one atomic TSX, reference, and viewer-result bundle", () => {
@@ -344,10 +364,11 @@ test("operating-point artifacts are shown as specification checks, never fake gr
   expect(html).not.toContain("Peak error")
   expect(html).not.toContain("Matches reference")
   expect(html).toContain("model-analog-only-runframe")
-  expect(html).toContain("Waiting for analog simulation")
+  expect(html).toContain("TSX loading")
+  expect(html).not.toContain("Waiting for analog simulation")
 })
 
-test("a source-ready benchmark does not claim an automatic Circuit JSON simulation", () => {
+test("a source-ready benchmark uses the same loading state in both TSX views", () => {
   const html = renderToStaticMarkup(
     createElement(ModelLivePreview, {
       job_id: "job_1",
@@ -362,9 +383,10 @@ test("a source-ready benchmark does not claim an automatic Circuit JSON simulati
     }),
   )
 
-  expect(html).toContain("Benchmark TSX is source-ready")
-  expect(html).toContain("No Circuit JSON snapshot is stored for this benchmark")
-  expect(html).toContain("analog viewer appears only after tscircuit stores a completed transient waveform")
+  expect(html.match(/TSX loading/g)).toHaveLength(2)
+  expect(html).toContain("Loading the generated TSX into the circuit viewer.")
+  expect(html).not.toContain("Benchmark TSX is source-ready")
+  expect(html).not.toContain("Waiting for analog simulation")
   expect(html).not.toContain("automatically runs one preview point")
 })
 
@@ -562,7 +584,7 @@ test("failed and cancelled server cases are never labelled as verified", () => {
     }),
   )
 
-  expect(failed_html).toContain("Server validation · failed")
+  expect(failed_html).toContain("Comparison unavailable")
   expect(failed_html).not.toContain("Server-verified model")
   expect(cancelled_html).toContain("Server validation · cancelled")
   expect(cancelled_html).toContain("Validation cancelled")
@@ -648,6 +670,7 @@ test("the comparison header shows metrics and tolerance status", () => {
         ],
         normalized_rmse: 0.4,
         normalized_max_error: 0.75,
+        result_status: "failed",
         matches_reference: false,
         updated_at: "2026-07-22T00:00:00.000Z",
       },
@@ -657,7 +680,9 @@ test("the comparison header shows metrics and tolerance status", () => {
   expect(html).toContain('class="model-comparison-summary"')
   expect(html).toContain("<span>NRMSE</span><strong>40.0%</strong>")
   expect(html).toContain("<span>Peak error</span><strong>75.0%</strong>")
-  expect(html).toContain("Outside curve tolerance")
+  expect(html).toContain("Outside reference tolerance")
+  expect(html).not.toContain("Validation failed")
+  expect(html).not.toContain("Comparison unavailable")
   expect(html).not.toContain("model-reference-mismatch-warning")
 })
 
@@ -795,8 +820,9 @@ test("found references use the normal workspace with both TSX views and an empty
   )
 
   expect(html.match(/model-preview-workspace/g)).toHaveLength(1)
-  expect(html).toContain("Waiting for benchmark TSX")
-  expect(html).toContain("Waiting for analog simulation")
+  expect(html.match(/TSX not available yet/g)).toHaveLength(2)
+  expect(html).not.toContain("Waiting for benchmark TSX")
+  expect(html).not.toContain("Waiting for analog simulation")
   expect(html).toContain("Reference graph comparison")
   expect(html).toContain("Waiting for digitized evidence")
   expect(html).toContain(

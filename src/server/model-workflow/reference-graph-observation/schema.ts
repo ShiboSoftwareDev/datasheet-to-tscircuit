@@ -28,7 +28,7 @@ export type ReferencePointFieldPolicy = "pixels_only" | "canonical"
 export type ReferenceGraphArtifactPhase = "find" | "comparison"
 
 export const MIN_TRACE_POINTS = 8
-export const MAX_TRACE_POINTS = 48
+export const MAX_TRACE_POINTS = 96
 const MAX_HORIZONTAL_PIXELS_PER_TRACE_POINT = 14
 export const AXIS_CALIBRATION_TOLERANCE = 0.015
 export const MIN_X_COVERAGE_RATIO = 0.98

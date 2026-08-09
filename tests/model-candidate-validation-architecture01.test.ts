@@ -3,8 +3,6 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import ts from "typescript"
 
-const stage_files = ["validate-model.ts", "repair-model.ts"] as const
-
 function calledIdentifiers(source_file: ts.SourceFile): string[] {
   const calls: string[] = []
   const visit = (node: ts.Node): void => {
@@ -17,36 +15,47 @@ function calledIdentifiers(source_file: ts.SourceFile): string[] {
   return calls
 }
 
-test("initial and repaired candidates use the same authoritative validation service", async () => {
-  for (const file_name of stage_files) {
-    const path = join(import.meta.dir, "../src/server/model-workflow/stages", file_name)
-    const source = await readFile(path, "utf8")
-    const source_file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true)
-    const candidate_validation_imports = source_file.statements.flatMap((statement) => {
-      if (
-        !ts.isImportDeclaration(statement) ||
-        !ts.isStringLiteral(statement.moduleSpecifier) ||
-        statement.moduleSpecifier.text !== "../candidate-validation"
-      ) {
-        return []
-      }
-      const bindings = statement.importClause?.namedBindings
-      return bindings && ts.isNamedImports(bindings) ? bindings.elements.map(({ name }) => name.text) : []
-    })
-    const calls = calledIdentifiers(source_file)
+async function stageCalls(file_name: string): Promise<string[]> {
+  const path = join(import.meta.dir, "../src/server/model-workflow/stages", file_name)
+  const source = await readFile(path, "utf8")
+  return calledIdentifiers(ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true))
+}
 
-    expect(candidate_validation_imports).toEqual(["validateCandidate"])
-    expect(calls.filter((name) => name === "validateCandidate")).toHaveLength(1)
-    for (const implementation_detail of [
-      "runSpiceValidation",
-      "checkCandidateStimulusCausality",
-      "attachStimulusCausalityCheck",
-      "buildValidationCircuitPreviews",
-      "persistCandidateValidationUi",
-      "projectCandidateValidationUi",
-      "classifyValidationInfrastructureFailure",
-    ]) {
-      expect(calls).not.toContain(implementation_detail)
-    }
+test("simulation execution, comparison, and repair retain separate authoritative boundaries", async () => {
+  const run_calls = await stageCalls("validate-model.ts")
+  expect(run_calls).toContain("runValidationCircuitSimulations")
+  expect(run_calls).toContain("writeTscircuitSimulationArtifacts")
+  for (const comparison_detail of [
+    "validateCandidate",
+    "runSpiceValidation",
+    "compareValidationCircuitSimulations",
+    "persistCandidateValidationUi",
+    "projectCandidateValidationUi",
+    "createModelRepairFeedback",
+  ]) {
+    expect(run_calls).not.toContain(comparison_detail)
+  }
+
+  const comparison_calls = await stageCalls("compare-simulation-outputs.ts")
+  expect(comparison_calls).toContain("readTscircuitSimulationArtifacts")
+  expect(comparison_calls).toContain("compareValidationCircuitSimulations")
+  expect(comparison_calls).not.toContain("runValidationCircuitSimulations")
+  expect(comparison_calls).not.toContain("runSpiceValidation")
+  expect(comparison_calls).not.toContain("validateCandidate")
+  expect(comparison_calls).not.toContain("createModelRepairFeedback")
+
+  const repair_calls = await stageCalls("repair-model.ts")
+  expect(repair_calls.filter((name) => name === "validateCandidate")).toHaveLength(1)
+  expect(repair_calls).toContain("createModelRepairFeedback")
+  expect(repair_calls).toContain("projectCandidateValidationUi")
+  for (const implementation_detail of [
+    "runSpiceValidation",
+    "checkCandidateStimulusCausality",
+    "attachStimulusCausalityCheck",
+    "buildValidationCircuitPreviews",
+    "persistCandidateValidationUi",
+    "classifyValidationInfrastructureFailure",
+  ]) {
+    expect(repair_calls).not.toContain(implementation_detail)
   }
 })

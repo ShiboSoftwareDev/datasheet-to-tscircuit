@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs"
 import { copyFile, readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { ensureJobTscircuitRuntimeConfig } from "../../job-scaffold"
@@ -31,7 +32,7 @@ async function retainedCandidateForRetry(input: {
 }): Promise<{ artifact_dir: string; generated: GeneratedModel } | undefined> {
   if (!input.revision) return undefined
   const candidates_root = join(input.model_dir, "candidates")
-  let entries
+  let entries: Dirent[]
   try {
     entries = await readdir(candidates_root, { withFileTypes: true })
   } catch (error) {
@@ -42,7 +43,9 @@ async function retainedCandidateForRetry(input: {
     (entry) => entry.isDirectory() && entry.name.startsWith(`${input.revision}-`),
   )
   if (matches.length !== 1) return undefined
-  const artifact_dir = join(candidates_root, matches[0]!.name)
+  const match = matches[0]
+  if (!match) return undefined
+  const artifact_dir = join(candidates_root, match.name)
   try {
     const [source, card, persisted_manifest] = await Promise.all([
       readFile(join(artifact_dir, "model.lib"), "utf8"),
@@ -122,9 +125,6 @@ export const generateModelStage = defineModelStage({
           signal,
           use_openai: context.use_openai,
           agent_client: services.agent_client,
-          ngspice: services.ngspice_executor,
-          ngspice_path: services.ngspice_bin,
-          tsci_path: services.tsci_bin,
           max_artifact_attempts: 3,
           debug_dir,
           on_output: (stream, message) =>

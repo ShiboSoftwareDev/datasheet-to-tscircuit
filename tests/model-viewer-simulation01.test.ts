@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test"
 import type { AnyCircuitElement } from "circuit-json"
-import { validateViewerSimulation } from "@/server/modeling/viewer-simulation"
 import {
   getViewerInfrastructureFailures,
   getViewerPreviewFailures,
   partitionViewerBuildErrors,
   type ValidationCircuitPreviewBuild,
 } from "@/server/model-workflow/validation-circuit-previews"
+import { validateViewerSimulation } from "@/server/modeling/viewer-simulation"
 import type { ValidationCase } from "@/server/spice-validation"
 
 type MutableCircuitRecord = AnyCircuitElement & Record<string, unknown>
@@ -455,6 +455,26 @@ test("viewer validation scores the exact tscircuit time-domain graph", () => {
     { x: 0.001, y: 1 },
     { x: 0.002, y: 2 },
   ])
+})
+
+test("repair validation may change fixtures without changing the reference observation", () => {
+  const repaired = transientCircuit() as MutableCircuitRecord[]
+  const load = repaired.find(
+    (record) => record.type === "source_component" && record.source_component_id === "r_load_component",
+  )
+  if (!load) throw new Error("Missing test load")
+  load.resistance = 2_000
+
+  const exact = validateViewerSimulation({ validation_case: transient_case, circuit_json: repaired })
+  const repair = validateViewerSimulation({
+    validation_case: transient_case,
+    circuit_json: repaired,
+    fixture_policy: "repairable",
+  })
+
+  expect(exact.errors.map(({ code }) => code)).toContain("viewer_fixture_model_mismatch")
+  expect(repair.passed).toBe(true)
+  expect(repair.errors).toEqual([])
 })
 
 test("viewer validation rejects a hidden non-transient experiment beside the planned transient", () => {

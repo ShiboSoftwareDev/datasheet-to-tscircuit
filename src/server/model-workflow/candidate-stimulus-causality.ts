@@ -61,7 +61,7 @@ function sourceMatchesBinding(
   )
 }
 
-function flattenBoundPulses(input: { plan: ValidationPlan; contract: ModelContract }): {
+export function createStimulusCausalityPlan(input: { plan: ValidationPlan; contract: ModelContract }): {
   plan: ValidationPlan
   relevant_observation_ids_by_case: ReadonlyMap<string, ReadonlySet<string>>
 } {
@@ -252,7 +252,7 @@ export async function checkCandidateStimulusCausality(input: {
   ngspice: NgspiceExecutor
   ngspice_path: string
 }): Promise<CandidateStimulusCausalityCheck> {
-  const flattened = flattenBoundPulses({ plan: input.plan, contract: input.contract })
+  const flattened = createStimulusCausalityPlan({ plan: input.plan, contract: input.contract })
   const checked_case_count = flattened.relevant_observation_ids_by_case.size
   const checked_observation_count = [...flattened.relevant_observation_ids_by_case.values()].reduce(
     (count, observations) => count + observations.size,
@@ -296,8 +296,44 @@ export async function checkCandidateStimulusCausality(input: {
     await rm(temporary_directory, { recursive: true, force: true }).catch(() => undefined)
   }
 
+  return evaluateStimulusCausality({
+    plan: input.plan,
+    contract: input.contract,
+    manifest: input.manifest,
+    model_source: input.model_source,
+    baseline_result: input.baseline_result,
+    flattened_result,
+    flattened,
+  })
+}
+
+export function evaluateStimulusCausality(input: {
+  plan: ValidationPlan
+  contract: ModelContract
+  manifest: ModelManifest
+  model_source: string
+  baseline_result: ValidationRunResult
+  flattened_result: ValidationRunResult
+  flattened?: ReturnType<typeof createStimulusCausalityPlan>
+}): CandidateStimulusCausalityCheck {
+  const flattened =
+    input.flattened ?? createStimulusCausalityPlan({ plan: input.plan, contract: input.contract })
+  const checked_case_count = flattened.relevant_observation_ids_by_case.size
+  const checked_observation_count = [...flattened.relevant_observation_ids_by_case.values()].reduce(
+    (count, observations) => count + observations.size,
+    0,
+  )
+  if (checked_observation_count === 0) return { required: false, passed: true }
+  const expected_hashes = hashValidationInputs({
+    plan: input.plan,
+    model_source: input.model_source,
+    manifest: input.manifest,
+  })
+  if (JSON.stringify(expected_hashes) !== JSON.stringify(input.baseline_result.hashes)) {
+    throw new Error("Candidate stimulus-causality check received a baseline from different model inputs")
+  }
   const baseline_series = indexSeries(input.baseline_result)
-  const flattened_series = indexSeries(flattened_result)
+  const flattened_series = indexSeries(input.flattened_result)
   const affected_cases = new Set<string>()
   let affected_observation_count = 0
   for (const validation_case of input.plan.cases) {

@@ -18,14 +18,14 @@ import { restorePersistedJobs } from "@/server/job-restorer"
 import { ensureJobTscircuitRuntimeConfig } from "@/server/job-scaffold"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
-import { parseModelInterface, readGeneratedModel } from "@/server/modeling"
-import { resolveBenchmarkReferenceImage } from "@/server/modeling/reference-image"
-import type { ValidationPlan } from "@/server/spice-validation"
 import { runModel } from "@/server/model-workflow"
 import {
   createModelTrainingCheckReceipt,
   MODEL_TRAINING_CHECK_RECEIPT_FILE,
 } from "@/server/model-workflow/model-training-check"
+import { parseModelInterface, readGeneratedModel } from "@/server/modeling"
+import { resolveBenchmarkReferenceImage } from "@/server/modeling/reference-image"
+import type { ValidationPlan } from "@/server/spice-validation"
 import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const ngspice_path = Bun.which("ngspice")
@@ -359,6 +359,7 @@ function deterministicAgent(calls: string[]): AgentClient {
           )}\n`,
         )
         if (input.phase_label.startsWith("Digitize reference graph ")) {
+          expect(existsSync(join(input.workspace, "reference-graph.png"))).toBe(true)
           const candidate = (await Bun.file(
             join(input.workspace, "model-reference-observation.json"),
           ).json()) as { graphs: Array<Record<string, unknown>> }
@@ -397,9 +398,6 @@ function deterministicAgent(calls: string[]): AgentClient {
         return { attempts: 1, duration_ms: 1, output_tail: "" }
       }
       if (input.phase_label === "SPICE model generation") {
-        const generated_validation_plan = JSON.parse(
-          await Bun.file(join(input.workspace, "model-training-plan.json")).text(),
-        ) as typeof validation_plan
         await Promise.all([
           Bun.write(join(input.workspace, "model.lib"), model_source),
           Bun.write(
@@ -417,51 +415,16 @@ function deterministicAgent(calls: string[]): AgentClient {
         const candidate_receipt = {
           version: 1 as const,
           status: "passed" as const,
-          checks: ["model_contract", "model_card", "ngspice_smoke"] as const,
+          checks: ["model_contract", "model_card", "static_source"] as const,
           revision: generated.manifest.revision,
           entry_name: generated.manifest.entry_name,
           pin_count: generated.manifest.pins.length,
           model_card_sha256: createHash("sha256").update(generated.card).digest("hex"),
         }
-        const training_receipt = await createModelTrainingCheckReceipt({
-          workspace: input.workspace,
-          candidate: candidate_receipt,
-          training_validation: {
-            version: 1,
-            status: "passed",
-            cases: generated_validation_plan.cases.map((validation_case) => {
-              const series = validation_case.observations.map((observation) => ({
-                observation_id: observation.id,
-                status: "passed" as const,
-                metrics: {
-                  sample_count: 2,
-                  normalized_max_error: 0,
-                  normalized_rmse: 0,
-                },
-                samples: [
-                  { x: 0, reference_y: 0, simulated_y: 0, error: 0 },
-                  { x: 0.001, reference_y: 2, simulated_y: 2, error: 0 },
-                ],
-                error_codes: [],
-              }))
-              return {
-                case_id: validation_case.id,
-                status: "passed" as const,
-                server_series: series,
-                viewer_series: series,
-                error_codes: [],
-              }
-            }),
-            error_codes: [],
-          },
-        })
-        await Promise.all([
-          Bun.write(join(input.workspace, ".candidate-check.json"), `${JSON.stringify(candidate_receipt)}\n`),
-          Bun.write(
-            join(input.workspace, MODEL_TRAINING_CHECK_RECEIPT_FILE),
-            `${JSON.stringify(training_receipt)}\n`,
-          ),
-        ])
+        await Bun.write(
+          join(input.workspace, ".candidate-check.json"),
+          `${JSON.stringify(candidate_receipt)}\n`,
+        )
       } else {
         throw new Error(`Unexpected agent phase: ${input.phase_label}`)
       }
@@ -796,7 +759,7 @@ testWithProductionSimulation(
         ({ command, command_label }) =>
           command[0] === "pdftotext" && command_label.startsWith("Extract canonical figure geometry"),
       ),
-    ).toHaveLength(2)
+    ).toHaveLength(3)
     expect(
       process_runner.calls.filter(
         ({ command, command_label }) =>
@@ -824,9 +787,45 @@ testWithProductionSimulation(
     })
     expect(await readFile(join(candidate_dir, "model.lib"), "utf8")).toBe(model_source)
     expect(await Bun.file(join(candidate_dir, "model-manifest.json")).exists()).toBe(true)
-    expect(await Bun.file(join(candidate_dir, "validation", "transient_gain", "result.raw")).exists()).toBe(
-      true,
+    expect(
+      await Bun.file(join(candidate_dir, "simulation", "cases", "transient_gain.circuit.json")).exists(),
+    ).toBe(true)
+    expect(
+      await Bun.file(
+        join(candidate_dir, "simulation", "causality-control", "cases", "transient_gain.circuit.json"),
+      ).exists(),
+    ).toBe(true)
+    const comparison = JSON.parse(
+      await readFile(join(candidate_dir, "validation", "simulation-comparison.json"), "utf8"),
     )
+    expect(comparison).toMatchObject({
+      passed: true,
+      case_count: 1,
+      passing_case_count: 1,
+      overall_statistics: {
+        series_count: 1,
+        passing_series: 1,
+        curve_score: expect.any(Number),
+        curve_worst_normalized_error: expect.any(Number),
+      },
+      graphs: [
+        {
+          graph_id: "transient_gain",
+          passed: true,
+          normalized_rmse: expect.any(Number),
+          normalized_max_error: expect.any(Number),
+          series: [
+            {
+              series_id: "output_voltage",
+              passed: true,
+              normalized_rmse: expect.any(Number),
+              normalized_max_error: expect.any(Number),
+            },
+          ],
+        },
+      ],
+    })
+    expect(JSON.stringify(comparison)).not.toContain("repair_feedback")
 
     const canonical_plan = JSON.parse(
       await readFile(join(model_dir, "validation-plan.json"), "utf8"),

@@ -7,16 +7,17 @@ import { atomicWriteJsonSync } from "../infrastructure/persistence/atomic-write"
 import { restoreJobDirectory } from "../job-restorer/restore-job-directory"
 import { restoreModelDirectory } from "../job-restorer/restore-model-directory"
 import { JobStore } from "../job-store"
+import { LOCAL_RUN_HEARTBEAT_INTERVAL_MS } from "../local-runs"
 import { ModelRunStore } from "../model-run-store"
-import { PIPELINE_REGISTRY, type RegisteredPipelineId } from "../pipeline-registry"
 import {
   loadPipelineTaskInputBundle,
   materializePipelineTaskInputFiles,
-  restorePipelineTaskInputFiles,
   type PipelineTaskInputBundle,
+  restorePipelineTaskInputFiles,
 } from "../pipeline"
-import { executePipeline, validateLocalInput, type PreparedPipelineLocalRun } from "./run"
-import { retainLocalInputBundle, rewriteWorkspacePaths, type LocalWorkspace } from "./workspace"
+import { PIPELINE_REGISTRY, type RegisteredPipelineId } from "../pipeline-registry"
+import { executePipeline, type PreparedPipelineLocalRun, validateLocalInput } from "./run"
+import { type LocalWorkspace, retainLocalInputBundle, rewriteWorkspacePaths } from "./workspace"
 
 export interface PipelineJobExecutionContext {
   rootDir: string
@@ -25,6 +26,14 @@ export interface PipelineJobExecutionContext {
   jobStore: JobStore
   modelRunStore: ModelRunStore
 }
+
+export type LocalRunProgressEvent =
+  | { readonly kind: "started" | "heartbeat"; readonly summary: LocalRunSummary }
+  | {
+      readonly kind: "pipeline"
+      readonly summary: LocalRunSummary
+      readonly pipeline: PublicPipelineSnapshot
+    }
 
 function requiredContextString(context: Readonly<Record<string, PipelineJsonValue>>, key: string): string {
   const value = context[key]
@@ -133,41 +142,45 @@ export async function clonePipelineJob(input: {
   const jobId = crypto.randomUUID()
   const stagingDir = join(input.context.jobsRoot, `.creating-${jobId}`)
   const jobDir = join(input.context.jobsRoot, jobId)
-  let sourceJob = liveSourceJob
-  let sourceModel = input.context.modelRunStore.getModelRunForJob(input.sourceJobId)
+  let sourceJob: Job | undefined
+  let sourceModel: ModelRun | undefined
   try {
     await mkdir(stagingDir)
     await materializePipelineTaskInputFiles({ bundle: input.bundle, destination_root: stagingDir })
-    if (!sourceJob) {
-      const retainedJobStore = new JobStore({
-        checkpoint_writer: () => undefined,
-        log_writer: async () => undefined,
-      })
-      const retainedModelRunStore = new ModelRunStore({
-        checkpoint_writer: () => undefined,
-        log_writer: async () => undefined,
-      })
-      sourceJob = await restoreJobDirectory({
-        job_id: input.sourceJobId,
-        job_dir: stagingDir,
-        job_store: retainedJobStore,
-      })
-      sourceModel = await restoreModelDirectory({
-        job_id: input.sourceJobId,
-        model_dir: join(stagingDir, "spice"),
-        model_run_store: retainedModelRunStore,
-      })
-      if (!sourceJob) {
-        throw new Error(`Retained input for job ${input.sourceJobId} has no restorable job checkpoint`)
-      }
-    }
     // Immutable accepted bundles cannot be copied across job identities. They
-    // are outputs, never inputs to an earlier debugging task.
+    // are outputs, never inputs to an earlier debugging task. Remove them
+    // before restoring the retained projection so a stale or identity-bound
+    // publication cannot hide the retained development candidate.
     await Promise.all([
       rm(join(stagingDir, "published-model.json"), { force: true }),
       rm(join(stagingDir, "published-models"), { recursive: true, force: true }),
       rm(join(stagingDir, "spice", "accepted-revisions"), { recursive: true, force: true }),
     ])
+    const retainedJobStore = new JobStore({
+      checkpoint_writer: () => undefined,
+      log_writer: async () => undefined,
+    })
+    const retainedModelRunStore = new ModelRunStore({
+      checkpoint_writer: () => undefined,
+      log_writer: async () => undefined,
+    })
+    // A clone represents the retained pre-task boundary. The live source job
+    // may have advanced through later in-place executions, so copying its
+    // current in-memory projection would cross-wire newer model metadata with
+    // the retained preview files materialized above.
+    sourceJob = await restoreJobDirectory({
+      job_id: input.sourceJobId,
+      job_dir: stagingDir,
+      job_store: retainedJobStore,
+    })
+    sourceModel = await restoreModelDirectory({
+      job_id: input.sourceJobId,
+      model_dir: join(stagingDir, "spice"),
+      model_run_store: retainedModelRunStore,
+    })
+    if (!sourceJob) {
+      throw new Error(`Retained input for job ${input.sourceJobId} has no restorable job checkpoint`)
+    }
     await rename(stagingDir, jobDir)
   } catch (error) {
     await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
@@ -229,7 +242,7 @@ function terminalJobStatus(status: LocalRunSummary["status"]) {
   return "failed" as const
 }
 
-function normalizePartialPipeline(input: {
+export function normalizePartialPipeline(input: {
   snapshot: PublicPipelineSnapshot | undefined
   baselineSnapshot?: PublicPipelineSnapshot
   mode: LocalRunMode
@@ -268,6 +281,8 @@ export async function createPipelineJobRun(input: {
   mode: LocalRunMode
   taskId?: string
   parentLocalRunId?: string
+  signal?: AbortSignal
+  on_progress?: (event: LocalRunProgressEvent) => void
 }): Promise<PreparedPipelineLocalRun> {
   validateLocalInput(input)
   const targetJob = input.context.jobStore.getJob(input.targetJobId)
@@ -301,12 +316,19 @@ export async function createPipelineJobRun(input: {
   const executionDir = join(input.context.localRunsRoot, localRunId)
   await mkdir(input.context.localRunsRoot, { recursive: true })
   await mkdir(executionDir)
-  const inputPath = await retainLocalInputBundle({
-    bundle: reboundBundle,
-    executionDir,
-    envelope,
-  })
-  const retainedBundle = await loadPipelineTaskInputBundle(inputPath)
+  let inputPath: string
+  let retainedBundle: PipelineTaskInputBundle
+  try {
+    inputPath = await retainLocalInputBundle({
+      bundle: reboundBundle,
+      executionDir,
+      envelope,
+    })
+    retainedBundle = await loadPipelineTaskInputBundle(inputPath)
+  } catch (error) {
+    await rm(executionDir, { recursive: true, force: true }).catch(() => undefined)
+    throw error
+  }
 
   const runDir =
     envelope.pipeline_id === "spice_generation"
@@ -330,6 +352,10 @@ export async function createPipelineJobRun(input: {
         bundle: retainedBundle,
         destination_root: targetJobDir,
         excluded_roots: envelope.pipeline_id === "spice_generation" ? [] : ["spice"],
+        // A retained task boundary supplies the task's explicit dependency
+        // paths, but it must never roll back the selected job's accumulated
+        // SPICE candidates, reference graphs, simulations, or live preview.
+        preserved_roots: envelope.pipeline_id === "spice_generation" ? ["spice"] : [],
       })
     }
   } catch (error) {
@@ -349,6 +375,7 @@ export async function createPipelineJobRun(input: {
     context: envelope.execution_context,
     dependencyOutputs: envelope.dependency_outputs,
   }
+  const createdAt = new Date().toISOString()
   const initialSummary: LocalRunSummary = {
     version: 2,
     local_run_id: localRunId,
@@ -362,7 +389,8 @@ export async function createPipelineJobRun(input: {
     ...(input.parentLocalRunId ? { parent_local_run_id: input.parentLocalRunId } : {}),
     file_name: targetJob.file_name,
     status: "running",
-    created_at: new Date().toISOString(),
+    created_at: createdAt,
+    heartbeat_at: createdAt,
     execution_dir: executionDir,
     workspace_dir: targetJobDir,
     input_path: inputPath,
@@ -388,6 +416,37 @@ export async function createPipelineJobRun(input: {
       envelope.pipeline_id === "spice_generation"
         ? requiredContextString(envelope.execution_context, "model_run_id")
         : undefined
+    let heartbeatSummary = initialSummary
+    let heartbeatTimer: ReturnType<typeof setInterval> | undefined
+    const reportProgress = (event: LocalRunProgressEvent) => {
+      try {
+        input.on_progress?.(event)
+      } catch (error) {
+        console.error("[local-run] progress_observer_failed", {
+          local_run_id: localRunId,
+          cause: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    const refreshHeartbeat = () => {
+      heartbeatSummary = { ...heartbeatSummary, heartbeat_at: new Date().toISOString() }
+      try {
+        atomicWriteJsonSync(summaryPath, heartbeatSummary)
+        reportProgress({ kind: "heartbeat", summary: heartbeatSummary })
+      } catch (error) {
+        console.error("[local-run] heartbeat_write_failed", {
+          local_run_id: localRunId,
+          cause: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    const stopHeartbeat = () => {
+      if (heartbeatTimer) clearInterval(heartbeatTimer)
+      heartbeatTimer = undefined
+    }
+    reportProgress({ kind: "started", summary: heartbeatSummary })
+    refreshHeartbeat()
+    heartbeatTimer = setInterval(refreshHeartbeat, LOCAL_RUN_HEARTBEAT_INTERVAL_MS)
     try {
       if (modelRunId) {
         input.context.modelRunStore.startSegment(modelRunId)
@@ -402,6 +461,7 @@ export async function createPipelineJobRun(input: {
         })
       }
     } catch (error) {
+      stopHeartbeat()
       if (modelRunId) input.context.modelRunStore.releaseModelExecution(modelRunId)
       else input.context.jobStore.releasePipelineExecution(input.targetJobId, envelope.pipeline_id)
       atomicWriteJsonSync(summaryPath, {
@@ -413,6 +473,13 @@ export async function createPipelineJobRun(input: {
       execution = Promise.reject(error)
       return execution
     }
+    const storeSignal = modelRunId
+      ? input.context.modelRunStore.getCancellationSignal(modelRunId)
+      : input.context.jobStore.getCancellationSignal(input.targetJobId)
+    const executionSignal =
+      storeSignal && input.signal
+        ? AbortSignal.any([storeSignal, input.signal])
+        : (input.signal ?? storeSignal)
     execution = executePipeline({
       rootDir: input.context.rootDir,
       local,
@@ -422,11 +489,21 @@ export async function createPipelineJobRun(input: {
       mode: input.mode,
       taskId: input.taskId,
       runDir,
-      signal: modelRunId
-        ? input.context.modelRunStore.getCancellationSignal(modelRunId)
-        : input.context.jobStore.getCancellationSignal(input.targetJobId),
+      signal: executionSignal,
+      normalize_snapshot: (pipeline) =>
+        normalizePartialPipeline({
+          snapshot: pipeline,
+          baselineSnapshot: baselinePipeline,
+          mode: input.mode,
+          taskId: input.taskId,
+          status: "running",
+        }) ?? pipeline,
+      on_snapshot: (pipeline) => {
+        reportProgress({ kind: "pipeline", summary: heartbeatSummary, pipeline })
+      },
     })
       .then((result) => {
+        stopHeartbeat()
         const failedStage = Object.values(result.stage_results).find(({ status }) => status === "failed")
         const resultError = failedStage?.status === "failed" ? failedStage.error.message : undefined
         const summary: LocalRunSummary = {
@@ -483,6 +560,7 @@ export async function createPipelineJobRun(input: {
         return summary
       })
       .catch((error) => {
+        stopHeartbeat()
         const summary: LocalRunSummary = {
           ...initialSummary,
           status: "failed",
@@ -513,6 +591,7 @@ export async function createPipelineJobRun(input: {
         throw error
       })
       .finally(() => {
+        stopHeartbeat()
         if (modelRunId) input.context.modelRunStore.releaseModelExecution(modelRunId)
         else input.context.jobStore.releasePipelineExecution(input.targetJobId, envelope.pipeline_id)
       })

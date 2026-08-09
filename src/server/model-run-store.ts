@@ -70,6 +70,9 @@ export type ModelRunUpdate = Partial<
     | "model_card"
     | "use_openai"
     | "pipeline"
+    | "repair_elapsed_time_ms"
+    | "repair_budget_ms"
+    | "repair_started_at"
   >
 >
 
@@ -125,6 +128,9 @@ function getPublicModelRun(record: ModelRunRecord): ModelRun {
     effort_multiplier: record.effort_multiplier,
     elapsed_time_ms: record.elapsed_time_ms,
     segment_started_at: record.segment_started_at,
+    repair_elapsed_time_ms: record.repair_elapsed_time_ms,
+    repair_budget_ms: record.repair_budget_ms,
+    repair_started_at: record.repair_started_at,
     current_invocation_id: record.current_invocation_id,
     iteration: record.iteration,
     logs: [...record.logs],
@@ -208,6 +214,8 @@ export class ModelRunStore {
       warnings: [],
       effort_multiplier: input.effort_multiplier,
       elapsed_time_ms: 0,
+      repair_elapsed_time_ms: 0,
+      repair_budget_ms: input.effort_multiplier * 30 * 60 * 1_000,
       iteration: 0,
       logs: [],
       progress_history: [],
@@ -248,6 +256,10 @@ export class ModelRunStore {
       completed_at: was_active ? new Date().toISOString() : input.model_run.completed_at,
       elapsed_time_ms: input.model_run.elapsed_time_ms + interrupted_segment_ms,
       segment_started_at: undefined,
+      repair_elapsed_time_ms: input.model_run.repair_elapsed_time_ms ?? 0,
+      repair_budget_ms:
+        input.model_run.repair_budget_ms ?? input.model_run.effort_multiplier * 30 * 60 * 1_000,
+      repair_started_at: undefined,
       logs: capRecentLogs(input.logs),
       progress_history: input.model_run.progress_history ?? [],
       preview_options: input.model_run.preview_options ?? [],
@@ -343,6 +355,30 @@ export class ModelRunStore {
       candidate.elapsed_time_ms = elapsed_time_ms
       candidate.segment_started_at = undefined
       Object.assign(candidate, update)
+    })
+  }
+
+  startRepairBudget(model_run_id: string, repair_budget_ms: number): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    if (!Number.isFinite(repair_budget_ms) || repair_budget_ms <= 0) {
+      throw new Error("Repair budget must be a positive duration")
+    }
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.repair_budget_ms = Math.floor(repair_budget_ms)
+      candidate.repair_elapsed_time_ms = 0
+      candidate.repair_started_at = new Date().toISOString()
+    })
+  }
+
+  finishRepairBudget(model_run_id: string): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    const started_at = record.repair_started_at ? new Date(record.repair_started_at).valueOf() : Number.NaN
+    const elapsed = Number.isFinite(started_at)
+      ? (record.repair_elapsed_time_ms ?? 0) + Math.max(0, Date.now() - started_at)
+      : (record.repair_elapsed_time_ms ?? 0)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.repair_elapsed_time_ms = Math.min(candidate.repair_budget_ms ?? elapsed, elapsed)
+      candidate.repair_started_at = undefined
     })
   }
 
@@ -475,6 +511,23 @@ export class ModelRunStore {
     })
   }
 
+  /** Publishes Create Simulation TSX's source-only circuit previews. */
+  projectSimulationSources(
+    model_run_id: string,
+    input: {
+      preview_options: ModelPreviewOption[]
+      circuit_preview: NonNullable<ModelRun["circuit_preview"]>
+      reference_preview: NonNullable<ModelRun["reference_preview"]>
+    },
+  ): ModelRun {
+    const record = this.requireRecord(model_run_id)
+    return this.mutateAndPublish(record, (candidate) => {
+      candidate.preview_options = input.preview_options
+      candidate.circuit_preview = input.circuit_preview
+      candidate.reference_preview = input.reference_preview
+    })
+  }
+
   /**
    * Atomically projects a fully persisted, non-accepted candidate validation
    * bundle into the live view. Accepted model fields remain untouched until the
@@ -484,6 +537,7 @@ export class ModelRunStore {
     model_run_id: string,
     input: {
       validation: NonNullable<ModelRun["validation"]>
+      development_model?: NonNullable<ModelRun["development_model"]>
       preview_options: ModelPreviewOption[]
       previews: Pick<ModelRun, "circuit_preview" | "reference_preview">
     },
@@ -491,6 +545,7 @@ export class ModelRunStore {
     const record = this.requireRecord(model_run_id)
     return this.mutateAndPublish(record, (candidate) => {
       candidate.validation = input.validation
+      if (input.development_model) candidate.development_model = input.development_model
       candidate.preview_options = input.preview_options
       candidate.circuit_preview = input.previews.circuit_preview
       candidate.reference_preview = input.previews.reference_preview
@@ -517,6 +572,7 @@ export class ModelRunStore {
     const should_start = !ACTIVE_STATUSES.has(record.status)
     const model_run = this.mutateAndPublish(record, (candidate) => {
       candidate.effort_multiplier += additional_effort
+      candidate.repair_budget_ms = candidate.effort_multiplier * 30 * 60 * 1_000
       if (should_start) {
         candidate.status = "queued"
         candidate.is_complete = false

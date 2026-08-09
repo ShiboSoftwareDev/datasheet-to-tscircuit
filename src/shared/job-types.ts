@@ -439,6 +439,11 @@ export interface ModelRun {
   effort_multiplier: number
   elapsed_time_ms: number
   segment_started_at?: string
+  /** Wall-clock time spent inside the current repair invocation. */
+  repair_elapsed_time_ms?: number
+  /** Current repair invocation's time allowance. */
+  repair_budget_ms?: number
+  repair_started_at?: string
   /** Identifies the pipeline invocation whose checkpoints are currently being written. */
   current_invocation_id?: string
   iteration: number

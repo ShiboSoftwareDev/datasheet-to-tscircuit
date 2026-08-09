@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { link, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createModelCandidateFileTools } from "../src/server/infrastructure/agent/model-candidate-tools-extension"
@@ -54,11 +54,8 @@ test("model candidate tools are visible to the agent under their scoped capabili
   ])
 
   expect(check_tool.name).toBe("check_model_candidate")
-  expect(check_tool.description).toContain("real ngspice smoke harness")
-  expect(check_tool.description).toContain("exact agent-visible training fixtures")
-  expect(check_tool.description).toContain("tscircuit viewer")
-  expect(check_tool.description).toContain("held-out samples")
-  expect(check_tool.description).toContain("no paths or commands")
+  expect(check_tool.description).toContain("Statically validate")
+  expect(check_tool.description).toContain("standalone tscircuit stages")
   expect(check_tool.promptGuidelines).toEqual([
     "After writing model.lib and model-card.md, call check_model_candidate and correct any failed diagnostic before finishing.",
   ])
@@ -307,7 +304,7 @@ test("model candidate check returns bounded diagnostics without leaking its work
   expect(result.content[0]?.text).not.toContain(workspace)
 })
 
-testWithNgspice("model candidate tool executes the production parser and real ngspice gate", async () => {
+test("model candidate tool executes the production parser without invoking a simulator", async () => {
   const workspace = await makeTemporaryDirectory("model-tools-real-check-")
   await Promise.all([
     writeFile(
@@ -350,10 +347,10 @@ testWithNgspice("model candidate tool executes the production parser and real ng
 
   expect(result.details).toMatchObject({
     status: "passed",
-    checks: ["model_contract", "model_card", "ngspice_smoke"],
+    checks: ["model_contract", "model_card", "static_source"],
     entry_name: "REAL_CHECK",
   })
-  expect(await Bun.file(join(workspace, ".candidate-smoke", "result.raw")).exists()).toBe(true)
+  expect(await Bun.file(join(workspace, ".candidate-smoke", "result.raw")).exists()).toBe(false)
 })
 
 test("model candidate tools cannot read outside their workspace or through an escaping symlink", async () => {

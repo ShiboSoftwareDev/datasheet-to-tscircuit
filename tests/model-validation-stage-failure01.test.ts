@@ -3,9 +3,11 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { AgentClient } from "@/server/infrastructure/agent"
-import type { ProcessRunner } from "@/server/infrastructure/process"
+import { ProcessError, type ProcessRunner } from "@/server/infrastructure/process"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
+import { persistCandidateValidationUi } from "@/server/model-workflow/stage-helpers/candidate-ui"
+import { repairModelStage } from "@/server/model-workflow/stages/repair-model"
 import { runSimulationsStage } from "@/server/model-workflow/stages/validate-model"
 import {
   createModelManifest,
@@ -13,8 +15,11 @@ import {
   type ModelContract,
   ModelStrategyRegistry,
 } from "@/server/modeling"
-import { loadStoredModelPreview } from "@/server/modeling/ui-projection-storage"
-import { type NgspiceExecutor, parseAgentValidationPlan } from "@/server/spice-validation"
+import {
+  type NgspiceExecutor,
+  parseAgentValidationPlan,
+  type ValidationRunResult,
+} from "@/server/spice-validation"
 
 const model_interface = {
   version: 1 as const,
@@ -182,7 +187,7 @@ const plan = parseAgentValidationPlan(
   },
 )
 
-test("validate_model retains failed viewer UI but reports direct validation infrastructure first", async () => {
+test("Run Simulations uses only tsci and retains execution failure without comparison state", async () => {
   const root = await mkdtemp(join(tmpdir(), "model-validation-stage-failure-"))
   try {
     const job_dir = join(root, "job")
@@ -286,109 +291,223 @@ test("validate_model retains failed viewer UI but reports direct validation infr
 
     expect(caught).toMatchObject({
       diagnostic: {
-        code: "model_validation_infrastructure_failed",
+        code: "model_viewer_simulation_failed",
         stage_id: "run_simulations",
-        operation: "classify_validation_failure",
+        operation: "execute_tscircuit_simulations",
       },
     })
-    expect((caught as { diagnostic?: { message?: string } }).diagnostic?.message).toContain(
-      "ngspice_spawn_failed",
-    )
-    expect((caught as { diagnostic?: { message?: string } }).diagnostic?.message).not.toContain(
-      "fixture tsci viewer build failed",
-    )
-    expect(ngspice_calls).toBe(2)
+    expect((caught as { diagnostic?: { message?: string } }).diagnostic?.message).toContain("step-response")
+    expect(ngspice_calls).toBe(0)
     expect(viewer_build_calls).toBe(1)
 
     const model_run = model_run_store.getModelRun("model_validation_failure")
-    expect(model_run?.validation).toMatchObject({
-      artifact_state: "candidate",
-      model_revision: generated.manifest.revision,
-      all_passed: false,
-    })
-    expect(model_run?.circuit_preview).toMatchObject({
-      build_status: "failed",
-      analysis_type: "transient",
-      analog_simulation_status: "failed",
-    })
-    expect(model_run?.circuit_preview?.code).toContain("<analogsimulation")
-    expect(model_run?.reference_preview).toMatchObject({
-      benchmark_id: "step-response",
-      source_file: "evidence/step-response.png",
-      reference_kind: "curve",
-      result_status: "failed",
-      result_origin: "tscircuit_viewer",
-      matches_reference: false,
-    })
-    expect(model_run?.reference_preview?.reference_points).toEqual(reference_points)
+    expect(model_run?.validation).toBeUndefined()
+    expect(model_run?.circuit_preview).toBeUndefined()
+    expect(model_run?.reference_preview).toBeUndefined()
 
-    const preview_generation = model_run?.validation?.preview_generation
-    const expected_preview_generation = `${invocation_id}-${generated.manifest.revision}`
-    expect(preview_generation).toBe(expected_preview_generation)
-    const stored_preview = await loadStoredModelPreview({
-      job_id: "job_validation_failure",
-      model_dir,
-      case_id: "step-response",
-      current_preview_generation: expected_preview_generation,
-      current_model_revision: generated.manifest.revision,
-    })
-    expect(stored_preview?.artifact_identity).toEqual({
-      preview_generation: expected_preview_generation,
-      model_revision: generated.manifest.revision,
-    })
-    expect(stored_preview?.circuit_preview?.build_status).toBe("failed")
-    expect(stored_preview?.circuit_preview?.code).toContain("<analogsimulation")
-    expect(stored_preview?.reference_preview?.reference_points).toEqual(reference_points)
-    const stored_code = stored_preview?.circuit_preview?.code
-    if (!stored_code) throw new Error("Stored failed candidate preview omitted its TSX source")
-    expect(
-      await readFile(
-        join(
-          model_dir,
-          "current-previews",
-          expected_preview_generation,
-          "cases",
-          "step-response.circuit.tsx",
-        ),
-        "utf8",
-      ),
-    ).toBe(stored_code)
-    expect(
-      await Bun.file(
-        join(model_dir, "current-previews", expected_preview_generation, "evidence", "step-response.png"),
-      ).exists(),
-    ).toBe(true)
-    const diagnostic_path = join(
-      model_dir,
-      "current-previews",
-      expected_preview_generation,
-      "candidate-diagnostics.json",
-    )
-    const diagnostic_bundle = JSON.parse(await readFile(diagnostic_path, "utf8"))
-    expect(diagnostic_bundle).toMatchObject({
+    const receipt_path = join(candidate_dir, "simulation", "tscircuit-simulation-results.json")
+    const receipt = JSON.parse(await readFile(receipt_path, "utf8"))
+    expect(receipt).toMatchObject({
       version: 1,
-      status: "failed",
       cases: [
         {
           case_id: "step-response",
-          analysis: "transient",
-          circuit_build_status: "failed",
-          artifacts: {
-            preview: "cases/step-response.preview.json",
-            tsx: "cases/step-response.circuit.tsx",
-          },
+          status: "failed",
+          failure_kind: "build",
         },
       ],
     })
-    const build_diagnostic = diagnostic_bundle.cases[0].diagnostics.find(
-      ({ source }: { source: string }) => source === "tscircuit_build",
-    )
-    expect(build_diagnostic?.message).toContain("fixture tsci viewer build failed")
-    expect(build_diagnostic?.message).not.toContain(root)
+    expect(receipt.cases[0].error).toContain("fixture tsci viewer build failed")
+    expect(receipt.cases[0].error).not.toContain(root)
     expect(
       (caught as { diagnostic?: { artifact_refs?: Array<{ path?: string }> } }).diagnostic?.artifact_refs,
     ).toContainEqual({
-      path: join(candidate_dir, "validation", "candidate-diagnostics.json"),
+      path: receipt_path,
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("Repair completes with the best candidate when its quality budget expires", async () => {
+  const root = await mkdtemp(join(tmpdir(), "model-repair-quality-budget-"))
+  try {
+    const job_dir = join(root, "job")
+    const model_dir = join(job_dir, "spice")
+    const candidate_dir = join(model_dir, "candidates", "candidate-1")
+    const source_dir = join(candidate_dir, "simulation-tsx")
+    const validation_dir = join(candidate_dir, "validation")
+    const evidence_dir = join(model_dir, "attempts", "attempt-1", "evidence")
+    const contract_path = join(model_dir, "attempts", "attempt-1", "model-contract.json")
+    const plan_path = join(model_dir, "attempts", "attempt-1", "validation-plan.json")
+    const model_path = join(candidate_dir, "model.lib")
+    const model_card_path = join(candidate_dir, "model-card.md")
+    const manifest_path = join(candidate_dir, "model-manifest.json")
+    const result_path = join(validation_dir, "validation-results.json")
+    const quality_error = {
+      kind: "comparison" as const,
+      code: "curve_tolerance_exceeded",
+      message: "The modeled response remains outside its curve tolerance.",
+    }
+    const result: ValidationRunResult = {
+      version: 1,
+      passed: false,
+      hashes: {
+        plan_sha256: "1".repeat(64),
+        model_sha256: "2".repeat(64),
+        manifest_sha256: "3".repeat(64),
+      },
+      cases: [
+        {
+          case_id: "step-response",
+          status: "failed",
+          analysis: "transient",
+          series: [
+            {
+              observation_id: "output_voltage",
+              type: "voltage",
+              unit: "V",
+              scale: "linear",
+              points: [
+                { x: 0, y: 0 },
+                { x: 0.001, y: 0.5 },
+              ],
+              passed: false,
+              metrics: { sample_count: 2, normalized_rmse: 0.5, normalized_max_error: 0.6 },
+              errors: [quality_error],
+            },
+          ],
+          errors: [quality_error],
+          elapsed_ms: 1,
+          netlist_sha256: "4".repeat(64),
+          raw_sha256: "5".repeat(64),
+        },
+      ],
+      errors: [quality_error],
+    }
+
+    await Promise.all([
+      mkdir(source_dir, { recursive: true }),
+      mkdir(validation_dir, { recursive: true }),
+      mkdir(evidence_dir, { recursive: true }),
+    ])
+    await Promise.all([
+      Bun.write(join(model_dir, "AGENTS.md"), "# Repair fixture\n"),
+      Bun.write(join(model_dir, "model-interface.json"), `${JSON.stringify(model_interface)}\n`),
+      Bun.write(contract_path, `${JSON.stringify(contract)}\n`),
+      Bun.write(plan_path, `${JSON.stringify(plan)}\n`),
+      Bun.write(model_path, generated.source),
+      Bun.write(model_card_path, generated.card),
+      Bun.write(manifest_path, `${JSON.stringify(generated.manifest)}\n`),
+      Bun.write(result_path, `${JSON.stringify(result)}\n`),
+    ])
+    await persistCandidateValidationUi({
+      plan,
+      result,
+      generated,
+      contract,
+      immutable_artifact_dir: validation_dir,
+      preview_generation: `repair-quality-${generated.manifest.revision}`,
+    })
+
+    const model_run_store = new ModelRunStore()
+    model_run_store.createModelRun({
+      model_run_id: "repair_quality_budget",
+      job_id: "repair_quality_job",
+      model_dir,
+      effort_multiplier: 1,
+    })
+    const stale_source = generated.source.replace("1k", "2k")
+    model_run_store.projectDevelopmentModel("repair_quality_budget", {
+      model_source: stale_source,
+      model_card: "Stale development candidate\n",
+      manifest: createModelManifest({
+        model_interface,
+        model_source: stale_source,
+        simulator: "ngspice",
+      }),
+    })
+    let agent_calls = 0
+    const outcome = await repairModelStage.execute({
+      run_id: "repair_quality_budget",
+      pipeline_id: "spice_generation",
+      stage_id: "repair_spice_model",
+      debug_dir: join(model_dir, "debug"),
+      context: {
+        model_run_id: "repair_quality_budget",
+        job_id: "repair_quality_job",
+        job_dir,
+        model_dir,
+        use_openai: false,
+        repair_budget_ms: 100,
+        invocation_id: "repair-quality-invocation",
+      },
+      services: {
+        job_store: new JobStore(),
+        model_run_store,
+        agent_client: {
+          async run(input) {
+            agent_calls += 1
+            return new Promise<never>((_resolve, reject) => {
+              const rejectForAbort = () =>
+                reject(
+                  new ProcessError({
+                    code: "process_cancelled",
+                    command_label: "repair fixture",
+                    message: "repair fixture was cancelled",
+                  }),
+                )
+              if (input.signal.aborted) rejectForAbort()
+              else input.signal.addEventListener("abort", rejectForAbort, { once: true })
+            })
+          },
+        },
+        process_runner: {
+          async run() {
+            throw new Error("tscircuit must not run before a repair candidate exists")
+          },
+        },
+        strategy_registry: new ModelStrategyRegistry(),
+        tsci_bin: "fixture-tsci",
+      },
+      dependency_outputs: {
+        compare_simulation_outputs: {
+          result_path,
+          model_path,
+          model_card_path,
+          manifest_path,
+          contract_path,
+          plan_path,
+          evidence_dir,
+          passed: false,
+          case_count: 1,
+          failing_case_ids: ["step-response"],
+          revision: generated.manifest.revision,
+        },
+      },
+      signal: new AbortController().signal,
+    })
+
+    expect(agent_calls).toBe(1)
+    expect(outcome).toMatchObject({
+      status: "completed",
+      output: {
+        passed: false,
+        revision: generated.manifest.revision,
+        model_path,
+        result_path,
+      },
+      diagnostics: [{ code: "model_quality_target_not_met", severity: "warning" }],
+    })
+    expect(model_run_store.getModelRun("repair_quality_budget")).toMatchObject({
+      repair_started_at: undefined,
+      development_model: { model_source: generated.source },
+      validation: { model_revision: generated.manifest.revision },
+      preview_options: [{ benchmark_id: "step-response" }],
+    })
+    expect(JSON.parse(await readFile(join(model_dir, "current-preview.json"), "utf8"))).toMatchObject({
+      revision: generated.manifest.revision,
+      preview_generation: `repair-quality-${generated.manifest.revision}`,
     })
   } finally {
     await rm(root, { recursive: true, force: true })

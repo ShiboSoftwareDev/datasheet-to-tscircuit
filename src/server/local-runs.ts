@@ -1,11 +1,16 @@
 import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { LocalRunMode, LocalRunStatus, LocalRunSummary } from "@/shared/local-run"
+import { atomicWriteJsonSync } from "./infrastructure/persistence/atomic-write"
 
 const LOCAL_RUN_ID = /^local-[a-zA-Z0-9-]{16,80}$/
 const LOCAL_SUMMARY_MAX_BYTES = 32 * 1024 * 1024
 const LOCAL_RUN_MODES = new Set<LocalRunMode>(["pipeline", "task", "from_task"])
 const LOCAL_RUN_STATUSES = new Set<LocalRunStatus>(["running", "completed", "failed", "cancelled"])
+export const LOCAL_RUN_HEARTBEAT_INTERVAL_MS = 5_000
+export const LOCAL_RUN_HEARTBEAT_STALE_MS = 60_000
+export const INTERRUPTED_LOCAL_RUN_MESSAGE =
+  "The Local execution process stopped before it recorded a terminal result. Retry to continue from its retained input."
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -50,6 +55,7 @@ function parseLocalRunSummary(value: unknown, expectedId: string): LocalRunSumma
     typeof value.file_name !== "string" ||
     !LOCAL_RUN_STATUSES.has(value.status as LocalRunStatus) ||
     typeof value.created_at !== "string" ||
+    (value.heartbeat_at !== undefined && typeof value.heartbeat_at !== "string") ||
     typeof value.execution_dir !== "string" ||
     typeof value.workspace_dir !== "string" ||
     typeof value.input_path !== "string" ||
@@ -172,4 +178,60 @@ export async function listLocalRuns(localRoot: string): Promise<LocalRunSummary[
   return summaries
     .filter((summary): summary is LocalRunSummary => summary !== undefined)
     .sort((first, second) => second.created_at.localeCompare(first.created_at))
+}
+
+function timestamp(value: string | undefined): number | undefined {
+  if (!value) return undefined
+  const parsed = new Date(value).valueOf()
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+/**
+ * Converts a running record whose owner stopped heartbeating into a durable
+ * terminal result. The fresh re-read closes races with an owner heartbeat that
+ * landed after a caller listed the directory.
+ */
+export async function reconcileInterruptedLocalRun(input: {
+  local_root: string
+  local_run_id: string
+  now?: number
+  stale_after_ms?: number
+}): Promise<LocalRunSummary> {
+  const summary = await readLocalRunSummary(input.local_root, input.local_run_id)
+  if (summary.version !== 2 || summary.status !== "running") return summary
+  const now = input.now ?? Date.now()
+  const lastHeartbeat = timestamp(summary.heartbeat_at) ?? timestamp(summary.created_at) ?? now
+  const staleAfter = Math.max(1, input.stale_after_ms ?? LOCAL_RUN_HEARTBEAT_STALE_MS)
+  if (now - lastHeartbeat < staleAfter) return summary
+
+  const completedAt = new Date(now).toISOString()
+  const interrupted: LocalRunSummary = {
+    ...summary,
+    status: "failed",
+    completed_at: completedAt,
+    error_message: INTERRUPTED_LOCAL_RUN_MESSAGE,
+  }
+  atomicWriteJsonSync(summary.summary_path, interrupted)
+  return interrupted
+}
+
+export async function reconcileInterruptedLocalRuns(
+  localRoot: string,
+  options: { now?: number; stale_after_ms?: number; excluded_ids?: ReadonlySet<string> } = {},
+): Promise<LocalRunSummary[]> {
+  const summaries = await listLocalRuns(localRoot)
+  return Promise.all(
+    summaries.map((summary) =>
+      options.excluded_ids?.has(summary.local_run_id)
+        ? summary
+        : reconcileInterruptedLocalRun({
+            local_root: localRoot,
+            local_run_id: summary.local_run_id,
+            now: options.now,
+            stale_after_ms: options.stale_after_ms,
+          }),
+    ),
+  ).then((reconciled) =>
+    reconciled.sort((first, second) => second.created_at.localeCompare(first.created_at)),
+  )
 }

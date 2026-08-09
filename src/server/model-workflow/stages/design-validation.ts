@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
 import {
   buildValidationPlanGuide,
@@ -16,7 +15,6 @@ import {
   updateModelProgress,
   writeJson,
 } from "../stage-helpers"
-import { assertValidationPlanSensitiveToDut } from "../validation-sensitivity"
 import { buildGraphValidationPlan } from "../validation-plan-from-graphs"
 import { defineModelStage } from "./stage-factory"
 
@@ -68,15 +66,6 @@ export const designValidationStage = defineModelStage({
       writeJson(join(attempt_dir, "validation-plan.json"), plan),
     ])
 
-    await assertValidationPlanSensitiveToDut({
-      plan,
-      contract,
-      model_dir: context.model_dir,
-      artifact_directory: join(attempt_dir, "private-sensitivity", randomUUID()),
-      signal,
-      ngspice: services.ngspice_executor,
-      ngspice_path: services.ngspice_bin,
-    })
     await projectComparisonGraphsUi({
       model_run_store: services.model_run_store,
       model_run_id: context.model_run_id,

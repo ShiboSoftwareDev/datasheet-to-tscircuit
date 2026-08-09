@@ -98,7 +98,7 @@ export async function launchModelRun(
   appendModelRunLogBestEffort(
     execution_context,
     model_run_id,
-    `Created a ${input.effort_multiplier}× SPICE model run using workflow source ${source_commit}. The server owns pin mapping, circuit compilation, ngspice execution, scoring, and publication; effort sets the repair budget.\n`,
+    `Created a ${input.effort_multiplier}× SPICE model run using workflow source ${source_commit}. The server owns pin mapping, tscircuit execution, scoring, and publication; each effort unit provides 30 minutes of repair time.\n`,
   )
   launchModelRunner(model_run_id, execution_context)
   const current_run = context.model_run_store.getModelRun(model_run_id)

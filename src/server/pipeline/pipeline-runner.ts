@@ -215,6 +215,7 @@ const getDependencyState = <
   stage: RegisteredPipelineStage<Outputs, Context, Services>,
   results: MutableStageResults<Outputs>,
   provided_outputs?: Readonly<Record<string, PipelineJsonValue>>,
+  inherited_outputs?: Readonly<Record<string, PipelineJsonValue>>,
 ): {
   readonly dependency_outputs: Readonly<Record<string, PipelineJsonValue>>
   readonly dependency_statuses: Readonly<Record<string, string>>
@@ -268,6 +269,9 @@ const getDependencyState = <
     dependency_statuses[dependency_id] = result.status
     if (result.status === "completed") {
       dependency_outputs[dependency_id] = result.output
+    } else if (inherited_outputs && dependency_id in inherited_outputs) {
+      dependency_statuses[dependency_id] = "provided"
+      dependency_outputs[dependency_id] = inherited_outputs[dependency_id]!
     } else {
       incomplete_dependencies.push(dependency_id)
     }
@@ -607,7 +611,7 @@ export const runPipeline = async <
     if (!selected) {
       const is_continuation_candidate = stage_index > target_index
       const dependency_state = is_continuation_candidate
-        ? getDependencyState(stage, mutable_results)
+        ? getDependencyState(stage, mutable_results, undefined, target.dependency_outputs)
         : undefined
       let input_files: PipelineTaskInputFiles | undefined
       if (dependency_state?.incomplete_dependencies.length === 0 && options.task_input_root) {
@@ -657,7 +661,12 @@ export const runPipeline = async <
     }
     const provided_outputs =
       target.mode !== "pipeline" && stage_index === target_index ? target.dependency_outputs : undefined
-    const dependency_state = getDependencyState(stage, mutable_results, provided_outputs)
+    const dependency_state = getDependencyState(
+      stage,
+      mutable_results,
+      provided_outputs,
+      target.mode === "pipeline" ? undefined : target.dependency_outputs,
+    )
     const debug_input = deepFreeze({
       version: 2,
       kind: "pipeline_task_input",

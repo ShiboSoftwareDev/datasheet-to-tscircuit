@@ -1,5 +1,6 @@
 import { join } from "node:path"
 import type { LocalRunMode, LocalRunSummary } from "@/shared/local-run"
+import type { PublicPipelineSnapshot } from "@/shared/job-types"
 import type {
   PipelineDefinition,
   PipelineExecutionTarget,
@@ -27,11 +28,10 @@ import type {
 import { ModelStrategyRegistry } from "../modeling"
 import {
   PipelineError,
+  type PipelineTaskInputBundle,
   projectPublicPipelineSnapshot,
   runPipeline,
-  type PipelineTaskInputBundle,
 } from "../pipeline"
-import { executeLocalNgspice } from "../spice-validation"
 import type { LocalWorkspace } from "./workspace"
 
 function requiredString({
@@ -58,20 +58,6 @@ function requiredBoolean({
   return value
 }
 
-function requiredNumber({
-  record,
-  key,
-}: {
-  record: Readonly<Record<string, PipelineJsonValue>>
-  key: string
-}): number {
-  const value = record[key]
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`Task context requires numeric ${key}`)
-  }
-  return value
-}
-
 function componentContext(record: Readonly<Record<string, PipelineJsonValue>>): ComponentPipelineContext {
   const additionalInstructions = record.additional_instructions
   return {
@@ -86,13 +72,17 @@ function componentContext(record: Readonly<Record<string, PipelineJsonValue>>): 
 }
 
 function modelContext(record: Readonly<Record<string, PipelineJsonValue>>): ModelPipelineContext {
+  const repairBudget = record.repair_budget_ms
+  if (repairBudget !== undefined && (typeof repairBudget !== "number" || !Number.isFinite(repairBudget))) {
+    throw new Error("Task context repair_budget_ms must be a finite number when provided")
+  }
   return {
     model_run_id: requiredString({ record, key: "model_run_id" }),
     job_id: requiredString({ record, key: "job_id" }),
     job_dir: requiredString({ record, key: "job_dir" }),
     model_dir: requiredString({ record, key: "model_dir" }),
     use_openai: requiredBoolean({ record, key: "use_openai" }),
-    max_repair_attempts: requiredNumber({ record, key: "max_repair_attempts" }),
+    ...(typeof repairBudget === "number" ? { repair_budget_ms: repairBudget } : {}),
     invocation_id: requiredString({ record, key: "invocation_id" }),
   }
 }
@@ -204,6 +194,8 @@ export async function executePipeline(input: {
   taskId?: string
   runDir: string
   signal?: AbortSignal
+  normalize_snapshot?: (snapshot: PublicPipelineSnapshot) => PublicPipelineSnapshot
+  on_snapshot?: (snapshot: PublicPipelineSnapshot) => void
 }): Promise<PipelineRunResult<PipelineOutputMap>> {
   const processRunner = new BunProcessRunner()
   const agentClient = new TsciAgentClient({
@@ -243,12 +235,14 @@ export async function executePipeline(input: {
           artifact_root: input.local.jobDir,
           private_roots: [input.runDir],
         })
+        const normalized = input.normalize_snapshot?.(projected) ?? projected
         const job = input.jobStore.getJob(componentContext(input.local.context).job_id)
         if (!job) return
         input.jobStore.updateJob(job.job_id, {
-          pipeline: projected,
-          pipelines: { ...job.pipelines, component_generation: projected },
+          pipeline: normalized,
+          pipelines: { ...job.pipelines, component_generation: normalized },
         })
+        input.on_snapshot?.(normalized)
       },
     })) as PipelineRunResult<PipelineOutputMap>
   }
@@ -284,11 +278,13 @@ export async function executePipeline(input: {
           artifact_root: input.local.jobDir,
           private_roots: [input.runDir],
         })
+        const normalized = input.normalize_snapshot?.(projected) ?? projected
         const job = input.jobStore.getJob(componentContext(input.local.context).job_id)
         if (!job) return
         input.jobStore.updateJob(job.job_id, {
-          pipelines: { ...job.pipelines, typical_application: projected },
+          pipelines: { ...job.pipelines, typical_application: normalized },
         })
+        input.on_snapshot?.(normalized)
       },
     })) as PipelineRunResult<PipelineOutputMap>
   }
@@ -301,8 +297,6 @@ export async function executePipeline(input: {
       process_runner: processRunner,
       strategy_registry: new ModelStrategyRegistry(),
       tsci_bin: tsciBin,
-      ngspice_bin: process.env.NGSPICE_BIN?.trim() || "ngspice",
-      ngspice_executor: executeLocalNgspice,
     }
     return (await runPipeline({
       definition: MODEL_PIPELINE,
@@ -319,13 +313,14 @@ export async function executePipeline(input: {
         dependencyOutputs: input.local.dependencyOutputs,
       }),
       on_snapshot: (snapshot) => {
-        input.modelRunStore.updateModelRun(context.model_run_id, {
-          pipeline: projectPublicPipelineSnapshot({
-            snapshot,
-            artifact_root: input.local.jobDir,
-            private_roots: [context.model_dir, input.runDir],
-          }),
+        const projected = projectPublicPipelineSnapshot({
+          snapshot,
+          artifact_root: input.local.jobDir,
+          private_roots: [context.model_dir, input.runDir],
         })
+        const normalized = input.normalize_snapshot?.(projected) ?? projected
+        input.modelRunStore.updateModelRun(context.model_run_id, { pipeline: normalized })
+        input.on_snapshot?.(normalized)
       },
     })) as PipelineRunResult<PipelineOutputMap>
   }

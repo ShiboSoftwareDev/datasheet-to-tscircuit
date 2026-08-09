@@ -11,8 +11,6 @@ import {
   type ReadOperations,
   type WriteOperations,
 } from "@earendil-works/pi-coding-agent"
-import { ProcessError } from "../process"
-import { BunProcessRunner } from "../process"
 import {
   checkModelCandidate,
   MODEL_CANDIDATE_CHECK_RECEIPT_FILE,
@@ -20,31 +18,32 @@ import {
   type ModelCandidateCheckReceipt,
 } from "../../model-workflow/model-candidate-check"
 import {
-  createModelTrainingValidationReport,
-  type ModelTrainingValidationReport,
-} from "../../model-workflow/model-training-validation"
-import {
-  createModelTrainingCheckReceipt,
-  MODEL_TRAINING_CHECK_RECEIPT_FILE,
-  readModelTrainingCheckReceipt,
-  type ModelTrainingCheckReceipt,
-} from "../../model-workflow/model-training-check"
-import {
   createModelTrainingCandidateQuality,
   ModelCandidateSearchSession,
-  modelCandidateTopologyFingerprint,
   type ModelCandidateSearchSnapshot,
+  modelCandidateTopologyFingerprint,
 } from "../../model-workflow/model-candidate-search"
 import {
+  type ModelFitParameterRange,
+  type ModelParameterSearchResult,
   replaceModelFitParameters,
   scoreModelFitValidation,
   searchModelParameters,
-  type ModelFitParameterRange,
-  type ModelParameterSearchResult,
 } from "../../model-workflow/model-parameter-fit"
+import {
+  createModelTrainingCheckReceipt,
+  MODEL_TRAINING_CHECK_RECEIPT_FILE,
+  type ModelTrainingCheckReceipt,
+  readModelTrainingCheckReceipt,
+} from "../../model-workflow/model-training-check"
+import {
+  createModelTrainingValidationReport,
+  type ModelTrainingValidationReport,
+} from "../../model-workflow/model-training-validation"
 import { buildValidationCircuitPreviews } from "../../model-workflow/validation-circuit-previews"
 import { parseFreshModelContract } from "../../modeling"
 import { executeLocalNgspice, parseValidationPlan, runSpiceValidation } from "../../spice-validation"
+import { BunProcessRunner, ProcessError } from "../process"
 
 const ALLOWED_OUTPUTS = new Set(["model.lib", "model-card.md"])
 const MAX_DIRECT_IMAGE_BYTES = 3 * 1024 * 1024
@@ -297,8 +296,6 @@ async function runProductionCandidateCheck(input: {
     await checkModelCandidate({
       workspace: input.workspace,
       ...(contract ? { model_contract: contract } : {}),
-      ngspice: executeLocalNgspice,
-      ngspice_path: input.ngspice_path,
       signal: input.signal,
     })
   ).receipt
@@ -316,8 +313,6 @@ async function runProductionTrainingValidation(input: {
   const checked = await checkModelCandidate({
     workspace: input.workspace,
     model_contract: contract,
-    ngspice: executeLocalNgspice,
-    ngspice_path: input.ngspice_path,
     signal: input.signal,
   })
   const plan = parseValidationPlan(
@@ -379,8 +374,6 @@ async function runProductionParameterFit(input: {
   const checked = await checkModelCandidate({
     workspace: input.workspace,
     model_contract: contract,
-    ngspice: executeLocalNgspice,
-    ngspice_path: input.ngspice_path,
     signal: input.signal,
   })
   const plan = parseValidationPlan(
@@ -422,8 +415,6 @@ async function runProductionParameterFit(input: {
       await checkModelCandidate({
         workspace: input.workspace,
         model_contract: contract,
-        ngspice: executeLocalNgspice,
-        ngspice_path: input.ngspice_path,
         signal: input.signal,
       })
     } catch (error) {
@@ -601,9 +592,8 @@ export function createModelCandidateFileTools(
     name: "check_model_candidate",
     label: "check_model_candidate",
     description:
-      "Validate model.lib and model-card.md, run the real ngspice smoke harness, then run the exact agent-visible training fixtures through ngspice and the tscircuit viewer. Takes no paths or commands. Returns residuals only at reference samples already visible in model-contract.json; held-out samples and the private causality gate remain unavailable.",
-    promptSnippet:
-      "Check the current model with the production smoke gate and real public-training simulations",
+      "Statically validate model.lib and model-card.md against the server-owned model contract. Simulation is performed later by the standalone tscircuit stages.",
+    promptSnippet: "Check the current model's static contract and artifact integrity",
     promptGuidelines: [
       "After writing model.lib and model-card.md, call check_model_candidate and correct any failed diagnostic before finishing.",
     ],

@@ -41,6 +41,7 @@ import {
   verifyReferenceGraphObservationPixels,
 } from "../src/server/model-workflow/reference-graph-observation"
 import {
+  assertFoundReferenceGraphCaptions,
   assertReferenceGraphObservationVerified,
   findReferenceGraphs,
   findPriorReferenceObservationCandidates,
@@ -171,6 +172,7 @@ function coloredResponseGraphPng(
     | "points_only"
     | "grid_only"
     | "ripple_band"
+    | "brightness_variant"
     | "discontinuous_stimulus_step",
 ): Uint8Array {
   const header = Buffer.alloc(13)
@@ -251,6 +253,10 @@ function coloredResponseGraphPng(
       drawLine(x, center_y + 3, x, center_y + 8, pale_blue)
       if ((x - 10) % 8 === 0) setPixel(x, center_y, blue)
     }
+  } else if (trace_shape === "brightness_variant") {
+    const pale_blue = [90, 130, 210] as const
+    drawLine(10, 90, 100, 50, blue, 3)
+    drawLine(100, 50, 190, 10, pale_blue, 3)
   } else if (trace_shape === "points_only") {
     for (let index = 0; index < 16; index += 1) {
       const ratio = index / 15
@@ -283,6 +289,7 @@ class ReferenceGraphCropRunner implements ProcessRunner {
       | "points_only"
       | "grid_only"
       | "ripple_band"
+      | "brightness_variant"
       | "discontinuous_stimulus_step" = "diagonal",
   ) {}
 
@@ -466,6 +473,51 @@ test("Find Reference Graphs rejects comparison fields and retains server-owned s
   expect(parsed.graphs[0]).not.toHaveProperty("electrical_binding")
   expect(parsed.graphs[0]).not.toHaveProperty("channels")
   expect(buildFoundReferenceGraphObserverPrompt()).toContain("exclusively to Create Comparison Graphs")
+  expect(buildReferenceGraphObserverPrompt()).toContain(
+    "reference-graph.png is the exact server-rendered crop",
+  )
+  expect(buildReferenceGraphObserverPrompt()).toContain("at most 96")
+})
+
+test("Find Reference Graphs rejects a crop that omits its own printed figure caption", async () => {
+  const value = validObservationValue()
+  delete (value.graphs[0] as Partial<(typeof value.graphs)[number]>).electrical_binding
+  delete (value.graphs[0] as Partial<(typeof value.graphs)[number]>).channels
+  const observation = parseFoundReferenceGraphObservation(value, discovery, model_interface)
+  const workspace = await mkdtemp(join(tmpdir(), "model-reference-caption-test-"))
+  temporary_directories.push(workspace)
+  const processRunnerForFigure = (figure: string): ProcessRunner => ({
+    async run(request) {
+      const output_path = request.command.at(-1)
+      if (request.command[0] !== "pdftotext" || !output_path) {
+        throw new Error(`Unexpected caption fixture command: ${request.command.join(" ")}`)
+      }
+      await Bun.write(
+        output_path,
+        `<word xMin="40" yMin="80" xMax="58" yMax="90">Figure</word>\n` +
+          `<word xMin="60" yMin="80" xMax="80" yMax="90">${figure}</word>\n`,
+      )
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    },
+  })
+
+  await expect(
+    assertFoundReferenceGraphCaptions({
+      observation,
+      workspace,
+      process_runner: processRunnerForFigure("8-19"),
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/own adjacent printed figure number\/caption: load_transient/)
+
+  await expect(
+    assertFoundReferenceGraphCaptions({
+      observation,
+      workspace,
+      process_runner: processRunnerForFigure("8-18"),
+      signal: new AbortController().signal,
+    }),
+  ).resolves.toBeUndefined()
 })
 
 test("cannot dismiss a source-proven public graph as fixture-ineligible", () => {
@@ -584,8 +636,8 @@ test("reference observation reports every invalid plotted channel in one correct
   expect(failure).toBeInstanceOf(AggregateError)
   const message = failure instanceof Error ? failure.message : ""
   expect(message).toContain("contains 2 invalid plotted channels")
-  expect(message).toContain("channels[0].digitized_curve.points must contain 13 through 48")
-  expect(message).toContain("channels[1].digitized_curve.points must contain 13 through 48")
+  expect(message).toContain("channels[0].digitized_curve.points must contain 13 through 96")
+  expect(message).toContain("channels[1].digitized_curve.points must contain 13 through 96")
 })
 
 test("reference observation reports invalid graph entries together", () => {
@@ -999,6 +1051,30 @@ test("source-proof correction feedback distinguishes clipped scope controls from
   expect(feedback).toContain("Find Reference Graphs must produce a new crop in a separate run")
   expect(feedback).toContain("Scale-match errors listed with a missing printed scale")
   expect(feedback).not.toContain("Change the y-axis anchor values")
+})
+
+test("comparison feedback never asks the agent to edit an immutable discovery crop", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  const feedback = sourceProofRejectionDiagnostics(observation, {
+    version: 1,
+    source_pdf_sha256,
+    results: [
+      {
+        status: "ineligible",
+        graph_id: "load_transient",
+        code: "axis_calibration_unproven",
+        reason: "The crop omits its own caption.",
+        diagnostic: {
+          recognized_measurements: ["100 us/div"],
+          missing_proofs: ["adjacent_figure_identity"],
+        },
+      },
+    ],
+  })[0]!
+
+  expect(feedback).toContain("Do not edit the crop")
+  expect(feedback).toContain("Find Reference Graphs must produce a complete crop")
+  expect(feedback).not.toContain("extend only the bottom or right crop edge")
 })
 
 test("source-proof correction feedback uses the exact server-computed axis span", () => {
@@ -2284,6 +2360,17 @@ describe("independent reference-graph observation", () => {
     })
   })
 
+  test("accepts brightness variation along one same-hue rendered trace", async () => {
+    const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+
+    await verifyReferenceGraphObservationPixels({
+      observation,
+      datasheet_path: await createPixelProofDatasheet(),
+      process_runner: new ReferenceGraphCropRunner("brightness_variant"),
+      signal: new AbortController().signal,
+    })
+  })
+
   test("rejects a connected shortcut that flattens visible oscillating extrema", async () => {
     const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
 
@@ -2352,6 +2439,8 @@ describe("independent reference-graph observation", () => {
     expect(message).toContain("calibrated points are off trace; at most")
     expect(message).toContain("Declared trace color is RGB(20, 80, 180) with tolerance 24")
     expect(message).toContain("First failing crop-local points: #0 (10, 90)")
+    expect(message).toContain("recalibrate the representative RGB or widen tolerance")
+    expect(message).toContain("Do not invent points to preserve an overly narrow color declaration")
   })
 
   test("pixel-proof feedback reports every failing eligible graph in one correction", async () => {
@@ -2520,7 +2609,7 @@ describe("independent reference-graph observation", () => {
     sparse_trace.graphs[0]!.channels![0]!.digitized_curve.points =
       sparse_trace.graphs[0]!.channels![0]!.digitized_curve.points.slice(0, 8)
     expect(() => parseReferenceGraphObservation(sparse_trace, discovery, model_interface)).toThrow(
-      /points must contain 13 through 48/,
+      /points must contain 13 through 96/,
     )
 
     const missing_binding = validObservationValue()

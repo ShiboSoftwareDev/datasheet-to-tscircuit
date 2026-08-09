@@ -290,8 +290,9 @@ export function divisionScaleNearestTrace(input: {
 }
 
 /**
- * Recovers a dropped SI prefix only when the same focused Horizontal panel has
- * an immediately adjacent time measurement that supplies that prefix. This is
+ * Recovers a dropped SI prefix, or a low-confidence `p` reading of a printed
+ * micro glyph, only when the same focused Horizontal panel has an immediately
+ * adjacent time measurement that supplies the micro prefix. This is
  * source-owned OCR normalization: both the imperfect division token and the
  * corroborating token are retained in the receipt.
  */
@@ -299,9 +300,29 @@ export function recoverMissingTimeDivisionPrefix(
   scale: ReferenceDivisionScaleSource | undefined,
   horizontal_words: readonly TesseractWord[],
 ): ReferenceDivisionScaleSource | undefined {
-  if (!scale || scale.normalized_unit !== "s" || scale.value_per_division_si < 1) return scale
-  const scale_bottom = scale.ocr_bbox_px.top + scale.ocr_bbox_px.height
-  const scale_right = scale.ocr_bbox_px.left + scale.ocr_bbox_px.width
+  const focused_scale = (() => {
+    const time_candidates = divisionScaleCandidates(horizontal_words).filter(
+      ({ normalized_unit }) => normalized_unit === "s",
+    )
+    const values = [...new Set(time_candidates.map(({ value_per_division_si }) => value_per_division_si))]
+    if (values.length !== 1) return undefined
+    return time_candidates.sort((left, right) => right.confidence - left.confidence)[0]
+  })()
+  const contextual_scale = focused_scale ?? scale
+  if (!contextual_scale || contextual_scale.normalized_unit !== "s") return scale
+  const scale_numeric = Number(
+    contextual_scale.raw_text
+      .normalize("NFKC")
+      .replace(/[−–—]/g, "-")
+      .match(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)/)?.[0],
+  )
+  if (!(scale_numeric > 0)) return scale
+  const scale_multiplier = contextual_scale.value_per_division_si / scale_numeric
+  const missing_prefix = scale_multiplier === 1
+  const low_confidence_micro_as_p = contextual_scale.confidence < 15 && scale_multiplier === 1e-12
+  if (!missing_prefix && !low_confidence_micro_as_p) return scale
+  const scale_bottom = contextual_scale.ocr_bbox_px.top + contextual_scale.ocr_bbox_px.height
+  const scale_right = contextual_scale.ocr_bbox_px.left + contextual_scale.ocr_bbox_px.width
   const candidates = measurementCandidates(horizontal_words).flatMap((measurement) => {
     if (measurement.unit !== "s" || !(measurement.value_si > 0)) return []
     const numeric = Number(
@@ -317,23 +338,26 @@ export function recoverMissingTimeDivisionPrefix(
     const measurement_right = measurement.bbox.left + measurement.bbox.width
     const horizontal_overlap = Math.max(
       0,
-      Math.min(scale_right, measurement_right) - Math.max(scale.ocr_bbox_px.left, measurement.bbox.left),
+      Math.min(scale_right, measurement_right) -
+        Math.max(contextual_scale.ocr_bbox_px.left, measurement.bbox.left),
     )
     if (vertical_gap < 0 || vertical_gap > 60 || horizontal_overlap < 12) return []
     return [{ measurement, multiplier, vertical_gap }]
   })
   candidates.sort((left, right) => left.vertical_gap - right.vertical_gap)
   const nearest = candidates[0]
-  if (!nearest) return scale
+  if (!nearest || nearest.multiplier !== 1e-6) return scale
   const equally_near = candidates.filter(
     (candidate) => Math.abs(candidate.vertical_gap - nearest.vertical_gap) <= 2,
   )
   if (new Set(equally_near.map(({ multiplier }) => multiplier)).size !== 1) return scale
   return {
-    ...scale,
-    value_per_division_si: scale.value_per_division_si * nearest.multiplier,
+    ...contextual_scale,
+    value_per_division_si: scale_numeric * nearest.multiplier,
     normalization: {
-      algorithm: "missing_time_prefix_from_adjacent_measurement_v1",
+      algorithm: missing_prefix
+        ? "missing_time_prefix_from_adjacent_measurement_v1"
+        : "low_confidence_micro_prefix_from_adjacent_measurement_v1",
       corroborating_raw_text: nearest.measurement.raw_text,
       multiplier: nearest.multiplier,
     },

@@ -6,14 +6,14 @@ import { TsciAgentClient } from "../infrastructure/agent"
 import { BunProcessRunner } from "../infrastructure/process"
 import { ModelStrategyRegistry } from "../modeling"
 import { projectPublicPipelineSnapshot, runPipeline } from "../pipeline"
-import { executeLocalNgspice } from "../spice-validation"
 import { MODEL_PIPELINE } from "./model-pipeline"
+import { appendModelLog, updateModelProgress } from "./stage-helpers"
 import {
   waitForComponentBeforePublication,
   waitForEvidenceBeforeModelPipeline,
 } from "./stages/wait-for-component"
-import { appendModelLog, updateModelProgress } from "./stage-helpers"
 import type { ModelRunnerContext } from "./types"
+import { REPAIR_BUDGET_MS_PER_EFFORT } from "./types"
 
 function failedStageMessage(result: PublicPipelineSnapshot): string {
   for (const stage of Object.values(result.stage_results)) {
@@ -26,7 +26,7 @@ function failedStageMessage(result: PublicPipelineSnapshot): string {
 function retainedAcceptedWarnings(input: {
   context: ModelRunnerContext
   model_run_id: string
-  state: "running" | "failed" | "cancelled"
+  state: "running" | "failed" | "cancelled" | "paused"
 }): string[] | undefined {
   const current = input.context.model_run_store.getModelRun(input.model_run_id)
   const revision = current?.manifest?.revision
@@ -39,7 +39,9 @@ function retainedAcceptedWarnings(input: {
       ? "while a replacement attempt runs"
       : input.state === "failed"
         ? "because the latest replacement attempt failed"
-        : "because the latest replacement attempt was stopped"
+        : input.state === "cancelled"
+          ? "because the latest replacement attempt was stopped"
+          : "because the latest development model did not meet the publication target"
   const candidate_is_visible = input.state !== "running" && current.validation?.artifact_state === "candidate"
   const visibility_copy = candidate_is_visible
     ? "the validation below belongs to the unaccepted candidate, while accepted downloads remain available"
@@ -53,7 +55,7 @@ function retainedAcceptedWarnings(input: {
 export function markAcceptedArtifactsAsRetained(input: {
   context: ModelRunnerContext
   model_run_id: string
-  state: "running" | "failed" | "cancelled"
+  state: "running" | "failed" | "cancelled" | "paused"
 }): string[] | undefined {
   const warnings = retainedAcceptedWarnings(input)
   if (!warnings) return undefined
@@ -114,7 +116,7 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
       job_dir,
       model_dir,
       use_openai: model_run.use_openai ?? context.use_openai ?? false,
-      max_repair_attempts: Math.max(1, Math.min(8, model_run.effort_multiplier)),
+      repair_budget_ms: model_run.effort_multiplier * REPAIR_BUDGET_MS_PER_EFFORT,
       invocation_id,
     },
     services: {
@@ -124,8 +126,6 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
       process_runner,
       strategy_registry: context.strategy_registry ?? new ModelStrategyRegistry(),
       tsci_bin: context.tsci_bin,
-      ngspice_bin: context.ngspice_bin ?? (process.env.NGSPICE_BIN?.trim() || "ngspice"),
-      ngspice_executor: context.ngspice_executor ?? executeLocalNgspice,
     },
     task_input_root: job_dir,
     signal,
@@ -155,7 +155,11 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
     private_roots: [model_dir, invocation_dir],
   })
 
-  if (result.status === "completed") {
+  const publish_result = result.stage_results.publish
+  const publication_committed =
+    publish_result.status === "completed" && publish_result.output.attached === true
+
+  if (result.status === "completed" && publication_committed) {
     try {
       updateModelProgress({
         store: context.model_run_store,
@@ -187,6 +191,41 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
       // A concurrent deletion can remove the live record, but it cannot undo
       // the already-committed publication selected on disk.
     }
+    return
+  }
+
+  if (result.status === "completed") {
+    const quality_warning =
+      "The development SPICE model remains unpublished because it did not meet the server-owned validation target."
+    const current_warnings = context.model_run_store.getModelRun(input.model_run_id)?.warnings ?? []
+    const retained_warnings = markAcceptedArtifactsAsRetained({
+      context,
+      model_run_id: input.model_run_id,
+      state: "paused",
+    })
+    const warnings = [...new Set([...(retained_warnings ?? current_warnings), quality_warning])]
+    updateModelProgress({
+      store: context.model_run_store,
+      model_run_id: input.model_run_id,
+      phase: "complete",
+      message: "Repair finished; the development model remains unpublished",
+      iteration: context.model_run_store.getModelRun(input.model_run_id)?.iteration,
+    })
+    await appendModelLog(
+      context.model_run_store,
+      input.model_run_id,
+      "system",
+      `Model pipeline paused: ${quality_warning}\n`,
+    ).catch(() => undefined)
+    context.model_run_store.finishSegment(input.model_run_id, {
+      status: "complete",
+      is_complete: true,
+      has_errors: false,
+      error_message: undefined,
+      warnings,
+      completed_at: new Date().toISOString(),
+      pipeline: public_result,
+    })
     return
   }
 

@@ -70,7 +70,13 @@ function pointTouchesTrace(input: {
       x <= Math.min(input.width - 1, center_x + horizontal_search_radius);
       x += 1
     ) {
-      if (colorDistance(input.rgbAt(x, y), input.color) <= input.color.tolerance) return true
+      const actual = input.rgbAt(x, y)
+      if (
+        colorDistance(actual, input.color) <= input.color.tolerance ||
+        bandColorMatches(actual, input.color)
+      ) {
+        return true
+      }
     }
   }
   return false
@@ -285,7 +291,7 @@ async function measureReferenceGraphTracePixels(input: {
     const color = input.graph.digitized_curve.trace_color
     const examples = off_trace_points.slice(0, 8).map(formatOffTracePointDiagnostic).join("; ")
     throw new Error(
-      `Independent pixel-trace proof for ${input.error_subject} does not follow the rendered datasheet waveform: ${off_trace_count}/${transformed_points.length} calibrated points are off trace; at most ${allowed_off_trace_count} are allowed. Declared trace color is RGB(${color.r}, ${color.g}, ${color.b}) with tolerance ${color.tolerance}; validation radius is ${validation_radius}px. First failing crop-local points: ${examples}`,
+      `Independent pixel-trace proof for ${input.error_subject} does not follow the rendered datasheet waveform: ${off_trace_count}/${transformed_points.length} calibrated points are off trace; at most ${allowed_off_trace_count} are allowed. Declared trace color is RGB(${color.r}, ${color.g}, ${color.b}) with tolerance ${color.tolerance}; validation radius is ${validation_radius}px. First failing crop-local points: ${examples}. Inspect the exact crop: when these points are on the correct same-hue centerline but the reported closest color distance exceeds the declared tolerance, recalibrate the representative RGB or widen tolerance (up to 120) to cover the line's antialiasing and brightness variation; otherwise move only the named points onto the rendered trace. Do not invent points to preserve an overly narrow color declaration.`,
     )
   }
   const segment_search_radius = 6

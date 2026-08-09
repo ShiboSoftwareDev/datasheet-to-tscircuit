@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { TsciAgentClient } from "../src/server/infrastructure/agent"
+import { boundedAgentBashTimeout } from "../src/server/infrastructure/agent/image-read-extension"
 import {
   BunProcessRunner,
   ProcessError,
+  type ProcessRunner,
   type ProcessRunRequest,
   type ProcessRunResult,
-  type ProcessRunner,
 } from "../src/server/infrastructure/process"
 
 describe("BunProcessRunner", () => {
@@ -264,6 +265,47 @@ test("TsciAgentClient retries only classified transport failures", async () => {
   ])
 })
 
+test("TsciAgentClient reports exhausted provider transport with its actionable detail", async () => {
+  const process_runner: ProcessRunner = {
+    async run(request) {
+      throw new ProcessError({
+        code: "process_exit_failed",
+        command_label: request.command_label,
+        message: "agent exited",
+        exit_code: 1,
+        output_tail: "[agent] failed\ntsci-agent: Was there a typo in the url or port?\n",
+      })
+    },
+  }
+  const client = new TsciAgentClient({
+    process_runner,
+    agent_bin: "unused-agent",
+    max_attempts: 2,
+    retry_base_delay_ms: 0,
+  })
+  const error = await client
+    .run({
+      workspace: process.cwd(),
+      prompt: "private prompt",
+      use_openai: true,
+      signal: new AbortController().signal,
+      phase_label: "reference discovery",
+      on_output: () => undefined,
+    })
+    .catch((caught) => caught)
+
+  expect(error).toBeInstanceOf(ProcessError)
+  expect(error).toMatchObject({ code: "process_transport_failed" })
+  expect(error.message).toContain("could not reach the AI provider after 2 transport attempt(s)")
+  expect(error.message).toContain("Was there a typo in the url or port?")
+})
+
+test("agent bash helpers always receive a bounded deadline", () => {
+  expect(boundedAgentBashTimeout(undefined)).toBe(60)
+  expect(boundedAgentBashTimeout(15)).toBe(15)
+  expect(boundedAgentBashTimeout(600)).toBe(120)
+})
+
 test("TsciAgentClient passes an explicitly scoped credential directory to the agent", async () => {
   const process_runner = new FakeProcessRunner()
   const client = new TsciAgentClient({
@@ -314,12 +356,7 @@ test("TsciAgentClient confines model candidates to scoped read/write tools", asy
     expect(request.command).toContain("--no-context-files")
     expect(request.command).toContain("--system-prompt")
     expect(request.command).toContain("--append-system-prompt")
-    expect(request.command).toContain(
-      "workspace_read,model_output_write,fit_model_parameters,check_model_candidate",
-    )
-    expect(request.env).toMatchObject({
-      DATASHEET_MODEL_CHECK_NGSPICE_BIN: "/trusted/bin/ngspice",
-    })
+    expect(request.command).toContain("workspace_read,model_output_write,check_model_candidate")
     const extension_index = request.command.indexOf("--extension")
     expect(request.command[extension_index + 1]).toEndWith("model-candidate-tools-extension.ts")
   }

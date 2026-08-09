@@ -81,6 +81,8 @@ function repairFeedbackCategory(error: ValidationRunResult["errors"][number]): M
       return "bounds_violation"
     case "curve_tolerance_exceeded":
       return "curve_mismatch"
+    case "bound_stimulus_insensitive":
+      return "stimulus_insensitive"
     case "invalid_log_sample":
       return "invalid_log_output"
     case "non_finite_series":
@@ -131,9 +133,7 @@ export function createModelRepairFeedback(
       add("validation_failure", case_index)
     }
   })
-  if (result.cases.length === 0) {
-    for (const error of result.errors) add(repairFeedbackCategory(error))
-  }
+  for (const error of result.errors) add(repairFeedbackCategory(error))
   Object.values(viewer_validation_by_case ?? {}).forEach((validation, case_index) => {
     if (!validation?.simulation_valid || validation.passed) return
     const failed_series = validation.series.flatMap((series, series_index) =>

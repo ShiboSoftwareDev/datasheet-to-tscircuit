@@ -4,13 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import type { ModelRun } from "@/shared/job-types"
 import { getModelPipelineElapsedTime, getModelPipelineProgress } from "@/shared/model-run-status"
 import { RETAINED_ACCEPTED_WARNING_PREFIX } from "@/shared/model-warnings"
-import {
-  getModelHeaderStats,
-  getModelMatchMetrics,
-  ModelCandidateProvenance,
-  ModelPanel,
-  ModelValidationScope,
-} from "@/web/components/model-panel"
+import { getModelHeaderStats, getModelMatchMetrics, ModelPanel } from "@/web/components/model-panel"
 
 test("model header derives match percentage from authoritative normalized RMSE", () => {
   const metrics = getModelMatchMetrics({
@@ -258,96 +252,6 @@ test("scalar checks cannot dilute the curve-only match metric", () => {
   ])
 })
 
-test("limited validation scope renders modeled coverage and unsupported behavior", () => {
-  const model_run = {
-    validation: {
-      benchmark_count: 3,
-      passing_count: 3,
-      benchmarks: [],
-      scope: {
-        total_requirement_count: 5,
-        modeled_requirement_count: 3,
-        documented_only_requirement_count: 2,
-        validated_sample_count: 3,
-        scalar_observation_count: 3,
-        curve_observation_count: 0,
-        swept_case_count: 0,
-        quality: "scalar_only",
-        documented_only_requirements: [
-          {
-            requirement_id: "serial_protocol",
-            title: "Serial protocol",
-            reason: "Digital register behavior is outside the electrical SPICE interface.",
-          },
-        ],
-        limitations: ["The model represents static pin loading only."],
-      },
-    },
-  } as unknown as ModelRun
-
-  const html = renderToStaticMarkup(createElement(ModelValidationScope, { model_run }))
-  expect(html).toContain("Scalar operating points only")
-  expect(html).toContain("3/5")
-  expect(html).toContain("Serial protocol")
-  expect(html).toContain("static pin loading only")
-  expect(html).not.toContain("100.0%")
-})
-
-test("failed replacement UI distinguishes candidate results from the accepted model", () => {
-  const html = renderToStaticMarkup(
-    createElement(ModelCandidateProvenance, {
-      model_run: {
-        manifest: { revision: "accepted-r1" },
-        validation: { artifact_state: "candidate", model_revision: "candidate-r2" },
-      } as unknown as ModelRun,
-    }),
-  )
-
-  expect(html).toContain("Unaccepted candidate validation")
-  expect(html).toContain("candidate-r2")
-  expect(html).toContain("accepted revision accepted-r1")
-})
-
-test("failed candidate diagnostics are visible while repair is still running", () => {
-  const html = renderToStaticMarkup(
-    createElement(ModelValidationScope, {
-      model_run: {
-        validation: {
-          artifact_state: "candidate",
-          benchmark_count: 1,
-          passing_count: 0,
-          benchmarks: [
-            {
-              benchmark_id: "startup-waveform",
-              title: "Startup waveform",
-              passed: false,
-              error_message: "Viewer produced no completed transient waveform.",
-            },
-          ],
-          scope: {
-            total_requirement_count: 1,
-            modeled_requirement_count: 1,
-            documented_only_requirement_count: 0,
-            validated_sample_count: 0,
-            scalar_observation_count: 0,
-            curve_observation_count: 1,
-            compared_curve_observation_count: 0,
-            curve_sample_count: 0,
-            swept_case_count: 1,
-            quality: "curve_attempted",
-            documented_only_requirements: [],
-            limitations: [],
-          },
-        },
-      } as unknown as ModelRun,
-    }),
-  )
-
-  expect(html).toContain("Current candidate failures")
-  expect(html).toContain("Startup waveform")
-  expect(html).toContain("Viewer produced no completed transient waveform.")
-})
-
 test("model panel keeps pipeline progress without duplicating agent or task history", () => {
   const timestamp = "2026-08-04T00:00:00.000Z"
   const html = renderToStaticMarkup(
@@ -382,6 +286,31 @@ test("model panel keeps pipeline progress without duplicating agent or task hist
           },
           progress_history: [],
           preview_options: [],
+          validation: {
+            artifact_state: "candidate",
+            model_revision: "1234567890abcdef",
+            benchmark_count: 1,
+            passing_count: 0,
+            critical_count: 1,
+            critical_passing_count: 0,
+            all_critical_passed: false,
+            all_passed: false,
+            benchmarks: [],
+            scope: {
+              total_requirement_count: 1,
+              modeled_requirement_count: 1,
+              documented_only_requirement_count: 0,
+              validated_sample_count: 10,
+              scalar_observation_count: 0,
+              curve_observation_count: 1,
+              compared_curve_observation_count: 1,
+              curve_sample_count: 10,
+              swept_case_count: 1,
+              quality: "curve_validated",
+              documented_only_requirements: [],
+              limitations: [],
+            },
+          },
           pipeline: {
             pipeline_id: "datasheet_model",
             status: "running",
@@ -420,14 +349,18 @@ test("model panel keeps pipeline progress without duplicating agent or task hist
   )
 
   expect(html).toContain("1/2 stages")
-  expect(html).toContain("Waiting for benchmark TSX")
-  expect(html).toContain("Waiting for analog simulation")
+  expect(html.match(/TSX not available yet/g)).toHaveLength(2)
+  expect(html).not.toContain("Waiting for benchmark TSX")
+  expect(html).not.toContain("Waiting for analog simulation")
   expect(html).toContain("Reference graph comparison")
   expect(html).not.toContain("Model execution trace")
   expect(html).not.toContain("internal only stage")
   expect(html).not.toContain("Generating candidate")
   expect(html).not.toContain("Current task")
   expect(html).not.toContain("Previous tasks")
+  expect(html).not.toContain("Unaccepted candidate validation")
+  expect(html).not.toContain("Validation scope")
+  expect(html).not.toContain("Reference curves validated")
 })
 
 test("model panel offers to restart successful SPICE generation", () => {

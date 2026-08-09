@@ -6,7 +6,12 @@ import type { DebugPipelineId, DebugRunMode } from "@/shared/pipeline-debug"
 import type { JobRunnerContext } from "./component-workflow/types"
 import { JobStore } from "./job-store"
 import { restorePersistedJob } from "./job-restorer"
-import { listLocalRuns, readLocalRunSummary } from "./local-runs"
+import {
+  listLocalRuns,
+  reconcileInterruptedLocalRun,
+  reconcileInterruptedLocalRuns,
+  readLocalRunSummary,
+} from "./local-runs"
 import { ModelRunStore } from "./model-run-store"
 import type { ModelRunnerContext } from "./model-workflow/types"
 import { loadPipelineTaskInputBundle } from "./pipeline"
@@ -59,6 +64,29 @@ function parseStartRequest(value: unknown): StartLocalRunRequest | undefined {
 
 function errorResponse(status: number, error_code: string, message: string): Response {
   return Response.json({ error: { error_code, message } }, { status })
+}
+
+/** The Local sidebar lists mutable jobs, not every execution that changed each job. */
+function latestLocalRunPerJob(
+  localRuns: Awaited<ReturnType<typeof listLocalRuns>>,
+): Awaited<ReturnType<typeof listLocalRuns>> {
+  const seenJobIds = new Set<string>()
+  return localRuns.filter((summary) => {
+    if (summary.version !== 2 || !summary.target_job_id || seenJobIds.has(summary.target_job_id)) {
+      return false
+    }
+    seenJobIds.add(summary.target_job_id)
+    return true
+  })
+}
+
+async function hasAvailableTargetJob(
+  summary: Awaited<ReturnType<typeof readLocalRunSummary>>,
+  jobsRoot: string,
+): Promise<boolean> {
+  if (summary.version !== 2 || !summary.target_job_id) return false
+  const metadata = await lstat(join(jobsRoot, summary.target_job_id)).catch(() => undefined)
+  return Boolean(metadata?.isDirectory() && !metadata.isSymbolicLink())
 }
 
 function snapshotForPipeline(input: {
@@ -183,6 +211,9 @@ async function synchronizeCompletedCliRun(
     log_writer: async () => undefined,
   })
   const targetJobDir = join(context.jobs_root, summary.target_job_id)
+  // A completed Local record can outlive a job that the user deliberately
+  // deleted. That is ordinary lifecycle cleanup, not a checkpoint failure.
+  if (!(await hasAvailableTargetJob(summary, context.jobs_root))) return
   await restorePersistedJob({
     job_id: summary.target_job_id,
     job_dir: targetJobDir,
@@ -235,9 +266,13 @@ export function createLocalRunApiHandler(context: LocalRunApiContext) {
     const requestUrl = new URL(request.url)
 
     if (requestUrl.pathname === "/api/local-runs" && request.method === "GET") {
-      const local_runs = (await listLocalRuns(context.local_runs_root)).filter(
-        (summary) => summary.version === 2,
+      const reconciled = await reconcileInterruptedLocalRuns(context.local_runs_root, {
+        excluded_ids: serverLaunchedRuns,
+      })
+      const availability = await Promise.all(
+        reconciled.map((summary) => hasAvailableTargetJob(summary, context.jobs_root)),
       )
+      const local_runs = latestLocalRunPerJob(reconciled.filter((_, index) => availability[index]))
       for (const summary of [...local_runs].reverse()) {
         void synchronize(summary).catch((error) => {
           console.error("[local-run] checkpoint_refresh_failed", {
@@ -252,7 +287,12 @@ export function createLocalRunApiHandler(context: LocalRunApiContext) {
       const localRunId = requestUrl.searchParams.get("local_run_id")?.trim()
       if (!localRunId) return errorResponse(400, "local_run_id_required", "local_run_id is required.")
       try {
-        const summary = await readLocalRunSummary(context.local_runs_root, localRunId)
+        const summary = serverLaunchedRuns.has(localRunId)
+          ? await readLocalRunSummary(context.local_runs_root, localRunId)
+          : await reconcileInterruptedLocalRun({
+              local_root: context.local_runs_root,
+              local_run_id: localRunId,
+            })
         if (summary.version === 2 && summary.target_job_id) {
           await synchronize(summary)
           const job = context.job_store.getJob(summary.target_job_id)

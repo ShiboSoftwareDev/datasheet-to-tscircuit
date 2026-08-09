@@ -145,6 +145,14 @@ export function projectModelReferencePreview(input: {
   const viewer_validation = completeViewerValidation(viewer_state)
   const displayed_series = viewer_required ? (viewer_validation?.series ?? []) : (case_result?.series ?? [])
   const result_by_observation = new Map(displayed_series.map((series) => [series.observation_id, series]))
+  const comparison_completed = Boolean(
+    case_result &&
+      (viewer_required
+        ? viewer_state.kind === "matched" || viewer_state.kind === "mismatched"
+        : input.validation_case.observations.every(
+            (observation) => (result_by_observation.get(observation.id)?.points.length ?? 0) > 0,
+          )),
+  )
   const series = input.validation_case.observations.map((observation) =>
     projectReferenceSeries({
       observation,
@@ -179,15 +187,11 @@ export function projectModelReferencePreview(input: {
     result_status:
       case_result?.status === "cancelled"
         ? "cancelled"
-        : viewer_required
-          ? case_result?.status === "passed" && viewer_state.kind === "matched"
-            ? "verified"
-            : case_result
-              ? "failed"
-              : undefined
-          : case_result?.status === "passed"
-            ? "verified"
-            : case_result?.status,
+        : comparison_completed
+          ? "verified"
+          : case_result
+            ? "failed"
+            : undefined,
     result_origin: viewer_required ? "tscircuit_viewer" : case_result ? "server_validation" : undefined,
     normalized_rmse: case_result
       ? averageDefined(displayed_series.map(({ metrics }) => metrics.normalized_rmse))
@@ -200,9 +204,8 @@ export function projectModelReferencePreview(input: {
         ? undefined
         : case_result
           ? viewer_required
-            ? case_result.status === "passed" && viewer_state.kind === "matched"
-            : case_result.status === "passed" &&
-              displayed_series.length === input.validation_case.observations.length &&
+            ? viewer_state.kind === "matched"
+            : displayed_series.length === input.validation_case.observations.length &&
               displayed_series.every(({ passed }) => passed)
           : undefined,
     is_stale: false,

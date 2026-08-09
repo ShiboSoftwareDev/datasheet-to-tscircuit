@@ -34,6 +34,20 @@ const CircuitJsonPreview = lazy(async () => {
   return { default: runframe_module.CircuitJsonPreview }
 })
 
+const SourceRunFrame = lazy(async () => {
+  const [runner_module, worker_module] = await Promise.all([
+    import("@tscircuit/runframe/runner"),
+    import("@tscircuit/eval/blob-url"),
+  ])
+  const RunFrame = runner_module.RunFrame
+  const evalWebWorkerBlobUrl = worker_module.default
+  return {
+    default: (props: Parameters<typeof RunFrame>[0]) => (
+      <RunFrame {...props} evalWebWorkerBlobUrl={evalWebWorkerBlobUrl} />
+    ),
+  }
+})
+
 export const MODEL_SCHEMATIC_CODE_TABS: TabId[] = ["code", "schematic"]
 export const MODEL_ANALOG_ONLY_TABS: TabId[] = ["analog_simulation"]
 
@@ -55,6 +69,23 @@ export function hasRunnableAnalogSimulation(preview?: ModelCircuitPreviewData): 
   if (preview.analog_simulation_status !== "available") return false
   if (preview.analysis_type !== "transient") return false
   return hasCompletedTransientSimulation(preview.circuit_json)
+}
+
+/** Browser-executed source is a development preview, never a persisted validation result. */
+export function getSourceRuntimeAnalogCircuitJson(input: {
+  preview?: ModelCircuitPreviewData
+  runtime_circuit_json?: ModelCircuitPreviewData["circuit_json"]
+}): ModelCircuitPreviewData["circuit_json"] {
+  if (hasRunnableAnalogSimulation(input.preview)) return input.preview?.circuit_json
+  if (
+    input.preview?.build_status === "source_ready" &&
+    input.preview.analysis_type === "transient" &&
+    input.runtime_circuit_json &&
+    hasCompletedTransientSimulation(input.runtime_circuit_json)
+  ) {
+    return input.runtime_circuit_json
+  }
+  return undefined
 }
 
 /** Analog is a capability of one validated circuit/reference/result bundle, never a loose circuit half. */
@@ -95,54 +126,71 @@ function ModelCode({ preview }: { preview: ModelCircuitPreviewData }) {
   )
 }
 
-function CircuitPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) {
-  const title =
-    preview?.build_status === "building"
-      ? "Building circuit"
-      : preview?.build_status === "failed"
-        ? "Circuit build failed"
-        : preview
-          ? "Benchmark TSX is source-ready"
-          : "Waiting for benchmark TSX"
+function TsxPlaceholder({
+  preview,
+  error_message,
+}: {
+  preview?: ModelCircuitPreviewData
+  error_message?: string
+}) {
+  const has_failed = Boolean(error_message || preview?.build_status === "failed")
+  const has_tsx = Boolean(preview?.code)
+  const title = has_failed ? "TSX failed to load" : has_tsx ? "TSX loading" : "TSX not available yet"
   return (
     <div className="model-preview-placeholder">
-      {preview?.build_status === "building" ? (
+      {!has_failed && has_tsx ? (
         <LoaderCircle className="spin" size={25} />
+      ) : has_failed ? (
+        <AlertTriangle size={25} />
       ) : (
         <FlaskConical size={25} />
       )}
       <strong>{title}</strong>
       <p>
-        {preview?.error_message ??
-          (preview?.build_status === "building"
-            ? "tsci is building this benchmark. The viewer will use the first persisted Circuit JSON output."
-            : preview
-              ? "No Circuit JSON snapshot is stored for this benchmark, so the source is shown here. The analog viewer appears only after tscircuit stores a completed transient waveform."
-              : "This appears as soon as the agent writes its first benchmark circuit.")}
+        {error_message ??
+          preview?.error_message ??
+          (has_tsx
+            ? "Loading the generated TSX into the circuit viewer."
+            : "This view will load when the generated TSX becomes available.")}
       </p>
-      {preview?.code && (
-        <pre>
-          <code>{preview.code}</code>
-        </pre>
-      )}
     </div>
   )
 }
 
-function AnalogPlaceholder({ preview }: { preview?: ModelCircuitPreviewData }) {
+function ModelSourceRuntimeRunner({
+  preview,
+  on_source_rendered,
+  on_source_error,
+}: {
+  preview: ModelCircuitPreviewData
+  on_source_rendered: (circuit_json: NonNullable<ModelCircuitPreviewData["circuit_json"]>) => void
+  on_source_error: (message: string) => void
+}) {
+  const source_entrypoint = preview.source_file.split("/").at(-1) ?? "main.tsx"
+  const source_fs_map = useMemo(
+    () => (preview.code ? { [source_entrypoint]: preview.code } : {}),
+    [preview.code, source_entrypoint],
+  )
+
   return (
-    <div className="model-preview-placeholder">
-      {preview?.build_status === "building" ? (
-        <LoaderCircle className="spin" size={25} />
-      ) : (
-        <Activity size={25} />
-      )}
-      <strong>Waiting for analog simulation</strong>
-      <p>
-        {preview
-          ? "The analog viewer will appear after tscircuit stores a completed transient waveform for this benchmark."
-          : "This appears after a benchmark TSX produces a completed transient waveform."}
-      </p>
+    <div hidden>
+      <Suspense fallback={null}>
+        <SourceRunFrame
+          fsMap={source_fs_map}
+          mainComponentPath={source_entrypoint}
+          showRunButton={false}
+          showToggleFullScreen={false}
+          showFileMenu={false}
+          availableTabs={MODEL_SCHEMATIC_CODE_TABS}
+          defaultActiveTab="schematic"
+          defaultTab="schematic"
+          onRenderFinished={({ circuitJson }) => {
+            if (Array.isArray(circuitJson)) on_source_rendered(circuitJson)
+          }}
+          onError={(error) => on_source_error(error.message)}
+          isWebEmbedded
+        />
+      </Suspense>
     </div>
   )
 }
@@ -161,22 +209,31 @@ export function getRunframeCircuitJson(input: {
 function ModelCircuitPreview({
   preview,
   show_analog_simulation,
+  runtime_circuit_json,
+  runtime_error,
 }: {
   preview?: ModelCircuitPreviewData
   show_analog_simulation: boolean
+  runtime_circuit_json?: ModelCircuitPreviewData["circuit_json"]
+  runtime_error?: string
 }) {
   const [active_tab, setActiveTab] = useState<TabId>("schematic")
+  const live_circuit_json = preview?.circuit_json ?? runtime_circuit_json
   // Runframe leaves Code whenever the Circuit JSON prop changes. Keep the snapshot
   // that was visible on entry, then reveal the newest live data on a visual tab.
-  const [code_tab_circuit_json, setCodeTabCircuitJson] = useState(preview?.circuit_json)
+  const [code_tab_circuit_json, setCodeTabCircuitJson] = useState(live_circuit_json)
   const runframe_circuit_json = getRunframeCircuitJson({
     active_tab,
-    live_circuit_json: preview?.circuit_json,
+    live_circuit_json,
     code_tab_circuit_json,
   })
+  const runs_source_in_browser = Boolean(
+    preview?.code && preview.build_status === "source_ready" && !preview.circuit_json,
+  )
+  const analog_circuit_json = getSourceRuntimeAnalogCircuitJson({ preview, runtime_circuit_json })
 
   const handleActiveTabChange = (tab: TabId) => {
-    if (tab === "code") setCodeTabCircuitJson(preview?.circuit_json)
+    if (tab === "code") setCodeTabCircuitJson(live_circuit_json)
     setActiveTab(tab)
   }
   const project_name = preview?.source_file.replace(/\.circuit\.tsx$/i, "")
@@ -187,15 +244,20 @@ function ModelCircuitPreview({
           {preview.error_message}
         </p>
       )}
+      {runtime_error && (
+        <p className="model-preview-build-error" role="alert">
+          Browser preview failed: {runtime_error}
+        </p>
+      )}
       <div className="model-circuit-split">
         <div className="model-runframe-shell model-schematic-code-runframe">
           {!preview || !runframe_circuit_json ? (
-            <CircuitPlaceholder preview={preview} />
+            <TsxPlaceholder preview={preview} error_message={runtime_error} />
           ) : (
-            <Suspense fallback={<CircuitPlaceholder preview={preview} />}>
+            <Suspense fallback={<TsxPlaceholder preview={preview} />}>
               <CircuitJsonPreview
                 circuitJson={runframe_circuit_json}
-                code={preview.code}
+                code={preview?.code}
                 showCodeTab
                 codeTabContent={<ModelCode preview={preview} />}
                 onActiveTabChange={handleActiveTabChange}
@@ -213,11 +275,11 @@ function ModelCircuitPreview({
           )}
         </div>
         <div className="model-runframe-shell model-analog-only-runframe">
-          {show_analog_simulation && preview?.circuit_json ? (
-            <Suspense fallback={<AnalogPlaceholder preview={preview} />}>
+          {(show_analog_simulation || runs_source_in_browser) && analog_circuit_json ? (
+            <Suspense fallback={<TsxPlaceholder preview={preview} />}>
               <CircuitJsonPreview
-                circuitJson={preview.circuit_json}
-                code={preview.code}
+                circuitJson={analog_circuit_json}
+                code={preview?.code}
                 availableTabs={MODEL_ANALOG_ONLY_TABS}
                 defaultActiveTab="analog_simulation"
                 defaultTab="analog_simulation"
@@ -231,7 +293,7 @@ function ModelCircuitPreview({
               />
             </Suspense>
           ) : (
-            <AnalogPlaceholder preview={preview} />
+            <TsxPlaceholder preview={preview} error_message={runtime_error} />
           )}
         </div>
       </div>
@@ -410,6 +472,9 @@ function SpecificationCheck({
     .filter((value) => Number.isFinite(value))
   const result_min = result_values.length > 0 ? Math.min(...result_values) : undefined
   const result_max = result_values.length > 0 ? Math.max(...result_values) : undefined
+  const comparison_unavailable =
+    preview.result_status === "failed" &&
+    !(result_values.length > 0 && preview.matches_reference !== undefined)
 
   return (
     <div
@@ -449,14 +514,14 @@ function SpecificationCheck({
       </dl>
       {result_values.length === 0 && (
         <p>
-          {preview.result_status === "failed"
-            ? "The server specification check failed before producing a finite result."
+          {comparison_unavailable
+            ? "The simulation did not produce a finite value to compare."
             : preview.result_status === "cancelled"
               ? "The server specification check was cancelled."
               : "The server specification check has no retained result."}
         </p>
       )}
-      {preview.result_status === "failed" && <p>Server validation · failed</p>}
+      {comparison_unavailable && <p>Comparison unavailable</p>}
       {preview.result_status === "cancelled" && <p>Server validation · cancelled</p>}
     </div>
   )
@@ -579,7 +644,9 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
     : []
   const comparison_is_deprecated = preview.result_status === "deprecated" || preview.is_stale
   const comparison_is_unverified = preview.result_status === "unverified"
-  const comparison_is_failed = preview.result_status === "failed"
+  const comparison_is_failed =
+    preview.result_status === "failed" &&
+    !(preview.result_points?.length && preview.matches_reference !== undefined)
   const comparison_is_cancelled = preview.result_status === "cancelled"
   const scale_disparity =
     reference_kind === "curve"
@@ -598,7 +665,7 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
   const result_label = comparison_is_deprecated
     ? "Previous model result · deprecated"
     : comparison_is_failed
-      ? "Server validation · failed"
+      ? "Comparison unavailable"
       : comparison_is_cancelled
         ? "Server validation · cancelled"
         : comparison_is_unverified
@@ -743,7 +810,7 @@ export function ReferenceGraph({ preview }: { preview?: ModelReferencePreview })
           {!preview.result_points && (
             <span className="model-result-pending">
               {comparison_is_failed
-                ? "No waveform: server validation failed"
+                ? "No waveform available for comparison"
                 : comparison_is_cancelled
                   ? "No waveform: server validation cancelled"
                   : reference_kind === "curve"
@@ -763,11 +830,17 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
   const reference_kind = getModelReferenceKind(preview) ?? "target"
   const is_curve = reference_kind === "curve"
   const comparison_is_deprecated = preview.result_status === "deprecated" || preview.is_stale
+  const has_comparison_result = Boolean(
+    preview.result_points?.length || preview.series?.some(({ result_points }) => result_points?.length),
+  )
+  const comparison_unavailable =
+    preview.result_status === "failed" && !(has_comparison_result && preview.matches_reference !== undefined)
+  const comparison_mismatched = preview.matches_reference === false && has_comparison_result
   const has_summary =
     (is_curve && preview.normalized_rmse !== undefined) ||
     (is_curve && preview.normalized_max_error !== undefined) ||
     comparison_is_deprecated ||
-    preview.result_status === "failed" ||
+    comparison_unavailable ||
     preview.result_status === "cancelled" ||
     preview.matches_reference !== undefined
   if (!has_summary) return null
@@ -800,15 +873,15 @@ function ComparisonSummary({ preview }: { preview?: ModelReferencePreview }) {
           <AlertTriangle size={12} />
           Validation cancelled
         </span>
-      ) : preview.result_status === "failed" ? (
+      ) : comparison_mismatched ? (
         <span className="model-comparison-state is-mismatch" role="status">
           <AlertTriangle size={12} />
-          Validation failed
+          {is_curve ? "Outside reference tolerance" : "Outside datasheet limits"}
         </span>
-      ) : preview.matches_reference === false ? (
+      ) : comparison_unavailable ? (
         <span className="model-comparison-state is-mismatch" role="status">
           <AlertTriangle size={12} />
-          {is_curve ? "Outside curve tolerance" : "Outside datasheet limits"}
+          Comparison unavailable
         </span>
       ) : preview.matches_reference === true ? (
         <span className="model-comparison-state is-match" role="status">
@@ -916,6 +989,12 @@ interface ModelPreviewCacheState {
   errors: Record<string, string>
 }
 
+interface SourceRuntimeState {
+  scope_key: string
+  circuit_json_by_benchmark: Record<string, NonNullable<ModelCircuitPreviewData["circuit_json"]>>
+  errors: Record<string, string>
+}
+
 export function getModelPreviewBundleScopeKey(input: {
   job_id: string
   preview_generation?: string
@@ -1017,6 +1096,15 @@ export function ModelLivePreview({
     preview_cache.scope_key === preview_cache_scope
       ? preview_cache
       : { scope_key: preview_cache_scope, previews: {}, errors: {} }
+  const [source_runtime, setSourceRuntime] = useState<SourceRuntimeState>({
+    scope_key: preview_cache_scope,
+    circuit_json_by_benchmark: {},
+    errors: {},
+  })
+  const scoped_source_runtime =
+    source_runtime.scope_key === preview_cache_scope
+      ? source_runtime
+      : { scope_key: preview_cache_scope, circuit_json_by_benchmark: {}, errors: {} }
   const live_preview = useMemo(
     () =>
       parseLiveModelPreview({
@@ -1087,9 +1175,58 @@ export function ModelLivePreview({
               title: reference_preview?.title ?? "Simulation comparison",
             },
           ]
+  const active_source_benchmark_id = preview_entries.find((entry) => {
+    const loaded = scoped_cache.previews[entry.benchmark_id]
+    const can_use_live_preview = entry.benchmark_id === live_benchmark_id || entry.benchmark_id === "live"
+    const preview = (loaded ?? (can_use_live_preview ? live_preview.preview : undefined))?.circuit_preview
+    return Boolean(
+      preview?.code &&
+        preview.build_status === "source_ready" &&
+        !preview.circuit_json &&
+        !scoped_source_runtime.circuit_json_by_benchmark[entry.benchmark_id] &&
+        !scoped_source_runtime.errors[entry.benchmark_id],
+    )
+  })?.benchmark_id
+
+  const active_source_loaded = active_source_benchmark_id
+    ? scoped_cache.previews[active_source_benchmark_id]
+    : undefined
+  const active_source_can_use_live_preview = Boolean(
+    active_source_benchmark_id &&
+      (active_source_benchmark_id === live_benchmark_id || active_source_benchmark_id === "live"),
+  )
+  const active_source_preview = (
+    active_source_loaded ?? (active_source_can_use_live_preview ? live_preview.preview : undefined)
+  )?.circuit_preview
 
   return (
     <section className="model-preview-list" aria-label="SPICE benchmark comparisons">
+      {active_source_benchmark_id && active_source_preview?.code && (
+        <ModelSourceRuntimeRunner
+          preview={active_source_preview}
+          on_source_rendered={(runtime_circuit_json) => {
+            setSourceRuntime((current) => ({
+              scope_key: preview_cache_scope,
+              circuit_json_by_benchmark: {
+                ...(current.scope_key === preview_cache_scope ? current.circuit_json_by_benchmark : {}),
+                [active_source_benchmark_id]: runtime_circuit_json,
+              },
+              errors: current.scope_key === preview_cache_scope ? current.errors : {},
+            }))
+          }}
+          on_source_error={(message) => {
+            setSourceRuntime((current) => ({
+              scope_key: preview_cache_scope,
+              circuit_json_by_benchmark:
+                current.scope_key === preview_cache_scope ? current.circuit_json_by_benchmark : {},
+              errors: {
+                ...(current.scope_key === preview_cache_scope ? current.errors : {}),
+                [active_source_benchmark_id]: message,
+              },
+            }))
+          }}
+        />
+      )}
       {preview_entries.map((entry) => {
         const found_reference =
           preview_options.length === 0 ? found_reference_by_id.get(entry.benchmark_id) : undefined
@@ -1127,6 +1264,8 @@ export function ModelLivePreview({
                 key={`${preview_cache_scope}:${entry.benchmark_id}:${displayed_circuit?.source_file ?? "pending"}`}
                 preview={displayed_circuit}
                 show_analog_simulation={hasRunnableAnalogPreviewBundle(displayed_bundle)}
+                runtime_circuit_json={scoped_source_runtime.circuit_json_by_benchmark[entry.benchmark_id]}
+                runtime_error={scoped_source_runtime.errors[entry.benchmark_id]}
               />
               <ModelDatasheetReferencePane
                 job_id={job_id}

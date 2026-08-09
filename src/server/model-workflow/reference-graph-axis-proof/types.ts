@@ -73,7 +73,9 @@ export interface ReferenceDivisionScaleSource {
   confidence: number
   ocr_bbox_px: OcrBoundingBox
   normalization?: {
-    algorithm: "missing_time_prefix_from_adjacent_measurement_v1"
+    algorithm:
+      | "missing_time_prefix_from_adjacent_measurement_v1"
+      | "low_confidence_micro_prefix_from_adjacent_measurement_v1"
     corroborating_raw_text: string
     multiplier: number
   }

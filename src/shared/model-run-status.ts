@@ -41,3 +41,20 @@ export function getModelPipelineElapsedTime(
   const segment_start = new Date(model_run.segment_started_at).valueOf()
   return model_run.elapsed_time_ms + (Number.isFinite(segment_start) ? Math.max(0, now - segment_start) : 0)
 }
+
+export function getModelRepairElapsedTime(
+  model_run: Pick<
+    ModelRun,
+    "repair_elapsed_time_ms" | "repair_started_at" | "repair_budget_ms" | "effort_multiplier"
+  >,
+  now: number,
+): { elapsed: number; budget: number } {
+  const budget = model_run.repair_budget_ms ?? model_run.effort_multiplier * 30 * 60 * 1_000
+  const started_at = model_run.repair_started_at
+    ? new Date(model_run.repair_started_at).valueOf()
+    : Number.NaN
+  const elapsed =
+    (model_run.repair_elapsed_time_ms ?? 0) +
+    (Number.isFinite(started_at) ? Math.max(0, now - started_at) : 0)
+  return { elapsed: Math.min(budget, elapsed), budget }
+}

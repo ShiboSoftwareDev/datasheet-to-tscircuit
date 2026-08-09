@@ -24,6 +24,7 @@ import {
 export function validateViewerSimulation(input: {
   validation_case: ValidationCase
   circuit_json: readonly AnyCircuitElement[]
+  fixture_policy?: "exact" | "repairable"
 }): ViewerSimulationValidation {
   const { validation_case, circuit_json } = input
   const errors: ValidationExecutionError[] = []
@@ -47,14 +48,16 @@ export function validateViewerSimulation(input: {
       )
     }
   }
-  for (const fixture of validation_case.fixtures) {
-    const current_observation = validation_case.observations.find(
-      (observation): observation is Extract<typeof observation, { type: "current" }> =>
-        observation.type === "current" && observation.element_id === fixture.id,
-    )
-    errors.push(...validateFixture({ fixture, circuit_json, current_observation }))
+  if (input.fixture_policy !== "repairable") {
+    for (const fixture of validation_case.fixtures) {
+      const current_observation = validation_case.observations.find(
+        (observation): observation is Extract<typeof observation, { type: "current" }> =>
+          observation.type === "current" && observation.element_id === fixture.id,
+      )
+      errors.push(...validateFixture({ fixture, circuit_json, current_observation }))
+    }
+    errors.push(...validateApplicationNodeGroups({ validation_case, circuit_json }))
   }
-  errors.push(...validateApplicationNodeGroups({ validation_case, circuit_json }))
 
   const all_experiments = circuit_json.flatMap((element) => {
     const record = asRecord(element)

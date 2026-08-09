@@ -151,6 +151,7 @@ export async function projectCandidateValidationUi(input: {
   evidence_dir: string
   revision: string
   projection: ReturnType<typeof projectModelUi>
+  development_model?: GeneratedModel
   signal: AbortSignal
 }): Promise<void> {
   input.signal.throwIfAborted()
@@ -165,7 +166,20 @@ export async function projectCandidateValidationUi(input: {
   ) {
     throw new Error("Candidate UI projection revision does not match its immutable candidate bundle")
   }
-  for (const [case_id, preview] of Object.entries(input.projection.selected_previews)) {
+  const benchmark_ids = input.projection.preview_options.map(({ benchmark_id }) => benchmark_id)
+  const selected_ids = Object.keys(input.projection.selected_previews)
+  if (
+    new Set(benchmark_ids).size !== benchmark_ids.length ||
+    selected_ids.length !== benchmark_ids.length ||
+    benchmark_ids.some((benchmark_id) => !input.projection.selected_previews[benchmark_id])
+  ) {
+    throw new Error("Candidate UI projection must retain one complete preview for every benchmark")
+  }
+  for (const case_id of benchmark_ids) {
+    const preview = input.projection.selected_previews[case_id]
+    if (!preview?.circuit_preview?.code || !preview.reference_preview) {
+      throw new Error(`Candidate UI projection ${case_id} must retain its circuit and reference graph`)
+    }
     if (
       preview.artifact_identity?.preview_generation !== preview_generation ||
       preview.artifact_identity.model_revision !== input.revision
@@ -244,6 +258,15 @@ export async function projectCandidateValidationUi(input: {
     : undefined
   input.model_run_store.projectCandidateValidation(input.model_run_id, {
     validation: input.projection.validation,
+    ...(input.development_model
+      ? {
+          development_model: {
+            model_source: input.development_model.source,
+            model_card: input.development_model.card,
+            manifest: input.development_model.manifest,
+          },
+        }
+      : {}),
     preview_options: input.projection.preview_options,
     previews: {
       circuit_preview: first_preview?.circuit_preview,
@@ -265,6 +288,7 @@ export async function restoreCandidateValidationUi(input: {
   immutable_artifact_dir: string
   evidence_dir: string
   revision: string
+  development_model?: GeneratedModel
   signal: AbortSignal
 }): Promise<void> {
   const projection = (await readJson(join(input.immutable_artifact_dir, "model-ui.json"))) as ReturnType<

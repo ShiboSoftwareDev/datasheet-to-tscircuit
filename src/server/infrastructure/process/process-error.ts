@@ -2,6 +2,7 @@ export type ProcessErrorCode =
   | "process_spawn_failed"
   | "process_exit_failed"
   | "process_output_handler_failed"
+  | "process_transport_failed"
   | "process_idle_timeout"
   | "process_wall_timeout"
   | "process_cancelled"

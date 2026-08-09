@@ -3,14 +3,11 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ModelContract, ModelInterface } from "../modeling"
 import {
+  type GeneratedModel,
   parseModelInterface,
   readGeneratedModel,
   validateFreshModelSource,
-  type GeneratedModel,
 } from "../modeling"
-import { ProcessError } from "../infrastructure/process"
-import type { NgspiceExecutor } from "../spice-validation"
-import { assertNgspiceAcceptsModelCandidate } from "./model-candidate-smoke"
 
 export type ModelCandidateCheckCode =
   | "model_interface_invalid"
@@ -32,7 +29,9 @@ export class ModelCandidateCheckError extends Error {
 export interface ModelCandidateCheckReceipt {
   readonly version: 1
   readonly status: "passed"
-  readonly checks: readonly ["model_contract", "model_card", "ngspice_smoke"]
+  readonly checks:
+    | readonly ["model_contract", "model_card", "static_source"]
+    | readonly ["model_contract", "model_card", "ngspice_smoke"]
   readonly revision: string
   readonly entry_name: string
   readonly pin_count: number
@@ -81,7 +80,10 @@ export function parseModelCandidateCheckReceipt(value: unknown): ModelCandidateC
     )
   }
   if (
-    JSON.stringify(value.checks) !== JSON.stringify(["model_contract", "model_card", "ngspice_smoke"]) ||
+    ![
+      JSON.stringify(["model_contract", "model_card", "static_source"]),
+      JSON.stringify(["model_contract", "model_card", "ngspice_smoke"]),
+    ].includes(JSON.stringify(value.checks)) ||
     typeof value.revision !== "string" ||
     !/^[a-f0-9]{16}$/.test(value.revision) ||
     typeof value.entry_name !== "string" ||
@@ -149,15 +151,12 @@ async function readCandidateInterface(workspace: string): Promise<ModelInterface
 /**
  * The single public candidate gate shared by the constrained model agent and
  * the authoritative post-agent artifact stage. It checks only agent-visible
- * artifacts and a server-owned zero-bias harness; held-out validation cases do
- * not enter this workspace or its diagnostics.
+ * artifacts. Simulation belongs to Run Simulations, never model inference.
  */
 export async function checkModelCandidate(input: {
   workspace: string
   model_interface?: ModelInterface
   model_contract?: ModelContract
-  ngspice: NgspiceExecutor
-  ngspice_path: string
   signal: AbortSignal
 }): Promise<CheckedModelCandidate> {
   input.signal.throwIfAborted()
@@ -179,32 +178,12 @@ export async function checkModelCandidate(input: {
   if (!generated.card.trim()) {
     throw new ModelCandidateCheckError("model_card_empty", "model-card.md must not be empty")
   }
-  try {
-    await assertNgspiceAcceptsModelCandidate({
-      workspace: input.workspace,
-      manifest: generated.manifest,
-      ngspice: input.ngspice,
-      ngspice_path: input.ngspice_path,
-      signal: input.signal,
-    })
-  } catch (error) {
-    // Process/infrastructure errors retain their original type so the artifact
-    // runner can stop without spending another model-generation attempt.
-    if (!(error instanceof ProcessError)) {
-      throw new ModelCandidateCheckError(
-        "ngspice_smoke_failed",
-        messageOf(error),
-        error instanceof Error ? { cause: error } : undefined,
-      )
-    }
-    throw error
-  }
   return {
     generated,
     receipt: {
       version: 1,
       status: "passed",
-      checks: ["model_contract", "model_card", "ngspice_smoke"],
+      checks: ["model_contract", "model_card", "static_source"],
       revision: generated.manifest.revision,
       entry_name: generated.manifest.entry_name,
       pin_count: generated.manifest.pins.length,

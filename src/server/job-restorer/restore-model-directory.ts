@@ -227,6 +227,15 @@ function restorePublicationIntegrityFailure(input: {
         ? checkpoint.effort_multiplier
         : 1,
     elapsed_time_ms: saved_elapsed_time_ms,
+    repair_elapsed_time_ms:
+      typeof checkpoint?.repair_elapsed_time_ms === "number" &&
+      Number.isFinite(checkpoint.repair_elapsed_time_ms)
+        ? Math.max(0, checkpoint.repair_elapsed_time_ms)
+        : 0,
+    repair_budget_ms:
+      typeof checkpoint?.repair_budget_ms === "number" && Number.isFinite(checkpoint.repair_budget_ms)
+        ? Math.max(1, checkpoint.repair_budget_ms)
+        : 30 * 60 * 1_000,
     current_invocation_id:
       typeof checkpoint?.current_invocation_id === "string" &&
       /^[a-f0-9-]{16,80}$/.test(checkpoint.current_invocation_id)
@@ -423,7 +432,10 @@ export async function restoreModelDirectory(input: {
       ? checkpoint.effort_multiplier
       : 1
   const candidate_ui =
-    !invalid_completion && !recovered_publication && status !== "complete" && !checkpoint_identity_conflict
+    !invalid_completion &&
+    !recovered_publication &&
+    (status !== "complete" || partial_pipeline_completion) &&
+    !checkpoint_identity_conflict
       ? await readCurrentCandidateProjection({
           model_dir: input.model_dir,
           model_run_id: saved_model_run_id,
@@ -538,6 +550,15 @@ export async function restoreModelDirectory(input: {
     warnings,
     effort_multiplier,
     elapsed_time_ms: saved_elapsed_time_ms + interrupted_segment_ms,
+    repair_elapsed_time_ms:
+      typeof checkpoint?.repair_elapsed_time_ms === "number" &&
+      Number.isFinite(checkpoint.repair_elapsed_time_ms)
+        ? Math.max(0, checkpoint.repair_elapsed_time_ms)
+        : 0,
+    repair_budget_ms:
+      typeof checkpoint?.repair_budget_ms === "number" && Number.isFinite(checkpoint.repair_budget_ms)
+        ? Math.max(1, checkpoint.repair_budget_ms)
+        : effort_multiplier * 30 * 60 * 1_000,
     current_invocation_id: recovered_publication ? publication!.commit.invocation_id : saved_invocation_id,
     iteration: typeof checkpoint?.iteration === "number" ? checkpoint.iteration : 0,
     logs,
@@ -563,17 +584,15 @@ export async function restoreModelDirectory(input: {
                 | undefined),
     validation: invalid_completion
       ? undefined
-      : partial_pipeline_completion
-        ? undefined
-        : ((candidate_ui
-            ? candidate_ui.validation
-            : publication
-              ? status === "complete"
-                ? ui?.validation
-                : undefined
-              : isRecord(checkpoint?.validation)
-                ? checkpoint.validation
-                : ui?.validation) as ModelValidationSummary | undefined),
+      : ((candidate_ui
+          ? candidate_ui.validation
+          : publication
+            ? status === "complete"
+              ? ui?.validation
+              : undefined
+            : isRecord(checkpoint?.validation)
+              ? checkpoint.validation
+              : ui?.validation) as ModelValidationSummary | undefined),
     model_card: partial_pipeline_completion
       ? undefined
       : invalid_completion

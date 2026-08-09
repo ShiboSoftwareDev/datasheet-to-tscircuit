@@ -452,16 +452,16 @@ export function parseModelSelectedPreview(
       )
     }
     const graph_count =
-      circuit_preview.circuit_json?.filter(({ type }) => type === "simulation_transient_voltage_graph")
-        .length ?? 0
-    const response_series_count =
-      reference_preview.series?.filter(
-        ({ role, reference_kind }) => role === "response" && reference_kind === "curve",
+      circuit_preview.circuit_json?.filter(
+        ({ type }) =>
+          type === "simulation_transient_voltage_graph" || type === "simulation_transient_current_graph",
       ).length ?? 0
-    if (graph_count !== response_series_count) {
+    const comparison_series_count =
+      reference_preview.series?.filter(({ reference_kind }) => reference_kind === "curve").length ?? 0
+    if (graph_count !== comparison_series_count) {
       fail(
         "Stored model preview",
-        `contains ${graph_count} voltage graphs for ${response_series_count} response comparison series`,
+        `contains ${graph_count} transient graphs for ${comparison_series_count} comparison series`,
       )
     }
   }

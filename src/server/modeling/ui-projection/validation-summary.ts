@@ -43,6 +43,10 @@ function observationTolerance(observation: ValidationObservation): number {
   return observation.reference.type === "bounds" ? 0 : observation.reference.tolerance
 }
 
+function validationErrorKey(error: ValidationRunResult["errors"][number]): string {
+  return `${error.kind}\u0000${error.code}\u0000${error.message}`
+}
+
 /**
  * Projects the authoritative validation result into the legacy UI summary DTO.
  * Every declared case is critical because the v1 validation contract has no
@@ -57,6 +61,13 @@ export function projectModelValidationSummary(
   const result_by_case = new Map(
     result.cases.map((validation_case) => [validation_case.case_id, validation_case]),
   )
+  const case_error_keys = new Set(
+    result.cases.flatMap((validation_case) => [
+      ...validation_case.errors.map(validationErrorKey),
+      ...validation_case.series.flatMap((series) => series.errors.map(validationErrorKey)),
+    ]),
+  )
+  const result_level_errors = result.errors.filter((error) => !case_error_keys.has(validationErrorKey(error)))
   const stimulus_causality_failed = result.errors.some(({ code }) => code === "bound_stimulus_insensitive")
   const benchmarks: ModelValidationBenchmark[] = plan.cases.map((validation_case) => {
     const case_result = result_by_case.get(validation_case.id)
@@ -106,7 +117,7 @@ export function projectModelValidationSummary(
       error_message:
         errorMessage([
           ...(case_result?.errors ?? []),
-          ...result.errors,
+          ...result_level_errors,
           ...(viewer_validation?.errors ?? []),
           ...(viewer_error ? [{ message: viewer_error }] : []),
         ]) ??

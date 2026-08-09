@@ -5,6 +5,8 @@ import type { ModelRunStore } from "../model-run-store"
 import type { ModelStrategyRegistry } from "../modeling"
 import type { NgspiceExecutor } from "../spice-validation"
 
+export const REPAIR_BUDGET_MS_PER_EFFORT = 30 * 60 * 1_000
+
 export type ModelRepairFeedbackCategory =
   | "target_mismatch"
   | "bounds_violation"
@@ -50,11 +52,13 @@ export interface ModelRunnerContext {
   agent_bin: string
   tsci_bin: string
   use_openai?: boolean
+  /** @deprecated The model workflow no longer executes ngspice. */
   ngspice_bin?: string
   agent_transport_retry_limit?: number
   agent_transport_retry_base_delay_ms?: number
   agent_client?: AgentClient
   process_runner?: ProcessRunner
+  /** @deprecated The model workflow no longer executes ngspice. */
   ngspice_executor?: NgspiceExecutor
   strategy_registry?: ModelStrategyRegistry
 }
@@ -99,17 +103,19 @@ export type ModelPipelineOutputs = {
   }
   run_simulations: {
     result_path: string
+    simulation_dir: string
+    source_dir: string
     model_path: string
     model_card_path: string
     manifest_path: string
     contract_path: string
     plan_path: string
     evidence_dir: string
-    passed: boolean
     case_count: number
-    failing_case_ids: string[]
-    /** Redacted typed feedback with aggregate counts and closed-enum repair actions. */
-    repair_feedback?: ModelRepairFeedback
+    simulation_error_case_ids: string[]
+    causality_result_path?: string
+    causality_case_count: number
+    causality_simulation_error_case_ids: string[]
     revision: string
   }
   compare_simulation_outputs: {
@@ -123,7 +129,10 @@ export type ModelPipelineOutputs = {
     passed: boolean
     case_count: number
     failing_case_ids: string[]
-    repair_feedback?: ModelRepairFeedback
+    stimulus_causality_failure?: {
+      affected_case_count: number
+      affected_observation_count: number
+    }
     revision: string
   }
   repair_spice_model: {
@@ -136,6 +145,7 @@ export type ModelPipelineOutputs = {
     evidence_dir: string
     passed: boolean
     repair_attempts: number
+    repair_elapsed_ms?: number
     revision: string
   }
   wait_for_component: {
@@ -158,7 +168,9 @@ export interface ModelPipelineContext {
   job_dir: string
   model_dir: string
   use_openai: boolean
-  max_repair_attempts: number
+  repair_budget_ms?: number
+  /** @deprecated Retained only for source-level test fixtures. */
+  max_repair_attempts?: number
   invocation_id: string
 }
 
@@ -169,6 +181,8 @@ export interface ModelPipelineServices {
   process_runner: ProcessRunner
   strategy_registry: ModelStrategyRegistry
   tsci_bin: string
-  ngspice_bin: string
-  ngspice_executor: NgspiceExecutor
+  /** @deprecated The model workflow no longer executes ngspice. */
+  ngspice_bin?: string
+  /** @deprecated The model workflow no longer executes ngspice. */
+  ngspice_executor?: NgspiceExecutor
 }

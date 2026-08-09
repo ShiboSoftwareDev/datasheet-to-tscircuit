@@ -1,3 +1,5 @@
+import { MAX_TRACE_POINTS } from "./schema"
+
 function correctionBlock(feedback?: string): string {
   if (!feedback) return ""
   return `
@@ -6,6 +8,10 @@ This is a correction attempt. Read the seeded artifact first and make only the
 smallest edits required by the final rejection block. Preserve every graph,
 crop, binding, channel, trace point, color, and axis value that the final block
 does not name. Earlier rejection blocks are history, not current instructions.
+When the final block reports off-trace points together with the declared color,
+tolerance, and nearest color distance, the color and tolerance are named: if
+the points visibly lie on the same plotted hue, correct that calibration rather
+than moving valid centerline points or inventing intermediate pixels.
 
 Validation history (the final block is current):
 ${feedback}`
@@ -79,6 +85,10 @@ Read the seeded observation, datasheet.pdf, model-interface.json,
 application-fixture-contract.json, and time-graph-hints.json. Inspect each exact
 crop at its original 200-DPI pixel dimensions. Write only
 model-reference-observation.json.
+
+For a single-graph task, reference-graph.png is the exact server-rendered crop
+at its original dimensions. Read that image directly; do not re-render or crop
+the PDF with a helper script.
 
 Discovery is immutable input. Do not add, remove, rename, reclassify, or move a
 graph. Do not change reviewed_hints, crop rectangles, figure locators, pages,
@@ -167,16 +177,25 @@ anchor first and maximum-value anchor second. Y-axis values use volts or amps
 as declared by that channel.
 
 Trace each line's visible centerline independently from left to right. Supply
-at least min(48,max(8,ceil(horizontal_axis_pixel_span/14))) and at most 48
+at least min(${MAX_TRACE_POINTS},max(8,ceil(horizontal_axis_pixel_span/14))) and at most ${MAX_TRACE_POINTS}
 strictly time-progressing points, cover at least 90% of the calibrated x axis,
 and leave no gap over 20%. Points must touch the declared-color connected line;
 do not trace labels, axes, another same-colored line, or an invented smooth
 curve.
 
+Choose one representative trace color for the whole rendered line, not merely
+its darkest or most saturated pixel. Set tolerance high enough to include that
+line's antialiasing and brightness variations across the complete plot, while
+remaining narrow enough to exclude other channels, labels, grid lines, and the
+background. If a correction reports that visually correct same-hue points have
+a nearest color distance just above the declared tolerance, recalibrate the
+representative RGB or widen tolerance (up to 120); do not move those points off
+the rendered centerline to preserve an overly narrow color declaration.
+
 The polyline between consecutive points must follow the rendered line rather
 than taking a shortcut around it. Preserve every visible spike, dip, edge,
 local maximum, and local minimum. Put intermediate points through steep or
-oscillating features; if the 48-point limit requires redistribution, remove
+oscillating features; if the ${MAX_TRACE_POINTS}-point limit requires redistribution, remove
 points only from genuinely flat spans away from transitions. A correction must
 never flatten or reduce a visible feature merely to pass continuity checks.
 

@@ -131,7 +131,7 @@ export const toPipelineError = (
     error instanceof Error &&
     "code" in error &&
     typeof error.code === "string" &&
-    /^process_(?:spawn_failed|exit_failed|output_handler_failed|idle_timeout|wall_timeout|cancelled)$/.test(
+    /^process_(?:spawn_failed|exit_failed|output_handler_failed|transport_failed|idle_timeout|wall_timeout|cancelled)$/.test(
       error.code,
     )
       ? error.code
@@ -148,7 +148,9 @@ export const toPipelineError = (
         ? {
             code: process_error_code,
             operation: "run_external_process",
-            retryable: process_error_code === "process_spawn_failed",
+            retryable:
+              process_error_code === "process_spawn_failed" ||
+              process_error_code === "process_transport_failed",
           }
         : {}),
       message: error instanceof Error ? error.message : input.fallback_message,

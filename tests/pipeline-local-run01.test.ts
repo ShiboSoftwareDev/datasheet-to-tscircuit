@@ -1,17 +1,19 @@
 import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
 import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { join, resolve } from "node:path"
 import { tmpdir } from "node:os"
-import { runDebugCli } from "@/cli/pipeline-debug"
+import { join, resolve } from "node:path"
+import { projectDebugCliStdout, runDebugCli } from "@/cli/pipeline-debug"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
 import {
   loadPipelineTaskInput,
   loadPipelineTaskInputBundle,
+  restorePipelineTaskInputFiles,
   retainPipelineTaskInputFiles,
 } from "@/server/pipeline"
-import { clonePipelineJob } from "@/server/pipeline-local-run"
+import { clonePipelineJob, normalizePartialPipeline } from "@/server/pipeline-local-run"
+import type { PublicPipelineSnapshot, PublicPipelineStage } from "@/shared/job-types"
 import type { LocalRunSummary } from "@/shared/local-run"
 import type { PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
 
@@ -45,6 +47,71 @@ async function pathExists(path: string): Promise<boolean> {
   )
 }
 
+test("in-place input restoration preserves accumulated SPICE graphs and previews", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "pipeline-preserve-spice-"))
+  const jobDir = join(temporaryRoot, "job")
+  const debugDir = join(jobDir, "spice", "runs", "original", ".pipeline", "stages", "07-repair")
+  try {
+    await mkdir(join(jobDir, "spice", "current-previews", "old", "cases"), { recursive: true })
+    await writeFile(join(jobDir, "datasheet.pdf"), "original datasheet")
+    await writeFile(join(jobDir, "spice", "current-preview.json"), '{"revision":"old"}\n')
+    await writeFile(
+      join(jobDir, "spice", "current-previews", "old", "cases", "figure.circuit.tsx"),
+      "old circuit",
+    )
+    await mkdir(debugDir, { recursive: true })
+    const inputFiles = await retainPipelineTaskInputFiles({
+      root_dir: jobDir,
+      debug_dir: debugDir,
+      objects_dir: join(jobDir, "spice", "runs", "original", ".pipeline", "input-objects"),
+    })
+    const inputPath = join(debugDir, "input.json")
+    await writeFile(
+      inputPath,
+      `${JSON.stringify({
+        version: 2,
+        kind: "pipeline_task_input",
+        pipeline_id: "spice_generation",
+        task_id: "repair_spice_model",
+        run_id: "original",
+        execution_context: {
+          model_run_id: "model-run",
+          job_id: "job",
+          job_dir: jobDir,
+          model_dir: join(jobDir, "spice"),
+          use_openai: false,
+          repair_budget_ms: 60_000,
+          invocation_id: "original",
+        },
+        depends_on: ["compare_simulation_outputs"],
+        dependency_statuses: { compare_simulation_outputs: "completed" },
+        dependency_outputs: { compare_simulation_outputs: {} },
+        input_files: inputFiles,
+      })}\n`,
+    )
+    await writeFile(join(jobDir, "datasheet.pdf"), "mutated datasheet")
+    await writeFile(join(jobDir, "spice", "current-preview.json"), '{"revision":"new"}\n')
+    await mkdir(join(jobDir, "spice", "current-previews", "new", "cases"), { recursive: true })
+    const newGraph = join(jobDir, "spice", "current-previews", "new", "cases", "figure.circuit.json")
+    await writeFile(newGraph, "new simulation graph")
+
+    await restorePipelineTaskInputFiles({
+      bundle: await loadPipelineTaskInputBundle(inputPath),
+      destination_root: jobDir,
+      preserved_roots: ["spice"],
+    })
+
+    expect(await readFile(join(jobDir, "datasheet.pdf"), "utf8")).toBe("original datasheet")
+    expect(await readFile(join(jobDir, "spice", "current-preview.json"), "utf8")).toBe('{"revision":"new"}\n')
+    expect(await readFile(newGraph, "utf8")).toBe("new simulation graph")
+    expect(
+      await readFile(join(jobDir, "spice", "current-previews", "old", "cases", "figure.circuit.tsx"), "utf8"),
+    ).toBe("old circuit")
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true })
+  }
+})
+
 test("the CLI catalog exposes every independently runnable task", async () => {
   const result = (await runDebugCli(["catalog"])) as {
     pipelines: Array<{ pipeline_id: string; tasks: Array<{ id: string; depends_on: string[] }> }>
@@ -60,6 +127,103 @@ test("the CLI catalog exposes every independently runnable task", async () => {
     id: "run_simulations",
     depends_on: ["create_simulation_tsx"],
   })
+})
+
+test("Local CLI stdout is compact while retaining the complete summary path", () => {
+  const projected = projectDebugCliStdout({
+    version: 2,
+    local_run_id: "local-1",
+    execution_kind: "clone",
+    mode: "pipeline",
+    pipeline_id: "spice_generation",
+    source_job_id: "source-job",
+    target_job_id: "target-job",
+    status: "failed",
+    created_at: "2026-01-01T00:00:00.000Z",
+    completed_at: "2026-01-01T00:01:00.000Z",
+    summary_path: "/runtime/local/local-1/summary.json",
+    stage_results: {
+      find_reference_graphs: { status: "completed", output: { huge: "x".repeat(10_000) } },
+      create_comparison_graphs: {
+        status: "failed",
+        error: { code: "artifact_invalid", message: "current failure\nlarge history" },
+      },
+    },
+  })
+
+  expect(projected).toEqual({
+    version: 2,
+    local_run_id: "local-1",
+    execution_kind: "clone",
+    mode: "pipeline",
+    pipeline_id: "spice_generation",
+    task_id: undefined,
+    source_job_id: "source-job",
+    target_job_id: "target-job",
+    status: "failed",
+    created_at: "2026-01-01T00:00:00.000Z",
+    completed_at: "2026-01-01T00:01:00.000Z",
+    summary_path: "/runtime/local/local-1/summary.json",
+    completed_stages: ["find_reference_graphs"],
+    failed_stage: {
+      stage_id: "create_comparison_graphs",
+      code: "artifact_invalid",
+      message: "current failure",
+    },
+  })
+  expect(JSON.stringify(projected)).not.toContain("large history")
+  expect(JSON.stringify(projected)).not.toContain("xxxxxxxx")
+})
+
+test("in-place partial progress retains earlier completed checkpoints", () => {
+  const timestamp = "2026-08-09T00:00:00.000Z"
+  const stage = (
+    stage_id: string,
+    status: "pending" | "running" | "completed" | "skipped",
+  ): PublicPipelineStage => ({
+    stage_id,
+    status,
+    debug_ref: stage_id,
+  })
+  const baseline: PublicPipelineSnapshot = {
+    pipeline_id: "spice_generation",
+    status: "completed",
+    sequence: 1,
+    started_at: timestamp,
+    updated_at: timestamp,
+    stage_results: {
+      find_reference_graphs: stage("find_reference_graphs", "completed"),
+      create_comparison_graphs: stage("create_comparison_graphs", "completed"),
+      infer_spice_model: stage("infer_spice_model", "completed"),
+      create_simulation_tsx: stage("create_simulation_tsx", "pending"),
+    },
+  }
+  const active: PublicPipelineSnapshot = {
+    ...baseline,
+    status: "running",
+    sequence: 2,
+    stage_results: {
+      find_reference_graphs: stage("find_reference_graphs", "skipped"),
+      create_comparison_graphs: stage("create_comparison_graphs", "skipped"),
+      infer_spice_model: stage("infer_spice_model", "skipped"),
+      create_simulation_tsx: stage("create_simulation_tsx", "running"),
+    },
+  }
+
+  const normalized = normalizePartialPipeline({
+    snapshot: active,
+    baselineSnapshot: baseline,
+    mode: "from_task",
+    taskId: "create_simulation_tsx",
+    status: "running",
+  })
+
+  expect(Object.values(normalized!.stage_results).map(({ status }) => status)).toEqual([
+    "completed",
+    "completed",
+    "completed",
+    "running",
+  ])
 })
 
 test("input references and --job clone while a positional job runs in place", async () => {
@@ -147,19 +311,38 @@ test("input references and --job clone while a positional job runs in place", as
     )
     expect(localInput.execution_context.job_dir).toBe(summary.workspace_dir)
     expect(localInput.execution_context.invocation_id).not.toBe("original-invocation")
-    expect(localInput.execution_context.job_id).toBe(summary.target_job_id!)
+    if (!summary.target_job_id) throw new Error("Expected the Local run to select a target job")
+    expect(localInput.execution_context.job_id).toBe(summary.target_job_id)
 
-    const sourceLocal = (await runDebugCli([
-      "local",
-      "run",
-      "local-job",
-      "--pipeline",
-      "component_generation",
-      "--task",
-      "prepare",
-      "--root",
-      temporaryRoot,
-    ])) as LocalRunSummary
+    const progressEvents: string[] = []
+    const unrelatedJobDir = join(temporaryRoot, ".runtime", "jobs", "unrelated-broken-job")
+    await mkdir(unrelatedJobDir, { recursive: true })
+    await writeFile(join(unrelatedJobDir, "job.json"), "not valid json\n")
+    const restoreErrors: unknown[][] = []
+    const originalConsoleError = console.error
+    console.error = (...values: unknown[]) => restoreErrors.push(values)
+    let sourceLocal: LocalRunSummary
+    try {
+      sourceLocal = (await runDebugCli(
+        [
+          "local",
+          "run",
+          "local-job",
+          "--pipeline",
+          "component_generation",
+          "--task",
+          "prepare",
+          "--root",
+          temporaryRoot,
+        ],
+        { on_progress: ({ kind }) => progressEvents.push(kind) },
+      )) as LocalRunSummary
+    } finally {
+      console.error = originalConsoleError
+    }
+    expect(restoreErrors.some((values) => JSON.stringify(values).includes("unrelated-broken-job"))).toBe(
+      false,
+    )
     expect(sourceLocal).toMatchObject({
       version: 2,
       execution_kind: "in_place",
@@ -168,6 +351,8 @@ test("input references and --job clone while a positional job runs in place", as
       workspace_dir: sourceJobDir,
       status: "completed",
     })
+    expect(progressEvents).toContain("started")
+    expect(progressEvents).toContain("pipeline")
     expect(await readFile(join(sourceJobDir, "datasheet.pdf"), "utf8")).toBe(
       "%PDF-1.4\nLocal fixture\n%%EOF\n",
     )
@@ -413,6 +598,28 @@ test("a SPICE clone receives new job/model identities and no cross-wired accepte
         dependency_outputs: {},
       },
     })
+    const retainedBundle = await loadPipelineTaskInputBundle(inputPath)
+
+    const laterModelSource = ".subckt fixture IN OUT\nR1 IN OUT 2k\n.ends fixture\n"
+    const laterRevision = createHash("sha256").update(laterModelSource.trim()).digest("hex").slice(0, 16)
+    modelRunStore.projectDevelopmentModel("source-model", {
+      model_source: laterModelSource,
+      model_card: "Later in-place development fixture",
+      manifest: {
+        version: 1,
+        part_number: "fixture",
+        dialect: "ngspice",
+        entry_name: "fixture",
+        model_file: "model.lib",
+        revision: laterRevision,
+        simulator: "ngspice",
+        generated_at: "2026-08-08T00:01:00.000Z",
+        pins: [
+          { component_pin: "IN", spice_node: "IN" },
+          { component_pin: "OUT", spice_node: "OUT" },
+        ],
+      },
+    })
 
     const clone = await clonePipelineJob({
       context: {
@@ -423,7 +630,7 @@ test("a SPICE clone receives new job/model identities and no cross-wired accepte
         modelRunStore,
       },
       sourceJobId,
-      bundle: await loadPipelineTaskInputBundle(inputPath),
+      bundle: retainedBundle,
     })
     expect(clone.jobId).not.toBe(sourceJobId)
     expect(clone.bundle.envelope.execution_context).toMatchObject({
@@ -433,6 +640,7 @@ test("a SPICE clone receives new job/model identities and no cross-wired accepte
     })
     expect(clone.bundle.envelope.execution_context.model_run_id).not.toBe("source-model")
     const clonedModel = modelRunStore.getModelRunForJob(clone.jobId)
+    expect(modelRunStore.getModelRun("source-model")?.development_model?.model_source).toBe(laterModelSource)
     expect(clonedModel?.development_model?.model_source).toBe(modelSource)
     expect(clonedModel?.model_source).toBeUndefined()
     expect(await pathExists(join(jobsRoot, clone.jobId, "published-model.json"))).toBe(false)

@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { type GeneratedModel, renderValidationCaseTsx } from "../../modeling"
 import type { ValidationPlan } from "../../spice-validation"
+import { projectSimulationSourcesUi } from "../simulation-source-ui"
 import { modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
 import { defineModelStage } from "./stage-factory"
 
@@ -27,6 +28,7 @@ export const createSimulationTsxStage = defineModelStage({
     await mkdir(source_dir, { recursive: true })
     const artifacts = []
     const cases = []
+    const source_by_case: Record<string, string> = {}
     for (const validation_case of plan.cases) {
       signal.throwIfAborted()
       const file_name = `${validation_case.id}.circuit.tsx`
@@ -38,6 +40,7 @@ export const createSimulationTsxStage = defineModelStage({
       })
       const path = join(source_dir, file_name)
       await writeFile(path, source, "utf8")
+      source_by_case[validation_case.id] = source
       cases.push({
         case_id: validation_case.id,
         path,
@@ -66,6 +69,15 @@ export const createSimulationTsxStage = defineModelStage({
         role: "simulation_source_manifest",
       }),
     )
+    await projectSimulationSourcesUi({
+      model_run_store: services.model_run_store,
+      model_run_id: context.model_run_id,
+      model_dir: context.model_dir,
+      plan,
+      evidence_dir: inferred.evidence_dir,
+      source_by_case,
+      signal,
+    })
     return {
       status: "completed",
       output: {

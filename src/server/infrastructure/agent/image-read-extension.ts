@@ -1,9 +1,18 @@
 import { stat } from "node:fs/promises"
 import { extname, isAbsolute, resolve } from "node:path"
-import { createReadTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import { createBashTool, createReadTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
 const MAX_DIRECT_IMAGE_BYTES = 3 * 1024 * 1024
 const IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"])
+const DEFAULT_BASH_TIMEOUT_SECONDS = 60
+const MAX_BASH_TIMEOUT_SECONDS = 120
+
+export function boundedAgentBashTimeout(requested: number | undefined): number {
+  if (requested === undefined || !Number.isFinite(requested) || requested <= 0) {
+    return DEFAULT_BASH_TIMEOUT_SECONDS
+  }
+  return Math.min(MAX_BASH_TIMEOUT_SECONDS, requested)
+}
 
 /**
  * Keeps image reads deterministic in the production Bun image. Large source
@@ -14,6 +23,19 @@ export default function registerImageReadExtension(agent: ExtensionAPI): void {
   const workspace = process.cwd()
   const normal_read = createReadTool(workspace)
   const direct_image_read = createReadTool(workspace, { autoResizeImages: false })
+  const bounded_bash = createBashTool(workspace)
+
+  agent.registerTool({
+    ...bounded_bash,
+    async execute(tool_call_id, parameters, signal, on_update) {
+      return bounded_bash.execute(
+        tool_call_id,
+        { ...parameters, timeout: boundedAgentBashTimeout(parameters.timeout) },
+        signal,
+        on_update,
+      )
+    },
+  })
 
   agent.registerTool({
     ...normal_read,

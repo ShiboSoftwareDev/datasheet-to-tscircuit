@@ -490,7 +490,7 @@ describe("model characterization contract", () => {
         policy: "fresh",
       }),
     ).toThrow(/needs at least 8 points so server validation can withhold interior samples/)
-    expect(buildCharacterizationPrompt()).toContain("Digitize 8 through 48 points")
+    expect(buildCharacterizationPrompt()).toContain("Digitize 8 through 96 points")
   })
 
   test("fresh modeled behavior cannot use operating-point or DC analysis", () => {

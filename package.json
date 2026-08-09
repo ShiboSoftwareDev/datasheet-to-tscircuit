@@ -45,6 +45,7 @@
     "@tscircuit/assembly-viewer": "^0.0.6",
     "@tscircuit/core": "^0.0.1467",
     "@tscircuit/create-snippet-url": "^0.0.15",
+    "@tscircuit/eval": "0.0.1023",
     "@tscircuit/internal-dynamic-import": "^0.0.11",
     "@tscircuit/pcb-viewer": "1.11.375",
     "@tscircuit/props": "0.0.585",

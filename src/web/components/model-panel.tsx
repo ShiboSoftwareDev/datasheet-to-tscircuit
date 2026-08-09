@@ -1,6 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog"
 import {
-  AlertTriangle,
   CheckCircle2,
   Clock3,
   Download,
@@ -18,6 +17,7 @@ import type { Job, ModelRun, ModelRunStatus } from "@/shared/job-types"
 import {
   getModelPipelineElapsedTime,
   getModelPipelineProgress,
+  getModelRepairElapsedTime,
   isModelRunPaused,
 } from "@/shared/model-run-status"
 import { isRetainedAcceptedWarning } from "@/shared/model-warnings"
@@ -35,7 +35,7 @@ const STATUS_COPY: Record<ModelRunStatus, string> = {
   cancelling: "Stopping",
   cancelled: "Stopped",
   complete: "Validated",
-  timed_out: "Ran out of iterations",
+  timed_out: "Repair time exhausted",
   failed: "Failed",
 }
 
@@ -140,118 +140,6 @@ export function getModelHeaderStats(model_run: ModelRun): Array<{
   ]
 }
 
-const SCOPE_QUALITY_COPY = {
-  scalar_only: {
-    label: "Scalar operating points only",
-    description:
-      "No datasheet reference curve was compared. Passing checks do not prove behavior across a range.",
-  },
-  range_checked: {
-    label: "Operating range checked",
-    description: "The model was sampled across a DC or time range, without a point-by-point reference curve.",
-  },
-  curve_attempted: {
-    label: "Reference comparison unavailable",
-    description: "A reference curve was declared, but the simulator produced no finite comparison samples.",
-  },
-  curve_validated: {
-    label: "Reference curves validated",
-    description: "Simulation samples were compared against server-bound datasheet reference curves.",
-  },
-} as const
-
-export function ModelValidationScope({ model_run }: { model_run: ModelRun }) {
-  const validation = model_run.validation
-  const scope = validation?.scope
-  if (!validation || !scope) return null
-
-  const quality = SCOPE_QUALITY_COPY[scope.quality]
-  const failed_benchmarks = validation.benchmarks.filter(({ passed }) => !passed)
-  return (
-    <section
-      className={`model-validation-scope model-validation-scope-${scope.quality}`}
-      aria-label="Model validation scope"
-    >
-      <header>
-        <div>
-          <span>Validation scope</span>
-          <strong>{quality.label}</strong>
-          <small>{quality.description}</small>
-        </div>
-        <dl>
-          <div>
-            <dt>Requirements modeled</dt>
-            <dd>
-              {scope.modeled_requirement_count}/{scope.total_requirement_count}
-            </dd>
-          </div>
-          <div>
-            <dt>Checks passed</dt>
-            <dd>
-              {validation.passing_count}/{validation.benchmark_count}
-            </dd>
-          </div>
-          <div>
-            <dt>Numeric samples</dt>
-            <dd>{scope.validated_sample_count}</dd>
-          </div>
-          <div>
-            <dt>Curve comparisons</dt>
-            <dd>{scope.curve_observation_count}</dd>
-          </div>
-        </dl>
-      </header>
-
-      {(failed_benchmarks.length > 0 ||
-        scope.documented_only_requirements.length > 0 ||
-        scope.limitations.length > 0) && (
-        <div className="model-validation-scope-details">
-          {failed_benchmarks.length > 0 && (
-            <div>
-              <strong>Current candidate failures</strong>
-              <ul>
-                {failed_benchmarks.map((benchmark) => (
-                  <li key={benchmark.benchmark_id}>
-                    <span>{benchmark.title}</span>
-                    <small>
-                      {benchmark.error_message ??
-                        benchmark.series?.find(({ passed }) => !passed)?.error_message ??
-                        "The server-owned comparison did not pass."}
-                    </small>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {scope.documented_only_requirements.length > 0 && (
-            <div>
-              <strong>Not implemented in SPICE</strong>
-              <ul>
-                {scope.documented_only_requirements.map((requirement) => (
-                  <li key={requirement.requirement_id}>
-                    <span>{requirement.title}</span>
-                    <small>{requirement.reason}</small>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {scope.limitations.length > 0 && (
-            <div>
-              <strong>Declared limitations</strong>
-              <ul>
-                {scope.limitations.map((limitation) => (
-                  <li key={limitation}>{limitation}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  )
-}
-
 function ModelSourceDialog({ model_run, local_run_id }: { model_run: ModelRun; local_run_id?: string }) {
   const development_model = model_run.development_model
   return (
@@ -289,32 +177,6 @@ function ModelSourceDialog({ model_run, local_run_id }: { model_run: ModelRun; l
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-  )
-}
-
-export function ModelCandidateProvenance({ model_run }: { model_run: ModelRun }) {
-  const validation = model_run.validation
-  if (validation?.artifact_state !== "candidate") return null
-  const candidate_revision = validation.model_revision ?? "unknown revision"
-  const accepted_revision = model_run.manifest?.revision
-  const development_revision = model_run.development_model?.manifest.revision
-  return (
-    <section className="model-candidate-provenance" role="status">
-      <AlertTriangle size={16} />
-      <div>
-        <strong>Unaccepted candidate validation</strong>
-        <p>
-          The TSX, reference evidence, graphs, and checks below belong to candidate{" "}
-          <code>{candidate_revision}</code>.{" "}
-          {development_revision
-            ? `The development model dialog shows revision ${development_revision}. `
-            : ""}
-          {accepted_revision
-            ? `Published downloads still refer to accepted revision ${accepted_revision}.`
-            : "No SPICE model has been accepted or attached yet."}
-        </p>
-      </div>
-    </section>
   )
 }
 
@@ -409,7 +271,7 @@ export function ModelPanel({
   const [now, setNow] = useState(Date.now())
 
   useEffect(() => {
-    if (!model_run?.segment_started_at || model_run.is_complete) return
+    if ((!model_run?.segment_started_at && !model_run?.repair_started_at) || model_run.is_complete) return
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [model_run])
@@ -433,12 +295,12 @@ export function ModelPanel({
     return (
       <section className="model-start-card">
         <span className="eyebrow">
-          <FlaskConical size={14} /> SPICE model generator · ngspice validation
+          <FlaskConical size={14} /> SPICE model generator · tscircuit validation
         </span>
         <h2>Build and validate a simulation model.</h2>
         <p>
           A typed pipeline characterizes the datasheet, designs a declarative fixture plan, generates the
-          model, and validates it with server-compiled ngspice circuits. The component interface, test plan,
+          model, and validates it with server-owned tscircuit simulations. The component interface, test plan,
           scoring, and publication stay server-owned.
         </p>
         <fieldset className="effort-picker" aria-label="Modeling effort">
@@ -450,7 +312,7 @@ export function ModelPanel({
               onClick={() => setEffort(value)}
             >
               <strong>{value}×</strong>
-              <small>{value === 1 ? "1 repair attempt" : `Up to ${value} repair attempts`}</small>
+              <small>{value * 30} min repair</small>
             </button>
           ))}
         </fieldset>
@@ -480,6 +342,7 @@ export function ModelPanel({
   }
 
   const elapsed_time = getModelPipelineElapsedTime(model_run, now)
+  const repair_time = getModelRepairElapsedTime(model_run, now)
   const stage_progress = getModelPipelineProgress(model_run)
   const progress = stage_progress.total > 0 ? (stage_progress.completed / stage_progress.total) * 100 : 0
   const is_running = !model_run.is_complete
@@ -549,11 +412,11 @@ export function ModelPanel({
           <div className="model-progress-copy">
             <span>
               <Clock3 size={14} />
-              {is_waiting ? "Waiting to start" : `${formatDuration(elapsed_time)} elapsed`}
+              {is_waiting ? "Waiting to start" : `${formatDuration(elapsed_time)} total`}
             </span>
             <span>
-              {stage_progress.completed}/{stage_progress.total || 8} stages · {model_run.effort_multiplier}×
-              repair budget
+              {stage_progress.completed}/{stage_progress.total || 8} stages ·{" "}
+              {formatDuration(repair_time.elapsed)} / {formatDuration(repair_time.budget)} repair
               {model_run.iteration > 0 && ` · repair ${model_run.iteration}`}
             </span>
           </div>
@@ -568,10 +431,6 @@ export function ModelPanel({
           {error_message}
         </p>
       )}
-
-      <ModelCandidateProvenance model_run={model_run} />
-
-      <ModelValidationScope model_run={model_run} />
 
       <ModelLivePreview
         job_id={job.job_id}

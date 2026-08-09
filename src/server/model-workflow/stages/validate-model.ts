@@ -3,14 +3,10 @@ import { dirname, join } from "node:path"
 import { type GeneratedModel, parseFreshModelContract } from "../../modeling"
 import { PipelineError } from "../../pipeline"
 import type { ValidationPlan } from "../../spice-validation"
-import { validateCandidate } from "../candidate-validation"
-import {
-  appendModelLog,
-  createModelRepairFeedback,
-  modelArtifact,
-  readJson,
-  updateModelProgress,
-} from "../stage-helpers"
+import { appendModelLog, modelArtifact, readJson, updateModelProgress } from "../stage-helpers"
+import { createStimulusCausalityPlan } from "../candidate-stimulus-causality"
+import { writeTscircuitSimulationArtifacts } from "../tscircuit-simulation-artifacts"
+import { runValidationCircuitSimulations } from "../validation-circuit-previews"
 import { defineModelStage } from "./stage-factory"
 
 export const runSimulationsStage = defineModelStage({
@@ -22,107 +18,117 @@ export const runSimulationsStage = defineModelStage({
       store: services.model_run_store,
       model_run_id: context.model_run_id,
       phase: "validating",
-      message: "Compiling declarative fixtures and running ngspice",
+      message: "Running generated TSX simulations with tscircuit",
     })
     const simulation_input = dependency_outputs.create_simulation_tsx
     const { contract_path, plan_path, evidence_dir } = simulation_input
-    const [contract_value, plan_value, model_source, model_card, manifest] = await Promise.all([
-      readJson(contract_path),
+    const [plan_value, contract_value, model_source, model_card, manifest] = await Promise.all([
       readJson(plan_path),
+      readJson(contract_path),
       readFile(simulation_input.model_path, "utf8"),
       readFile(simulation_input.model_card_path, "utf8"),
       readJson(simulation_input.manifest_path),
     ])
-    const contract = parseFreshModelContract(contract_value)
     const plan = plan_value as ValidationPlan
+    const contract = parseFreshModelContract(contract_value)
     const generated: GeneratedModel = {
       source: model_source,
       card: model_card,
       manifest: manifest as GeneratedModel["manifest"],
     }
-    const validation_artifact_dir = join(dirname(simulation_input.model_path), "validation")
-    const validation = await validateCandidate({
+    const simulation_dir = join(dirname(simulation_input.model_path), "simulation")
+    const simulations = await runValidationCircuitSimulations({
+      model_dir: context.model_dir,
       plan,
-      contract,
       generated,
       source_dir: simulation_input.source_dir,
-      model_dir: context.model_dir,
-      validation_artifact_dir,
-      evidence_dir,
-      preview_generation: `${context.invocation_id}-${generated.manifest.revision}`,
-      model_run_store: services.model_run_store,
-      model_run_id: context.model_run_id,
       tsci_bin: services.tsci_bin,
       process_runner: services.process_runner,
       signal,
-      ngspice: services.ngspice_executor,
-      ngspice_path: services.ngspice_bin,
       append: (stream, message) =>
         appendModelLog(services.model_run_store, context.model_run_id, stream, message),
     })
-    const {
-      infrastructure_failure,
-      diagnostic_path,
-      passed,
-      preview_build,
-      projection,
-      result,
-      result_path,
-      stimulus_causality,
-      viewer_failures,
-    } = validation
-    if (infrastructure_failure?.source === "server_validation") {
-      throw new PipelineError({
-        code: "model_validation_infrastructure_failed",
-        message:
-          "Model validation failed outside the repairable model boundary: " +
-          infrastructure_failure.errors.map(({ code, message }) => `${code}: ${message}`).join("; "),
-        stage_id: "run_simulations",
-        operation: "classify_validation_failure",
-        artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
-        hint: "Inspect the simulator, raw-result, and validation-plan trace. The failed TSX/reference preview was retained, but model repair was not started for this infrastructure or contract error.",
-      })
-    }
-    if (infrastructure_failure?.source === "tscircuit_viewer") {
+    const result_path = await writeTscircuitSimulationArtifacts({
+      simulation_dir,
+      plan,
+      generated,
+      simulations,
+    })
+    const build_failure_case_ids = plan.cases.flatMap(({ id }) =>
+      simulations.circuit_build_errors_by_case[id] ? [id] : [],
+    )
+    if (build_failure_case_ids.length > 0) {
       throw new PipelineError({
         code: "model_viewer_simulation_failed",
-        message:
-          "The validation TSX did not produce the required tscircuit transient graph: " +
-          infrastructure_failure.failures.map(({ case_id, message }) => `${case_id}: ${message}`).join("; "),
+        message: `tsci could not execute ${build_failure_case_ids.length} generated TSX simulation(s): ${build_failure_case_ids.join(", ")}`,
         stage_id: "run_simulations",
-        operation: "validate_tscircuit_transient_graph",
-        artifact_refs: [{ path: result_path }, { path: diagnostic_path }],
-        hint: "Inspect the named validation case and Circuit JSON trace. Only an elapsed-time reference curve backed by one completed tscircuit transient experiment is publishable.",
+        operation: "execute_tscircuit_simulations",
+        artifact_refs: [{ path: result_path }],
+        hint: "Inspect the retained tscircuit simulation receipt and the named TSX cases. No reference comparison was attempted.",
       })
     }
-    const failing_case_ids = [
-      ...new Set([
-        ...result.cases.filter(({ status }) => status !== "passed").map(({ case_id }) => case_id),
-        ...viewer_failures.map(({ case_id }) => case_id),
-      ]),
-    ]
-    const repair_feedback = passed
-      ? undefined
-      : createModelRepairFeedback(
-          result,
-          preview_build.viewer_validation_by_case,
-          stimulus_causality,
-          preview_build.viewer_model_errors_by_case,
-        )
+    const simulation_error_case_ids = plan.cases.flatMap(({ id }) =>
+      simulations.simulation_errors_by_case[id] ? [id] : [],
+    )
+    const causality = createStimulusCausalityPlan({ plan, contract })
+    const causality_case_count = causality.relevant_observation_ids_by_case.size
+    const causality_plan: ValidationPlan = {
+      ...causality.plan,
+      cases: causality.plan.cases.filter(({ id }) => causality.relevant_observation_ids_by_case.has(id)),
+    }
+    let causality_result_path: string | undefined
+    let causality_simulation_error_case_ids: string[] = []
+    if (causality_case_count > 0) {
+      const causality_simulations = await runValidationCircuitSimulations({
+        model_dir: context.model_dir,
+        plan: causality_plan,
+        generated,
+        tsci_bin: services.tsci_bin,
+        process_runner: services.process_runner,
+        signal,
+        append: (stream, message) =>
+          appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+      })
+      causality_result_path = await writeTscircuitSimulationArtifacts({
+        simulation_dir: join(simulation_dir, "causality-control"),
+        plan: causality_plan,
+        generated,
+        simulations: causality_simulations,
+      })
+      const causality_build_failure_case_ids = causality_plan.cases.flatMap(({ id }) =>
+        causality_simulations.circuit_build_errors_by_case[id] ? [id] : [],
+      )
+      if (causality_build_failure_case_ids.length > 0) {
+        throw new PipelineError({
+          code: "model_viewer_simulation_failed",
+          message: `tsci could not execute ${causality_build_failure_case_ids.length} causality-control TSX simulation(s): ${causality_build_failure_case_ids.join(", ")}`,
+          stage_id: "run_simulations",
+          operation: "execute_tscircuit_causality_simulations",
+          artifact_refs: [{ path: causality_result_path }],
+          hint: "Inspect the retained tscircuit causality-control receipt. No causality comparison was attempted.",
+        })
+      }
+      causality_simulation_error_case_ids = causality_plan.cases.flatMap(({ id }) =>
+        causality_simulations.simulation_errors_by_case[id] ? [id] : [],
+      )
+    }
     return {
       status: "completed",
       output: {
         result_path,
+        simulation_dir,
+        source_dir: simulation_input.source_dir,
         model_path: simulation_input.model_path,
         model_card_path: simulation_input.model_card_path,
         manifest_path: simulation_input.manifest_path,
         contract_path,
         plan_path,
         evidence_dir,
-        passed,
-        case_count: result.cases.length,
-        failing_case_ids,
-        ...(repair_feedback ? { repair_feedback } : {}),
+        case_count: plan.cases.length,
+        simulation_error_case_ids,
+        ...(causality_result_path ? { causality_result_path } : {}),
+        causality_case_count,
+        causality_simulation_error_case_ids,
         revision: generated.manifest.revision,
       },
       artifacts: [
@@ -130,18 +136,23 @@ export const runSimulationsStage = defineModelStage({
           id: "simulation_outputs",
           path: result_path,
           media_type: "application/json",
-          role: "validation_result",
+          role: "simulation_result",
         }),
-        await modelArtifact({
-          id: "simulation_diagnostics",
-          path: diagnostic_path,
-          media_type: "application/json",
-          role: "debug",
-        }),
+        ...(causality_result_path
+          ? [
+              await modelArtifact({
+                id: "causality_simulation_outputs",
+                path: causality_result_path,
+                media_type: "application/json",
+                role: "simulation_result",
+              }),
+            ]
+          : []),
       ],
       metrics: {
-        validation_cases: result.cases.length,
-        passing_cases: projection.validation.passing_count,
+        simulation_cases: plan.cases.length + causality_case_count,
+        completed_simulations: plan.cases.length - simulation_error_case_ids.length,
+        causality_control_simulations: causality_case_count - causality_simulation_error_case_ids.length,
       },
     }
   },

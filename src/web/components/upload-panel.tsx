@@ -1,8 +1,8 @@
 import { ArrowRight, Bot, Cloud, FileText, FlaskConical, Sparkles, UploadCloud, X } from "lucide-react"
 import { useRef, useState } from "react"
-import { createJob } from "../api"
-import { getInitialUseOpenai, saveAgentProvider } from "../agent-provider-preference"
 import type { Job } from "@/shared/job-types"
+import { getInitialUseOpenai, saveAgentProvider } from "../agent-provider-preference"
+import { createJob } from "../api"
 
 const MODEL_ENABLED_STORAGE_KEY = "datasheet-create-pspice-model"
 const MODEL_EFFORT_STORAGE_KEY = "datasheet-model-effort"
@@ -238,7 +238,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
           <span className="model-option-copy">
             <strong>Create SPICE behavioral model</strong>
             <small>
-              Validated with ngspice; effort sets the maximum number of server-guided model repair attempts.
+              Validated with tscircuit; each effort unit provides 30 minutes of server-guided repair.
             </small>
           </span>
           <i aria-hidden="true">
@@ -261,7 +261,7 @@ export function UploadPanel({ on_job_created }: UploadPanelProps) {
                 onClick={() => updateModelEffort(value)}
               >
                 <strong>{value}×</strong>
-                <small>{value === 1 ? "1 repair" : `Up to ${value} repairs`}</small>
+                <small>{value * 30} min repair</small>
               </button>
             ))}
           </div>

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { cp, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runDebugCli } from "@/cli/pipeline-debug"
@@ -181,6 +181,11 @@ test("the server runs and reruns Local tasks in their selected regular job", asy
     expect(rerun.local_run.target_job_id).toBe("local-api-job")
     const completedRerun = await waitForLocalCompletion(handler, rerun.local_run.local_run_id)
     expect(completedRerun.local_run.status).toBe("completed")
+
+    const latestListResponse = await handleResponse(handler, new Request("http://localhost/api/local-runs"))
+    const latestListed = (await latestListResponse.json()) as { local_runs: LocalRunSummary[] }
+    expect(latestListed.local_runs).toHaveLength(1)
+    expect(latestListed.local_runs[0]?.local_run_id).toBe(rerun.local_run.local_run_id)
   } finally {
     await rm(rootDir, { recursive: true, force: true })
   }
@@ -231,6 +236,126 @@ test("an already-running server imports a regular job created by a separate CLI 
     expect(detail.ok).toBe(true)
     expect(jobStore.getJob(cliRun.target_job_id!)?.job_id).toBe(cliRun.target_job_id)
     expect(((await detail.json()) as LocalRunDetail).job.job_id).toBe(cliRun.target_job_id!)
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test("Local records whose target job was deleted are omitted without checkpoint refresh", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-deleted-target-"))
+  try {
+    const inputPath = await createPrepareInput(rootDir)
+    const cliRun = (await runDebugCli([
+      "task",
+      "run",
+      "--input",
+      inputPath,
+      "--root",
+      rootDir,
+    ])) as LocalRunSummary
+    if (!cliRun.target_job_id) throw new Error("Expected the CLI run to create a target job")
+    await rm(join(rootDir, ".runtime", "jobs", cliRun.target_job_id), {
+      recursive: true,
+      force: true,
+    })
+
+    const jobStore = new JobStore()
+    const modelRunStore = new ModelRunStore()
+    await restorePersistedJobs({
+      jobs_root: join(rootDir, ".runtime", "jobs"),
+      job_store: jobStore,
+      model_run_store: modelRunStore,
+    })
+    const handler = createLocalRunApiHandler({
+      root_dir: rootDir,
+      jobs_root: join(rootDir, ".runtime", "jobs"),
+      local_runs_root: join(rootDir, ".runtime", "local"),
+      job_store: jobStore,
+      model_run_store: modelRunStore,
+      agent_bin: join(rootDir, "node_modules", ".bin", "tsci-agent"),
+      tsci_bin: join(rootDir, "node_modules", ".bin", "tsci"),
+    })
+
+    const listResponse = await handleResponse(handler, new Request("http://localhost/api/local-runs"))
+    expect(listResponse.ok).toBe(true)
+    expect((await listResponse.json()) as { local_runs: LocalRunSummary[] }).toEqual({
+      local_runs: [],
+    })
+  } finally {
+    await rm(rootDir, { recursive: true, force: true })
+  }
+})
+
+test("the server reconciles an abandoned CLI execution instead of showing it as running forever", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-interrupted-"))
+  try {
+    await createPrepareInput(rootDir)
+    const completed = (await runDebugCli([
+      "local",
+      "run",
+      "local-api-job",
+      "--pipeline",
+      "component_generation",
+      "--task",
+      "prepare",
+      "--root",
+      rootDir,
+    ])) as LocalRunSummary
+
+    const savedSummary = JSON.parse(await readFile(completed.summary_path, "utf8")) as Record<string, unknown>
+    delete savedSummary.completed_at
+    delete savedSummary.error_message
+    await writeFile(
+      completed.summary_path,
+      `${JSON.stringify({
+        ...savedSummary,
+        status: "running",
+        heartbeat_at: "2026-08-01T00:00:00.000Z",
+      })}\n`,
+    )
+
+    const jobCheckpointPath = join(rootDir, ".runtime", "jobs", "local-api-job", "job.json")
+    const jobCheckpoint = JSON.parse(await readFile(jobCheckpointPath, "utf8")) as Record<string, unknown>
+    delete jobCheckpoint.completed_at
+    delete jobCheckpoint.error_message
+    await writeFile(
+      jobCheckpointPath,
+      `${JSON.stringify({
+        ...jobCheckpoint,
+        display_status: "agent_running",
+        is_complete: false,
+        has_errors: false,
+      })}\n`,
+    )
+
+    const jobStore = new JobStore()
+    const modelRunStore = new ModelRunStore()
+    await restorePersistedJobs({
+      jobs_root: join(rootDir, ".runtime", "jobs"),
+      job_store: jobStore,
+      model_run_store: modelRunStore,
+    })
+    const handler = createLocalRunApiHandler({
+      root_dir: rootDir,
+      jobs_root: join(rootDir, ".runtime", "jobs"),
+      local_runs_root: join(rootDir, ".runtime", "local"),
+      job_store: jobStore,
+      model_run_store: modelRunStore,
+      agent_bin: join(rootDir, "node_modules", ".bin", "tsci-agent"),
+      tsci_bin: join(rootDir, "node_modules", ".bin", "tsci"),
+    })
+
+    const response = await handleResponse(
+      handler,
+      new Request(
+        `http://localhost/api/local-run/get?local_run_id=${encodeURIComponent(completed.local_run_id)}`,
+      ),
+    )
+    expect(response.ok).toBe(true)
+    const detail = (await response.json()) as LocalRunDetail
+    expect(detail.local_run).toMatchObject({ status: "failed" })
+    expect(detail.local_run.error_message).toContain("stopped before it recorded a terminal result")
+    expect(detail.job).toMatchObject({ display_status: "failed", is_complete: true, has_errors: true })
   } finally {
     await rm(rootDir, { recursive: true, force: true })
   }

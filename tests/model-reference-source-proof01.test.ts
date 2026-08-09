@@ -546,6 +546,59 @@ test("recovers a missing time prefix only from an adjacent same-panel measuremen
   expect(recoverMissingTimeDivisionPrefix(scale, measurement_above_scale)).toEqual(scale)
 })
 
+test("corrects a low-confidence micro glyph read as p only from adjacent microsecond evidence", () => {
+  const horizontal_words = [
+    {
+      block: 1,
+      paragraph: 1,
+      line: 1,
+      word: 1,
+      confidence: 93,
+      text: "100",
+      bbox: { left: 54, top: 129, width: 45, height: 20 },
+    },
+    {
+      block: 1,
+      paragraph: 1,
+      line: 1,
+      word: 2,
+      confidence: 4.2,
+      text: "ps/div",
+      bbox: { left: 110, top: 127, width: 78, height: 27 },
+    },
+    {
+      block: 1,
+      paragraph: 1,
+      line: 2,
+      word: 1,
+      confidence: 91,
+      text: "301",
+      bbox: { left: 53, top: 157, width: 42, height: 21 },
+    },
+    {
+      block: 1,
+      paragraph: 1,
+      line: 2,
+      word: 2,
+      confidence: 82,
+      text: "us",
+      bbox: { left: 110, top: 162, width: 29, height: 20 },
+    },
+  ]
+
+  const recovered = recoverMissingTimeDivisionPrefix(undefined, horizontal_words)
+  expect(recovered?.raw_text).toBe("100 ps/div")
+  expect(recovered?.value_per_division_si).toBeCloseTo(100e-6, 12)
+  expect(recovered?.normalization).toEqual({
+    algorithm: "low_confidence_micro_prefix_from_adjacent_measurement_v1",
+    corroborating_raw_text: "301 us",
+    multiplier: 1e-6,
+  })
+
+  horizontal_words[1]!.confidence = 80
+  expect(recoverMissingTimeDivisionPrefix(undefined, horizontal_words)).toBeUndefined()
+})
+
 testWithArchivedRun93(
   "rejects a same-page neighboring plot and a crop whose caption and nominal text are not source-local",
   async () => {

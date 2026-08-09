@@ -12,6 +12,7 @@ import {
   printedNominalSourcesByGraphId,
   type ReferenceGraphSourceProof,
 } from "../reference-graph-axis-proof"
+import { extractPdfTextBBox, figureIdentityFromPdfText } from "../reference-graph-axis-proof/pdf-extraction"
 import {
   buildFoundReferenceGraphObserverPrompt,
   buildSingleComparisonReferenceGraphObserverPrompt,
@@ -118,12 +119,14 @@ function sourceProofCorrectionGuidance(
       "Scale-match errors listed with a missing printed scale are downstream consequences and must not be edited."
     )
   }
-  const instructions: string[] = []
   if (missing_proofs.some((proof) => proof.includes("adjacent_figure_identity"))) {
-    instructions.push(
-      "Keep crop.x_px, crop.y_px, and existing crop-local coordinates fixed; extend only the bottom or right crop edge just far enough to include the graph's immediately adjacent printed figure caption.",
+    return (
+      "The exact immutable Find Reference Graphs crop does not include or immediately adjoin its own printed figure number/caption. " +
+      "Do not edit the crop or any other discovery field in Create Comparison Graphs. " +
+      "This comparison input cannot be completed; Find Reference Graphs must produce a complete crop in a separate run."
     )
   }
+  const instructions: string[] = []
   if (missing_proofs.some((proof) => proof.includes("time_grid_and_anchor_alignment"))) {
     instructions.push(
       pixel_trace_rejected
@@ -292,8 +295,8 @@ export async function findReferenceGraphs(input: {
       debug_dir: join(debug_dir, "reference-finder"),
       files: ["model-reference-observation.json"],
     },
-    validate: async (workspace) =>
-      parseFoundReferenceGraphObservation(
+    validate: async (workspace) => {
+      const observation = parseFoundReferenceGraphObservation(
         await readBoundedJsonArtifact({
           path: join(workspace, "model-reference-observation.json"),
           max_bytes: 2 * 1024 * 1024,
@@ -303,7 +306,15 @@ export async function findReferenceGraphs(input: {
         time_graph_discovery,
         model_interface,
         application_fixture,
-      ),
+      )
+      await assertFoundReferenceGraphCaptions({
+        observation,
+        workspace,
+        process_runner: services.process_runner,
+        signal,
+      })
+      return observation
+    },
     promote: async (_workspace, observation) => {
       await writeJson(join(attempt_dir, "model-reference-observation.json"), observation)
     },
@@ -314,6 +325,36 @@ export async function findReferenceGraphs(input: {
     observation: observer.value,
     observer_attempts: observer.attempts,
   }
+}
+
+export async function assertFoundReferenceGraphCaptions(input: {
+  observation: ReferenceGraphObservation
+  workspace: string
+  process_runner: ModelPipelineServices["process_runner"]
+  signal: AbortSignal
+}): Promise<void> {
+  const bbox_by_page = new Map<number, string>()
+  const incomplete_graph_ids: string[] = []
+  for (const graph of foundObservedGraphs(input.observation)) {
+    input.signal.throwIfAborted()
+    let bbox_html = bbox_by_page.get(graph.page)
+    if (!bbox_html) {
+      bbox_html = await extractPdfTextBBox({
+        graph,
+        workspace: input.workspace,
+        process_runner: input.process_runner,
+        signal: input.signal,
+      })
+      bbox_by_page.set(graph.page, bbox_html)
+    }
+    if (!figureIdentityFromPdfText({ graph, bbox_html })) incomplete_graph_ids.push(graph.graph_id)
+  }
+  if (incomplete_graph_ids.length === 0) return
+  throw new Error(
+    `Find Reference Graphs produced ${incomplete_graph_ids.length} crop(s) without their own adjacent printed figure number/caption: ${incomplete_graph_ids.join(
+      ", ",
+    )}. Adjust only those named crop rectangles so each contains the complete plot, axes, scope controls, and its own caption without a neighboring figure.`,
+  )
 }
 
 export async function digitizeReferenceGraphs(input: {
@@ -372,6 +413,7 @@ export async function digitizeReferenceGraphs(input: {
   for (const [graph_index, found_graph] of foundObservedGraphs(immutable_found_observation).entries()) {
     signal.throwIfAborted()
     const seed_path = join(attempt_dir, `comparison-seed-${found_graph.graph_id}.json`)
+    const reference_image_path = join(attempt_dir, "evidence", "figures", `${found_graph.graph_id}.png`)
     await writeJson(seed_path, found_graph)
     const graph_observer = await runAgentArtifactStage<{
       graph: ReferenceGraphObservation["graphs"][number]
@@ -394,6 +436,7 @@ export async function digitizeReferenceGraphs(input: {
             { source: join(context.model_dir, "application-fixture-contract.json") },
             { source: time_graph_hints_path },
             { source: seed_path, destination: "model-reference-graph.json" },
+            { source: reference_image_path, destination: "reference-graph.png" },
           ],
         }),
       build_prompt: (feedback) =>

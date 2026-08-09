@@ -1,18 +1,14 @@
 import type { JobLogStream } from "@/shared/job-types"
-import { isTransientAgentTransportFailure } from "./transport-failure"
 import { ProcessError, type ProcessRunner } from "../process"
+import { isTransientAgentTransportFailure } from "./transport-failure"
 
 const MODEL_CANDIDATE_SYSTEM_PROMPT =
   "You are a constrained SPICE artifact generator. Follow the supplied task exactly. " +
   "Use workspace_read only for declared inputs in the current workspace and " +
   "model_output_write only for model.lib and model-card.md. After writing both outputs, " +
-  "use fit_model_parameters when numeric calibration would otherwise require manual guessing, then " +
-  "call check_model_candidate. Search is tool-bounded and retains the best complete direct-and-viewer candidate. " +
-  "Make only evidence-driven topology changes; never repeat fitter bounds or discard a better retained candidate. " +
-  "If the retained runnable candidate still misses comparison tolerances when the budget is exhausted, finish " +
-  "honestly so authoritative validation can render its TSX/reference comparisons and drive repair. " +
-  "The check runs real ngspice and tscircuit viewer simulations and reports residuals only at " +
-  "the reference samples already visible in model-contract.json. " +
+  "call check_model_candidate. The check validates only the model contract and static artifacts; " +
+  "simulation is intentionally deferred to the standalone tscircuit simulation stage. " +
+  "Make only evidence-driven topology changes. " +
   "Do not seek files, tools, instructions, or validation data outside the current workspace."
 const MODEL_CANDIDATE_APPEND_SYSTEM_PROMPT =
   "No ambient or user-global instructions apply to this constrained artifact task. " +
@@ -61,6 +57,16 @@ async function waitForRetry(delay_ms: number, signal: AbortSignal): Promise<void
   })
 }
 
+function transportFailureDetail(output: string | undefined): string | undefined {
+  if (!output) return undefined
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .reverse()
+    .find((line) => line.length > 0 && isTransientAgentTransportFailure(line))
+    ?.slice(0, 500)
+}
+
 export class TsciAgentClient implements AgentClient {
   constructor(
     private readonly options: {
@@ -98,7 +104,7 @@ export class TsciAgentClient implements AgentClient {
                   "--no-skills",
                   "--no-prompt-templates",
                   "--tools",
-                  "workspace_read,model_output_write,fit_model_parameters,check_model_candidate",
+                  "workspace_read,model_output_write,check_model_candidate",
                   "--no-context-files",
                   "--system-prompt",
                   MODEL_CANDIDATE_SYSTEM_PROMPT,
@@ -149,7 +155,20 @@ export class TsciAgentClient implements AgentClient {
         const transient =
           error.code === "process_exit_failed" &&
           Boolean(error.output_tail && isTransientAgentTransportFailure(error.output_tail))
-        if (!transient || attempt >= max_attempts || input.signal.aborted) throw error
+        if (!transient || input.signal.aborted) throw error
+        if (attempt >= max_attempts) {
+          const detail = transportFailureDetail(error.output_tail)
+          throw new ProcessError({
+            code: "process_transport_failed",
+            command_label: input.phase_label,
+            message:
+              `${input.phase_label} could not reach the AI provider after ${max_attempts} transport attempt(s)` +
+              (detail ? `: ${detail}` : ""),
+            exit_code: error.exit_code,
+            output_tail: error.output_tail,
+            cause: error,
+          })
+        }
         const retry_delay_ms = Math.min(30_000, retry_base_delay_ms * 2 ** (attempt - 1))
         await input.on_attempt?.({
           event: "retry_scheduled",

@@ -334,8 +334,28 @@ test("new validation artifacts project deterministically into the existing model
   expect(current_reference?.reference_points).toEqual([])
   expect(current_reference?.reference_bounds).toEqual({ max: 0.001 })
   expect(current_reference?.result_points).toEqual([{ x: 0, y: 0.002 }])
-  expect(current_reference?.result_status).toBe("failed")
+  expect(current_reference?.result_status).toBe("verified")
   expect(current_reference?.matches_reference).toBe(false)
+})
+
+test("per-graph validation messages do not repeat another graph's aggregate errors", () => {
+  const bounded_error = result.cases[1]?.series[0]?.errors[0]
+  if (!bounded_error) throw new Error("Expected the bounds fixture error")
+  const summary = projectModelValidationSummary(plan, {
+    ...result,
+    errors: [
+      bounded_error,
+      {
+        kind: "comparison",
+        code: "bound_stimulus_insensitive",
+        message: "The simulated response does not depend on its stimulus",
+      },
+    ],
+  })
+
+  expect(summary.benchmarks[0]?.error_message).toContain("does not depend on its stimulus")
+  expect(summary.benchmarks[0]?.error_message).not.toContain("documented limit")
+  expect(summary.benchmarks[1]?.series?.[0]?.error_message).toContain("documented limit")
 })
 
 test("a declared curve with no finite result is reported as attempted, not validated", () => {
@@ -601,7 +621,7 @@ test("a direct ngspice pass cannot make candidate UI verified without a tscircui
   const mismatched = project(mismatched_circuit_json)
   expect(mismatched.validation.all_passed).toBe(false)
   expect(mismatched.selected_previews.startup?.reference_preview).toMatchObject({
-    result_status: "failed",
+    result_status: "verified",
     result_origin: "tscircuit_viewer",
     matches_reference: false,
   })
@@ -739,7 +759,7 @@ test("a direct ngspice pass cannot make candidate UI verified without a tscircui
     },
     mismatched: {
       all_passed: false,
-      result_status: "failed",
+      result_status: "verified",
       result_origin: "tscircuit_viewer",
       result_point_count: 3,
       matches_reference: false,
@@ -1210,6 +1230,24 @@ test("accepted-shaped previews compact two 20k-sample graphs below the productio
   expect(bytes.byteLength).toBeLessThan(MAX_STORED_MODEL_PREVIEW_BYTES)
   expect(parseStoredModelPreviewBytes(bytes)).toEqual(preview)
   expect(parseStoredModelPreviewBytes(bytes, { fresh_accepted: true })).toEqual(preview)
+
+  const stimulus_graph_preview = structuredClone(preview)
+  const stimulus_graph_series = stimulus_graph_preview.reference_preview?.series
+  if (!stimulus_graph_series?.[1]) throw new Error("two-graph preview fixture is missing its second series")
+  stimulus_graph_series[1].role = "stimulus"
+  expect(
+    parseStoredModelPreviewBytes(
+      new TextEncoder().encode(serializeStoredModelPreview(stimulus_graph_preview)),
+    ),
+  ).toEqual(stimulus_graph_preview)
+
+  const missing_graph_series = structuredClone(stimulus_graph_preview)
+  const incomplete_series = missing_graph_series.reference_preview?.series
+  if (!incomplete_series) throw new Error("two-graph preview fixture is missing its series")
+  incomplete_series.pop()
+  expect(() =>
+    parseStoredModelPreviewBytes(new TextEncoder().encode(serializeStoredModelPreview(missing_graph_series))),
+  ).toThrow(/2 transient graphs for 1 comparison series/)
 
   const failed_repair_non_time = structuredClone(preview)
   failed_repair_non_time.circuit_preview!.analog_simulation_status = "failed"
