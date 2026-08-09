@@ -73,40 +73,51 @@ test("reference graph results retain discovery order when workers finish out of 
   expect(results.map(({ proof }) => proof)).toEqual(graphs.map((graph) => `${graph}-proof`))
 })
 
-test("a graph failure stops new work and cannot publish partial canonical results", async () => {
+test("a graph failure aborts active siblings and cannot publish partial canonical results", async () => {
   const graphs = ["graph-1", "graph-2", "graph-3", "graph-4"]
-  const first_graph_release = deferred()
-  const first_two_started = deferred()
+  const first_graph_started = deferred()
   const failure = Object.assign(new Error("graph-2 exhausted its artifact retries"), {
     debug_dir: "reference-observer/graph-2/rejected-attempts/8",
   })
   const started: string[] = []
+  const disposed: string[] = []
+  let sibling_abort: unknown
   let canonical_published = false
 
   const run = (async () => {
     const results = await runReferenceGraphWorkerPool({
       graphs,
       signal: new AbortController().signal,
-      async digitize(graph) {
+      async digitize(graph, _graph_index, signal) {
         started.push(graph)
-        if (started.length === MAX_CONCURRENT_REFERENCE_GRAPH_DIGITIZATIONS) first_two_started.resolve()
-        if (graph === "graph-1") await first_graph_release.promise
-        if (graph === "graph-2") throw failure
-        return graph
+        if (graph === "graph-1") {
+          first_graph_started.resolve()
+          try {
+            await new Promise<void>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true })
+            })
+          } catch (error) {
+            sibling_abort = error
+            throw error
+          } finally {
+            disposed.push(graph)
+          }
+        }
+        await first_graph_started.promise
+        throw failure
       },
     })
     canonical_published = true
     return results
   })()
 
-  await first_two_started.promise
-  await Promise.resolve()
-  first_graph_release.resolve()
   const caught = await run.catch((error) => error)
 
   expect(caught).toBe(failure)
+  expect(sibling_abort).toBe(failure)
   expect(caught.debug_dir).toBe("reference-observer/graph-2/rejected-attempts/8")
   expect(started).toEqual(["graph-1", "graph-2"])
+  expect(disposed).toEqual(["graph-1"])
   expect(canonical_published).toBe(false)
 })
 
@@ -149,5 +160,7 @@ test("cancellation reaches active graph work and prevents queued graphs from sta
   expect(caught).toBe(cancellation)
   expect(started).toEqual(["graph-1", "graph-2"])
   expect(disposed.sort()).toEqual(["graph-1", "graph-2"])
-  expect(received_signals.every((signal) => signal === controller.signal)).toBe(true)
+  expect(new Set(received_signals).size).toBe(1)
+  expect(received_signals[0]).not.toBe(controller.signal)
+  expect(received_signals.every((signal) => signal.aborted && signal.reason === cancellation)).toBe(true)
 })

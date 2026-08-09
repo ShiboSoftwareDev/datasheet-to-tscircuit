@@ -15,8 +15,12 @@ export async function runReferenceGraphWorkerPool<Graph, Result>(input: {
   concurrency?: number
   digitize: (graph: Graph, graph_index: number, signal: AbortSignal) => Promise<Result>
 }): Promise<Result[]> {
+  input.signal.throwIfAborted()
   if (input.graphs.length === 0) return []
 
+  const pool_controller = new AbortController()
+  const forwardCallerCancellation = () => pool_controller.abort(input.signal.reason)
+  input.signal.addEventListener("abort", forwardCallerCancellation, { once: true })
   const concurrency = Math.max(
     1,
     Math.min(
@@ -27,10 +31,11 @@ export async function runReferenceGraphWorkerPool<Graph, Result>(input: {
   const slots: Array<WorkerSlot<Result> | undefined> = new Array(input.graphs.length)
   let next_index = 0
   let stopped = false
+  let primary_failure: { readonly error: unknown } | undefined
 
   const workers = Array.from({ length: concurrency }, async () => {
     while (!stopped) {
-      input.signal.throwIfAborted()
+      pool_controller.signal.throwIfAborted()
       const graph_index = next_index
       if (graph_index >= input.graphs.length) return
       const graph = input.graphs[graph_index]!
@@ -39,26 +44,34 @@ export async function runReferenceGraphWorkerPool<Graph, Result>(input: {
       try {
         slots[graph_index] = {
           status: "completed",
-          value: await input.digitize(graph, graph_index, input.signal),
+          value: await input.digitize(graph, graph_index, pool_controller.signal),
         }
       } catch (error) {
         slots[graph_index] = { status: "failed", error }
-        stopped = true
+        if (!pool_controller.signal.aborted) {
+          primary_failure = { error }
+          stopped = true
+          pool_controller.abort(error)
+        }
       }
     }
   })
 
-  // Cancellation can make an idle worker throw while another worker is still
-  // disposing its graph workspace. Do not return until every active worker settles.
-  await Promise.allSettled(workers)
-  input.signal.throwIfAborted()
+  try {
+    // Cancellation can make an idle worker throw while another worker is still
+    // disposing its graph workspace. Do not return until every active worker settles.
+    await Promise.allSettled(workers)
+    input.signal.throwIfAborted()
+    if (primary_failure) throw primary_failure.error
 
-  // Select by original graph index so simultaneous failures are deterministic.
-  const failure = slots.find((slot) => slot?.status === "failed")
-  if (failure?.status === "failed") throw failure.error
+    const failure = slots.find((slot) => slot?.status === "failed")
+    if (failure?.status === "failed") throw failure.error
 
-  return slots.map((slot, graph_index) => {
-    if (slot?.status === "completed") return slot.value
-    throw new Error(`Reference graph worker ${graph_index} did not produce a result`)
-  })
+    return slots.map((slot, graph_index) => {
+      if (slot?.status === "completed") return slot.value
+      throw new Error(`Reference graph worker ${graph_index} did not produce a result`)
+    })
+  } finally {
+    input.signal.removeEventListener("abort", forwardCallerCancellation)
+  }
 }

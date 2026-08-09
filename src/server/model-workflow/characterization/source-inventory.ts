@@ -418,8 +418,8 @@ export async function digitizeReferenceGraphs(input: {
   const graph_results = await runReferenceGraphWorkerPool({
     graphs: found_graphs,
     signal,
-    digitize: async (found_graph, graph_index) => {
-      signal.throwIfAborted()
+    digitize: async (found_graph, graph_index, graph_signal) => {
+      graph_signal.throwIfAborted()
       const seed_path = join(attempt_dir, `comparison-seed-${found_graph.graph_id}.json`)
       const reference_image_path = join(attempt_dir, "evidence", "figures", `${found_graph.graph_id}.png`)
       await writeJson(seed_path, found_graph)
@@ -432,7 +432,7 @@ export async function digitizeReferenceGraphs(input: {
         stage_id: `verify_model_reference_graph_${found_graph.graph_id}`,
         phase_label: `Digitize reference graph ${found_graph.graph_id}`,
         max_artifact_attempts: 8,
-        signal,
+        signal: graph_signal,
         use_openai: context.use_openai,
         agent_client: services.agent_client,
         extensions: [extension],
@@ -512,18 +512,18 @@ export async function digitizeReferenceGraphs(input: {
               observation,
               datasheet_path,
               process_runner: services.process_runner,
-              signal,
+              signal: graph_signal,
               on_output: graphLogOutput,
             })
           } catch (error) {
-            signal.throwIfAborted()
+            graph_signal.throwIfAborted()
             pixel_rejection = error instanceof Error ? error : new Error(String(error))
           }
           const source_proof = await buildSourceProof({
             observation,
             datasheet_path,
             services,
-            signal,
+            signal: graph_signal,
             printed_nominal_sources_by_graph_id,
           })
           assertReferenceGraphObservationVerified({ observation, source_proof, pixel_rejection })
