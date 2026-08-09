@@ -30,12 +30,19 @@ import { canonicalizeObservedGraphSource } from "../reference-graph-observation/
 import { isRecord, parseGraph } from "../reference-graph-observation/schema"
 import { discoverTimeGraphHints } from "../time-graph-hints"
 import { assertObserverFoundEligibleTimeDomainGraph } from "./eligibility"
+import {
+  MAX_CONCURRENT_REFERENCE_GRAPH_DIGITIZATIONS,
+  runReferenceGraphWorkerPool,
+} from "./reference-graph-worker-pool"
 
 export interface ReferenceGraphInventory {
   readonly time_graph_hints_path: string
   readonly observation: ReferenceGraphObservation
   readonly source_proof: ReferenceGraphSourceProof
   readonly observer_attempts: number
+  readonly reference_graph_count: number
+  readonly reference_graph_concurrency: number
+  readonly reference_graph_agent_duration_ms: number
   readonly reused_from_invocation_id?: string
 }
 
@@ -403,122 +410,144 @@ export async function digitizeReferenceGraphs(input: {
     graph_hints.set(review.graph_id, hints)
   }
 
-  const completed_graphs = new Map<string, ReferenceGraphObservation["graphs"][number]>()
-  const proof_results: ReferenceGraphSourceProof["results"] = []
   const printed_nominal_sources_by_graph_id = printedNominalSourcesByGraphId({
     observation: immutable_found_observation,
     discovery: time_graph_discovery,
   })
-  let observer_attempts = 0
-  for (const [graph_index, found_graph] of foundObservedGraphs(immutable_found_observation).entries()) {
-    signal.throwIfAborted()
-    const seed_path = join(attempt_dir, `comparison-seed-${found_graph.graph_id}.json`)
-    const reference_image_path = join(attempt_dir, "evidence", "figures", `${found_graph.graph_id}.png`)
-    await writeJson(seed_path, found_graph)
-    const graph_observer = await runAgentArtifactStage<{
-      graph: ReferenceGraphObservation["graphs"][number]
-      source_proof: ReferenceGraphSourceProof
-    }>({
-      stage_id: `verify_model_reference_graph_${found_graph.graph_id}`,
-      phase_label: `Digitize reference graph ${found_graph.graph_id}`,
-      max_artifact_attempts: 8,
-      signal,
-      use_openai: context.use_openai,
-      agent_client: services.agent_client,
-      extensions: [extension],
-      create_workspace: () =>
-        createStageWorkspace({
-          prefix: `model-reference-${found_graph.graph_id}`,
-          files: [
-            { source: join(context.model_dir, "AGENTS.md") },
-            { source: datasheet_path, destination: "datasheet.pdf" },
-            { source: join(context.model_dir, "model-interface.json") },
-            { source: join(context.model_dir, "application-fixture-contract.json") },
-            { source: time_graph_hints_path },
-            { source: seed_path, destination: "model-reference-graph.json" },
-            { source: reference_image_path, destination: "reference-graph.png" },
-          ],
-        }),
-      build_prompt: (feedback) =>
-        buildSingleComparisonReferenceGraphObserverPrompt(found_graph.graph_id, feedback),
-      heartbeat_paths: (workspace) => [join(workspace, "model-reference-graph.json")],
-      on_output: logOutput,
-      rejection_debug: {
-        debug_dir: join(debug_dir, "reference-observer", found_graph.graph_id),
-        files: ["model-reference-graph.json"],
-      },
-      validate: async (workspace) => {
-        const raw_graph = await readBoundedJsonArtifact({
-          path: join(workspace, "model-reference-graph.json"),
-          max_bytes: 512 * 1024,
-          max_depth: 32,
-          max_nodes: 12_000,
-        })
-        if (!isRecord(raw_graph) || raw_graph.graph_id !== found_graph.graph_id) {
-          throw new Error(
-            `model-reference-graph.json must remain the one graph object ${found_graph.graph_id}`,
+  const found_graphs = foundObservedGraphs(immutable_found_observation)
+  const graph_results = await runReferenceGraphWorkerPool({
+    graphs: found_graphs,
+    signal,
+    digitize: async (found_graph, graph_index) => {
+      signal.throwIfAborted()
+      const seed_path = join(attempt_dir, `comparison-seed-${found_graph.graph_id}.json`)
+      const reference_image_path = join(attempt_dir, "evidence", "figures", `${found_graph.graph_id}.png`)
+      await writeJson(seed_path, found_graph)
+      const graphLogOutput = (stream: JobLogStream, message: string) =>
+        logOutput(stream, `[reference graph ${found_graph.graph_id}] ${message}`)
+      const graph_observer = await runAgentArtifactStage<{
+        graph: ReferenceGraphObservation["graphs"][number]
+        source_proof: ReferenceGraphSourceProof
+      }>({
+        stage_id: `verify_model_reference_graph_${found_graph.graph_id}`,
+        phase_label: `Digitize reference graph ${found_graph.graph_id}`,
+        max_artifact_attempts: 8,
+        signal,
+        use_openai: context.use_openai,
+        agent_client: services.agent_client,
+        extensions: [extension],
+        create_workspace: () =>
+          createStageWorkspace({
+            prefix: `model-reference-${found_graph.graph_id}`,
+            files: [
+              { source: join(context.model_dir, "AGENTS.md") },
+              { source: datasheet_path, destination: "datasheet.pdf" },
+              { source: join(context.model_dir, "model-interface.json") },
+              { source: join(context.model_dir, "application-fixture-contract.json") },
+              { source: time_graph_hints_path },
+              { source: seed_path, destination: "model-reference-graph.json" },
+              { source: reference_image_path, destination: "reference-graph.png" },
+            ],
+          }),
+        build_prompt: (feedback) =>
+          buildSingleComparisonReferenceGraphObserverPrompt(found_graph.graph_id, feedback),
+        heartbeat_paths: (workspace) => [join(workspace, "model-reference-graph.json")],
+        on_output: graphLogOutput,
+        rejection_debug: {
+          debug_dir: join(debug_dir, "reference-observer", found_graph.graph_id),
+          files: ["model-reference-graph.json"],
+        },
+        validate: async (workspace) => {
+          const raw_graph = await readBoundedJsonArtifact({
+            path: join(workspace, "model-reference-graph.json"),
+            max_bytes: 512 * 1024,
+            max_depth: 32,
+            max_nodes: 12_000,
+          })
+          if (!isRecord(raw_graph) || raw_graph.graph_id !== found_graph.graph_id) {
+            throw new Error(
+              `model-reference-graph.json must remain the one graph object ${found_graph.graph_id}`,
+            )
+          }
+          const parsed_graph = parseGraph(
+            raw_graph,
+            graph_index,
+            model_interface,
+            "pixels_only",
+            "comparison",
           )
-        }
-        const parsed_graph = parseGraph(raw_graph, graph_index, model_interface, "pixels_only", "comparison")
-        const graph = canonicalizeObservedGraphSource({
-          graph: parsed_graph,
-          source_hints: graph_hints.get(found_graph.graph_id) ?? [],
-          model_interface,
-          application_fixture,
-          phase: "comparison",
-        })
-        const found_state = discoveryOnlyObservation({
-          version: 1,
-          source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
-          reviewed_hints: [],
-          graphs: [found_graph],
-        })
-        const candidate_state = discoveryOnlyObservation({
-          version: 1,
-          source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
-          reviewed_hints: [],
-          graphs: [graph],
-        })
-        if (JSON.stringify(found_state) !== JSON.stringify(candidate_state)) {
-          throw new Error(
-            `Create Comparison Graphs must preserve every discovery field of ${found_graph.graph_id}; only electrical_binding and channels may be added`,
-          )
-        }
-        const observation: ReferenceGraphObservation = {
-          version: 1,
-          source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
-          reviewed_hints: [],
-          graphs: [graph],
-        }
-        let pixel_rejection: Error | undefined
-        try {
-          await verifyReferenceGraphObservationPixels({
+          const graph = canonicalizeObservedGraphSource({
+            graph: parsed_graph,
+            source_hints: graph_hints.get(found_graph.graph_id) ?? [],
+            model_interface,
+            application_fixture,
+            phase: "comparison",
+          })
+          const found_state = discoveryOnlyObservation({
+            version: 1,
+            source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
+            reviewed_hints: [],
+            graphs: [found_graph],
+          })
+          const candidate_state = discoveryOnlyObservation({
+            version: 1,
+            source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
+            reviewed_hints: [],
+            graphs: [graph],
+          })
+          if (JSON.stringify(found_state) !== JSON.stringify(candidate_state)) {
+            throw new Error(
+              `Create Comparison Graphs must preserve every discovery field of ${found_graph.graph_id}; only electrical_binding and channels may be added`,
+            )
+          }
+          const observation: ReferenceGraphObservation = {
+            version: 1,
+            source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
+            reviewed_hints: [],
+            graphs: [graph],
+          }
+          let pixel_rejection: Error | undefined
+          try {
+            await verifyReferenceGraphObservationPixels({
+              observation,
+              datasheet_path,
+              process_runner: services.process_runner,
+              signal,
+              on_output: graphLogOutput,
+            })
+          } catch (error) {
+            signal.throwIfAborted()
+            pixel_rejection = error instanceof Error ? error : new Error(String(error))
+          }
+          const source_proof = await buildSourceProof({
             observation,
             datasheet_path,
-            process_runner: services.process_runner,
+            services,
             signal,
-            on_output: logOutput,
+            printed_nominal_sources_by_graph_id,
           })
-        } catch (error) {
-          signal.throwIfAborted()
-          pixel_rejection = error instanceof Error ? error : new Error(String(error))
-        }
-        const source_proof = await buildSourceProof({
-          observation,
-          datasheet_path,
-          services,
-          signal,
-          printed_nominal_sources_by_graph_id,
-        })
-        assertReferenceGraphObservationVerified({ observation, source_proof, pixel_rejection })
-        return { graph, source_proof }
-      },
-      promote: async () => undefined,
-    })
-    observer_attempts += graph_observer.attempts
-    completed_graphs.set(found_graph.graph_id, graph_observer.value.graph)
-    proof_results.push(...graph_observer.value.source_proof.results)
-  }
+          assertReferenceGraphObservationVerified({ observation, source_proof, pixel_rejection })
+          return { graph, source_proof }
+        },
+        promote: async () => undefined,
+      })
+      return {
+        graph_id: found_graph.graph_id,
+        graph: graph_observer.value.graph,
+        source_proof: graph_observer.value.source_proof,
+        attempts: graph_observer.attempts,
+        agent_duration_ms: graph_observer.agent_duration_ms,
+      }
+    },
+  })
+
+  const completed_graphs = new Map(graph_results.map((result) => [result.graph_id, result.graph]))
+  const proof_results = graph_results.flatMap((result) => result.source_proof.results)
+  const observer_attempts = graph_results.reduce((sum, result) => sum + result.attempts, 0)
+  const reference_graph_agent_duration_ms = graph_results.reduce(
+    (sum, result) => sum + result.agent_duration_ms,
+    0,
+  )
 
   const combined_observation = parseCanonicalReferenceGraphObservation(
     {
@@ -536,6 +565,7 @@ export async function digitizeReferenceGraphs(input: {
     source_pdf_sha256: combined_observation.source_pdf_sha256,
     results: proof_results,
   }
+  signal.throwIfAborted()
   await Promise.all([
     writeJson(join(attempt_dir, "model-reference-observation.json"), combined_observation),
     writeJson(join(attempt_dir, "model-reference-source-proof.json"), source_proof),
@@ -546,5 +576,8 @@ export async function digitizeReferenceGraphs(input: {
     observation: combined_observation,
     source_proof,
     observer_attempts,
+    reference_graph_count: found_graphs.length,
+    reference_graph_concurrency: Math.min(found_graphs.length, MAX_CONCURRENT_REFERENCE_GRAPH_DIGITIZATIONS),
+    reference_graph_agent_duration_ms,
   }
 }
