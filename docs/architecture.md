@@ -377,6 +377,15 @@ markers:
   stimulus signals, numeric low/high levels, and rise/fall times. The explicit
   `null` form is authoritative and prevents a later agent from inventing a
   convenient pulse for switching, startup, or other unqualified waveforms.
+- `reference-graph-preflight.json` is generated independently for each immutable
+  discovery crop before its first comparison-digitization attempt. It contains
+  only bounded canonical-PDF facts: adjacent figure identity, OCR measurement
+  and division-scale candidates, neutral grid-line candidates, deterministic
+  grid spacing, and source units-per-pixel/anchor-span candidates. The artifact
+  is attempt guidance, not an acceptance receipt; the ordinary pixel verifier
+  and source-proof builder still recompute candidate-specific trace, grid,
+  scale, caption, and baseline acceptance. Per-graph copies remain under
+  `reference-observer/<graph-id>/preflight.json` beside retry history.
 - `model-reference-observation.json` is produced in a separate source-only
   workspace with no candidate characterization. It inventories elapsed-time
   graphs, their visible time-axis evidence, public-pin response, supported

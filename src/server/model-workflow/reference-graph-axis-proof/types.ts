@@ -22,7 +22,12 @@ export interface ReferenceGraphFigureIdentityReceipt {
   algorithm: "pdftotext_bbox_adjacent_figure_v1"
   normalized_figure: string
   source_text: string
-  bbox_pdf_points: { x_min: number; y_min: number; x_max: number; y_max: number }
+  bbox_pdf_points: {
+    x_min: number
+    y_min: number
+    x_max: number
+    y_max: number
+  }
   crop_edge_gap_pdf_points: number
   bbox_output_sha256: string
 }
@@ -222,6 +227,72 @@ export interface ReferenceGraphSourceProof {
   version: 1
   source_pdf_sha256: string
   results: ReferenceGraphAxisProofResult[]
+}
+
+export interface ReferenceGraphPreflightDivisionScale {
+  raw_text: string
+  value_per_division_si: number
+  observer_center_px: { x: number; y: number }
+}
+
+/**
+ * Bounded, source-only facts available before graph digitization. This is
+ * guidance, never an acceptance receipt; candidate verification remains owned
+ * by ReferenceGraphSourceProof.
+ */
+export interface ReferenceGraphPreflight {
+  version: 1
+  graph_id: string
+  source_pdf_sha256: string
+  page: number
+  canonical_crop: ModelReferenceCropRegion
+  canonical_crop_sha256: string
+  figure_identity?: ReferenceGraphFigureIdentityReceipt
+  x_axis: {
+    quantity: "time"
+    unit: "s"
+    elapsed_time_origin: 0
+    grid_line_candidates_px: number[]
+    median_grid_spacing_px?: number
+    recommended_anchor_pixels?: {
+      minimum_value_pixel: number
+      maximum_value_pixel: number
+    }
+    division_scale_candidates: ReferenceGraphPreflightDivisionScale[]
+    explicit_tick_calibration?: {
+      first: ReferenceAxisSourceTick
+      second: ReferenceAxisSourceTick
+      seconds_per_pixel: number
+      supporting_tick_count: number
+    }
+    source_seconds_per_pixel_candidates: number[]
+    required_anchor_value_span_candidates: number[]
+  }
+  y_axis: {
+    quantity: "voltage"
+    unit: "V"
+    grid_line_candidates_px: number[]
+    median_grid_spacing_px?: number
+    recommended_anchor_pixels?: {
+      minimum_value_pixel: number
+      maximum_value_pixel: number
+    }
+    division_scale_candidates: ReferenceGraphPreflightDivisionScale[]
+    explicit_tick_calibration?: {
+      first: ReferenceAxisSourceTick
+      second: ReferenceAxisSourceTick
+      volts_per_pixel: number
+      supporting_tick_count: number
+    }
+    source_volts_per_pixel_candidates: number[]
+    required_anchor_value_span_candidates: number[]
+  }
+  recognized_measurements: Array<{
+    raw_text: string
+    unit: "s" | "V"
+    value_si: number
+    observer_center_px: { x: number; y: number }
+  }>
 }
 
 export interface TesseractWord {

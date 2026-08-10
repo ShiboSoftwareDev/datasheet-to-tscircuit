@@ -19,6 +19,7 @@ import {
   tesseractVersion,
 } from "./ocr-extraction"
 import { extractPdfTextBBox, figureIdentityFromPdfText, nominalVoltageFromPdfText } from "./pdf-extraction"
+import type { ReferenceGraphImmutableSourceAnalysis } from "./preflight"
 import {
   dominantGrid,
   divisionScaleNearestTrace,
@@ -106,48 +107,85 @@ async function proveGraphAxis(input: {
   signal: AbortSignal
   engine_version: string
   printed_nominal_source?: TimeGraphTransientFixtureEvidence
+  immutable_source_analysis?: ReferenceGraphImmutableSourceAnalysis
 }): Promise<ReferenceGraphAxisProofResult> {
-  const render_prefix = join(input.workspace, `${input.graph.graph_id}-axis`)
   const crop = input.graph.crop
-  await input.process_runner.run({
-    command: [
-      "pdftoppm",
-      "-f",
-      String(crop.page),
-      "-l",
-      String(crop.page),
-      "-r",
-      String(OCR_DPI),
-      "-x",
-      String(crop.x_px * OCR_SCALE),
-      "-y",
-      String(crop.y_px * OCR_SCALE),
-      "-W",
-      String(crop.width_px * OCR_SCALE),
-      "-H",
-      String(crop.height_px * OCR_SCALE),
-      "-png",
-      "-singlefile",
-      join(input.workspace, "datasheet.pdf"),
-      render_prefix,
-    ],
-    command_label: `Render canonical axis crop ${input.graph.graph_id}`,
-    cwd: input.workspace,
-    signal: input.signal,
-    wall_timeout_ms: 120_000,
-    max_output_chars: 20_000,
-  })
-  const image_path = `${render_prefix}.png`
-  const ocr_base = join(input.workspace, `${input.graph.graph_id}-ocr`)
-  await input.process_runner.run({
-    command: ["tesseract", image_path, ocr_base, "-l", "eng", "--psm", "11", "tsv"],
-    command_label: `OCR canonical axis crop ${input.graph.graph_id}`,
-    cwd: input.workspace,
-    signal: input.signal,
-    wall_timeout_ms: 120_000,
-    max_output_chars: 20_000,
-  })
-  const [png, tsv] = await Promise.all([readFile(image_path), readFile(`${ocr_base}.tsv`, "utf8")])
+  const crop_proof = canonicalReferenceCropProof(crop)
+  const analysis = input.immutable_source_analysis
+  if (
+    analysis &&
+    (analysis.graph_id !== input.graph.source_graph_id ||
+      analysis.source_pdf_sha256 !== input.source_pdf_sha256 ||
+      analysis.page !== input.graph.page ||
+      analysis.canonical_crop_sha256 !== crop_proof.canonical_crop_sha256)
+  ) {
+    throw new Error(
+      `Reference-axis proof received mismatched immutable analysis for ${input.graph.source_graph_id}`,
+    )
+  }
+  let png: Buffer
+  let tsv: string
+  let png_dimensions: Awaited<ReturnType<typeof decodeModelEvidencePng>>
+  let bbox_html: string
+  let full_words: TesseractWord[]
+  let engine_version = input.engine_version
+  if (analysis) {
+    png = analysis.png
+    tsv = analysis.tsv
+    png_dimensions = analysis.decoded
+    bbox_html = analysis.bbox_html
+    full_words = analysis.full_words
+    engine_version = analysis.engine_version
+  } else {
+    const render_prefix = join(input.workspace, `${input.graph.graph_id}-axis`)
+    await input.process_runner.run({
+      command: [
+        "pdftoppm",
+        "-f",
+        String(crop.page),
+        "-l",
+        String(crop.page),
+        "-r",
+        String(OCR_DPI),
+        "-x",
+        String(crop.x_px * OCR_SCALE),
+        "-y",
+        String(crop.y_px * OCR_SCALE),
+        "-W",
+        String(crop.width_px * OCR_SCALE),
+        "-H",
+        String(crop.height_px * OCR_SCALE),
+        "-png",
+        "-singlefile",
+        join(input.workspace, "datasheet.pdf"),
+        render_prefix,
+      ],
+      command_label: `Render canonical axis crop ${input.graph.graph_id}`,
+      cwd: input.workspace,
+      signal: input.signal,
+      wall_timeout_ms: 120_000,
+      max_output_chars: 20_000,
+    })
+    const image_path = `${render_prefix}.png`
+    const ocr_base = join(input.workspace, `${input.graph.graph_id}-ocr`)
+    await input.process_runner.run({
+      command: ["tesseract", image_path, ocr_base, "-l", "eng", "--psm", "11", "tsv"],
+      command_label: `OCR canonical axis crop ${input.graph.graph_id}`,
+      cwd: input.workspace,
+      signal: input.signal,
+      wall_timeout_ms: 120_000,
+      max_output_chars: 20_000,
+    })
+    ;[png, tsv] = await Promise.all([readFile(image_path), readFile(`${ocr_base}.tsv`, "utf8")])
+    png_dimensions = await decodeModelEvidencePng(image_path, `axis proof ${input.graph.graph_id}`)
+    bbox_html = await extractPdfTextBBox({
+      graph: input.graph,
+      workspace: input.workspace,
+      process_runner: input.process_runner,
+      signal: input.signal,
+    })
+    full_words = parseTesseractTsv(tsv)
+  }
   if (Buffer.byteLength(tsv) < 1 || Buffer.byteLength(tsv) > MAX_TSV_BYTES) {
     return {
       status: "ineligible",
@@ -162,18 +200,13 @@ async function proveGraphAxis(input: {
   }
   const expected_width = crop.width_px * OCR_SCALE
   const expected_height = crop.height_px * OCR_SCALE
-  const png_dimensions = await decodeModelEvidencePng(image_path, `axis proof ${input.graph.graph_id}`)
   if (png_dimensions.width !== expected_width || png_dimensions.height !== expected_height) {
     throw new Error(`Canonical axis crop ${input.graph.graph_id} rendered with unexpected dimensions`)
   }
-  const bbox_html = await extractPdfTextBBox({
+  const figure_identity = figureIdentityFromPdfText({
     graph: input.graph,
-    workspace: input.workspace,
-    process_runner: input.process_runner,
-    signal: input.signal,
+    bbox_html,
   })
-  const figure_identity = figureIdentityFromPdfText({ graph: input.graph, bbox_html })
-  const full_words = parseTesseractTsv(tsv)
   const measurements = measurementCandidates(full_words)
   const ticks = axisTicks({ graph: input.graph, candidates: measurements })
   const explicit_time = alignedExplicitAxisCalibration({
@@ -181,7 +214,6 @@ async function proveGraphAxis(input: {
     unit: "s",
     candidates: measurements,
   })
-  const crop_proof = canonicalReferenceCropProof(crop)
   const common = {
     version: 1 as const,
     graph_id: input.graph.source_graph_id,
@@ -205,7 +237,7 @@ async function proveGraphAxis(input: {
       figure_identity,
       ocr: {
         engine: "tesseract",
-        engine_version: input.engine_version,
+        engine_version,
         language: "eng",
         page_segmentation_mode: 11,
         tsv_sha256: sha256(tsv),
@@ -247,7 +279,10 @@ async function proveGraphAxis(input: {
         source_text: string
         bbox: NonNullable<ReturnType<typeof nominalVoltageFromPdfText>>["bbox"]
       }
-    | { kind: "printed_experiment"; evidence: TimeGraphTransientFixtureEvidence }
+    | {
+        kind: "printed_experiment"
+        evidence: TimeGraphTransientFixtureEvidence
+      }
     | undefined
   let nominal_point_indexes: number[] = []
   let nominal_baseline_pixel: number | undefined
@@ -294,8 +329,16 @@ async function proveGraphAxis(input: {
       }) ??
       uniqueDivisionScale(channel_division_candidates, "V") ??
       uniqueDivisionScale(full_division_candidates, "V")
-    x_grid_lines = neutralGridProfile({ decoded: png_dimensions, axis: "x", graph: input.graph })
-    y_grid_lines = neutralGridProfile({ decoded: png_dimensions, axis: "y", graph: input.graph })
+    x_grid_lines = neutralGridProfile({
+      decoded: png_dimensions,
+      axis: "x",
+      graph: input.graph,
+    })
+    y_grid_lines = neutralGridProfile({
+      decoded: png_dimensions,
+      axis: "y",
+      graph: input.graph,
+    })
     x_grid = dominantGrid({
       lines: x_grid_lines,
       first_anchor: input.graph.digitized_curve.x_axis.first.pixel,
@@ -306,7 +349,10 @@ async function proveGraphAxis(input: {
       first_anchor: input.graph.digitized_curve.y_axis.first.pixel,
       second_anchor: input.graph.digitized_curve.y_axis.second.pixel,
     })
-    const pdf_nominal_source = nominalVoltageFromPdfText({ graph: input.graph, bbox_html })
+    const pdf_nominal_source = nominalVoltageFromPdfText({
+      graph: input.graph,
+      bbox_html,
+    })
     const printed_nominal_source = input.printed_nominal_source
     if (pdf_nominal_source) {
       nominal_source = { kind: "pdf", ...pdf_nominal_source }
@@ -314,7 +360,10 @@ async function proveGraphAxis(input: {
       printed_nominal_source &&
       printed_nominal_source.response.nominal_volts === input.graph.electrical_binding.response.nominal_volts
     ) {
-      nominal_source = { kind: "printed_experiment", evidence: printed_nominal_source }
+      nominal_source = {
+        kind: "printed_experiment",
+        evidence: printed_nominal_source,
+      }
     }
     const edge_baseline = stableTraceEdgeBaseline(
       input.graph.digitized_curve.points,
@@ -420,7 +469,7 @@ async function proveGraphAxis(input: {
         figure_identity,
         ocr: {
           engine: "tesseract" as const,
-          engine_version: input.engine_version,
+          engine_version,
           language: "eng" as const,
           page_segmentation_mode: 11 as const,
           tsv_sha256: sha256(tsv),
@@ -561,6 +610,7 @@ export async function buildReferenceGraphSourceProof(input: {
   process_runner: ProcessRunner
   signal: AbortSignal
   printed_nominal_sources_by_graph_id?: Readonly<Record<string, TimeGraphTransientFixtureEvidence>>
+  immutable_source_analysis_by_graph_id?: Readonly<Record<string, ReferenceGraphImmutableSourceAnalysis>>
 }): Promise<ReferenceGraphSourceProof> {
   const source_pdf = await readFile(input.datasheet_path)
   const actual_sha256 = sha256(source_pdf)
@@ -583,19 +633,25 @@ export async function buildReferenceGraphSourceProof(input: {
   })
   try {
     await mkdir(workspace.path, { recursive: true })
-    let engine_version: string
-    try {
-      engine_version = await tesseractVersion({
-        process_runner: input.process_runner,
-        cwd: workspace.path,
-        signal: input.signal,
-      })
-    } catch (error) {
-      input.signal.throwIfAborted()
-      throw new Error(
-        "Reference-axis verification requires the tesseract OCR runtime; install tesseract-ocr in the production image and local test environment.",
-        { cause: error },
+    let engine_version = ""
+    if (
+      graphs.some(
+        (graph) => input.immutable_source_analysis_by_graph_id?.[graph.source_graph_id] === undefined,
       )
+    ) {
+      try {
+        engine_version = await tesseractVersion({
+          process_runner: input.process_runner,
+          cwd: workspace.path,
+          signal: input.signal,
+        })
+      } catch (error) {
+        input.signal.throwIfAborted()
+        throw new Error(
+          "Reference-axis verification requires the tesseract OCR runtime; install tesseract-ocr in the production image and local test environment.",
+          { cause: error },
+        )
+      }
     }
     const results: ReferenceGraphAxisProofResult[] = []
     for (const graph of graphs) {
@@ -609,6 +665,7 @@ export async function buildReferenceGraphSourceProof(input: {
           signal: input.signal,
           engine_version,
           printed_nominal_source: input.printed_nominal_sources_by_graph_id?.[graph.source_graph_id],
+          immutable_source_analysis: input.immutable_source_analysis_by_graph_id?.[graph.source_graph_id],
         }),
       )
     }

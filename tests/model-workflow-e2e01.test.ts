@@ -753,7 +753,7 @@ testWithProductionSimulation(
         ({ command, command_label }) =>
           command[0] === "tesseract" && command_label.startsWith("OCR canonical axis crop"),
       ),
-    ).toHaveLength(2)
+    ).toHaveLength(1)
     expect(
       process_runner.calls.filter(
         ({ command, command_label }) =>

@@ -13,6 +13,11 @@ export {
   verifiedReferenceGraphIds,
 } from "./reference-graph-axis-proof/eligibility"
 export { parseReferenceGraphSourceProof } from "./reference-graph-axis-proof/parser"
+export {
+  analyzeReferenceGraphPreflight,
+  buildReferenceGraphPreflight,
+  type ReferenceGraphImmutableSourceAnalysis,
+} from "./reference-graph-axis-proof/preflight"
 export type {
   ExplicitReferenceGraphAxisCalibrationReceipt,
   ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt,
@@ -22,6 +27,8 @@ export type {
   ReferenceGraphAxisCalibrationReceipt,
   ReferenceGraphAxisProofResult,
   ReferenceGraphFigureIdentityReceipt,
+  ReferenceGraphPreflight,
+  ReferenceGraphPreflightDivisionScale,
   ReferenceGraphSourceProof,
   ReferenceGridCalibrationSource,
   ScopeDivisionReferenceGraphAxisCalibrationReceipt,

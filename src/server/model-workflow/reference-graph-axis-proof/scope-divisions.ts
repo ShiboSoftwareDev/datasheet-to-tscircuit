@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { ProcessRunner } from "../../infrastructure/process"
 import { decodeModelEvidencePng } from "../model-evidence-pages"
-import type { EligibleObservedReferenceChannel } from "../reference-graph-observation"
+import type { EligibleObservedReferenceChannel, ObservedReferenceGraph } from "../reference-graph-observation"
 import { divisionScaleCandidates, measurementCandidates, parseTesseractTsv } from "./ocr-extraction"
 import { ANCHOR_PIXEL_TOLERANCE, MAX_TSV_BYTES, OCR_DPI, OCR_SCALE, sha256 } from "./shared"
 import type { ReferenceDivisionScaleSource, ReferenceGridCalibrationSource, TesseractWord } from "./types"
@@ -10,10 +10,12 @@ import type { ReferenceDivisionScaleSource, ReferenceGridCalibrationSource, Tess
 const MAX_RIGHT_EDGE_PANEL_FALLBACK_WIDTH = 1_024 * OCR_SCALE
 
 export async function ocrScopePanels(input: {
-  graph: EligibleObservedReferenceChannel
+  graph: Pick<ObservedReferenceGraph, "graph_id" | "page" | "crop"> &
+    Partial<Pick<EligibleObservedReferenceChannel, "digitized_curve">>
   full_words: readonly TesseractWord[]
   render_width: number
   render_height: number
+  plot_right_px?: number
   workspace: string
   process_runner: ProcessRunner
   signal: AbortSignal
@@ -42,12 +44,15 @@ export async function ocrScopePanels(input: {
     return undefined
   }
   const horizontal = horizontal_words[0]
-  const traced_plot_right =
-    Math.max(
-      input.graph.digitized_curve.x_axis.first.pixel,
-      input.graph.digitized_curve.x_axis.second.pixel,
-      ...input.graph.digitized_curve.points.map(({ pixel_x }) => pixel_x),
-    ) * OCR_SCALE
+  const traced_plot_right = input.graph.digitized_curve
+    ? Math.max(
+        input.graph.digitized_curve.x_axis.first.pixel,
+        input.graph.digitized_curve.x_axis.second.pixel,
+        ...input.graph.digitized_curve.points.map(({ pixel_x }) => pixel_x),
+      ) * OCR_SCALE
+    : input.plot_right_px === undefined
+      ? input.render_width - 360
+      : input.plot_right_px * OCR_SCALE
   const panel_left = horizontal
     ? Math.max(0, Math.floor(horizontal.bbox.left - 24))
     : Math.max(0, Math.min(input.render_width - 384, Math.floor(traced_plot_right - 24)))
@@ -122,7 +127,10 @@ export async function ocrScopePanels(input: {
       throw new Error(`Reference axis ${region.name} OCR output is not bounded`)
     }
     tsvs.push(tsv)
-    const region_words = parseTesseractTsv(tsv, { left: region.left, top: region.top }).map((word) => ({
+    const region_words = parseTesseractTsv(tsv, {
+      left: region.left,
+      top: region.top,
+    }).map((word) => ({
       ...word,
       block: word.block + (region_index + 1) * 10_000,
     }))
@@ -154,7 +162,6 @@ export function neutralGridProfile(input: {
     input.graph.digitized_curve.y_axis.second.pixel * OCR_SCALE,
   ]
   const cross_values = input.axis === "x" ? [...point_y, ...anchor_y] : [...point_x, ...anchor_x]
-  const axis_limit = input.axis === "x" ? input.decoded.width : input.decoded.height
   const cross_limit = input.axis === "x" ? input.decoded.height : input.decoded.width
   // Sweep the complete source crop along the axis being proved. Restricting
   // this dimension to the observer's claimed anchors/range creates a circular
@@ -162,15 +169,38 @@ export function neutralGridProfile(input: {
   // third line dominantGrid needs to establish the spacing. The perpendicular
   // sampling band remains tied to the traced plot, so unrelated crop content
   // cannot supply a grid merely by being elsewhere in the image.
-  const axis_min = 0
-  const axis_max = axis_limit - 1
   const cross_min = Math.max(0, Math.floor(Math.min(...cross_values) - 36))
   const cross_max = Math.min(cross_limit - 1, Math.ceil(Math.max(...cross_values) + 36))
+  return neutralGridProfileInBand({ ...input, cross_min, cross_max })
+}
+
+/** Candidate-independent grid scan used only for attempt-one guidance. */
+export function neutralGridProfileForCrop(input: {
+  decoded: Awaited<ReturnType<typeof decodeModelEvidencePng>>
+  axis: "x" | "y"
+}): number[] {
+  const cross_limit = input.axis === "x" ? input.decoded.height : input.decoded.width
+  return neutralGridProfileInBand({
+    ...input,
+    cross_min: 0,
+    cross_max: cross_limit - 1,
+  })
+}
+
+function neutralGridProfileInBand(input: {
+  decoded: Awaited<ReturnType<typeof decodeModelEvidencePng>>
+  axis: "x" | "y"
+  cross_min: number
+  cross_max: number
+}): number[] {
+  const axis_limit = input.axis === "x" ? input.decoded.width : input.decoded.height
+  const axis_min = 0
+  const axis_max = axis_limit - 1
   const scored: Array<{ pixel: number; score: number }> = []
   for (let pixel = axis_min; pixel <= axis_max; pixel += 1) {
     let neutral = 0
     let sampled = 0
-    for (let cross = cross_min; cross <= cross_max; cross += 1) {
+    for (let cross = input.cross_min; cross <= input.cross_max; cross += 1) {
       const [r, g, b] =
         input.axis === "x" ? input.decoded.rgbAt(pixel, cross) : input.decoded.rgbAt(cross, pixel)
       const maximum = Math.max(r, g, b)
@@ -194,15 +224,11 @@ export function neutralGridProfile(input: {
     .sort((left, right) => left - right)
 }
 
-export function dominantGrid(input: {
-  lines: readonly number[]
-  first_anchor: number
-  second_anchor: number
-}): ReferenceGridCalibrationSource | undefined {
-  if (input.lines.length < 3) return undefined
-  const spacings = input.lines
+export function dominantGridSpacing(lines: readonly number[]): number | undefined {
+  if (lines.length < 3) return undefined
+  const spacings = lines
     .slice(1)
-    .map((line, index) => line - input.lines[index]!)
+    .map((line, index) => line - lines[index]!)
     .filter((spacing) => spacing >= 8)
   if (spacings.length < 2) return undefined
   const candidates = spacings.map((spacing) => ({
@@ -215,7 +241,16 @@ export function dominantGrid(input: {
   const supported = spacings.filter(
     (spacing) => Math.abs(spacing - best.spacing) <= Math.max(1.5, best.spacing * 0.04),
   )
-  const median_spacing_px = supported.sort((left, right) => left - right)[Math.floor(supported.length / 2)]!
+  return supported.sort((left, right) => left - right)[Math.floor(supported.length / 2)]!
+}
+
+export function dominantGrid(input: {
+  lines: readonly number[]
+  first_anchor: number
+  second_anchor: number
+}): ReferenceGridCalibrationSource | undefined {
+  const median_spacing_px = dominantGridSpacing(input.lines)
+  if (median_spacing_px === undefined) return undefined
   const nearest = (anchor: number) =>
     input.lines
       .map((line) => ({ line, error: Math.abs(line - anchor) }))

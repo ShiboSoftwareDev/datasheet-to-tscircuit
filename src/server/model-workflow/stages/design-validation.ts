@@ -119,8 +119,12 @@ export const designValidationStage = defineModelStage({
       ],
       metrics: {
         agent_attempts: inventory.observer_attempts,
+        reference_graph_agent_attempts: inventory.observer_attempts,
         reference_graph_count: inventory.reference_graph_count,
         reference_graph_concurrency: inventory.reference_graph_concurrency,
+        reference_graph_first_attempt_successes: inventory.reference_graph_first_attempt_successes,
+        reference_graph_retry_count: inventory.reference_graph_retry_count,
+        reference_graph_preflight_duration_ms: inventory.reference_graph_preflight_duration_ms,
         reference_graph_agent_duration_ms: inventory.reference_graph_agent_duration_ms,
         validation_cases: plan.cases.length,
       },

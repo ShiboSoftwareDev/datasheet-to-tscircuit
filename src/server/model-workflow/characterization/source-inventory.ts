@@ -1,4 +1,4 @@
-import { readdir, stat } from "node:fs/promises"
+import { mkdir, readdir, stat } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
 import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
@@ -8,8 +8,10 @@ import type { JobLogStream } from "../../../shared/job-types"
 import type { ModelPipelineContext, ModelPipelineServices } from "../types"
 import { appendModelLog, writeJson } from "../stage-helpers"
 import {
+  analyzeReferenceGraphPreflight,
   buildReferenceGraphSourceProof,
   printedNominalSourcesByGraphId,
+  type ReferenceGraphImmutableSourceAnalysis,
   type ReferenceGraphSourceProof,
 } from "../reference-graph-axis-proof"
 import { extractPdfTextBBox, figureIdentityFromPdfText } from "../reference-graph-axis-proof/pdf-extraction"
@@ -42,7 +44,10 @@ export interface ReferenceGraphInventory {
   readonly observer_attempts: number
   readonly reference_graph_count: number
   readonly reference_graph_concurrency: number
+  readonly reference_graph_first_attempt_successes: number
+  readonly reference_graph_retry_count: number
   readonly reference_graph_agent_duration_ms: number
+  readonly reference_graph_preflight_duration_ms: number
   readonly reused_from_invocation_id?: string
 }
 
@@ -66,6 +71,30 @@ function discoveryOnlyObservation(observation: ReferenceGraphObservation): Refer
       ...graph,
       crop: { ...graph.crop },
     })),
+  }
+}
+
+export function assertComparisonGraphPreservesDiscovery(input: {
+  source_pdf_sha256: string
+  found_graph: ReferenceGraphObservation["graphs"][number]
+  candidate_graph: ReferenceGraphObservation["graphs"][number]
+}): void {
+  const found_state = discoveryOnlyObservation({
+    version: 1,
+    source_pdf_sha256: input.source_pdf_sha256,
+    reviewed_hints: [],
+    graphs: [input.found_graph],
+  })
+  const candidate_state = discoveryOnlyObservation({
+    version: 1,
+    source_pdf_sha256: input.source_pdf_sha256,
+    reviewed_hints: [],
+    graphs: [input.candidate_graph],
+  })
+  if (JSON.stringify(found_state) !== JSON.stringify(candidate_state)) {
+    throw new Error(
+      `Create Comparison Graphs must preserve every discovery field of ${input.found_graph.graph_id}; only electrical_binding and channels may be added`,
+    )
   }
 }
 
@@ -229,6 +258,7 @@ async function buildSourceProof(input: {
   printed_nominal_sources_by_graph_id: Parameters<
     typeof buildReferenceGraphSourceProof
   >[0]["printed_nominal_sources_by_graph_id"]
+  immutable_source_analysis_by_graph_id?: Readonly<Record<string, ReferenceGraphImmutableSourceAnalysis>>
 }): Promise<ReferenceGraphSourceProof> {
   try {
     return await buildReferenceGraphSourceProof({
@@ -237,6 +267,7 @@ async function buildSourceProof(input: {
       process_runner: input.services.process_runner,
       signal: input.signal,
       printed_nominal_sources_by_graph_id: input.printed_nominal_sources_by_graph_id,
+      immutable_source_analysis_by_graph_id: input.immutable_source_analysis_by_graph_id,
     })
   } catch (error) {
     input.signal.throwIfAborted()
@@ -247,6 +278,37 @@ async function buildSourceProof(input: {
         stage_id: "find_reference_graphs",
         operation: "verify_reference_axis",
         hint: "Install and verify pdftoppm, pdftotext, and tesseract with English OCR data in the server runtime. This is an infrastructure failure, not an agent artifact rejection.",
+        retryable: false,
+      },
+      { cause: error },
+    )
+  }
+}
+
+async function buildPreflight(input: {
+  graph: Parameters<typeof analyzeReferenceGraphPreflight>[0]["graph"]
+  source_pdf_sha256: string
+  datasheet_path: string
+  services: ModelPipelineServices
+  signal: AbortSignal
+}) {
+  try {
+    return await analyzeReferenceGraphPreflight({
+      graph: input.graph,
+      source_pdf_sha256: input.source_pdf_sha256,
+      datasheet_path: input.datasheet_path,
+      process_runner: input.services.process_runner,
+      signal: input.signal,
+    })
+  } catch (error) {
+    input.signal.throwIfAborted()
+    throw new PipelineError(
+      {
+        code: "reference_axis_infrastructure_failed",
+        message: `Reference graph preflight could not run: ${error instanceof Error ? error.message : String(error)}`,
+        stage_id: "create_comparison_graphs",
+        operation: "preflight_reference_axis",
+        hint: "Install and verify pdftoppm, pdftotext, and tesseract with English OCR data in the server runtime. Preflight failures are infrastructure failures, not agent artifact rejections.",
         retryable: false,
       },
       { cause: error },
@@ -291,7 +353,9 @@ export async function findReferenceGraphs(input: {
           { source: join(context.model_dir, "AGENTS.md") },
           { source: datasheet_path, destination: "datasheet.pdf" },
           { source: join(context.model_dir, "model-interface.json") },
-          { source: join(context.model_dir, "application-fixture-contract.json") },
+          {
+            source: join(context.model_dir, "application-fixture-contract.json"),
+          },
           { source: time_graph_hints_path },
         ],
       }),
@@ -422,9 +486,23 @@ export async function digitizeReferenceGraphs(input: {
       graph_signal.throwIfAborted()
       const seed_path = join(attempt_dir, `comparison-seed-${found_graph.graph_id}.json`)
       const reference_image_path = join(attempt_dir, "evidence", "figures", `${found_graph.graph_id}.png`)
-      await writeJson(seed_path, found_graph)
       const graphLogOutput = (stream: JobLogStream, message: string) =>
         logOutput(stream, `[reference graph ${found_graph.graph_id}] ${message}`)
+      const graph_debug_dir = join(debug_dir, "reference-observer", found_graph.graph_id)
+      const preflight_path = join(graph_debug_dir, "preflight.json")
+      const preflight_started_at = Date.now()
+      await graphLogOutput("system", "Running deterministic source calibration preflight.\n")
+      const preflight = await buildPreflight({
+        graph: found_graph,
+        source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
+        datasheet_path,
+        services,
+        signal: graph_signal,
+      })
+      const preflight_duration_ms = Date.now() - preflight_started_at
+      graph_signal.throwIfAborted()
+      await mkdir(graph_debug_dir, { recursive: true })
+      await Promise.all([writeJson(seed_path, found_graph), writeJson(preflight_path, preflight.preflight)])
       const graph_observer = await runAgentArtifactStage<{
         graph: ReferenceGraphObservation["graphs"][number]
         source_proof: ReferenceGraphSourceProof
@@ -443,10 +521,19 @@ export async function digitizeReferenceGraphs(input: {
               { source: join(context.model_dir, "AGENTS.md") },
               { source: datasheet_path, destination: "datasheet.pdf" },
               { source: join(context.model_dir, "model-interface.json") },
-              { source: join(context.model_dir, "application-fixture-contract.json") },
+              {
+                source: join(context.model_dir, "application-fixture-contract.json"),
+              },
               { source: time_graph_hints_path },
               { source: seed_path, destination: "model-reference-graph.json" },
-              { source: reference_image_path, destination: "reference-graph.png" },
+              {
+                source: reference_image_path,
+                destination: "reference-graph.png",
+              },
+              {
+                source: preflight_path,
+                destination: "reference-graph-preflight.json",
+              },
             ],
           }),
         build_prompt: (feedback) =>
@@ -454,7 +541,7 @@ export async function digitizeReferenceGraphs(input: {
         heartbeat_paths: (workspace) => [join(workspace, "model-reference-graph.json")],
         on_output: graphLogOutput,
         rejection_debug: {
-          debug_dir: join(debug_dir, "reference-observer", found_graph.graph_id),
+          debug_dir: graph_debug_dir,
           files: ["model-reference-graph.json"],
         },
         validate: async (workspace) => {
@@ -483,23 +570,11 @@ export async function digitizeReferenceGraphs(input: {
             application_fixture,
             phase: "comparison",
           })
-          const found_state = discoveryOnlyObservation({
-            version: 1,
+          assertComparisonGraphPreservesDiscovery({
             source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
-            reviewed_hints: [],
-            graphs: [found_graph],
+            found_graph,
+            candidate_graph: graph,
           })
-          const candidate_state = discoveryOnlyObservation({
-            version: 1,
-            source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
-            reviewed_hints: [],
-            graphs: [graph],
-          })
-          if (JSON.stringify(found_state) !== JSON.stringify(candidate_state)) {
-            throw new Error(
-              `Create Comparison Graphs must preserve every discovery field of ${found_graph.graph_id}; only electrical_binding and channels may be added`,
-            )
-          }
           const observation: ReferenceGraphObservation = {
             version: 1,
             source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
@@ -525,8 +600,15 @@ export async function digitizeReferenceGraphs(input: {
             services,
             signal: graph_signal,
             printed_nominal_sources_by_graph_id,
+            immutable_source_analysis_by_graph_id: {
+              [found_graph.graph_id]: preflight.source_analysis,
+            },
           })
-          assertReferenceGraphObservationVerified({ observation, source_proof, pixel_rejection })
+          assertReferenceGraphObservationVerified({
+            observation,
+            source_proof,
+            pixel_rejection,
+          })
           return { graph, source_proof }
         },
         promote: async () => undefined,
@@ -537,6 +619,7 @@ export async function digitizeReferenceGraphs(input: {
         source_proof: graph_observer.value.source_proof,
         attempts: graph_observer.attempts,
         agent_duration_ms: graph_observer.agent_duration_ms,
+        preflight_duration_ms,
       }
     },
   })
@@ -544,8 +627,16 @@ export async function digitizeReferenceGraphs(input: {
   const completed_graphs = new Map(graph_results.map((result) => [result.graph_id, result.graph]))
   const proof_results = graph_results.flatMap((result) => result.source_proof.results)
   const observer_attempts = graph_results.reduce((sum, result) => sum + result.attempts, 0)
+  const reference_graph_first_attempt_successes = graph_results.filter(
+    ({ attempts }) => attempts === 1,
+  ).length
+  const reference_graph_retry_count = observer_attempts - graph_results.length
   const reference_graph_agent_duration_ms = graph_results.reduce(
     (sum, result) => sum + result.agent_duration_ms,
+    0,
+  )
+  const reference_graph_preflight_duration_ms = graph_results.reduce(
+    (sum, result) => sum + result.preflight_duration_ms,
     0,
   )
 
@@ -578,6 +669,9 @@ export async function digitizeReferenceGraphs(input: {
     observer_attempts,
     reference_graph_count: found_graphs.length,
     reference_graph_concurrency: Math.min(found_graphs.length, MAX_CONCURRENT_REFERENCE_GRAPH_DIGITIZATIONS),
+    reference_graph_first_attempt_successes,
+    reference_graph_retry_count,
     reference_graph_agent_duration_ms,
+    reference_graph_preflight_duration_ms,
   }
 }

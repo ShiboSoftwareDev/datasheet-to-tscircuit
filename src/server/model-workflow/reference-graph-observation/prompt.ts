@@ -256,8 +256,19 @@ export function buildSingleComparisonReferenceGraphObserverPrompt(
   return `Create comparison channels for exactly one immutable discovered graph: ${graph_id}.
 
 model-reference-graph.json contains that one graph object, not the full observation.
-Inspect it and the exact source crop, then add electrical_binding and channels in
-place. Write only model-reference-graph.json and keep it as one graph object.
+Read reference-graph-preflight.json before inspecting the exact source crop. It
+contains bounded server-derived facts from the immutable PDF: figure identity,
+candidate grid lines, printed division scales and source units-per-pixel. Use
+listed grid lines for axis-anchor pixels, preferring recommended_anchor_pixels
+when present. Copy the matching required_anchor_value_span_candidates value
+exactly; it is the server-computed product of source units-per-pixel and that
+anchor pair. Do not estimate it from rounded grid positions. When multiple voltage-scale
+candidates are listed, use the printed control nearest the channel being traced.
+The preflight is guidance only; the server will still verify the submitted crop,
+axes, and pixels independently.
+
+Inspect the graph and exact source crop, then add electrical_binding and channels
+in place. Write only model-reference-graph.json and keep it as one graph object.
 Do not edit any discovery field. The server combines independently completed
 graphs; you are not responsible for any other figure.
 
