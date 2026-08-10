@@ -18,7 +18,7 @@ import { restorePersistedJobs } from "@/server/job-restorer"
 import { ensureJobTscircuitRuntimeConfig } from "@/server/job-scaffold"
 import { JobStore } from "@/server/job-store"
 import { ModelRunStore } from "@/server/model-run-store"
-import { runModel } from "@/server/model-workflow"
+import { MODEL_PIPELINE, runModel } from "@/server/model-workflow"
 import {
   createModelTrainingCheckReceipt,
   MODEL_TRAINING_CHECK_RECEIPT_FILE,
@@ -726,17 +726,9 @@ testWithProductionSimulation(
       x_axis_label: "time",
       x_axis_unit: "s",
     })
-    expect(Object.values(run!.pipeline!.stage_results).map(({ status }) => status)).toEqual([
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-      "completed",
-    ])
+    expect(Object.values(run!.pipeline!.stage_results).map(({ status }) => status)).toEqual(
+      Array(MODEL_PIPELINE.stages.length).fill("completed"),
+    )
     expect(agent_calls).toEqual([
       "Independent datasheet graph discovery",
       "Digitize reference graph transient_gain",

@@ -7,6 +7,7 @@ import { ModelRunStore } from "@/server/model-run-store"
 import { ModelStrategyRegistry } from "@/server/modeling"
 import {
   waitForComponentBeforePublication,
+  waitForModelEvidenceBeforeComparison,
   waitForComponentStage,
 } from "@/server/model-workflow/stages/wait-for-component"
 
@@ -169,4 +170,87 @@ test("an early component-ready milestone cannot race the final component publica
   const run = model_run_store.getModelRun("publishing_component_model")
   expect(run?.status).toBe("waiting_for_component")
   expect(run?.is_complete).toBe(false)
+})
+
+test("a Local model-evidence barrier refreshes an externally advancing job", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "model-evidence-external-refresh-"))
+  temporary_directories.push(job_dir)
+  const model_dir = join(job_dir, "spice")
+  const job_store = new JobStore()
+  const model_run_store = new ModelRunStore()
+  job_store.createJob({ job_id: "external_evidence", job_dir, file_name: "external.pdf" })
+  job_store.updateJob("external_evidence", {
+    display_status: "agent_running",
+    is_complete: false,
+    has_errors: false,
+    pipelines: {
+      component_generation: {
+        pipeline_id: "component_generation",
+        status: "running",
+        sequence: 1,
+        started_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        stage_results: {},
+      },
+      typical_application: {
+        pipeline_id: "typical_application",
+        status: "running",
+        sequence: 1,
+        started_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        stage_results: {},
+      },
+    },
+  })
+  model_run_store.createModelRun({
+    model_run_id: "external_evidence_model",
+    job_id: "external_evidence",
+    model_dir,
+    effort_multiplier: 1,
+  })
+
+  let refresh_count = 0
+  const wait_promise = waitForModelEvidenceBeforeComparison({
+    job_id: "external_evidence",
+    model_run_id: "external_evidence_model",
+    job_store,
+    model_run_store,
+    signal: new AbortController().signal,
+    refresh_interval_ms: 1,
+    refresh_job: async () => {
+      refresh_count += 1
+      if (refresh_count < 2) return
+      const timestamp = new Date().toISOString()
+      job_store.updateJob("external_evidence", {
+        evidence_available: true,
+        pipelines: {
+          component_generation: {
+            pipeline_id: "component_generation",
+            status: "running",
+            sequence: 1,
+            started_at: timestamp,
+            updated_at: timestamp,
+            stage_results: {},
+          },
+          typical_application: {
+            pipeline_id: "typical_application",
+            status: "running",
+            sequence: 2,
+            started_at: timestamp,
+            updated_at: timestamp,
+            stage_results: {
+              extract_application_evidence: {
+                stage_id: "extract_application_evidence",
+                status: "completed",
+                debug_ref: "runs/test/extract_application_evidence",
+              },
+            },
+          },
+        },
+      })
+    },
+  })
+
+  await wait_promise
+  expect(refresh_count).toBe(2)
 })

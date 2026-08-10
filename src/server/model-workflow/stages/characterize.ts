@@ -1,5 +1,5 @@
 import { join } from "node:path"
-import { prepareReferenceGraphInputs } from "../../modeling"
+import { prepareReferenceDiscoveryInputs } from "../../modeling"
 import {
   assertHasEligibleTimeDomainGraph,
   assertObserverFoundEligibleTimeDomainGraph,
@@ -29,12 +29,12 @@ export const characterizeStage = defineModelStage({
       phase: "characterizing",
       message: "Loading committed datasheet evidence for reference discovery",
     })
-    const prepared = await prepareReferenceGraphInputs({
+    const prepared = await prepareReferenceDiscoveryInputs({
       job_dir: context.job_dir,
       model_dir: context.model_dir,
       invocation_id: context.invocation_id,
     })
-    const { model_interface, application_fixture, attempt_dir } = prepared
+    const { attempt_dir } = prepared
 
     updateModelProgress({
       store: services.model_run_store,
@@ -48,8 +48,6 @@ export const characterizeStage = defineModelStage({
       attempt_dir,
       debug_dir,
       signal,
-      model_interface,
-      application_fixture,
     })
 
     const references = foundObservedGraphs(inventory.observation)
@@ -78,25 +76,10 @@ export const characterizeStage = defineModelStage({
       output: {
         found_reference_ids: references.map(({ graph_id }) => graph_id),
         evidence_dir,
-        model_interface_path: prepared.interface_path,
-        application_fixture_path: prepared.application_fixture_path,
-        application_fixture_sha256: application_fixture.contract_sha256,
         time_graph_hints_path: inventory.time_graph_hints_path,
         reference_observation_path,
       },
       artifacts: [
-        await modelArtifact({
-          id: "model_interface",
-          path: prepared.interface_path,
-          media_type: "application/json",
-          role: "model_contract",
-        }),
-        await modelArtifact({
-          id: "application_fixture_contract",
-          path: join(attempt_dir, "application-fixture-contract.json"),
-          media_type: "application/json",
-          role: "model_contract",
-        }),
         await modelArtifact({
           id: "time_graph_hints",
           path: inventory.time_graph_hints_path,
@@ -114,7 +97,6 @@ export const characterizeStage = defineModelStage({
         agent_attempts: inventory.observer_attempts,
         reference_observer_attempts: inventory.observer_attempts,
         found_references: references.length,
-        application_fixture_documented: application_fixture.availability === "documented" ? 1 : 0,
       },
     }
   },

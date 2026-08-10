@@ -1,27 +1,24 @@
 import { join } from "node:path"
-import { validateApplication } from "../component-validation"
-import { appendJobLog, componentArtifact } from "../stage-helpers"
+import { readCircuitBuildRecord, validateBuiltApplication } from "../component-validation"
+import { componentArtifact } from "../stage-helpers"
 import { defineApplicationStage } from "./stage-factory"
 
 export const validateApplicationStage = defineApplicationStage({
   id: "validate_application",
-  depends_on: ["generate_application"],
-  async execute({ context, services, dependency_outputs, signal }) {
-    const result = await validateApplication({
+  depends_on: ["build_application"],
+  async execute({ context, services, dependency_outputs }) {
+    const result = await validateBuiltApplication({
       job_id: context.job_id,
       job_dir: context.job_dir,
       job_store: services.job_store,
-      tsci_bin: services.tsci_bin,
-      process_runner: services.process_runner,
-      signal,
-      on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
+      build: await readCircuitBuildRecord(dependency_outputs.build_application.result_path),
     })
     const result_path = join(context.job_dir, "application-validation.json")
     return {
       status: "completed",
       output: {
         result_path,
-        available: dependency_outputs.generate_application.available,
+        available: dependency_outputs.build_application.available,
         passed: result.passed,
         errors: result.errors,
       },
@@ -34,7 +31,7 @@ export const validateApplicationStage = defineApplicationStage({
         }),
       ],
       metrics: {
-        application_available: dependency_outputs.generate_application.available,
+        application_available: dependency_outputs.build_application.available,
         validation_errors: result.errors.length,
       },
     }

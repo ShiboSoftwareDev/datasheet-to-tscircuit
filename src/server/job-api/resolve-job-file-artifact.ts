@@ -1,6 +1,10 @@
 import { constants } from "node:fs"
 import { lstat, open, realpath } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import {
+  applicationEvidenceFilePath,
+  readCommittedApplicationEvidenceSnapshot,
+} from "../component-workflow/application-evidence-commit"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import { readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
 
@@ -12,6 +16,7 @@ interface JobFileMetadata {
 interface StaticJobFile extends JobFileMetadata {
   relative_path: string
   requires_committed_evidence?: true
+  requires_committed_application_evidence?: true
 }
 
 type JobFileResolution =
@@ -59,7 +64,7 @@ const static_job_files = {
     relative_path: "typical-application-plan.json",
     download_name: "typical-application-plan.json",
     content_type: "application/json; charset=utf-8",
-    requires_committed_evidence: true,
+    requires_committed_application_evidence: true,
   },
   land_pattern: {
     relative_path: "visual-reference/land-pattern.png",
@@ -71,7 +76,7 @@ const static_job_files = {
     relative_path: "visual-reference/typical-application.png",
     download_name: "typical-application.png",
     content_type: "image/png",
-    requires_committed_evidence: true,
+    requires_committed_application_evidence: true,
   },
 } as const satisfies Record<string, StaticJobFile>
 
@@ -347,6 +352,25 @@ export async function resolveJobFileArtifact(
               },
             }
           : {}),
+      }
+    }
+    if (
+      "requires_committed_application_evidence" in static_file &&
+      static_file.requires_committed_application_evidence
+    ) {
+      const committed_application_evidence = await readCommittedApplicationEvidenceSnapshot(job_dir)
+      const committed_legacy_evidence = committed_application_evidence
+        ? undefined
+        : await readCommittedEvidenceSnapshot(job_dir)
+      const artifact_bytes =
+        committed_application_evidence?.files.get(applicationEvidenceFilePath(static_file.relative_path)) ??
+        committed_legacy_evidence?.files.get(static_file.relative_path)
+      if (!artifact_bytes) return { status: "missing", download_name: descriptor.download_name }
+      return {
+        status: "ready",
+        artifact_bytes,
+        download_name: descriptor.download_name,
+        content_type: descriptor.content_type,
       }
     }
     if ("requires_committed_evidence" in static_file && static_file.requires_committed_evidence) {

@@ -2,6 +2,10 @@ import { createHash } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { parseComponentEvidence } from "../component-evidence"
+import {
+  applicationEvidenceFilePath,
+  readCommittedApplicationEvidenceSnapshot,
+} from "../component-workflow/application-evidence-commit"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import {
   applicationTargetIdentityFromEvidence,
@@ -33,12 +37,32 @@ function sha256Bytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex")
 }
 
-/**
- * Materializes only the committed evidence inputs required by Find Reference
- * Graphs and its downstream model-characterization work. It deliberately does
- * not read or wait for a generated component artifact.
- */
-export async function prepareReferenceGraphInputs(input: {
+/** Materializes the uploaded PDF input required by Find Reference Graphs. */
+export async function prepareReferenceDiscoveryInputs(input: {
+  job_dir: string
+  model_dir: string
+  invocation_id: string
+}): Promise<{
+  attempt_dir: string
+  datasheet_path: string
+}> {
+  const datasheet_bytes = await readFile(join(input.job_dir, "datasheet.pdf"))
+  if (datasheet_bytes.byteLength === 0) throw new Error("Uploaded datasheet.pdf is empty")
+  const attempt_dir = join(input.model_dir, "attempts", input.invocation_id)
+  const datasheet_path = join(input.model_dir, "datasheet.pdf")
+  await Promise.all([
+    mkdir(input.model_dir, { recursive: true }),
+    mkdir(join(attempt_dir, "evidence"), { recursive: true }),
+  ])
+  await Promise.all([
+    Bun.write(datasheet_path, datasheet_bytes),
+    Bun.write(join(input.model_dir, "AGENTS.md"), MODEL_WORKSPACE_GUIDE),
+  ])
+  return { attempt_dir, datasheet_path }
+}
+
+/** Captures the committed semantic evidence first required by comparison design. */
+export async function prepareModelEvidenceInputs(input: {
   job_dir: string
   model_dir: string
   invocation_id: string
@@ -49,10 +73,18 @@ export async function prepareReferenceGraphInputs(input: {
   interface_path: string
   application_fixture_path: string
 }> {
-  const evidence_snapshot = await readCommittedEvidenceSnapshot(input.job_dir)
+  const [evidence_snapshot, application_evidence_snapshot] = await Promise.all([
+    readCommittedEvidenceSnapshot(input.job_dir),
+    readCommittedApplicationEvidenceSnapshot(input.job_dir),
+  ])
   if (!evidence_snapshot) {
     throw new Error(
       "Model workspace requires approved evidence, but evidence-commit.json has not been published",
+    )
+  }
+  if (!application_evidence_snapshot) {
+    throw new Error(
+      "Model workspace requires approved application evidence, but application-evidence-commit.json has not been published",
     )
   }
   if (evidence_snapshot.version === 1) {
@@ -61,7 +93,9 @@ export async function prepareReferenceGraphInputs(input: {
     )
   }
   const evidence_bytes = evidence_snapshot.files.get("component-evidence.json")
-  const application_plan_bytes = evidence_snapshot.files.get("typical-application-plan.json")
+  const application_plan_bytes = application_evidence_snapshot.files.get(
+    applicationEvidenceFilePath("typical-application-plan.json"),
+  )
   if (!evidence_bytes || !application_plan_bytes) {
     throw new Error("Committed evidence snapshot is missing a required model-workspace input")
   }
@@ -73,6 +107,15 @@ export async function prepareReferenceGraphInputs(input: {
   }
   const evidence = parseComponentEvidence(evidence_value)
   const datasheet_bytes = evidence_snapshot.source_pdf
+  const discovery_datasheet_bytes = await readFile(join(input.model_dir, "datasheet.pdf"))
+  if (
+    sha256Bytes(datasheet_bytes) !== sha256Bytes(application_evidence_snapshot.source_pdf) ||
+    sha256Bytes(datasheet_bytes) !== sha256Bytes(discovery_datasheet_bytes)
+  ) {
+    throw new Error(
+      "Component, application, and reference-discovery inputs must use identical datasheet bytes",
+    )
+  }
   let application_plan_value: unknown
   try {
     application_plan_value = JSON.parse(
@@ -100,13 +143,11 @@ export async function prepareReferenceGraphInputs(input: {
   const application_fixture_text = `${JSON.stringify(application_fixture, null, 2)}\n`
   await mkdir(input.model_dir, { recursive: true })
   await Promise.all([
-    Bun.write(join(input.model_dir, "datasheet.pdf"), datasheet_bytes),
     Bun.write(join(input.model_dir, "component-evidence.json"), evidence_bytes),
     Bun.write(join(input.model_dir, "typical-application-plan.json"), application_plan_bytes),
     Bun.write(workspace_application_fixture_path, application_fixture_text),
     Bun.write(interface_path, `${JSON.stringify(model_interface, null, 2)}\n`),
     Bun.write(join(input.model_dir, "AGENTS.md"), MODEL_WORKSPACE_GUIDE),
-    mkdir(join(attempt_dir, "evidence"), { recursive: true }),
   ])
   const application_fixture_path = join(attempt_dir, "application-fixture-contract.json")
   await Bun.write(application_fixture_path, application_fixture_text)

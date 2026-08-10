@@ -2,7 +2,7 @@ import { afterEach, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
-import { runJob } from "@/server/component-workflow"
+import { APPLICATION_PIPELINE, runJob } from "@/server/component-workflow"
 import type { AgentClient } from "@/server/infrastructure/agent"
 import {
   ProcessError,
@@ -11,6 +11,7 @@ import {
   type ProcessRunResult,
 } from "@/server/infrastructure/process"
 import { JobStore } from "@/server/job-store"
+import { runPipeline } from "@/server/pipeline"
 
 const temporary_directories: string[] = []
 setDefaultTimeout(20_000)
@@ -23,6 +24,49 @@ afterEach(async () => {
   await Promise.all(
     temporary_directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   )
+})
+
+test("typical-application evidence extraction runs without a component artifact", async () => {
+  const root = await mkdtemp(join(tmpdir(), "datasheet-application-evidence-independent-"))
+  temporary_directories.push(root)
+  const job_dir = join(root, "job")
+  const run_dir = join(job_dir, "runs", "typical_application", "independent")
+  await mkdir(run_dir, { recursive: true })
+  await Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.4\n% deterministic fixture\n")
+  const job_store = new JobStore()
+  job_store.createJob({ job_id: "application_evidence_only", job_dir, file_name: "generic-2.pdf" })
+  const calls: string[] = []
+  const result = await runPipeline({
+    definition: APPLICATION_PIPELINE,
+    run_id: "application_evidence_only",
+    workspace_dir: run_dir,
+    context: {
+      job_id: "application_evidence_only",
+      job_dir,
+      use_openai: false,
+      invocation_id: "independent",
+    },
+    services: {
+      job_store,
+      agent_client: deterministicAgent(calls),
+      process_runner: new FakeTscircuitRunner(),
+      tsci_bin: "fixture-tsci",
+    },
+    target: {
+      mode: "stage",
+      stage_id: "extract_application_evidence",
+      dependency_outputs: {},
+    },
+  })
+
+  expect(result.status).toBe("completed")
+  expect(result.stage_results.extract_application_evidence.status).toBe("completed")
+  expect(await Bun.file(join(job_dir, "application-evidence-commit.json")).exists()).toBe(true)
+  expect(await Bun.file(join(job_dir, "component.circuit.tsx")).exists()).toBe(false)
+  expect(calls).toEqual([
+    "Typical-application evidence extraction",
+    "Independent application connectivity verification",
+  ])
 })
 
 const text_source = {
@@ -150,7 +194,7 @@ const component_source = `export default function Generic2() {
 }
 `
 
-const application_source = `import Generic2 from "./index.circuit"
+const application_source = `import Generic2 from "./component.circuit"
 
 export default function InputBypass() {
   return (
@@ -328,11 +372,16 @@ function deterministicAgent(calls: string[]): AgentClient {
             join(input.workspace, "component-evidence.json"),
             `${JSON.stringify(component_evidence, null, 2)}\n`,
           ),
+          Bun.write(join(reference_dir, "land-pattern.png"), png_bytes),
+        ])
+      } else if (input.phase_label === "Typical-application evidence extraction") {
+        const reference_dir = join(input.workspace, "visual-reference")
+        await mkdir(reference_dir, { recursive: true })
+        await Promise.all([
           Bun.write(
             join(input.workspace, "typical-application-plan.json"),
             `${JSON.stringify(application_plan, null, 2)}\n`,
           ),
-          Bun.write(join(reference_dir, "land-pattern.png"), png_bytes),
           Bun.write(join(reference_dir, "typical-application.png"), png_bytes),
         ])
       } else if (input.phase_label === "Independent footprint geometry verification") {
@@ -469,33 +518,45 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
   const pipeline = job?.pipeline
   expect(pipeline).toBeDefined()
   expect(Object.keys(pipeline?.stage_results ?? {})).toEqual([
-    "prepare",
     "extract_evidence",
     "generate_component",
+    "build_component",
     "validate_component",
     "repair_component",
+    "publish_component",
   ])
   expect(Object.values(pipeline?.stage_results ?? {}).map(({ status }) => status)).toEqual(
-    Array(5).fill("completed"),
+    Array(6).fill("completed"),
   )
   const application_pipeline = job?.pipelines?.typical_application
   expect(Object.keys(application_pipeline?.stage_results ?? {})).toEqual([
-    "prepare_application",
+    "extract_application_evidence",
+    "wait_for_component",
     "generate_application",
+    "build_application",
     "validate_application",
     "repair_application",
-    "publish",
+    "publish_application",
   ])
   expect(Object.values(application_pipeline?.stage_results ?? {}).map(({ status }) => status)).toEqual(
-    Array(5).fill("completed"),
+    Array(7).fill("completed"),
   )
-  expect(agent_calls).toEqual([
-    "Datasheet evidence extraction",
-    "Independent footprint geometry verification",
-    "Independent application connectivity verification",
-    "Component source generation",
-    "Application source generation",
-  ])
+  expect([...agent_calls].sort()).toEqual(
+    [
+      "Datasheet evidence extraction",
+      "Independent footprint geometry verification",
+      "Component source generation",
+      "Typical-application evidence extraction",
+      "Independent application connectivity verification",
+      "Application source generation",
+    ].sort(),
+  )
+  expect(agent_calls.indexOf("Component source generation")).toBeLessThan(
+    agent_calls.indexOf("Application source generation"),
+  )
+  expect(Date.parse(application_pipeline?.started_at ?? "")).toBeLessThan(
+    Date.parse(pipeline?.stage_results.publish_component.completed_at ?? ""),
+  )
 
   const component_validation = JSON.parse(await readFile(join(job_dir, "component-validation.json"), "utf8"))
   const application_validation = JSON.parse(
@@ -528,14 +589,18 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
   const evidence_dir = join(job_dir, evidence_pointer.evidence_directory)
   expect(await Bun.file(join(evidence_dir, "visual-reference", "land-pattern.png")).exists()).toBe(true)
   expect(await Bun.file(join(evidence_dir, "visual-reference", "typical-application.png")).exists()).toBe(
-    true,
+    false,
   )
   expect(await Bun.file(join(evidence_dir, "footprint-geometry-verification.json")).json()).toMatchObject({
     version: 1,
     status: "verified",
   })
+  const application_pointer = (await Bun.file(join(job_dir, "application-evidence-commit.json")).json()) as {
+    evidence_directory: string
+  }
+  const application_evidence_dir = join(job_dir, application_pointer.evidence_directory)
   expect(
-    await Bun.file(join(evidence_dir, "application-connectivity-verification.json")).json(),
+    await Bun.file(join(application_evidence_dir, "application-connectivity-verification.json")).json(),
   ).toMatchObject({
     version: 1,
     status: "verified",
@@ -641,7 +706,7 @@ test("evidence correction repairs a retained agent-71-shaped candidate without r
   ).toHaveLength(1)
 })
 
-test("evidence correction catches incomplete U1 coverage before model preparation", async () => {
+test("application evidence correction catches an incomplete U1 graph before generation", async () => {
   const root = await mkdtemp(join(tmpdir(), "datasheet-component-pipeline-pin-coverage-"))
   temporary_directories.push(root)
   const job_dir = join(root, "job")
@@ -664,7 +729,7 @@ test("evidence correction catches incomplete U1 coverage before model preparatio
   let extraction_attempt = 0
   const correction_agent: AgentClient = {
     async run(input) {
-      if (input.phase_label !== "Datasheet evidence extraction") return base_agent.run(input)
+      if (input.phase_label !== "Typical-application evidence extraction") return base_agent.run(input)
       extraction_attempt += 1
       const result = await base_agent.run(input)
       if (extraction_attempt === 1) {
@@ -677,7 +742,7 @@ test("evidence correction catches incomplete U1 coverage before model preparatio
           `${JSON.stringify(incomplete_plan, null, 2)}\n`,
         )
       } else {
-        expect(input.prompt).toContain("Extracted application omits documented U1 pin 2 (RETURN)")
+        expect(input.prompt).toContain("Independent application connectivity does not match")
       }
       return result
     },
@@ -698,13 +763,14 @@ test("evidence correction catches incomplete U1 coverage before model preparatio
     display_status: "complete",
     validation: { evidence: "passed" },
   })
-  expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(2)
+  expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(1)
+  expect(agent_calls.filter((phase) => phase === "Typical-application evidence extraction")).toHaveLength(2)
   expect(
     agent_calls.filter((phase) => phase === "Independent application connectivity verification"),
   ).toHaveLength(1)
 })
 
-test("evidence correction reuses immutable reviewer observations across semantic repairs", async () => {
+test("application evidence correction reuses its immutable reviewer observation", async () => {
   const root = await mkdtemp(join(tmpdir(), "datasheet-component-pipeline-reviewer-reuse-"))
   temporary_directories.push(root)
   const job_dir = join(root, "job")
@@ -730,21 +796,10 @@ test("evidence correction reuses immutable reviewer observations across semantic
   let deleted_seeded_review = false
   const correction_agent: AgentClient = {
     async run(input) {
-      if (input.phase_label !== "Datasheet evidence extraction") return base_agent.run(input)
+      if (input.phase_label !== "Typical-application evidence extraction") return base_agent.run(input)
       extraction_attempt += 1
 
       if (extraction_attempt === 1) {
-        const result = await base_agent.run(input)
-        const invalid_evidence = await Bun.file(join(input.workspace, "component-evidence.json")).json()
-        Reflect.deleteProperty(invalid_evidence, "version")
-        await Bun.write(
-          join(input.workspace, "component-evidence.json"),
-          `${JSON.stringify(invalid_evidence, null, 2)}\n`,
-        )
-        return result
-      }
-
-      if (extraction_attempt === 2) {
         const result = await base_agent.run(input)
         const incomplete_plan = {
           ...application_plan,
@@ -804,7 +859,8 @@ test("evidence correction reuses immutable reviewer observations across semantic
     validation: { evidence: "passed" },
     pipeline: { pipeline_id: "component_generation", status: "completed" },
   })
-  expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(3)
+  expect(agent_calls.filter((phase) => phase === "Datasheet evidence extraction")).toHaveLength(1)
+  expect(agent_calls.filter((phase) => phase === "Typical-application evidence extraction")).toHaveLength(2)
   expect(agent_calls.filter((phase) => phase === "Independent footprint geometry verification")).toHaveLength(
     1,
   )
@@ -816,18 +872,14 @@ test("evidence correction reuses immutable reviewer observations across semantic
     .filter(({ stream }) => stream === "system")
     .map(({ message }) => message)
     .join("")
-  expect(system_logs).toContain("Reusing immutable footprint observation")
-  expect(system_logs).toContain("Reusing immutable application observation")
+  expect(system_logs).not.toContain("Reusing immutable footprint observation")
 
-  const evidence_pointer = (await Bun.file(join(job_dir, "evidence-commit.json")).json()) as {
+  const evidence_pointer = (await Bun.file(join(job_dir, "application-evidence-commit.json")).json()) as {
     evidence_directory: string
   }
   const evidence_dir = join(job_dir, evidence_pointer.evidence_directory)
   expect(await Bun.file(join(evidence_dir, "application-connectivity-review.json")).json()).toEqual(
     application_connectivity_review,
-  )
-  expect(await Bun.file(join(evidence_dir, "footprint-geometry-review.json")).json()).toEqual(
-    footprint_geometry_review,
   )
 })
 
@@ -884,18 +936,21 @@ test("component workflow preserves missing-tsci failures and never invokes sourc
     has_errors: true,
     pipeline: { status: "failed" },
   })
-  expect(job?.error_message).toContain("[validate_component/process_spawn_failed]")
-  expect(job?.pipeline?.stage_results.validate_component).toMatchObject({
+  expect(job?.error_message).toContain("[build_component/process_spawn_failed]")
+  expect(job?.pipeline?.stage_results.build_component).toMatchObject({
     status: "failed",
     error: { code: "process_spawn_failed", operation: "run_external_process" },
   })
   expect(job?.pipeline?.stage_results.repair_component.status).toBe("skipped")
-  expect(agent_calls).toEqual([
-    "Datasheet evidence extraction",
-    "Independent footprint geometry verification",
-    "Independent application connectivity verification",
-    "Component source generation",
-  ])
+  expect([...agent_calls].sort()).toEqual(
+    [
+      "Datasheet evidence extraction",
+      "Independent footprint geometry verification",
+      "Component source generation",
+      "Typical-application evidence extraction",
+      "Independent application connectivity verification",
+    ].sort(),
+  )
 })
 
 test("evidence extraction rejects an invalid server-rendered PNG before publication", async () => {
@@ -950,7 +1005,12 @@ test("evidence extraction rejects an invalid server-rendered PNG before publicat
   })
   expect(job_store.getJob("component_invalid_reference_png")?.evidence_available).toBeFalsy()
   expect(job_store.getJob("component_invalid_reference_png")?.validation?.evidence).toBe("failed")
-  expect(agent_calls).toEqual(Array(4).fill("Datasheet evidence extraction"))
+  expect([...agent_calls].sort()).toEqual(
+    [
+      ...Array(4).fill("Datasheet evidence extraction"),
+      ...Array(4).fill("Typical-application evidence extraction"),
+    ].sort(),
+  )
   expect(await Bun.file(join(job_dir, "component-evidence.json")).exists()).toBe(false)
   expect(await Bun.file(join(job_dir, "visual-reference")).exists()).toBe(false)
   expect(await Bun.file(join(job_dir, "evidence-commit.json")).exists()).toBe(false)

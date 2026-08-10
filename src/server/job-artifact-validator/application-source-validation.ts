@@ -22,7 +22,7 @@ interface LiteralJsxComponentProps {
   footprint?: string
 }
 
-const COMPONENT_MODULE_PATTERN = /^\.\/index\.circuit(?:\.tsx)?$/
+const COMPONENT_MODULE_PATTERN = /^\.\/component\.circuit(?:\.tsx)?$/
 
 function requiresGenericUnknownPassive(
   component: ApplicationConnectivityPlan["components"][number],
@@ -43,7 +43,7 @@ function getValidatedComponentInstantiationErrors(source_file: ts.SourceFile): s
     return default_import ? [default_import.text] : []
   })
   if (component_imports.length !== 1) {
-    return ["Typical application must have exactly one default import from ./index.circuit"]
+    return ["Typical application must have exactly one default import from ./component.circuit"]
   }
 
   const component_binding = component_imports[0] ?? ""
@@ -63,7 +63,7 @@ function getValidatedComponentInstantiationErrors(source_file: ts.SourceFile): s
   return component_instances === 1 && u1_instances === 1
     ? []
     : [
-        `Typical application must instantiate the default import ${component_binding} from ./index.circuit exactly once with literal name="U1"`,
+        `Typical application must instantiate the default import ${component_binding} from ./component.circuit exactly once with literal name="U1"`,
       ]
 }
 

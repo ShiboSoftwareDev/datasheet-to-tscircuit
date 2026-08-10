@@ -1,4 +1,4 @@
-import { lstat, mkdir, realpath } from "node:fs/promises"
+import { lstat, mkdir, realpath, rm } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import type { PublicPipelineSnapshot } from "@/shared/job-types"
 import type { LocalRunMode } from "@/shared/local-run"
@@ -11,6 +11,8 @@ import { loadPipelineTaskInputBundle } from "../server/pipeline"
 import {
   clonePipelineJob,
   createPipelineJobRun,
+  deriveApplicationInputBundle,
+  deriveSpiceInputBundle,
   type LocalRunProgressEvent,
   validateLocalInput,
 } from "../server/pipeline-local-run"
@@ -215,13 +217,39 @@ async function runLocalJob({
     modelRunStore: state.modelRunStore,
   })
   const retainedTask = snapshot?.stage_results[taskId]
-  if (!retainedTask) {
+  const sourceJob = state.jobStore.getJob(sourceJobId)
+  if (!sourceJob) throw new Error(`Job ${sourceJobId} was not found`)
+  const derivedModelRunId =
+    !retainedTask &&
+    mode === "pipeline" &&
+    registeredPipelineId === "spice_generation" &&
+    taskId === "find_reference_graphs"
+      ? crypto.randomUUID()
+      : undefined
+  const derivedInput =
+    !retainedTask &&
+    mode === "pipeline" &&
+    registeredPipelineId === "typical_application" &&
+    taskId === "extract_application_evidence"
+      ? await deriveApplicationInputBundle({
+          sourceJobId,
+          sourceJobDir: jobDir,
+          localRunsRoot: join(rootDir, ".runtime", "local"),
+          useOpenai: sourceJob.use_openai ?? false,
+          additionalInstructions: state.jobStore.getJobRetrySource(sourceJobId)?.additional_instructions,
+        })
+      : derivedModelRunId
+        ? await deriveSpiceInputBundle({
+            sourceJobId,
+            sourceJobDir: jobDir,
+            localRunsRoot: join(rootDir, ".runtime", "local"),
+            modelRunId: derivedModelRunId,
+            useOpenai: sourceJob.use_openai ?? false,
+            additionalInstructions: state.jobStore.getJobRetrySource(sourceJobId)?.additional_instructions,
+          })
+        : undefined
+  if (!retainedTask && !derivedInput) {
     throw new Error(`Job ${sourceJobId} has no retained input for ${pipelineId}/${taskId}`)
-  }
-  const inputPath = await resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
-  let bundle = await loadPipelineTaskInputBundle(inputPath)
-  if (bundle.envelope.pipeline_id !== registeredPipelineId || bundle.envelope.task_id !== taskId) {
-    throw new Error("Retained task input identity does not match the requested task")
   }
   const executionContext = {
     rootDir,
@@ -230,42 +258,75 @@ async function runLocalJob({
     jobStore: state.jobStore,
     modelRunStore: state.modelRunStore,
   }
-  let executionTargetJobId = sourceJobId
-  let executionKind: "in_place" | "clone" = "in_place"
-  if (referencedJobId) {
-    const clone = await clonePipelineJob({
-      context: executionContext,
-      sourceJobId,
-      bundle,
-    })
-    executionTargetJobId = clone.jobId
-    bundle = clone.bundle
-    executionKind = "clone"
-  }
-  if (repairMinutes !== undefined) {
-    bundle = {
-      ...bundle,
-      envelope: {
-        ...bundle.envelope,
-        execution_context: {
-          ...bundle.envelope.execution_context,
-          repair_budget_ms: Math.round(repairMinutes * 60_000),
-        },
-      },
+  let createdModelRun = false
+  let executionStarted = false
+  try {
+    let bundle
+    if (retainedTask) {
+      const inputPath = await resolveInputPath({ jobDir, debugRef: retainedTask.debug_ref })
+      bundle = await loadPipelineTaskInputBundle(inputPath)
+    } else {
+      if (!derivedInput) throw new Error("Application input derivation did not produce a bundle")
+      bundle = derivedInput.bundle
     }
+    if (bundle.envelope.pipeline_id !== registeredPipelineId || bundle.envelope.task_id !== taskId) {
+      throw new Error("Retained task input identity does not match the requested task")
+    }
+    let executionTargetJobId = sourceJobId
+    let executionKind: "in_place" | "clone" = "in_place"
+    if (referencedJobId) {
+      const clone = await clonePipelineJob({
+        context: executionContext,
+        sourceJobId,
+        bundle,
+      })
+      executionTargetJobId = clone.jobId
+      bundle = clone.bundle
+      executionKind = "clone"
+    } else if (derivedModelRunId) {
+      state.modelRunStore.createModelRun({
+        model_run_id: derivedModelRunId,
+        job_id: sourceJobId,
+        model_dir: join(jobDir, "spice"),
+        use_openai: sourceJob.use_openai,
+        effort_multiplier: 1,
+      })
+      createdModelRun = true
+    }
+    if (repairMinutes !== undefined) {
+      bundle = {
+        ...bundle,
+        envelope: {
+          ...bundle.envelope,
+          execution_context: {
+            ...bundle.envelope.execution_context,
+            repair_budget_ms: Math.round(repairMinutes * 60_000),
+          },
+        },
+      }
+    }
+    const prepared = await createPipelineJobRun({
+      context: executionContext,
+      bundle,
+      targetJobId: executionTargetJobId,
+      sourceJobId,
+      executionKind,
+      mode,
+      taskId: mode === "pipeline" ? undefined : taskId,
+      signal: options.signal,
+      on_progress: options.on_progress,
+    })
+    executionStarted = true
+    return await prepared.execute()
+  } catch (error) {
+    if (createdModelRun && !executionStarted) {
+      state.modelRunStore.deleteModelRunForJob(sourceJobId)
+      await rm(join(jobDir, "spice"), { recursive: true, force: true }).catch(() => undefined)
+    }
+    throw error
+  } finally {
+    await derivedInput?.cleanup()
   }
-  const prepared = await createPipelineJobRun({
-    context: executionContext,
-    bundle,
-    targetJobId: executionTargetJobId,
-    sourceJobId,
-    executionKind,
-    mode,
-    taskId: mode === "pipeline" ? undefined : taskId,
-    signal: options.signal,
-    on_progress: options.on_progress,
-  })
-  return prepared.execute()
 }
 
 async function runReferencedInput(input: {

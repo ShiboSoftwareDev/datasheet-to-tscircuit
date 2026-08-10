@@ -5,8 +5,8 @@ import { repositoryRoot } from "../paths/repository-paths"
 import { getPinnedTscircuitVersion } from "../runtime-versions"
 import { getRuntimeSourceCommit } from "../runtime-source-commit"
 import { isRecord } from "./application-plan"
-import { applicationPrompt, componentPrompt, evidencePrompt } from "./prompts"
-import { COMPONENT_EVIDENCE_GUIDE_SHA256 } from "./evidence-schema"
+import { applicationEvidencePrompt, applicationPrompt, componentPrompt, evidencePrompt } from "./prompts"
+import { APPLICATION_EVIDENCE_GUIDE_SHA256, COMPONENT_EVIDENCE_GUIDE_SHA256 } from "./evidence-schema"
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex")
@@ -72,7 +72,9 @@ export async function collectJobProvenance(input: {
   return {
     source_commit,
     workflow_source_sha256,
-    evidence_contract_sha256: COMPONENT_EVIDENCE_GUIDE_SHA256,
+    evidence_contract_sha256: sha256(
+      `${COMPONENT_EVIDENCE_GUIDE_SHA256}:${APPLICATION_EVIDENCE_GUIDE_SHA256}`,
+    ),
     bun_version: Bun.version,
     tscircuit_version,
     tsci_agent_version,
@@ -84,7 +86,9 @@ export async function collectJobProvenance(input: {
       evidence: sha256(evidencePrompt({ additional_instructions: input.additional_instructions })),
       component_generation: sha256(componentPrompt({})),
       typical_application: sha256(
-        applicationPrompt({
+        `${applicationEvidencePrompt({
+          additional_instructions: input.additional_instructions,
+        })}\n${applicationPrompt({
           plan: {
             version: 4,
             availability: "documented",
@@ -95,7 +99,7 @@ export async function collectJobProvenance(input: {
             components: [],
             connections: [],
           },
-        }),
+        })}`,
       ),
     },
   }

@@ -11,15 +11,33 @@ import { retainPipelineTaskInputFiles } from "@/server/pipeline"
 import type { LocalRunDetail, LocalRunSummary } from "@/shared/local-run"
 import type { PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
 
-async function createPrepareInput(rootDir: string): Promise<string> {
+async function createRepairInput(rootDir: string): Promise<string> {
   const jobId = "local-api-job"
   const jobDir = join(rootDir, ".runtime", "jobs", jobId)
-  const debugRef = "runs/component_generation/original/.pipeline/stages/01-prepare"
+  const debugRef = "runs/component_generation/original/.pipeline/stages/05-repair_component"
   const debugDir = join(jobDir, debugRef)
   await mkdir(debugDir, { recursive: true })
   await writeFile(join(jobDir, "datasheet.pdf"), "%PDF-1.4\nLocal API fixture\n%%EOF\n")
   const store = new JobStore()
   store.createJob({ job_id: jobId, job_dir: jobDir, file_name: "local-api.pdf" })
+  await Promise.all([
+    writeFile(join(jobDir, "index.circuit.tsx"), "export default () => null\n"),
+    writeFile(
+      join(jobDir, "component-validation.json"),
+      `${JSON.stringify({
+        version: 1,
+        passed: true,
+        errors: [],
+        circuit_json: [
+          {
+            type: "source_component",
+            source_component_id: "source_component_u1",
+            name: "U1",
+          },
+        ],
+      })}\n`,
+    ),
+  ])
   store.updateJob(jobId, {
     display_status: "complete",
     is_complete: true,
@@ -30,7 +48,11 @@ async function createPrepareInput(rootDir: string): Promise<string> {
       started_at: "2026-08-05T08:00:00.000Z",
       updated_at: "2026-08-05T08:00:01.000Z",
       stage_results: {
-        prepare: { stage_id: "prepare", status: "completed", debug_ref: debugRef },
+        repair_component: {
+          stage_id: "repair_component",
+          status: "completed",
+          debug_ref: debugRef,
+        },
       },
     },
   })
@@ -44,7 +66,7 @@ async function createPrepareInput(rootDir: string): Promise<string> {
     version: 2,
     kind: "pipeline_task_input",
     pipeline_id: "component_generation",
-    task_id: "prepare",
+    task_id: "repair_component",
     run_id: "source-run",
     execution_context: {
       job_id: jobId,
@@ -52,9 +74,15 @@ async function createPrepareInput(rootDir: string): Promise<string> {
       use_openai: false,
       invocation_id: "source-invocation",
     },
-    depends_on: [],
-    dependency_statuses: {},
-    dependency_outputs: {},
+    depends_on: ["validate_component"],
+    dependency_statuses: { validate_component: "completed" },
+    dependency_outputs: {
+      validate_component: {
+        result_path: join(jobDir, "component-validation.json"),
+        passed: true,
+        errors: [],
+      },
+    },
     input_files: inputFiles,
   }
   const inputPath = join(debugDir, "input.json")
@@ -88,7 +116,7 @@ async function waitForLocalCompletion(handler: LocalHandler, localRunId: string)
 test("the server runs and reruns Local tasks in their selected regular job", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-api-"))
   try {
-    await createPrepareInput(rootDir)
+    await createRepairInput(rootDir)
 
     const jobStore = new JobStore()
     const modelRunStore = new ModelRunStore()
@@ -116,7 +144,7 @@ test("the server runs and reruns Local tasks in their selected regular job", asy
           job_id: "local-api-job",
           pipeline_id: "component_generation",
           mode: "stage",
-          stage_id: "prepare",
+          stage_id: "repair_component",
         }),
       }),
     )
@@ -194,7 +222,7 @@ test("the server runs and reruns Local tasks in their selected regular job", asy
 test("an already-running server imports a regular job created by a separate CLI process", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-cli-sync-"))
   try {
-    const inputPath = await createPrepareInput(rootDir)
+    const inputPath = await createRepairInput(rootDir)
     const jobStore = new JobStore()
     const modelRunStore = new ModelRunStore()
     await restorePersistedJobs({
@@ -244,7 +272,7 @@ test("an already-running server imports a regular job created by a separate CLI 
 test("Local records whose target job was deleted are omitted without checkpoint refresh", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-deleted-target-"))
   try {
-    const inputPath = await createPrepareInput(rootDir)
+    const inputPath = await createRepairInput(rootDir)
     const cliRun = (await runDebugCli([
       "task",
       "run",
@@ -289,7 +317,7 @@ test("Local records whose target job was deleted are omitted without checkpoint 
 test("the server reconciles an abandoned CLI execution instead of showing it as running forever", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "datasheet-local-interrupted-"))
   try {
-    await createPrepareInput(rootDir)
+    await createRepairInput(rootDir)
     const completed = (await runDebugCli([
       "local",
       "run",
@@ -297,7 +325,7 @@ test("the server reconciles an abandoned CLI execution instead of showing it as 
       "--pipeline",
       "component_generation",
       "--task",
-      "prepare",
+      "repair_component",
       "--root",
       rootDir,
     ])) as LocalRunSummary
@@ -364,7 +392,7 @@ test("the server reconciles an abandoned CLI execution instead of showing it as 
 test("regular-job Local records rebase and remain runnable after the runtime root is mounted elsewhere", async () => {
   const sourceRoot = await mkdtemp(join(tmpdir(), "datasheet-local-source-"))
   try {
-    await createPrepareInput(sourceRoot)
+    await createRepairInput(sourceRoot)
     const sourceJobStore = new JobStore()
     const sourceModelRunStore = new ModelRunStore()
     await restorePersistedJobs({
@@ -390,7 +418,7 @@ test("regular-job Local records rebase and remain runnable after the runtime roo
           job_id: "local-api-job",
           pipeline_id: "component_generation",
           mode: "stage",
-          stage_id: "prepare",
+          stage_id: "repair_component",
         }),
       }),
     )

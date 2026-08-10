@@ -88,6 +88,13 @@ interface CanonicalEndpoint {
   graph_token: string
 }
 
+declare const standaloneEndpointIdentityBrand: unique symbol
+type StandaloneEndpointIdentity = string & { readonly [standaloneEndpointIdentityBrand]: true }
+
+function standaloneEndpointIdentity(value: string): StandaloneEndpointIdentity {
+  return value as StandaloneEndpointIdentity
+}
+
 const SYMMETRIC_TWO_TERMINAL_KINDS = new Set([
   "ceramiccapacitor",
   "ferritebead",
@@ -363,6 +370,53 @@ export function canonicalizeApplicationGraph(input: {
   return graph.sort((left, right) => compareText(JSON.stringify(left), JSON.stringify(right)))
 }
 
+/**
+ * Canonicalize a datasheet application graph without consulting component
+ * evidence. This is the extraction-time contract: both agents must transcribe
+ * the same visible endpoint labels. Component pin aliases are resolved later,
+ * when the generated application is validated against the published component.
+ */
+export function canonicalizeStandaloneApplicationGraph(input: {
+  connections: readonly { readonly pins: readonly string[] }[]
+  components: readonly { readonly reference: string; readonly kind: string }[]
+}): string[][] {
+  const kinds = componentKinds(input.components)
+  const seen_endpoints = new Map<StandaloneEndpointIdentity, { node: number; endpoint: string }>()
+  const graph = input.connections.map(({ pins }, node) => {
+    if (pins.length < 2) {
+      throw new Error(`Application graph node ${node} must contain at least two endpoints`)
+    }
+    const resolved = pins.map((raw_endpoint) => {
+      const endpoint = canonicalizeApplicationEndpoint(raw_endpoint, `application node ${node}`)
+      const separator = endpoint.indexOf(".")
+      let identity: StandaloneEndpointIdentity
+      let graph_token: string
+      if (separator < 0) {
+        identity = standaloneEndpointIdentity(`external:${normalizeElectricalPinLabel(endpoint)}`)
+        graph_token = identity
+      } else {
+        const reference = normalizedReference(endpoint.slice(0, separator))
+        const port = normalizePin(endpoint.slice(separator + 1))
+        if (!port) throw new Error(`Application endpoint ${endpoint} has an empty port`)
+        identity = standaloneEndpointIdentity(`${reference}.port:${port}`)
+        graph_token = SYMMETRIC_TWO_TERMINAL_KINDS.has(kinds.get(reference) ?? "")
+          ? `${reference}.symmetric_terminal`
+          : identity
+      }
+      const earlier = seen_endpoints.get(identity)
+      if (earlier) {
+        throw new Error(
+          `Application endpoint ${endpoint} is already used by ${earlier.endpoint} in node ${earlier.node}`,
+        )
+      }
+      seen_endpoints.set(identity, { node, endpoint })
+      return graph_token
+    })
+    return resolved.sort(compareText)
+  })
+  return graph.sort((left, right) => compareText(JSON.stringify(left), JSON.stringify(right)))
+}
+
 export function getApplicationTargetPinCoverageErrors(input: {
   availability: TypicalApplicationPlan["availability"]
   connections: readonly { readonly pins: readonly string[] }[]
@@ -473,7 +527,7 @@ function canonicalizeApplicationComponents(
 function compareApplicationComponentInventories(input: {
   extractor: readonly TypicalApplicationPlan["components"][number][]
   verifier: readonly VisibleApplicationComponent[]
-  evidence: ComponentEvidence
+  evidence?: ComponentEvidence
 }): {
   extractor_components: CanonicalApplicationComponent[]
   verifier_components: CanonicalApplicationComponent[]
@@ -517,7 +571,11 @@ function compareApplicationComponentInventories(input: {
     if (
       verifier.value !== undefined &&
       extractor.value !== verifier.value &&
-      !(extractor.reference === "U1" && visibleTargetIdentityMatchesEvidence(verifier.value, input.evidence))
+      !(
+        input.evidence &&
+        extractor.reference === "U1" &&
+        visibleTargetIdentityMatchesEvidence(verifier.value, input.evidence)
+      )
     ) {
       disagreements.push(
         `${extractor.reference}.value extractor=${JSON.stringify(extractor.value ?? "missing")} verifier=${JSON.stringify(verifier.value)}`,
@@ -527,6 +585,7 @@ function compareApplicationComponentInventories(input: {
       verifier.manufacturer_part_number !== undefined &&
       extractor.manufacturer_part_number !== verifier.manufacturer_part_number &&
       !(
+        input.evidence &&
         extractor.reference === "U1" &&
         (visibleTargetIdentityMatchesEvidence(verifier.manufacturer_part_number, input.evidence) ||
           (extractor.value !== undefined &&
@@ -557,7 +616,7 @@ function extractorApplicationSource(plan: TypicalApplicationPlan): ApplicationSo
 export function compareApplicationGraphs(input: {
   plan: TypicalApplicationPlan
   review: ApplicationConnectivityReview
-  evidence: ComponentEvidence
+  evidence?: ComponentEvidence
 }): ApplicationConnectivityAgreement {
   if (input.plan.availability !== input.review.availability) {
     throw new Error(
@@ -596,40 +655,52 @@ export function compareApplicationGraphs(input: {
     evidence: input.evidence,
   })
   errors.push(...component_errors)
-  errors.push(
-    ...getApplicationTargetPinCoverageErrors({
-      availability: input.plan.availability,
-      connections: input.plan.connections,
-      evidence: input.evidence,
-      subject: "Extracted application",
-    }),
-    ...getApplicationTargetPinCoverageErrors({
-      availability: input.review.availability,
-      connections: input.review.connections,
-      evidence: input.evidence,
-      subject: "Independent application review",
-    }),
-  )
+  if (input.evidence) {
+    errors.push(
+      ...getApplicationTargetPinCoverageErrors({
+        availability: input.plan.availability,
+        connections: input.plan.connections,
+        evidence: input.evidence,
+        subject: "Extracted application",
+      }),
+      ...getApplicationTargetPinCoverageErrors({
+        availability: input.review.availability,
+        connections: input.review.connections,
+        evidence: input.evidence,
+        subject: "Independent application review",
+      }),
+    )
+  }
 
   let extractor_graph: string[][] | undefined
   let verifier_graph: string[][] | undefined
   try {
-    extractor_graph = canonicalizeApplicationGraph({
-      connections: input.plan.connections,
-      evidence: input.evidence,
-      components: input.plan.components,
-    })
+    extractor_graph = input.evidence
+      ? canonicalizeApplicationGraph({
+          connections: input.plan.connections,
+          evidence: input.evidence,
+          components: input.plan.components,
+        })
+      : canonicalizeStandaloneApplicationGraph({
+          connections: input.plan.connections,
+          components: input.plan.components,
+        })
   } catch (error) {
     errors.push(
       `Extracted application graph is invalid: ${error instanceof Error ? error.message : String(error)}`,
     )
   }
   try {
-    verifier_graph = canonicalizeApplicationGraph({
-      connections: input.review.connections,
-      evidence: input.evidence,
-      components: input.review.components,
-    })
+    verifier_graph = input.evidence
+      ? canonicalizeApplicationGraph({
+          connections: input.review.connections,
+          evidence: input.evidence,
+          components: input.review.components,
+        })
+      : canonicalizeStandaloneApplicationGraph({
+          connections: input.review.connections,
+          components: input.review.components,
+        })
   } catch (error) {
     errors.push(
       `Independent application graph is invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -709,7 +780,9 @@ export function parseApplicationConnectivityReview(
     "documented connectivity review",
   )
 
-  const [source] = parseApplicationSourceReferences([value.source], "connectivity review source", {
+  const [source] = parseApplicationSourceReferences({
+    value: [value.source],
+    label: "connectivity review source",
     allow_unmaterialized_pdf_visual: true,
   })
   if (!source) throw new Error("connectivity review source is missing")
@@ -902,15 +975,17 @@ When a documented application exists, write:
 
 Each components entry records one visible component. Always include reference
 and kind. Include value or manufacturer_part_number only when that exact text is
-legibly printed in the application figure; otherwise omit it. Every inventoried
+legibly printed in the application figure; otherwise omit it. Never append a U1
+package or ordering suffix found elsewhere in the datasheet. Every inventoried
 component must appear in at least one connection, and every component.port
 endpoint must name an inventoried component.
 
 Each connections entry is one electrically joined node. Bare tokens such as
 VIN, VOUT, ENABLE, and GND are explicit external rail/terminal identities and
 must be retained. Represent whitespace in a printed external label with underscores
-(for example "48V BATT" becomes "48V_BATT"). Net ordering does not matter. Prefer U1 physical pin numbers
-when the image labels them. Inspect every junction dot and keep wire crossings
+(for example "48V BATT" becomes "48V_BATT"). Net ordering does not matter. Resolve
+every U1 endpoint to its physical pin number from the same datasheet; do not emit
+pin-name aliases. Inspect every junction dot and keep wire crossings
 without a junction in separate nodes.
 
 Arrows, bus wedges, braces, interface labels, and text such as "To MCU" describe
@@ -964,7 +1039,7 @@ export const APPLICATION_CONNECTIVITY_OBSERVER_CONTRACT_SHA256 = createHash("sha
 export interface ObserveApplicationConnectivityInput {
   workspace: string
   plan: TypicalApplicationPlan
-  evidence: ComponentEvidence
+  evidence?: ComponentEvidence
   outer_attempt: number
   debug_dir: string
   signal: AbortSignal
@@ -1025,12 +1100,14 @@ export async function observeApplicationConnectivity(
       if (!isDeepStrictEqual(raw_review, parsed_review)) {
         throw new Error("application-connectivity-review.json must contain only the canonical review fields")
       }
-      const coverage_errors = getApplicationTargetPinCoverageErrors({
-        availability: parsed_review.availability,
-        connections: parsed_review.availability === "documented" ? parsed_review.connections : [],
-        evidence: input.evidence,
-        subject: "Independent application review",
-      })
+      const coverage_errors = input.evidence
+        ? getApplicationTargetPinCoverageErrors({
+            availability: parsed_review.availability,
+            connections: parsed_review.availability === "documented" ? parsed_review.connections : [],
+            evidence: input.evidence,
+            subject: "Independent application review",
+          })
+        : []
       if (coverage_errors.length > 0) {
         throw aggregateError("Application connectivity review is incomplete", coverage_errors)
       }
@@ -1058,7 +1135,7 @@ export async function observeApplicationConnectivity(
 /** Purely compare one stable observation with an extractor candidate. */
 export function applyApplicationConnectivityObservation(input: {
   plan: TypicalApplicationPlan
-  evidence: ComponentEvidence
+  evidence?: ComponentEvidence
   observation: ApplicationConnectivityObservation
 }): ApplicationConnectivityAgreement {
   return {

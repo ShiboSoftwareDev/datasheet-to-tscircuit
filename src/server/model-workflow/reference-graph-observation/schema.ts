@@ -508,7 +508,7 @@ function parseCrop(value: unknown, path: string): ModelReferenceCropRegion {
 export function parseGraph(
   value: unknown,
   index: number,
-  model_interface: ModelInterface,
+  model_interface: ModelInterface | undefined,
   point_field_policy: ReferencePointFieldPolicy,
   phase: ReferenceGraphArtifactPhase = "comparison",
 ): ObservedReferenceGraph {
@@ -567,6 +567,9 @@ export function parseGraph(
     throw new Error(`${path}.electrical_binding is supported only for eligible voltage graphs`)
   }
   if (electrical_binding) {
+    if (!model_interface) {
+      throw new Error(`${path}.electrical_binding requires model-interface.json`)
+    }
     assertModelReferenceElectricalBindingInterface({
       binding: electrical_binding,
       model_interface,
@@ -574,7 +577,7 @@ export function parseGraph(
     })
   }
   const channels =
-    value.channels === undefined || !electrical_binding
+    value.channels === undefined || !electrical_binding || !model_interface
       ? undefined
       : parseReferenceChannels({
           value: value.channels,

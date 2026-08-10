@@ -14,20 +14,20 @@ export interface JobRunnerContext {
 }
 
 export type ComponentPipelineOutputs = {
-  prepare: {
-    job_id: string
-    datasheet_path: string
-    provenance_path: string
-  }
   extract_evidence: {
     evidence_path: string
     part_number: string
     pin_count: number
-    application_available: boolean
   }
   generate_component: {
     source_path: string
     source_bytes: number
+  }
+  build_component: {
+    result_path: string
+    build_errors: string[]
+    drc_errors: string[]
+    circuit_element_count: number
   }
   validate_component: {
     result_path: string
@@ -39,17 +39,39 @@ export type ComponentPipelineOutputs = {
     passed: boolean
     repair_attempts: number
   }
+  publish_component: {
+    component_ready: boolean
+    component_path: string
+    component_circuit_json_path: string
+  }
 }
 
 export type ApplicationPipelineOutputs = {
-  prepare_application: {
-    component_path: string
-    component_circuit_json_path: string
+  extract_application_evidence: {
+    evidence_path: string
     application_available: boolean
+    application_title?: string
   }
-  generate_application: {
+  wait_for_component:
+    | { component_required: false }
+    | {
+        component_required: true
+        component_path: string
+        component_circuit_json_path: string
+        component_sha256: string
+        component_circuit_json_sha256: string
+      }
+  generate_application:
+    | { available: false }
+    | {
+        available: true
+        source_path: string
+      }
+  build_application: {
+    result_path: string
     available: boolean
-    source_path: string
+    build_errors: string[]
+    circuit_element_count: number
   }
   validate_application: {
     result_path: string
@@ -64,8 +86,7 @@ export type ApplicationPipelineOutputs = {
     repair_attempts: number
     errors: string[]
   }
-  publish: {
-    component_ready: boolean
+  publish_application: {
     application_ready: boolean
   }
 }

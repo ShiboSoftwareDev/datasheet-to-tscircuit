@@ -135,7 +135,11 @@ function isTargetApplicationComponent(
   // Family and orderable identities are separate evidence fields. Never infer
   // their boundary from a shared string prefix or a package-code suffix.
   if (target.has_distinct_ordering_code) {
-    if (manufacturer_part_number && manufacturer_part_number !== target.normalized_selected_part_number) {
+    if (
+      manufacturer_part_number &&
+      manufacturer_part_number !== target.normalized_part_number &&
+      manufacturer_part_number !== target.normalized_selected_part_number
+    ) {
       return false
     }
     if (
@@ -232,7 +236,7 @@ function canonicalizeTypicalApplicationPlan(
     if (target_count !== 1 || !target_component) {
       const identity_hint = target
         ? `; application value must identify family ${JSON.stringify(target.part_number)}` +
-          ` and manufacturer_part_number, when present, must equal selected ordering identity ${JSON.stringify(target.selected_part_number)}`
+          ` and manufacturer_part_number, when present, must identify that family or selected ordering identity ${JSON.stringify(target.selected_part_number)}`
         : ""
       throw new Error(
         `documented typical application must resolve exactly one target component to U1${identity_hint}`,
@@ -309,16 +313,16 @@ function requiredFiniteNumber(value: unknown, label: string): number {
   return value
 }
 
-export function parseApplicationSourceReferences(
-  value: unknown,
-  label: string,
-  options: { allow_unmaterialized_pdf_visual?: boolean } = {},
-): ApplicationSourceReference[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`${label} must cite at least one datasheet page`)
+export function parseApplicationSourceReferences(input: {
+  value: unknown
+  label: string
+  allow_unmaterialized_pdf_visual?: boolean
+}): ApplicationSourceReference[] {
+  if (!Array.isArray(input.value) || input.value.length === 0) {
+    throw new Error(`${input.label} must cite at least one datasheet page`)
   }
-  return value.map((source, index) => {
-    const source_label = `${label}[${index}]`
+  return input.value.map((source, index) => {
+    const source_label = `${input.label}[${index}]`
     if (!isRecord(source) || !Number.isInteger(source.page) || (source.page as number) < 1) {
       throw new Error(`${source_label}.page must be a positive integer`)
     }
@@ -361,13 +365,8 @@ export function parseApplicationSourceReferences(
       ...(source.note === undefined ? {} : { note: requiredText(source.note, `${source_label}.note`) }),
     }
     if (parsed.method === "pdf_visual") {
-      if (
-        options.allow_unmaterialized_pdf_visual &&
-        parsed.image === undefined &&
-        parsed.render_dpi === undefined
-      ) {
-        // An independent reviewer may discover a different page in the PDF.
-        // The outer extraction attempt owns rendering that page on correction.
+      if (input.allow_unmaterialized_pdf_visual) {
+        // The server renders and replaces every agent/reviewer source image.
       } else if (!parsed.image || parsed.render_dpi !== 200) {
         throw new Error(`${source_label} must record an image rendered at exactly 200 DPI`)
       }
@@ -385,17 +384,24 @@ export function parseApplicationSourceReferences(
   })
 }
 
-function optionalSourcedText(
-  value: unknown,
-  label: string,
-): { value?: string; sources?: ApplicationSourceReference[] } {
-  if (value === undefined || value === null) return {}
-  if (typeof value === "string") return { value: requiredText(value, label) }
-  if (!isRecord(value)) throw new Error(`${label} must be a string or a sourced value object`)
-  assertOnlyKeys(value, ["value", "sources"], label)
+function optionalSourcedText(input: {
+  value: unknown
+  label: string
+  allow_unmaterialized_pdf_visual: boolean
+}): { value?: string; sources?: ApplicationSourceReference[] } {
+  if (input.value === undefined || input.value === null) return {}
+  if (typeof input.value === "string") return { value: requiredText(input.value, input.label) }
+  if (!isRecord(input.value)) {
+    throw new Error(`${input.label} must be a string or a sourced value object`)
+  }
+  assertOnlyKeys(input.value, ["value", "sources"], input.label)
   return {
-    value: requiredText(value.value, `${label}.value`),
-    sources: parseApplicationSourceReferences(value.sources, `${label}.sources`),
+    value: requiredText(input.value.value, `${input.label}.value`),
+    sources: parseApplicationSourceReferences({
+      value: input.value.sources,
+      label: `${input.label}.sources`,
+      allow_unmaterialized_pdf_visual: input.allow_unmaterialized_pdf_visual,
+    }),
   }
 }
 
@@ -424,9 +430,12 @@ function optionalTextArray(value: unknown, label: string): string[] {
   return value.map((item, index) => requiredText(item, `${label}[${index}]`))
 }
 
-export function parseTypicalApplicationPlan(
+function parseTypicalApplicationPlanWithOptions(
   value: unknown,
-  target_identity?: ApplicationTargetIdentityInput,
+  options: {
+    target_identity?: ApplicationTargetIdentityInput
+    allow_unmaterialized_pdf_visual: boolean
+  },
 ): TypicalApplicationPlan {
   if (isRecord(value)) {
     assertOnlyKeys(
@@ -478,10 +487,11 @@ export function parseTypicalApplicationPlan(
   const pcb_implementation = raw_pcb_implementation as
     | TypicalApplicationPlan["pcb_implementation"]
     | undefined
-  const source_references = parseApplicationSourceReferences(
-    value.source_references,
-    "typical application source_references",
-  )
+  const source_references = parseApplicationSourceReferences({
+    value: value.source_references,
+    label: "typical application source_references",
+    allow_unmaterialized_pdf_visual: options.allow_unmaterialized_pdf_visual,
+  })
   if (!Array.isArray(value.components) || (availability === "documented" && value.components.length === 0)) {
     throw new Error("documented typical-application evidence must list the application components")
   }
@@ -513,25 +523,33 @@ export function parseTypicalApplicationPlan(
     seen_components.add(componentReferenceKey(reference))
     let component_source_references: ApplicationSourceReference[] | undefined
     if (component.source_references !== undefined) {
-      component_source_references = parseApplicationSourceReferences(
-        component.source_references,
-        `components[${index}].source_references`,
-      )
+      component_source_references = parseApplicationSourceReferences({
+        value: component.source_references,
+        label: `components[${index}].source_references`,
+        allow_unmaterialized_pdf_visual: options.allow_unmaterialized_pdf_visual,
+      })
     }
     let footprint_source_references: ApplicationSourceReference[] | undefined
     if (component.footprint_source_references !== undefined) {
-      footprint_source_references = parseApplicationSourceReferences(
-        component.footprint_source_references,
-        `components[${index}].footprint_source_references`,
-      )
+      footprint_source_references = parseApplicationSourceReferences({
+        value: component.footprint_source_references,
+        label: `components[${index}].footprint_source_references`,
+        allow_unmaterialized_pdf_visual: options.allow_unmaterialized_pdf_visual,
+      })
     }
-    const parsed_value = optionalSourcedText(component.value, `components[${index}].value`)
-    const parsed_purpose = optionalSourcedText(component.purpose, `components[${index}].purpose`)
-    const parsed_part_number = optionalSourcedText(
+    const parseComponentText = (component_value: unknown, field: string) =>
+      optionalSourcedText({
+        value: component_value,
+        label: `components[${index}].${field}`,
+        allow_unmaterialized_pdf_visual: options.allow_unmaterialized_pdf_visual,
+      })
+    const parsed_value = parseComponentText(component.value, "value")
+    const parsed_purpose = parseComponentText(component.purpose, "purpose")
+    const parsed_part_number = parseComponentText(
       component.manufacturer_part_number,
-      `components[${index}].manufacturer_part_number`,
+      "manufacturer_part_number",
     )
-    const parsed_footprint = optionalSourcedText(component.footprint, `components[${index}].footprint`)
+    const parsed_footprint = parseComponentText(component.footprint, "footprint")
     if (hasExactPartNumberSource(component_source_references, parsed_part_number.sources)) {
       components_with_sourced_part_numbers.add(componentReferenceKey(reference))
     }
@@ -620,7 +638,7 @@ export function parseTypicalApplicationPlan(
       components,
       connections,
     },
-    target_identity,
+    options.target_identity,
   )
   const component_names = new Set(
     canonical_plan.components.map((component) => componentReferenceKey(component.reference)),
@@ -688,4 +706,21 @@ export function parseTypicalApplicationPlan(
     ...canonical_plan,
     ...(searched_sections.length > 0 ? { searched_sections } : {}),
   }
+}
+
+export function parseTypicalApplicationPlan(
+  value: unknown,
+  target_identity?: ApplicationTargetIdentityInput,
+): TypicalApplicationPlan {
+  return parseTypicalApplicationPlanWithOptions(value, {
+    target_identity,
+    allow_unmaterialized_pdf_visual: false,
+  })
+}
+
+/** Parse an isolated agent candidate before the server renders and binds its cited PDF pages. */
+export function parseUnmaterializedTypicalApplicationPlan(value: unknown): TypicalApplicationPlan {
+  return parseTypicalApplicationPlanWithOptions(value, {
+    allow_unmaterialized_pdf_visual: true,
+  })
 }

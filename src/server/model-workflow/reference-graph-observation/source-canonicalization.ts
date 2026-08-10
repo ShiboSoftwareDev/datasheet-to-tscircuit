@@ -22,7 +22,7 @@ function withoutComparisonState(graph: ObservedReferenceGraph): ObservedReferenc
 export function canonicalizeObservedGraphSource(input: {
   graph: ObservedReferenceGraph
   source_hints: TimeGraphDiscovery["hints"]
-  model_interface: ModelInterface
+  model_interface?: ModelInterface
   application_fixture?: ApplicationFixtureContract
   phase?: ReferenceGraphArtifactPhase
 }): ObservedReferenceGraph {
@@ -78,6 +78,14 @@ export function canonicalizeObservedGraphSource(input: {
     if (!potentially_eligible || !printed_fixture_evidence) {
       return { ...found, fixture_reproducible: false }
     }
+    if (!model_interface) {
+      return {
+        ...found,
+        fixture_reproducible: true,
+        reason:
+          "Server-owned source conditions describe a public voltage response and a supported transient fixture; exact component and application binding is deferred to Create Comparison Graphs.",
+      }
+    }
     const passive_constraint_failure = reconcileGraphPassiveConstraints({
       source_hints,
       application_fixture,
@@ -113,6 +121,9 @@ export function canonicalizeObservedGraphSource(input: {
       reason:
         "Server-owned graph-local conditions resolve to a public voltage response and a tscircuit-supported transient fixture.",
     }
+  }
+  if (!model_interface) {
+    throw new Error("Create Comparison Graphs requires model-interface.json")
   }
   if (
     printed_fixture_evidence &&

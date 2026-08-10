@@ -67,11 +67,13 @@ export type ModelPipelineOutputs = {
   find_reference_graphs: {
     found_reference_ids: string[]
     evidence_dir: string
+    time_graph_hints_path: string
+    reference_observation_path: string
+  }
+  wait_for_model_evidence: {
     model_interface_path: string
     application_fixture_path: string
     application_fixture_sha256: string
-    time_graph_hints_path: string
-    reference_observation_path: string
   }
   create_comparison_graphs: {
     plan_path: string

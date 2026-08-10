@@ -521,6 +521,8 @@ export async function restorePipelineTaskInputFiles(input: {
   bundle: PipelineTaskInputBundle
   destination_root: string
   excluded_roots?: readonly string[]
+  /** Live control files that must not be rewound to a retained task boundary. */
+  preserved_paths?: readonly string[]
   /**
    * Live output roots that belong to the selected job, not to the retained
    * task input. Existing entries are never removed or overwritten; missing
@@ -537,6 +539,7 @@ export async function restorePipelineTaskInputFiles(input: {
     const retained_directories = new Set(input.bundle.manifest.directories)
     const excluded_roots = new Set(input.excluded_roots ?? [])
     const preserved_roots = new Set(input.preserved_roots ?? [])
+    const preserved_paths = new Set(input.preserved_paths ?? [])
 
     const prune = async (directory: string, relative_directory = ""): Promise<void> => {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -546,6 +549,7 @@ export async function restorePipelineTaskInputFiles(input: {
           entry.name === basename(temporary_root) ||
           excluded_roots.has(top_level) ||
           preserved_roots.has(top_level) ||
+          preserved_paths.has(relative_path) ||
           relative_path === "runs" ||
           relative_path.startsWith(`runs${sep}`) ||
           relative_path === join("spice", "runs") ||
@@ -574,7 +578,10 @@ export async function restorePipelineTaskInputFiles(input: {
       const source = join(temporary_root, file.path)
       const destination = join(destination_root, file.path)
       const top_level = file.path.split(sep)[0] ?? ""
-      if (preserved_roots.has(top_level) && (await lstat(destination).catch(() => undefined))) {
+      if (
+        (preserved_roots.has(top_level) || preserved_paths.has(file.path)) &&
+        (await lstat(destination).catch(() => undefined))
+      ) {
         continue
       }
       await mkdir(dirname(destination), { recursive: true, mode: 0o700 })

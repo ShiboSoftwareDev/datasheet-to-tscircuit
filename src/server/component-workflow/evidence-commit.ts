@@ -38,20 +38,26 @@ const LEGACY_EVIDENCE_JSON_FILES = [
   "typical-application-plan.json",
 ] as const
 const LEGACY_OPTIONAL_EVIDENCE_JSON_FILES = ["application-connectivity-verification.json"] as const
-const V2_EVIDENCE_JSON_FILES = [
-  ...LEGACY_EVIDENCE_JSON_FILES,
+const COMPONENT_EVIDENCE_JSON_FILES = [
+  "component-evidence.json",
+  "footprint-plan.json",
+  "component-schematic-plan.json",
   "footprint-geometry-review.json",
   "footprint-geometry-verification.json",
-  "application-connectivity-review.json",
-  "application-connectivity-verification.json",
   "evidence-image-manifest.json",
 ] as const
+const APPLICATION_EVIDENCE_JSON_FILES = [
+  "typical-application-plan.json",
+  "application-connectivity-review.json",
+  "application-connectivity-verification.json",
+] as const
+const V2_EVIDENCE_JSON_FILES = [...COMPONENT_EVIDENCE_JSON_FILES, ...APPLICATION_EVIDENCE_JSON_FILES] as const
 const LEGACY_REQUIRED_EVIDENCE_FILES = new Set<string>([
   ...LEGACY_EVIDENCE_JSON_FILES,
   "visual-reference/land-pattern.png",
 ])
 const V2_REQUIRED_EVIDENCE_FILES = new Set<string>([
-  ...V2_EVIDENCE_JSON_FILES,
+  ...COMPONENT_EVIDENCE_JSON_FILES,
   "visual-reference/land-pattern.png",
 ])
 const MAX_COMMIT_BYTES = 2 * 1024 * 1024
@@ -256,10 +262,28 @@ async function evidenceFilePaths(
   const committed_legacy_optional = LEGACY_OPTIONAL_EVIDENCE_JSON_FILES.filter((path) =>
     committed_paths.includes(path),
   )
-  const json_paths =
-    version === 1
-      ? [...LEGACY_EVIDENCE_JSON_FILES, ...committed_legacy_optional]
-      : [...V2_EVIDENCE_JSON_FILES]
+  let json_paths: string[]
+  if (version === 1) {
+    json_paths = [...LEGACY_EVIDENCE_JSON_FILES, ...committed_legacy_optional]
+  } else {
+    const application_presence = await Promise.all(
+      APPLICATION_EVIDENCE_JSON_FILES.map(async (path) =>
+        committed_paths.length > 0
+          ? committed_paths.includes(path)
+          : await lstat(join(job_dir, path)).then(
+              (metadata) => metadata.isFile() && !metadata.isSymbolicLink(),
+              () => false,
+            ),
+      ),
+    )
+    if (application_presence.some(Boolean) && !application_presence.every(Boolean)) {
+      throw new Error("Application evidence files must be committed as one complete set")
+    }
+    json_paths = [
+      ...COMPONENT_EVIDENCE_JSON_FILES,
+      ...(application_presence.every(Boolean) ? APPLICATION_EVIDENCE_JSON_FILES : []),
+    ]
+  }
   const paths = [...json_paths, ...(await listVisualReferences(job_dir))].sort()
   if (paths.length > MAX_EVIDENCE_FILES) {
     throw new Error(`Evidence contains more than ${MAX_EVIDENCE_FILES} files`)
@@ -339,7 +363,7 @@ async function validateEvidenceImageManifest(input: {
   job_dir: string
   files: ReadonlyMap<string, Uint8Array>
   component_evidence: ComponentEvidence
-  application_plan: TypicalApplicationPlan
+  application_plan?: TypicalApplicationPlan
   source_pdf?: Uint8Array<ArrayBuffer>
 }): Promise<Uint8Array<ArrayBuffer>> {
   const raw_manifest = parseJsonBytes(input.files, "evidence-image-manifest.json")
@@ -347,7 +371,7 @@ async function validateEvidenceImageManifest(input: {
   if (!isDeepStrictEqual(raw_manifest, manifest)) {
     throw new Error("evidence-image-manifest.json is not in canonical version-1 form")
   }
-  const expected_application_alias = input.application_plan.availability === "documented"
+  const expected_application_alias = input.application_plan?.availability === "documented"
   if (Boolean(manifest.aliases.typical_application) !== expected_application_alias) {
     throw new Error(
       expected_application_alias
@@ -392,7 +416,7 @@ async function validateEvidenceImageManifest(input: {
   }
   for (const source of [
     ...componentSources(input.component_evidence),
-    ...applicationSources(input.application_plan),
+    ...(input.application_plan ? applicationSources(input.application_plan) : []),
   ]) {
     if (!source.image) continue
     if (!declared_images.has(source.image)) {
@@ -426,15 +450,6 @@ async function validateV2Evidence(
   ]
   if (blocking_reasons.length > 0) {
     throw new Error(`Committed component evidence is not publishable: ${blocking_reasons.join("; ")}`)
-  }
-
-  const raw_application = parseJsonBytes(files, "typical-application-plan.json")
-  const application_plan = parseTypicalApplicationPlan(
-    raw_application,
-    applicationTargetIdentityFromEvidence(component_evidence),
-  )
-  if (!isDeepStrictEqual(raw_application, application_plan)) {
-    throw new Error("typical-application-plan.json is not in canonical version-4 form")
   }
 
   const raw_footprint_plan = parseJsonBytes(files, "footprint-plan.json")
@@ -482,48 +497,59 @@ async function validateV2Evidence(
     throw new Error("footprint-geometry-verification.json does not match the committed independent geometry")
   }
 
-  const raw_review = parseJsonBytes(files, "application-connectivity-review.json")
-  const raw_agreement = parseJsonBytes(files, "application-connectivity-verification.json")
-  const review = parseApplicationConnectivityReview(raw_review, application_plan)
-  if (!isDeepStrictEqual(raw_review, review)) {
-    throw new Error("application-connectivity-review.json is not in canonical version-1 form")
-  }
-  const expected_agreement = compareApplicationGraphs({
-    plan: application_plan,
-    review,
-    evidence: component_evidence,
-  })
-  if (!isRecord(raw_agreement)) {
-    throw new Error("application-connectivity-verification.json must be an object")
-  }
-  const { verifier_attempts, verifier_agent_duration_ms, ...deterministic_agreement } = raw_agreement
-  if (
-    verifier_attempts !== undefined &&
-    (!Number.isInteger(verifier_attempts) || (verifier_attempts as number) < 1)
-  ) {
-    throw new Error("application-connectivity-verification.json verifier_attempts must be positive")
-  }
-  if (
-    verifier_agent_duration_ms !== undefined &&
-    (typeof verifier_agent_duration_ms !== "number" ||
-      !Number.isFinite(verifier_agent_duration_ms) ||
-      verifier_agent_duration_ms < 0)
-  ) {
-    throw new Error(
-      "application-connectivity-verification.json verifier_agent_duration_ms must be nonnegative",
+  let application_plan: TypicalApplicationPlan | undefined
+  if (files.has("typical-application-plan.json")) {
+    const raw_application = parseJsonBytes(files, "typical-application-plan.json")
+    application_plan = parseTypicalApplicationPlan(
+      raw_application,
+      applicationTargetIdentityFromEvidence(component_evidence),
     )
-  }
-  if (!isDeepStrictEqual(deterministic_agreement, expected_agreement)) {
-    throw new Error(
-      "application-connectivity-verification.json does not match the committed application graphs",
-    )
+    if (!isDeepStrictEqual(raw_application, application_plan)) {
+      throw new Error("typical-application-plan.json is not in canonical version-4 form")
+    }
+    const raw_review = parseJsonBytes(files, "application-connectivity-review.json")
+    const raw_agreement = parseJsonBytes(files, "application-connectivity-verification.json")
+    const review = parseApplicationConnectivityReview(raw_review, application_plan)
+    if (!isDeepStrictEqual(raw_review, review)) {
+      throw new Error("application-connectivity-review.json is not in canonical version-1 form")
+    }
+    const expected_agreement = compareApplicationGraphs({
+      plan: application_plan,
+      review,
+      evidence: component_evidence,
+    })
+    if (!isRecord(raw_agreement)) {
+      throw new Error("application-connectivity-verification.json must be an object")
+    }
+    const { verifier_attempts, verifier_agent_duration_ms, ...deterministic_agreement } = raw_agreement
+    if (
+      verifier_attempts !== undefined &&
+      (!Number.isInteger(verifier_attempts) || (verifier_attempts as number) < 1)
+    ) {
+      throw new Error("application-connectivity-verification.json verifier_attempts must be positive")
+    }
+    if (
+      verifier_agent_duration_ms !== undefined &&
+      (typeof verifier_agent_duration_ms !== "number" ||
+        !Number.isFinite(verifier_agent_duration_ms) ||
+        verifier_agent_duration_ms < 0)
+    ) {
+      throw new Error(
+        "application-connectivity-verification.json verifier_agent_duration_ms must be nonnegative",
+      )
+    }
+    if (!isDeepStrictEqual(deterministic_agreement, expected_agreement)) {
+      throw new Error(
+        "application-connectivity-verification.json does not match the committed application graphs",
+      )
+    }
   }
 
   return validateEvidenceImageManifest({
     job_dir,
     files,
     component_evidence,
-    application_plan,
+    ...(application_plan ? { application_plan } : {}),
     source_pdf,
   })
 }

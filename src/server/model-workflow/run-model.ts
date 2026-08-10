@@ -10,7 +10,7 @@ import { MODEL_PIPELINE } from "./model-pipeline"
 import { appendModelLog, updateModelProgress } from "./stage-helpers"
 import {
   waitForComponentBeforePublication,
-  waitForEvidenceBeforeModelPipeline,
+  waitForModelEvidenceBeforeComparison,
 } from "./stages/wait-for-component"
 import type { ModelRunnerContext } from "./types"
 import { REPAIR_BUDGET_MS_PER_EFFORT } from "./types"
@@ -85,14 +85,6 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
     model_run_id: input.model_run_id,
     state: "running",
   })
-  await waitForEvidenceBeforeModelPipeline({
-    job_id: model_run.job_id,
-    model_run_id: input.model_run_id,
-    job_store: context.job_store,
-    model_run_store: context.model_run_store,
-    signal,
-  })
-
   const process_runner = context.process_runner ?? new BunProcessRunner()
   const agent_client =
     context.agent_client ??
@@ -129,16 +121,26 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
     },
     task_input_root: job_dir,
     signal,
-    before_stage_start: ({ stage_id, signal: stage_signal }) =>
-      stage_id === "wait_for_component"
-        ? waitForComponentBeforePublication({
-            job_id: model_run.job_id,
-            model_run_id: input.model_run_id,
-            job_store: context.job_store,
-            model_run_store: context.model_run_store,
-            signal: stage_signal,
-          })
-        : undefined,
+    before_stage_start: ({ stage_id, signal: stage_signal }) => {
+      if (stage_id === "wait_for_model_evidence") {
+        return waitForModelEvidenceBeforeComparison({
+          job_id: model_run.job_id,
+          model_run_id: input.model_run_id,
+          job_store: context.job_store,
+          model_run_store: context.model_run_store,
+          signal: stage_signal,
+        })
+      }
+      if (stage_id === "wait_for_component") {
+        return waitForComponentBeforePublication({
+          job_id: model_run.job_id,
+          model_run_id: input.model_run_id,
+          job_store: context.job_store,
+          model_run_store: context.model_run_store,
+          signal: stage_signal,
+        })
+      }
+    },
     on_snapshot: (snapshot) => {
       context.model_run_store.updateModelRun(input.model_run_id, {
         pipeline: projectPublicPipelineSnapshot({

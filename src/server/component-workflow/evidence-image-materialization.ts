@@ -314,16 +314,16 @@ async function sha256File(
  * render made directly from datasheet.pdf. The returned evidence cites only
  * these server-owned bytes.
  */
-export async function materializeEvidenceImages(input: {
+async function materializeEvidenceImagesInternal(input: {
   workspace: string
   component_evidence: ComponentEvidence
-  application_plan: TypicalApplicationPlan
+  application_plan?: TypicalApplicationPlan
   process_runner: ProcessRunner
   signal: AbortSignal
   on_output?: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
 }): Promise<{
   component_evidence: ComponentEvidence
-  application_plan: TypicalApplicationPlan
+  application_plan?: TypicalApplicationPlan
   manifest: EvidenceImageManifest
 }> {
   const land_pattern_page = primaryVisualPage(
@@ -334,12 +334,12 @@ export async function materializeEvidenceImages(input: {
     "Copper land-pattern geometry",
   )
   const typical_application_page =
-    input.application_plan.availability === "documented"
+    input.application_plan?.availability === "documented"
       ? primaryVisualPage(input.application_plan.source_references, "Documented typical application")
       : undefined
   const all_sources = [
     ...collectComponentSources(input.component_evidence),
-    ...collectApplicationSources(input.application_plan),
+    ...(input.application_plan ? collectApplicationSources(input.application_plan) : []),
   ]
   const pages = [...new Set(all_sources.map(({ page }) => page))].sort((left, right) => left - right)
   if (pages.length > MAX_RENDERED_SOURCE_PAGES) {
@@ -440,7 +440,43 @@ export async function materializeEvidenceImages(input: {
   )
   return {
     component_evidence: rewriteComponentEvidence(input.component_evidence, land_pattern_page),
-    application_plan: rewriteApplicationPlan(input.application_plan, typical_application_page),
+    ...(input.application_plan
+      ? { application_plan: rewriteApplicationPlan(input.application_plan, typical_application_page) }
+      : {}),
     manifest,
+  }
+}
+
+export async function materializeComponentEvidenceImages(input: {
+  workspace: string
+  component_evidence: ComponentEvidence
+  process_runner: ProcessRunner
+  signal: AbortSignal
+  on_output?: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
+}): Promise<{ component_evidence: ComponentEvidence; manifest: EvidenceImageManifest }> {
+  const materialized = await materializeEvidenceImagesInternal(input)
+  return { component_evidence: materialized.component_evidence, manifest: materialized.manifest }
+}
+
+export async function materializeEvidenceImages(input: {
+  workspace: string
+  component_evidence: ComponentEvidence
+  application_plan: TypicalApplicationPlan
+  process_runner: ProcessRunner
+  signal: AbortSignal
+  on_output?: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
+}): Promise<{
+  component_evidence: ComponentEvidence
+  application_plan: TypicalApplicationPlan
+  manifest: EvidenceImageManifest
+}> {
+  const materialized = await materializeEvidenceImagesInternal(input)
+  if (!materialized.application_plan) {
+    throw new Error("Combined evidence materialization did not return an application plan")
+  }
+  return {
+    component_evidence: materialized.component_evidence,
+    application_plan: materialized.application_plan,
+    manifest: materialized.manifest,
   }
 }

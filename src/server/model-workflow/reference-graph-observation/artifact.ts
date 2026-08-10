@@ -34,7 +34,7 @@ export function parseReferenceGraphObservation(
 export function parseFoundReferenceGraphObservation(
   value: unknown,
   discovery: TimeGraphDiscovery,
-  model_interface: ModelInterface,
+  model_interface?: ModelInterface,
   application_fixture?: ApplicationFixtureContract,
 ): ReferenceGraphObservation {
   return parseReferenceGraphObservationWithPointPolicy(
@@ -82,7 +82,7 @@ export function parseCanonicalFoundReferenceGraphObservation(
 function parseReferenceGraphObservationWithPointPolicy(
   value: unknown,
   discovery: TimeGraphDiscovery,
-  model_interface: ModelInterface,
+  model_interface: ModelInterface | undefined,
   application_fixture: ApplicationFixtureContract | undefined,
   point_field_policy: ReferencePointFieldPolicy,
   phase: ReferenceGraphArtifactPhase,

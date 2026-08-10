@@ -20,9 +20,8 @@ ${feedback}`
 export function buildFoundReferenceGraphObserverPrompt(feedback?: string): string {
   const prompt = `Find every printed elapsed-time graph in the complete datasheet.
 
-Read datasheet.pdf from first page to last page, model-interface.json,
-application-fixture-contract.json, and time-graph-hints.json. Write only
-model-reference-observation.json.
+Read datasheet.pdf from first page to last page and time-graph-hints.json. Write
+only model-reference-observation.json.
 
 Return the version-1 source_pdf_sha256, reviewed_hints[], and graphs[] contract.
 Review every deterministic hint exactly once. A caption-proven transient hint

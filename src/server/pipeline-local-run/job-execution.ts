@@ -102,6 +102,33 @@ function cloneJobProjection(source: Job): Parameters<JobStore["updateJob"]>[1] {
   }
 }
 
+async function refreshJobFromRestoredWorkspace(input: {
+  context: PipelineJobExecutionContext
+  jobId: string
+  jobDir: string
+}): Promise<void> {
+  const restoredStore = new JobStore({
+    checkpoint_writer: () => undefined,
+    log_writer: async () => undefined,
+  })
+  const restored = await restoreJobDirectory({
+    job_id: input.jobId,
+    job_dir: input.jobDir,
+    job_store: restoredStore,
+    active_job_state: "preserve",
+  })
+  if (!restored) throw new Error(`Retained input for job ${input.jobId} has no restorable job checkpoint`)
+  const retrySource = restoredStore.getJobRetrySource(input.jobId)
+  input.context.jobStore.refreshRestoredJob({
+    ...restored,
+    job_dir: input.jobDir,
+    warnings: restored.warnings ?? [],
+    ...(retrySource?.additional_instructions
+      ? { additional_instructions: retrySource.additional_instructions }
+      : {}),
+  })
+}
+
 function clonedModelRun(source: ModelRun, input: { jobId: string; modelRunId: string }): ModelRun {
   const now = new Date().toISOString()
   return {
@@ -356,6 +383,15 @@ export async function createPipelineJobRun(input: {
         // paths, but it must never roll back the selected job's accumulated
         // SPICE candidates, reference graphs, simulations, or live preview.
         preserved_roots: envelope.pipeline_id === "spice_generation" ? ["spice"] : [],
+        // The selected job is the execution container, not a task artifact.
+        // Rewinding its live checkpoint can erase progress written by another
+        // pipeline or by the server process coordinating this Local run.
+        preserved_paths: ["job.json"],
+      })
+      await refreshJobFromRestoredWorkspace({
+        context: input.context,
+        jobId: input.targetJobId,
+        jobDir: targetJobDir,
       })
     }
   } catch (error) {
@@ -490,6 +526,12 @@ export async function createPipelineJobRun(input: {
       taskId: input.taskId,
       runDir,
       signal: executionSignal,
+      refresh_job: () =>
+        refreshJobFromRestoredWorkspace({
+          context: input.context,
+          jobId: input.targetJobId,
+          jobDir: targetJobDir,
+        }),
       normalize_snapshot: (pipeline) =>
         normalizePartialPipeline({
           snapshot: pipeline,

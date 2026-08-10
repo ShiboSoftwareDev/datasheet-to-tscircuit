@@ -463,16 +463,18 @@ function validObservationValue() {
 
 test("Find Reference Graphs rejects comparison fields and retains server-owned simulator eligibility", () => {
   const value = validObservationValue()
-  expect(() => parseFoundReferenceGraphObservation(value, discovery, model_interface)).toThrow(
+  expect(() => parseFoundReferenceGraphObservation(value, discovery)).toThrow(
     "electrical_binding belongs to Create Comparison Graphs",
   )
   delete (value.graphs[0] as Partial<(typeof value.graphs)[number]>).electrical_binding
   delete (value.graphs[0] as Partial<(typeof value.graphs)[number]>).channels
-  const parsed = parseFoundReferenceGraphObservation(value, discovery, model_interface)
+  const parsed = parseFoundReferenceGraphObservation(value, discovery)
   expect(foundObservedGraphs(parsed)).toHaveLength(1)
   expect(parsed.graphs[0]).not.toHaveProperty("electrical_binding")
   expect(parsed.graphs[0]).not.toHaveProperty("channels")
   expect(buildFoundReferenceGraphObserverPrompt()).toContain("exclusively to Create Comparison Graphs")
+  expect(buildFoundReferenceGraphObserverPrompt()).not.toContain("model-interface.json")
+  expect(buildFoundReferenceGraphObserverPrompt()).not.toContain("application-fixture-contract.json")
   expect(buildReferenceGraphObserverPrompt()).toContain(
     "reference-graph.png is the exact server-rendered crop",
   )
@@ -721,6 +723,8 @@ test("reference graph inventory sends retained validation errors to every correc
   const agent_client: AgentClient = {
     async run(input) {
       prompts.push(input.prompt)
+      expect(await Bun.file(join(input.workspace, "model-interface.json")).exists()).toBe(false)
+      expect(await Bun.file(join(input.workspace, "application-fixture-contract.json")).exists()).toBe(false)
       const hints = (await Bun.file(join(input.workspace, "time-graph-hints.json")).json()) as {
         source_pdf_sha256: string
       }
@@ -775,8 +779,6 @@ test("reference graph inventory sends retained validation errors to every correc
       attempt_dir,
       debug_dir,
       signal: new AbortController().signal,
-      model_interface,
-      application_fixture,
     }),
   ).rejects.toThrow("model-reference-observation.json.graphs must be an array")
   expect(prompts).toHaveLength(4)
@@ -1024,6 +1026,31 @@ test("source-proof correction feedback preserves server-recognized calibration e
   ).toEqual([
     "load_transient: The crop axis is not yet calibrated. Missing source proofs: voltage_grid_and_anchor_alignment. Server-recognized crop evidence: 100 us/div; 100 mV/div; y-grid:45.67,76.67,108.33,139.33. Change only the y-axis anchor pixel coordinates to server-recognized grid lines; keep the crop origin and trace points fixed. Do not demote a printed graph merely to bypass source verification.",
   ])
+})
+
+test("time-scale correction feedback keeps the bound stimulus inside the recalibrated window", () => {
+  const observation = parseReferenceGraphObservation(validObservationValue(), discovery, model_interface)
+  const feedback = sourceProofRejectionDiagnostics(observation, {
+    version: 1,
+    source_pdf_sha256,
+    results: [
+      {
+        status: "ineligible",
+        graph_id: "load_transient",
+        code: "axis_calibration_unproven",
+        reason: "The declared time scale does not match the source.",
+        diagnostic: {
+          recognized_measurements: ["server-required-x-anchor-value-span:0.001s"],
+          missing_proofs: ["declared_time_scale_matches_source"],
+        },
+      },
+    ],
+  })[0]!
+
+  expect(feedback).toContain("use that exact span")
+  expect(feedback).toContain("recompute the electrical_binding stimulus PULSE delay, width, and period")
+  expect(feedback).toContain("printed first edge inside")
+  expect(feedback).toContain("next period beyond the window")
 })
 
 test("source-proof correction feedback distinguishes clipped scope controls from bad axis values", () => {

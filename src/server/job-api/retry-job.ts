@@ -2,6 +2,7 @@ import { constants } from "node:fs"
 import { copyFile, open } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job } from "@/shared/job-types"
+import { readCommittedApplicationEvidenceSnapshot } from "../component-workflow/application-evidence-commit"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import type { JobRetrySource } from "../job-store"
 import type { JobApiContext } from "./job-api-context"
@@ -61,10 +62,13 @@ async function hasLegacyEvidenceCommitMarker(job_dir: string): Promise<boolean> 
 
 async function readCommittedRetrySourcePdf(job_dir: string): Promise<Uint8Array | undefined> {
   try {
-    const evidence_snapshot = await readCommittedEvidenceSnapshot(job_dir)
+    const [evidence_snapshot, application_evidence_snapshot] = await Promise.all([
+      readCommittedEvidenceSnapshot(job_dir),
+      readCommittedApplicationEvidenceSnapshot(job_dir),
+    ])
     return evidence_snapshot?.version === 2 || evidence_snapshot?.version === 3
       ? evidence_snapshot.source_pdf
-      : undefined
+      : application_evidence_snapshot?.source_pdf
   } catch (error) {
     // Version 1 never bound the PDF, so retained legacy jobs preserve their
     // historical root-file retry behavior. Newer commits fail closed.

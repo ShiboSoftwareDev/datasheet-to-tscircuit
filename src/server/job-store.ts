@@ -290,13 +290,28 @@ export class JobStore {
   claimPipelineExecution(job_id: string, pipeline_id: string): boolean {
     if (!this.job_map.has(job_id) || this.job_deletion_lease_map.has(job_id)) return false
     const active = this.active_pipeline_execution_map.get(job_id) ?? new Set<string>()
-    if (active.has(pipeline_id)) return false
+    // Component and typical-application executions restore and mutate the same
+    // job workspace. Different pipeline IDs therefore cannot safely execute in
+    // parallel inside one job.
+    if (active.size > 0) return false
     const job = this.job_map.get(job_id)!
     if (job.cancellation_controller.signal.aborted) {
       job.cancellation_controller = new AbortController()
     }
     active.add(pipeline_id)
     this.active_pipeline_execution_map.set(job_id, active)
+    return true
+  }
+
+  claimCoordinatedPipelineExecutions(job_id: string, pipeline_ids: readonly string[]): boolean {
+    const job = this.job_map.get(job_id)
+    if (!job || this.job_deletion_lease_map.has(job_id)) return false
+    if (pipeline_ids.length === 0 || new Set(pipeline_ids).size !== pipeline_ids.length) return false
+    if ((this.active_pipeline_execution_map.get(job_id)?.size ?? 0) > 0) return false
+    if (job.cancellation_controller.signal.aborted) {
+      job.cancellation_controller = new AbortController()
+    }
+    this.active_pipeline_execution_map.set(job_id, new Set(pipeline_ids))
     return true
   }
 

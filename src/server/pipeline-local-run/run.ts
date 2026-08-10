@@ -20,6 +20,10 @@ import { BunProcessRunner } from "../infrastructure/process"
 import type { JobStore } from "../job-store"
 import type { ModelRunStore } from "../model-run-store"
 import { MODEL_PIPELINE } from "../model-workflow"
+import {
+  waitForComponentBeforePublication,
+  waitForModelEvidenceBeforeComparison,
+} from "../model-workflow/stages/wait-for-component"
 import type {
   ModelPipelineContext,
   ModelPipelineOutputs,
@@ -194,6 +198,7 @@ export async function executePipeline(input: {
   taskId?: string
   runDir: string
   signal?: AbortSignal
+  refresh_job?: () => Promise<void>
   normalize_snapshot?: (snapshot: PublicPipelineSnapshot) => PublicPipelineSnapshot
   on_snapshot?: (snapshot: PublicPipelineSnapshot) => void
 }): Promise<PipelineRunResult<PipelineOutputMap>> {
@@ -312,6 +317,31 @@ export async function executePipeline(input: {
         taskId: input.taskId,
         dependencyOutputs: input.local.dependencyOutputs,
       }),
+      before_stage_start:
+        input.mode === "pipeline"
+          ? ({ stage_id, signal }) => {
+              if (stage_id === "wait_for_model_evidence") {
+                return waitForModelEvidenceBeforeComparison({
+                  job_id: context.job_id,
+                  model_run_id: context.model_run_id,
+                  job_store: input.jobStore,
+                  model_run_store: input.modelRunStore,
+                  signal,
+                  refresh_job: input.refresh_job,
+                })
+              }
+              if (stage_id === "wait_for_component") {
+                return waitForComponentBeforePublication({
+                  job_id: context.job_id,
+                  model_run_id: context.model_run_id,
+                  job_store: input.jobStore,
+                  model_run_store: input.modelRunStore,
+                  signal,
+                  refresh_job: input.refresh_job,
+                })
+              }
+            }
+          : undefined,
       on_snapshot: (snapshot) => {
         const projected = projectPublicPipelineSnapshot({
           snapshot,

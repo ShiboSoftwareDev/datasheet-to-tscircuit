@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { projectDebugCliStdout, runDebugCli } from "@/cli/pipeline-debug"
@@ -12,10 +12,15 @@ import {
   restorePipelineTaskInputFiles,
   retainPipelineTaskInputFiles,
 } from "@/server/pipeline"
-import { clonePipelineJob, normalizePartialPipeline } from "@/server/pipeline-local-run"
+import {
+  clonePipelineJob,
+  deriveSpiceInputBundle,
+  normalizePartialPipeline,
+} from "@/server/pipeline-local-run"
 import type { PublicPipelineSnapshot, PublicPipelineStage } from "@/shared/job-types"
 import type { LocalRunSummary } from "@/shared/local-run"
 import type { PipelineTaskInputEnvelope } from "@/shared/pipeline-types"
+import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 async function writeRetainedInput(input: {
   sourceJobDir: string
@@ -47,6 +52,54 @@ async function pathExists(path: string): Promise<boolean> {
   )
 }
 
+test("a never-run SPICE pipeline derives only its initial job boundary", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "pipeline-derived-spice-"))
+  const sourceJobDir = join(temporaryRoot, "job")
+  const localRunsRoot = join(temporaryRoot, "local")
+  const restoredRoot = join(temporaryRoot, "restored")
+  await mkdir(join(sourceJobDir, "spice"), { recursive: true })
+  await Promise.all([
+    writeFile(join(sourceJobDir, "job.json"), '{"job_id":"fresh-job"}\n'),
+    writeFile(join(sourceJobDir, "datasheet.pdf"), "datasheet"),
+    writeFile(join(sourceJobDir, "component.circuit.tsx"), "component"),
+    writeFile(join(sourceJobDir, "typical-application.circuit.tsx"), "application"),
+    writeFile(join(sourceJobDir, "spice", "stale-candidate.lib"), "stale"),
+  ])
+  const derived = await deriveSpiceInputBundle({
+    sourceJobId: "fresh-job",
+    sourceJobDir,
+    localRunsRoot,
+    modelRunId: "fresh-model-run",
+    useOpenai: true,
+  })
+  try {
+    expect(derived.bundle.envelope).toMatchObject({
+      pipeline_id: "spice_generation",
+      task_id: "find_reference_graphs",
+      depends_on: [],
+      dependency_outputs: {},
+      execution_context: {
+        job_id: "fresh-job",
+        model_run_id: "fresh-model-run",
+        model_dir: join(sourceJobDir, "spice"),
+        use_openai: true,
+      },
+    })
+    await mkdir(restoredRoot, { recursive: true })
+    await restorePipelineTaskInputFiles({
+      bundle: derived.bundle,
+      destination_root: restoredRoot,
+    })
+    expect(await readFile(join(restoredRoot, "datasheet.pdf"), "utf8")).toBe("datasheet")
+    expect(await readFile(join(restoredRoot, "component.circuit.tsx"), "utf8")).toBe("component")
+    expect(await readFile(join(restoredRoot, "typical-application.circuit.tsx"), "utf8")).toBe("application")
+    expect(await pathExists(join(restoredRoot, "spice"))).toBe(false)
+  } finally {
+    await derived.cleanup()
+    await rm(temporaryRoot, { recursive: true, force: true })
+  }
+})
+
 test("in-place input restoration preserves accumulated SPICE graphs and previews", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "pipeline-preserve-spice-"))
   const jobDir = join(temporaryRoot, "job")
@@ -54,6 +107,7 @@ test("in-place input restoration preserves accumulated SPICE graphs and previews
   try {
     await mkdir(join(jobDir, "spice", "current-previews", "old", "cases"), { recursive: true })
     await writeFile(join(jobDir, "datasheet.pdf"), "original datasheet")
+    await writeFile(join(jobDir, "job.json"), '{"status":"retained"}\n')
     await writeFile(join(jobDir, "spice", "current-preview.json"), '{"revision":"old"}\n')
     await writeFile(
       join(jobDir, "spice", "current-previews", "old", "cases", "figure.circuit.tsx"),
@@ -90,6 +144,7 @@ test("in-place input restoration preserves accumulated SPICE graphs and previews
       })}\n`,
     )
     await writeFile(join(jobDir, "datasheet.pdf"), "mutated datasheet")
+    await writeFile(join(jobDir, "job.json"), '{"status":"live"}\n')
     await writeFile(join(jobDir, "spice", "current-preview.json"), '{"revision":"new"}\n')
     await mkdir(join(jobDir, "spice", "current-previews", "new", "cases"), { recursive: true })
     const newGraph = join(jobDir, "spice", "current-previews", "new", "cases", "figure.circuit.json")
@@ -99,9 +154,11 @@ test("in-place input restoration preserves accumulated SPICE graphs and previews
       bundle: await loadPipelineTaskInputBundle(inputPath),
       destination_root: jobDir,
       preserved_roots: ["spice"],
+      preserved_paths: ["job.json"],
     })
 
     expect(await readFile(join(jobDir, "datasheet.pdf"), "utf8")).toBe("original datasheet")
+    expect(await readFile(join(jobDir, "job.json"), "utf8")).toBe('{"status":"live"}\n')
     expect(await readFile(join(jobDir, "spice", "current-preview.json"), "utf8")).toBe('{"revision":"new"}\n')
     expect(await readFile(newGraph, "utf8")).toBe("new simulation graph")
     expect(
@@ -233,7 +290,23 @@ test("input references and --job clone while a positional job runs in place", as
   try {
     await Bun.write(join(sourceJobDir, "datasheet.pdf"), "%PDF-1.4\nLocal fixture\n%%EOF\n")
     store.createJob({ job_id: "local-job", job_dir: sourceJobDir, file_name: "fixture.pdf" })
-    const retainedDebugRef = "runs/component_generation/original/.pipeline/stages/01-prepare"
+    await writeFile(join(sourceJobDir, "index.circuit.tsx"), "export default () => null\n")
+    await writeFile(
+      join(sourceJobDir, "component-validation.json"),
+      `${JSON.stringify({
+        version: 1,
+        passed: true,
+        errors: [],
+        circuit_json: [
+          {
+            type: "source_component",
+            source_component_id: "source_component_u1",
+            name: "U1",
+          },
+        ],
+      })}\n`,
+    )
+    const retainedDebugRef = "runs/component_generation/original/.pipeline/stages/05-repair_component"
     const retainedInputPath = join(sourceJobDir, retainedDebugRef, "input.json")
     store.updateJob("local-job", {
       display_status: "complete",
@@ -245,8 +318,8 @@ test("input references and --job clone while a positional job runs in place", as
         started_at: "2026-08-05T08:00:00.000Z",
         updated_at: "2026-08-05T08:00:01.000Z",
         stage_results: {
-          prepare: {
-            stage_id: "prepare",
+          repair_component: {
+            stage_id: "repair_component",
             status: "completed",
             debug_ref: retainedDebugRef,
           },
@@ -257,7 +330,7 @@ test("input references and --job clone while a positional job runs in place", as
       version: 2,
       kind: "pipeline_task_input",
       pipeline_id: "component_generation",
-      task_id: "prepare",
+      task_id: "repair_component",
       run_id: "original-run",
       execution_context: {
         job_id: "local-job",
@@ -265,9 +338,15 @@ test("input references and --job clone while a positional job runs in place", as
         use_openai: false,
         invocation_id: "original-invocation",
       },
-      depends_on: [],
-      dependency_statuses: {},
-      dependency_outputs: {},
+      depends_on: ["validate_component"],
+      dependency_statuses: { validate_component: "completed" },
+      dependency_outputs: {
+        validate_component: {
+          result_path: "/app/.runtime/jobs/local-job/component-validation.json",
+          passed: true,
+          errors: [],
+        },
+      },
     }
     await writeRetainedInput({
       sourceJobDir,
@@ -275,17 +354,17 @@ test("input references and --job clone while a positional job runs in place", as
       envelope,
       excludedRoots: ["spice"],
     })
-    const sourceCheckpointBefore = await readFile(join(sourceJobDir, "job.json"), "utf8")
-    const retainedDatasheetHash = createHash("sha256")
-      .update(await readFile(join(sourceJobDir, "datasheet.pdf")))
-      .digest("hex")
+    const retainedCheckpoint = await readFile(join(sourceJobDir, "job.json"), "utf8")
+    store.updateJob("local-job", { component_ready: true })
+    await writeFile(join(sourceJobDir, "component.circuit.tsx"), "stale published component\n")
+    const liveCheckpointBefore = await readFile(join(sourceJobDir, "job.json"), "utf8")
     await writeFile(join(sourceJobDir, "datasheet.pdf"), "%PDF-1.4\nmutated after retention\n%%EOF\n")
 
     const inspection = (await runDebugCli(["task", "inspect", "--input", retainedInputPath])) as {
       envelope: PipelineTaskInputEnvelope
       retained_files: { count: number; total_bytes: number }
     }
-    expect(inspection.envelope.task_id).toBe("prepare")
+    expect(inspection.envelope.task_id).toBe("repair_component")
     expect(inspection.retained_files.count).toBeGreaterThanOrEqual(2)
     expect(inspection.retained_files.total_bytes).toBeGreaterThan(0)
 
@@ -298,16 +377,14 @@ test("input references and --job clone while a positional job runs in place", as
       temporaryRoot,
     ])) as LocalRunSummary
 
-    expect(summary.status).toBe("completed")
+    expect({ status: summary.status, error: summary.error_message }).toEqual({
+      status: "completed",
+      error: undefined,
+    })
     expect(summary.workspace_dir).not.toBe(sourceJobDir)
-    expect(await readFile(join(sourceJobDir, "job.json"), "utf8")).toBe(sourceCheckpointBefore)
-    expect(await Bun.file(join(summary.workspace_dir, "provenance.json")).exists()).toBe(true)
-    const localProvenance = (await Bun.file(join(summary.workspace_dir, "provenance.json")).json()) as {
-      datasheet_sha256: string
-    }
-    expect(localProvenance.datasheet_sha256).toBe(retainedDatasheetHash)
+    expect(await readFile(join(sourceJobDir, "job.json"), "utf8")).toBe(liveCheckpointBefore)
     const localInput = await loadPipelineTaskInput(
-      join(summary.pipeline_dir, "stages", "01-prepare", "input.json"),
+      join(summary.pipeline_dir, "stages", "05-repair_component", "input.json"),
     )
     expect(localInput.execution_context.job_dir).toBe(summary.workspace_dir)
     expect(localInput.execution_context.invocation_id).not.toBe("original-invocation")
@@ -331,7 +408,7 @@ test("input references and --job clone while a positional job runs in place", as
           "--pipeline",
           "component_generation",
           "--task",
-          "prepare",
+          "repair_component",
           "--root",
           temporaryRoot,
         ],
@@ -356,16 +433,18 @@ test("input references and --job clone while a positional job runs in place", as
     expect(await readFile(join(sourceJobDir, "datasheet.pdf"), "utf8")).toBe(
       "%PDF-1.4\nLocal fixture\n%%EOF\n",
     )
-    expect(await readFile(join(sourceJobDir, "job.json"), "utf8")).not.toBe(sourceCheckpointBefore)
+    expect(await readFile(join(sourceJobDir, "job.json"), "utf8")).not.toBe(retainedCheckpoint)
+    expect(JSON.parse(await readFile(join(sourceJobDir, "job.json"), "utf8")).component_ready).toBe(false)
+    expect(await pathExists(join(sourceJobDir, "component.circuit.tsx"))).toBe(false)
     const sourceLocalSummaryBefore = await readFile(sourceLocal.summary_path, "utf8")
     const sourceStageResults = sourceLocal.stage_results as Record<
       string,
       { debug_dir: string; status: string }
     >
-    const continuationInputPath = join(sourceStageResults.extract_evidence.debug_dir, "input.json")
+    const continuationInputPath = join(sourceStageResults.publish_component.debug_dir, "input.json")
     const continuationBundle = await loadPipelineTaskInputBundle(continuationInputPath)
-    expect(continuationBundle.envelope.dependency_statuses).toEqual({ prepare: "completed" })
-    expect(continuationBundle.envelope.dependency_outputs.prepare).toBeDefined()
+    expect(continuationBundle.envelope.dependency_statuses).toEqual({ repair_component: "completed" })
+    expect(continuationBundle.envelope.dependency_outputs.repair_component).toBeDefined()
 
     const clonedLocal = (await runDebugCli([
       "local",
@@ -375,7 +454,7 @@ test("input references and --job clone while a positional job runs in place", as
       "--pipeline",
       "component_generation",
       "--task",
-      "prepare",
+      "repair_component",
       "--root",
       temporaryRoot,
     ])) as LocalRunSummary
@@ -395,7 +474,7 @@ test("input references and --job clone while a positional job runs in place", as
     const portableRoot = join(temporaryRoot, "portable-input")
     await cp(resolve(retainedInputPath, "../../.."), portableRoot, { recursive: true })
     await rm(sourceJobDir, { recursive: true, force: true })
-    const independentInput = join(portableRoot, "stages", "01-prepare", "input.json")
+    const independentInput = join(portableRoot, "stages", "05-repair_component", "input.json")
     const independentClone = (await runDebugCli([
       "task",
       "run",
@@ -415,6 +494,141 @@ test("input references and --job clone while a positional job runs in place", as
   }
 })
 
+test("a full application clone derives its extraction input from a component-only job", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "pipeline-application-from-component-"))
+  const sourceJobId = "component-only"
+  const sourceJobDir = join(temporaryRoot, ".runtime", "jobs", sourceJobId)
+  const store = new JobStore()
+  const visualSource = {
+    page: 2,
+    figure: "Recommended land pattern",
+    method: "pdf_visual",
+    confidence: "high",
+    image: "visual-reference/land-pattern.png",
+    render_dpi: 200,
+  } as const
+  try {
+    await publishCommittedEvidenceFixture({
+      job_dir: sourceJobDir,
+      component_evidence: {
+        version: 1,
+        status: "resolved",
+        part_number: { value: "COMPONENT-ONLY-2", sources: [visualSource] },
+        package: {
+          name: { value: "Two terminal package", sources: [visualSource] },
+          pin_count: { value: 2, sources: [visualSource] },
+        },
+        pinout: {
+          pins: [
+            { number: "1", labels: ["INPUT"], role: "input", sources: [visualSource] },
+            { number: "2", labels: ["RETURN"], role: "ground", sources: [visualSource] },
+          ],
+        },
+        footprint: {
+          view: "pcb_top",
+          units: "mm",
+          drawing_orientation: { value: "pcb_top", sources: [visualSource] },
+          pads: [
+            {
+              pin: "1",
+              kind: "smt",
+              x: -0.75,
+              y: 0,
+              width: 0.55,
+              height: 0.8,
+              sources: [visualSource],
+            },
+            {
+              pin: "2",
+              kind: "smt",
+              x: 0.75,
+              y: 0,
+              width: 0.55,
+              height: 0.8,
+              sources: [visualSource],
+            },
+          ],
+        },
+        unresolved_ambiguities: [],
+      },
+      application_plan: {
+        version: 4,
+        availability: "not_present",
+        title: "No documented typical application",
+        description: "The searched sections contain no reference circuit.",
+        source_references: [visualSource],
+        searched_sections: ["Application information"],
+        components: [],
+        connections: [],
+      },
+    })
+    store.createJob({
+      job_id: sourceJobId,
+      job_dir: sourceJobDir,
+      file_name: "component-only.pdf",
+    })
+    await Promise.all([
+      writeFile(
+        join(sourceJobDir, "component.circuit.tsx"),
+        'export default () => <chip name="U1" footprint="soic2" />\n',
+      ),
+      writeFile(join(sourceJobDir, "component.circuit.json"), "[]\n"),
+    ])
+    store.updateJob(sourceJobId, {
+      component_ready: true,
+      display_status: "complete",
+      is_complete: true,
+      pipeline: {
+        pipeline_id: "component_generation",
+        status: "completed",
+        sequence: 1,
+        started_at: "2026-08-09T00:00:00.000Z",
+        updated_at: "2026-08-09T00:01:00.000Z",
+        stage_results: {
+          publish_component: {
+            stage_id: "publish_component",
+            status: "completed",
+            debug_ref: "runs/component_generation/component-only/.pipeline/stages/06-publish_component",
+          },
+        },
+      },
+    })
+    const sourceCheckpoint = await readFile(join(sourceJobDir, "job.json"), "utf8")
+
+    const summary = (await runDebugCli([
+      "local",
+      "run",
+      "--job",
+      sourceJobId,
+      "--pipeline",
+      "typical_application",
+      "--root",
+      temporaryRoot,
+    ])) as LocalRunSummary
+
+    expect(summary).toMatchObject({
+      execution_kind: "clone",
+      mode: "pipeline",
+      pipeline_id: "typical_application",
+      source_job_id: sourceJobId,
+      status: "failed",
+      stage_results: {
+        extract_application_evidence: {
+          status: "failed",
+          error: { code: "process_spawn_failed" },
+        },
+      },
+    })
+    expect(summary.target_job_id).not.toBe(sourceJobId)
+    expect(await readFile(join(sourceJobDir, "job.json"), "utf8")).toBe(sourceCheckpoint)
+    expect(
+      (await readdir(join(temporaryRoot, ".runtime", "local"))).some((name) => name.startsWith(".")),
+    ).toBe(false)
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true })
+  }
+})
+
 test("a task with Docker-local dependency paths is rewritten to its cloned regular job", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "pipeline-docker-path-local-"))
   const sourceJobDir = join(temporaryRoot, ".runtime", "jobs", "repair-job")
@@ -426,11 +640,22 @@ test("a task with Docker-local dependency paths is rewritten to its cloned regul
     await writeFile(join(sourceJobDir, "index.circuit.tsx"), "export default () => null\n")
     await writeFile(
       join(sourceJobDir, "component-validation.json"),
-      `${JSON.stringify({ passed: true, errors: [], circuit_json: [] })}\n`,
+      `${JSON.stringify({
+        version: 1,
+        passed: true,
+        errors: [],
+        circuit_json: [
+          {
+            type: "source_component",
+            source_component_id: "source_component_u1",
+            name: "U1",
+          },
+        ],
+      })}\n`,
     )
     const inputPath = await writeRetainedInput({
       sourceJobDir,
-      debugRef: "runs/component_generation/original/.pipeline/stages/06-repair_component",
+      debugRef: "runs/component_generation/original/.pipeline/stages/05-repair_component",
       excludedRoots: ["spice"],
       envelope: {
         version: 2,
@@ -463,7 +688,10 @@ test("a task with Docker-local dependency paths is rewritten to its cloned regul
       "--root",
       temporaryRoot,
     ])) as LocalRunSummary
-    expect(summary.status).toBe("completed")
+    expect({ status: summary.status, error: summary.error_message }).toEqual({
+      status: "completed",
+      error: undefined,
+    })
     expect(summary.selected_task_result).toMatchObject({
       status: "completed",
       output: {
@@ -471,9 +699,10 @@ test("a task with Docker-local dependency paths is rewritten to its cloned regul
         passed: true,
       },
     })
-    expect(await readFile(join(summary.workspace_dir, "component.circuit.tsx"), "utf8")).toBe(
+    expect(await readFile(join(summary.workspace_dir, "index.circuit.tsx"), "utf8")).toBe(
       "export default () => null\n",
     )
+    expect(await pathExists(join(summary.workspace_dir, "component.circuit.tsx"))).toBe(false)
     expect(await pathExists(join(sourceJobDir, "component.circuit.tsx"))).toBe(false)
 
     const jobsBeforeInvalidRun = (await runDebugCli(["job", "list", "--root", temporaryRoot])) as {
@@ -481,7 +710,7 @@ test("a task with Docker-local dependency paths is rewritten to its cloned regul
     }
     await expect(
       runDebugCli(["pipeline", "run", "--input", inputPath, "--root", temporaryRoot]),
-    ).rejects.toThrow("requires the retained input for prepare")
+    ).rejects.toThrow("requires the retained input for extract_evidence")
     const jobsAfterInvalidRun = (await runDebugCli(["job", "list", "--root", temporaryRoot])) as {
       jobs: unknown[]
     }
@@ -661,13 +890,13 @@ test("a retained file whose bytes no longer match its manifest is refused", asyn
     store.createJob({ job_id: "corrupt-job", job_dir: sourceJobDir, file_name: "corrupt.pdf" })
     const inputPath = await writeRetainedInput({
       sourceJobDir,
-      debugRef: "runs/component_generation/original/.pipeline/stages/01-prepare",
+      debugRef: "runs/component_generation/original/.pipeline/stages/01-extract_evidence",
       excludedRoots: ["spice"],
       envelope: {
         version: 2,
         kind: "pipeline_task_input",
         pipeline_id: "component_generation",
-        task_id: "prepare",
+        task_id: "extract_evidence",
         run_id: "original-run",
         execution_context: {
           job_id: "corrupt-job",

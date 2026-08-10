@@ -7,12 +7,15 @@ import {
   generateApplicationSource,
   generateComponentSource,
 } from "@/server/component-workflow/source-candidates"
-import { readApprovedEvidence } from "@/server/component-workflow/stage-helpers"
+import {
+  readApprovedApplicationEvidence,
+  readApprovedEvidence,
+} from "@/server/component-workflow/stage-helpers"
 import type { AgentClient } from "@/server/infrastructure/agent"
 import { createJobApiHandler } from "@/server/job-api"
 import { restoreJobDirectory } from "@/server/job-restorer/restore-job-directory"
 import { JobStore } from "@/server/job-store"
-import { prepareReferenceGraphInputs } from "@/server/modeling"
+import { prepareModelEvidenceInputs, prepareReferenceDiscoveryInputs } from "@/server/modeling"
 import { publishCommittedEvidenceFixture } from "./fixtures/committed-evidence"
 
 const temporary_directories: string[] = []
@@ -188,7 +191,9 @@ test("component correction attempts reuse one committed in-memory evidence snaps
 
 test("application generation rejects a plan outside its committed snapshot", async () => {
   const job_dir = await createCommittedJob()
-  const { application_plan } = await readApprovedEvidence(job_dir)
+  const component_source_path = join(job_dir, "component.circuit.tsx")
+  await Bun.write(component_source_path, 'export default () => <chip name="U1" />\n')
+  const application_plan = await readApprovedApplicationEvidence(job_dir)
   let agent_called = false
   const agent_client: AgentClient = {
     async run() {
@@ -200,6 +205,7 @@ test("application generation rejects a plan outside its committed snapshot", asy
   await expect(
     generateApplicationSource({
       job_dir,
+      component_source_path,
       plan: { ...application_plan, title: "Stale caller plan" },
       signal: new AbortController().signal,
       use_openai: false,
@@ -211,12 +217,54 @@ test("application generation rejects a plan outside its committed snapshot", asy
   expect(agent_called).toBe(false)
 })
 
-test("reference graph inputs materialize committed evidence and fail closed on tampering", async () => {
+test("application generation exposes only the committed component source", async () => {
+  const job_dir = await createCommittedJob()
+  await writeProjectFiles(job_dir)
+  const component_source_path = join(job_dir, "component.circuit.tsx")
+  await Promise.all([
+    Bun.write(component_source_path, 'export default () => <chip name="COMMITTED" />\n'),
+    Bun.write(join(job_dir, "index.circuit.tsx"), 'export default () => <chip name="MUTABLE" />\n'),
+  ])
+  const application_plan = await readApprovedApplicationEvidence(job_dir)
+  const agent_client: AgentClient = {
+    async run(input) {
+      expect(await Bun.file(join(input.workspace, "component.circuit.tsx")).text()).toContain("COMMITTED")
+      expect(await Bun.file(join(input.workspace, "index.circuit.tsx")).exists()).toBe(false)
+      await Bun.write(
+        join(input.workspace, "typical-application.circuit.tsx"),
+        'import Component from "./component.circuit"\nexport default () => <Component name="U1" />\n',
+      )
+      return { attempts: 1, duration_ms: 1, output_tail: "" }
+    },
+  }
+
+  await generateApplicationSource({
+    job_dir,
+    component_source_path,
+    plan: application_plan,
+    signal: new AbortController().signal,
+    use_openai: false,
+    agent_client,
+    debug_dir: join(job_dir, "debug", "application-source"),
+    on_output() {},
+  })
+
+  expect(await Bun.file(join(job_dir, "typical-application.circuit.tsx")).text()).toContain(
+    "./component.circuit",
+  )
+})
+
+test("model evidence inputs materialize committed evidence and fail closed on tampering", async () => {
   const job_dir = await createCommittedJob()
   const evidence_dir = await committedEvidenceDir(job_dir)
   const model_dir = join(job_dir, "spice")
 
-  const { model_interface } = await prepareReferenceGraphInputs({
+  await prepareReferenceDiscoveryInputs({
+    job_dir,
+    model_dir,
+    invocation_id: "initial",
+  })
+  const { model_interface } = await prepareModelEvidenceInputs({
     job_dir,
     model_dir,
     invocation_id: "initial",
@@ -244,7 +292,7 @@ test("reference graph inputs materialize committed evidence and fail closed on t
   )
   const rejected_model_dir = join(job_dir, "spice-after-tamper")
   await expect(
-    prepareReferenceGraphInputs({
+    prepareModelEvidenceInputs({
       job_dir,
       model_dir: rejected_model_dir,
       invocation_id: "tampered",
@@ -253,7 +301,7 @@ test("reference graph inputs materialize committed evidence and fail closed on t
   expect(await Bun.file(rejected_model_dir).exists()).toBe(false)
 })
 
-test("reference graph inputs reject legacy evidence that does not bind a source PDF", async () => {
+test("model evidence inputs reject legacy evidence that does not bind a source PDF", async () => {
   const job_dir = await createCommittedJob()
   const relative_paths = [
     "component-evidence.json",
@@ -279,10 +327,11 @@ test("reference graph inputs reject legacy evidence that does not bind a source 
   )
 
   const model_dir = join(job_dir, "spice-legacy-evidence")
-  await expect(prepareReferenceGraphInputs({ job_dir, model_dir, invocation_id: "legacy" })).rejects.toThrow(
+  await prepareReferenceDiscoveryInputs({ job_dir, model_dir, invocation_id: "legacy" })
+  await expect(prepareModelEvidenceInputs({ job_dir, model_dir, invocation_id: "legacy" })).rejects.toThrow(
     "requires PDF-bound evidence version 2 or newer",
   )
-  expect(await Bun.file(model_dir).exists()).toBe(false)
+  expect(await Bun.file(join(model_dir, "model-interface.json")).exists()).toBe(false)
 })
 
 test("job restoration uses a v3 snapshot when the mutable root PDF is missing", async () => {
@@ -426,25 +475,27 @@ test("job restoration remains visible and reports corrupt committed evidence", a
 
   expect(restored).toBeDefined()
   expect(restored?.evidence_available).toBe(false)
-  expect(restored?.typical_application_title).toBeUndefined()
+  expect(restored?.typical_application_title).toBe("Committed reference application")
   expect(restored?.has_errors).toBe(true)
   expect(restored?.warnings).toContainEqual(
     expect.stringContaining("Committed evidence failed integrity validation"),
   )
 })
 
-test("approved evidence and model setup reject loose files without a commit marker", async () => {
+test("approved evidence and model evidence setup reject loose files without a commit marker", async () => {
   const job_dir = await mkdtemp(join(tmpdir(), "loose-evidence-consumer-"))
   temporary_directories.push(job_dir)
   await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF loose evidence fixture\n"),
     Bun.write(join(job_dir, "component-evidence.json"), `${JSON.stringify(componentEvidence())}\n`),
     Bun.write(join(job_dir, "typical-application-plan.json"), `${JSON.stringify(applicationPlan())}\n`),
   ])
 
   await expect(readApprovedEvidence(job_dir)).rejects.toThrow("evidence-commit.json has not been published")
   const model_dir = join(job_dir, "spice")
-  await expect(prepareReferenceGraphInputs({ job_dir, model_dir, invocation_id: "loose" })).rejects.toThrow(
+  await prepareReferenceDiscoveryInputs({ job_dir, model_dir, invocation_id: "loose" })
+  await expect(prepareModelEvidenceInputs({ job_dir, model_dir, invocation_id: "loose" })).rejects.toThrow(
     "evidence-commit.json has not been published",
   )
-  expect(await Bun.file(model_dir).exists()).toBe(false)
+  expect(await Bun.file(join(model_dir, "model-interface.json")).exists()).toBe(false)
 })

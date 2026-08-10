@@ -4,9 +4,18 @@ import { isDeepStrictEqual } from "node:util"
 import { type AgentClient, runAgentArtifactStage } from "../infrastructure/agent"
 import { createStageWorkspace, promoteStageFile, readBoundedTextArtifact } from "../infrastructure/artifacts"
 import type { TypicalApplicationPlan } from "./application-plan"
+import {
+  applicationEvidenceFilePath,
+  type CommittedApplicationEvidenceSnapshot,
+} from "./application-evidence-commit"
 import type { CommittedEvidenceSnapshot } from "./evidence-commit"
 import { applicationPrompt, componentPrompt } from "./prompts"
-import { readApprovedEvidenceBundle, validateGeneratedSource } from "./stage-helpers"
+import {
+  readApprovedApplicationEvidenceBundle,
+  readApprovedComponentEvidenceBundle,
+  readComponentBoundApplicationEvidence,
+  validateGeneratedSource,
+} from "./stage-helpers"
 import {
   APPLICATION_SOURCE_STAGE_INSTRUCTIONS,
   COMPONENT_SOURCE_STAGE_INSTRUCTIONS,
@@ -23,7 +32,6 @@ const GENERATION_EVIDENCE_FILES = [
   "component-evidence.json",
   "component-schematic-plan.json",
   "footprint-plan.json",
-  "typical-application-plan.json",
 ] as const
 
 function committedGenerationFiles(
@@ -50,6 +58,25 @@ async function materializeCommittedEvidence(
     const destination = join(workspace, file.relative_path)
     await mkdir(dirname(destination), { recursive: true })
     await Bun.write(destination, file.bytes)
+  }
+}
+
+async function materializeCommittedApplicationEvidence(
+  workspace: string,
+  snapshot: CommittedApplicationEvidenceSnapshot,
+): Promise<void> {
+  const paths = [
+    applicationEvidenceFilePath("typical-application-plan.json"),
+    ...[...snapshot.files.keys()]
+      .filter((relative_path) => relative_path.startsWith("visual-reference/"))
+      .sort(),
+  ]
+  for (const relative_path of paths) {
+    const bytes = snapshot.files.get(relative_path)
+    if (!bytes) throw new Error(`Committed application evidence is missing ${relative_path}`)
+    const destination = join(workspace, relative_path)
+    await mkdir(dirname(destination), { recursive: true })
+    await Bun.write(destination, bytes)
   }
 }
 
@@ -82,7 +109,7 @@ export async function generateComponentSource(input: {
   feedback?: string
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
 }) {
-  const { snapshot } = await readApprovedEvidenceBundle(input.job_dir)
+  const { snapshot } = await readApprovedComponentEvidenceBundle(input.job_dir)
   return runAgentArtifactStage({
     stage_id: input.feedback ? "repair_component" : "generate_component",
     phase_label: input.feedback ? "Component source repair" : "Component source generation",
@@ -134,6 +161,7 @@ export async function generateComponentSource(input: {
 
 export async function generateApplicationSource(input: {
   job_dir: string
+  component_source_path: string
   plan: TypicalApplicationPlan
   signal: AbortSignal
   use_openai: boolean
@@ -142,11 +170,14 @@ export async function generateApplicationSource(input: {
   feedback?: string
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
 }) {
-  const { snapshot, evidence } = await readApprovedEvidenceBundle(input.job_dir)
-  if (!isDeepStrictEqual(input.plan, evidence.application_plan)) {
+  const [{ snapshot }, application_plan] = await Promise.all([
+    readApprovedApplicationEvidenceBundle(input.job_dir),
+    readComponentBoundApplicationEvidence(input.job_dir),
+  ])
+  if (!isDeepStrictEqual(input.plan, application_plan)) {
     throw new Error("Application source plan does not match the committed evidence snapshot")
   }
-  const committed_plan = evidence.application_plan
+  const committed_plan = application_plan
   return runAgentArtifactStage({
     stage_id: input.feedback ? "repair_application" : "generate_application",
     phase_label: input.feedback ? "Application source repair" : "Application source generation",
@@ -155,20 +186,27 @@ export async function generateApplicationSource(input: {
     use_openai: input.use_openai,
     agent_client: input.agent_client,
     create_workspace: () =>
-      createSourceWorkspace({
-        prefix: "application-source",
-        files: [
-          ...PROJECT_FILES,
-          "index.circuit.tsx",
-          "component.circuit.tsx",
-          "typical-application.circuit.tsx",
-        ].map((file_name) => ({
-          source: join(input.job_dir, file_name),
-          required: file_name !== "typical-application.circuit.tsx",
-        })),
-        evidence_snapshot: snapshot,
-        instructions: APPLICATION_SOURCE_STAGE_INSTRUCTIONS,
-      }),
+      (async () => {
+        const workspace = await createStageWorkspace({
+          prefix: "application-source",
+          files: [
+            ...PROJECT_FILES.map((file_name) => ({ source: join(input.job_dir, file_name) })),
+            { source: input.component_source_path },
+            {
+              source: join(input.job_dir, "typical-application.circuit.tsx"),
+              required: false,
+            },
+          ],
+        })
+        try {
+          await materializeCommittedApplicationEvidence(workspace.path, snapshot)
+          await Bun.write(join(workspace.path, "AGENTS.md"), APPLICATION_SOURCE_STAGE_INSTRUCTIONS)
+          return workspace
+        } catch (error) {
+          await workspace.dispose().catch(() => undefined)
+          throw error
+        }
+      })(),
     build_prompt: (artifact_feedback) =>
       applicationPrompt({
         plan: committed_plan,

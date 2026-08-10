@@ -2,6 +2,10 @@ import { constants } from "node:fs"
 import { lstat, open, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job, JobDisplayStatus } from "@/shared/job-types"
+import {
+  applicationEvidenceFilePath,
+  readCommittedApplicationEvidenceSnapshot,
+} from "../component-workflow/application-evidence-commit"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import type { JobStore } from "../job-store"
 import { MODEL_PUBLICATION_FILE, readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
@@ -93,6 +97,7 @@ export async function restoreJobDirectory(input: {
   job_id: string
   job_dir: string
   job_store: JobStore
+  active_job_state?: "interrupt" | "preserve"
 }): Promise<Job | undefined> {
   const checkpoint_path = join(input.job_dir, "job.json")
   const snapshot = await readJobMarker(checkpoint_path, input.job_id)
@@ -112,27 +117,41 @@ export async function restoreJobDirectory(input: {
     )
   }
   const saved = snapshot
-  const [publication_result, evidence_result, mutable_datasheet_exists] = await Promise.all([
-    readModelPublication(input.job_dir, input.job_id).then(
-      (publication) => ({ publication, publication_integrity_error: undefined }),
-      (error: unknown) => ({
-        publication: undefined,
-        publication_integrity_error: error instanceof Error ? error.message : String(error),
-      }),
-    ),
-    readCommittedEvidenceSnapshot(input.job_dir).then(
-      (evidence_snapshot) => ({ evidence_snapshot, evidence_integrity_error: undefined }),
-      (error: unknown) => ({
-        evidence_snapshot: undefined,
-        evidence_integrity_error: error instanceof Error ? error.message : String(error),
-      }),
-    ),
-    Bun.file(join(input.job_dir, "datasheet.pdf")).exists(),
-  ])
+  const [publication_result, evidence_result, application_evidence_result, mutable_datasheet_exists] =
+    await Promise.all([
+      readModelPublication(input.job_dir, input.job_id).then(
+        (publication) => ({ publication, publication_integrity_error: undefined }),
+        (error: unknown) => ({
+          publication: undefined,
+          publication_integrity_error: error instanceof Error ? error.message : String(error),
+        }),
+      ),
+      readCommittedEvidenceSnapshot(input.job_dir).then(
+        (evidence_snapshot) => ({ evidence_snapshot, evidence_integrity_error: undefined }),
+        (error: unknown) => ({
+          evidence_snapshot: undefined,
+          evidence_integrity_error: error instanceof Error ? error.message : String(error),
+        }),
+      ),
+      readCommittedApplicationEvidenceSnapshot(input.job_dir).then(
+        (application_evidence_snapshot) => ({
+          application_evidence_snapshot,
+          application_evidence_integrity_error: undefined,
+        }),
+        (error: unknown) => ({
+          application_evidence_snapshot: undefined,
+          application_evidence_integrity_error: error instanceof Error ? error.message : String(error),
+        }),
+      ),
+      Bun.file(join(input.job_dir, "datasheet.pdf")).exists(),
+    ])
   const { publication } = publication_result
   let { publication_integrity_error } = publication_result
   const { evidence_snapshot, evidence_integrity_error } = evidence_result
-  if (!mutable_datasheet_exists && evidence_snapshot?.version !== 3) return undefined
+  const { application_evidence_snapshot, application_evidence_integrity_error } = application_evidence_result
+  if (!mutable_datasheet_exists && evidence_snapshot?.version !== 3 && !application_evidence_snapshot) {
+    return undefined
+  }
   const readBaseComponentSource = async (): Promise<string | undefined> => {
     const component_source = await readFile(join(input.job_dir, "component.circuit.tsx"), "utf8").catch(
       () => undefined,
@@ -187,13 +206,17 @@ export async function restoreJobDirectory(input: {
   const publication_is_usable = Boolean(publication && !publication_integrity_error)
   const evidence_is_committed = evidence_snapshot !== undefined
   let restored_application_plan: unknown
-  if (evidence_snapshot) {
-    const plan_bytes = evidence_snapshot.files.get("typical-application-plan.json")
-    if (!plan_bytes) throw new Error("Committed evidence snapshot is missing typical-application-plan.json")
+  const application_plan_bytes =
+    application_evidence_snapshot?.files.get(applicationEvidenceFilePath("typical-application-plan.json")) ??
+    evidence_snapshot?.files.get("typical-application-plan.json")
+  if (application_evidence_snapshot && !application_plan_bytes) {
+    throw new Error("Committed application evidence is missing typical-application-plan.json")
+  }
+  if (application_plan_bytes) {
     try {
       restored_application_plan = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(plan_bytes),
-      ) as unknown
+        new TextDecoder("utf-8", { fatal: true }).decode(application_plan_bytes),
+      )
     } catch (error) {
       throw new Error("Committed typical-application-plan.json is not valid UTF-8 JSON", {
         cause: error,
@@ -258,10 +281,19 @@ export async function restoreJobDirectory(input: {
         : undefined),
     typical_application: parsePublicPipelineSnapshot(saved_pipelines?.typical_application),
   }
-  const interrupted = !saved_status || ACTIVE_JOB_STATUSES.has(saved_status)
+  const active_job_state = input.active_job_state ?? "interrupt"
+  const active_checkpoint = Boolean(saved_status && ACTIVE_JOB_STATUSES.has(saved_status))
+  const preserved_active_status =
+    saved_status && active_job_state === "preserve" && ACTIVE_JOB_STATUSES.has(saved_status)
+      ? saved_status
+      : undefined
+  const interrupted = !saved_status || (active_job_state === "interrupt" && active_checkpoint)
   const published_pipeline_completed = Boolean(
-    (restored_pipelines.typical_application?.status === "completed" &&
-      restored_pipelines.typical_application.stage_results.publish?.status === "completed") ||
+    (restored_pipelines.component_generation?.pipeline_id === "component_generation" &&
+      restored_pipelines.component_generation.status === "completed" &&
+      restored_pipelines.component_generation.stage_results.publish_component?.status === "completed") ||
+      (restored_pipelines.typical_application?.status === "completed" &&
+        restored_pipelines.typical_application.stage_results.publish_application?.status === "completed") ||
       (restored_pipeline?.pipeline_id === "datasheet_component" &&
         restored_pipeline.status === "completed" &&
         restored_pipeline.stage_results.publish?.status === "completed"),
@@ -273,9 +305,11 @@ export async function restoreJobDirectory(input: {
     ? "failed"
     : recover_published_component
       ? "complete"
-      : interrupted
-        ? "failed"
-        : saved_status
+      : preserved_active_status
+        ? preserved_active_status
+        : interrupted
+          ? "failed"
+          : saved_status
   const created_at =
     typeof saved?.created_at === "string"
       ? saved.created_at
@@ -321,6 +355,7 @@ export async function restoreJobDirectory(input: {
       display_status === "failed" ||
       Boolean(publication_integrity_error) ||
       Boolean(evidence_integrity_error) ||
+      Boolean(application_evidence_integrity_error) ||
       (recover_published_component ? false : Boolean(saved?.has_errors)),
     error_message,
     warnings: [
@@ -329,6 +364,11 @@ export async function restoreJobDirectory(input: {
         : []),
       ...(evidence_integrity_error
         ? [`Committed evidence failed integrity validation and was not restored: ${evidence_integrity_error}`]
+        : []),
+      ...(application_evidence_integrity_error
+        ? [
+            `Committed application evidence failed integrity validation and was not restored: ${application_evidence_integrity_error}`,
+          ]
         : []),
       ...(publication_integrity_error
         ? [

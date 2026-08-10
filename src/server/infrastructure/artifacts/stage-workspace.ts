@@ -147,11 +147,20 @@ export async function readBoundedJsonArtifact(input: {
   const max_depth = requiredPositiveLimit(input.max_depth ?? 64, "JSON artifact max_depth")
   const max_nodes = requiredPositiveLimit(input.max_nodes ?? 100_000, "JSON artifact max_nodes")
   const bytes = await readRegularFile(input.path, max_bytes)
+  let text: string
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+  } catch (error) {
+    throw new Error(`Artifact is not valid UTF-8: ${input.path}`, { cause: error })
+  }
   let value: unknown
   try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+    value = JSON.parse(text)
   } catch (error) {
-    throw new Error(`Artifact is not valid UTF-8 JSON: ${input.path}`, { cause: error })
+    throw new Error(
+      `Artifact contains invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
   }
 
   const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 1 }]

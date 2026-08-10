@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises"
 import type { AnyCircuitElement } from "circuit-json"
 import type { JobValidation } from "@/shared/job-types"
+import { isCircuitElementArray } from "../component-circuit-json"
 import {
   type ComponentEvidence,
   createFootprintPlanFromEvidence,
@@ -15,6 +16,11 @@ import {
   parseTypicalApplicationPlan,
   type TypicalApplicationPlan,
 } from "./application-plan"
+import {
+  applicationEvidenceFilePath,
+  type CommittedApplicationEvidenceSnapshot,
+  readCommittedApplicationEvidenceSnapshot,
+} from "./application-evidence-commit"
 import { type CommittedEvidenceSnapshot, readCommittedEvidenceSnapshot } from "./evidence-commit"
 
 export const INITIAL_JOB_VALIDATION: JobValidation = {
@@ -66,14 +72,14 @@ export interface ApprovedComponentEvidence {
   component_evidence: ComponentEvidence
   footprint_plan: FootprintPlan
   schematic_plan: ComponentSchematicPlan
-  application_plan: TypicalApplicationPlan
 }
 
 function parseCommittedJson(snapshot: CommittedEvidenceSnapshot, relative_path: string): unknown {
   const bytes = snapshot.files.get(relative_path)
   if (!bytes) throw new Error(`Committed evidence snapshot is missing ${relative_path}`)
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+    return parsed
   } catch (error) {
     throw new Error(`Committed evidence snapshot contains invalid JSON at ${relative_path}`, {
       cause: error,
@@ -89,10 +95,6 @@ export function parseApprovedEvidenceSnapshot(
     component_evidence,
     footprint_plan: createFootprintPlanFromEvidence(component_evidence),
     schematic_plan: createComponentSchematicPlan(component_evidence),
-    application_plan: parseTypicalApplicationPlan(
-      parseCommittedJson(snapshot, "typical-application-plan.json"),
-      applicationTargetIdentityFromEvidence(component_evidence),
-    ),
   }
 }
 
@@ -101,7 +103,7 @@ export interface ApprovedEvidenceBundle {
   evidence: ApprovedComponentEvidence
 }
 
-export async function readApprovedEvidenceBundle(job_dir: string): Promise<ApprovedEvidenceBundle> {
+export async function readApprovedComponentEvidenceBundle(job_dir: string): Promise<ApprovedEvidenceBundle> {
   const snapshot = await readCommittedEvidenceSnapshot(job_dir)
   if (!snapshot) {
     throw new Error("Approved evidence is unavailable because evidence-commit.json has not been published")
@@ -110,7 +112,63 @@ export async function readApprovedEvidenceBundle(job_dir: string): Promise<Appro
 }
 
 export async function readApprovedEvidence(job_dir: string): Promise<ApprovedComponentEvidence> {
-  return (await readApprovedEvidenceBundle(job_dir)).evidence
+  return (await readApprovedComponentEvidenceBundle(job_dir)).evidence
+}
+
+function parseCommittedApplicationJson(
+  snapshot: CommittedApplicationEvidenceSnapshot,
+  relative_path: string,
+): unknown {
+  const bytes = snapshot.files.get(applicationEvidenceFilePath(relative_path))
+  if (!bytes) throw new Error(`Committed application evidence is missing ${relative_path}`)
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+    return parsed
+  } catch (error) {
+    throw new Error(`Committed application evidence contains invalid JSON at ${relative_path}`, {
+      cause: error,
+    })
+  }
+}
+
+export interface ApprovedApplicationEvidenceBundle {
+  snapshot: CommittedApplicationEvidenceSnapshot
+  application_plan: TypicalApplicationPlan
+}
+
+export async function readApprovedApplicationEvidenceBundle(
+  job_dir: string,
+): Promise<ApprovedApplicationEvidenceBundle> {
+  const snapshot = await readCommittedApplicationEvidenceSnapshot(job_dir)
+  if (!snapshot) {
+    throw new Error(
+      "Approved application evidence is unavailable because application-evidence-commit.json has not been published",
+    )
+  }
+  return {
+    snapshot,
+    application_plan: parseTypicalApplicationPlan(
+      parseCommittedApplicationJson(snapshot, "typical-application-plan.json"),
+    ),
+  }
+}
+
+export async function readApprovedApplicationEvidence(job_dir: string): Promise<TypicalApplicationPlan> {
+  return (await readApprovedApplicationEvidenceBundle(job_dir)).application_plan
+}
+
+/** Resolve the independently extracted U1 endpoints against component evidence. */
+export async function readComponentBoundApplicationEvidence(
+  job_dir: string,
+): Promise<TypicalApplicationPlan> {
+  const [application_plan, component] = await Promise.all([
+    readApprovedApplicationEvidence(job_dir),
+    readApprovedEvidence(job_dir),
+  ])
+  return parseTypicalApplicationPlan(
+    application_plan,
+    applicationTargetIdentityFromEvidence(component.component_evidence),
+  )
 }
 
 export function updateJobValidation(
@@ -134,6 +192,32 @@ export interface CircuitValidationRecord {
   circuit_json: AnyCircuitElement[]
 }
 
+export async function readCircuitValidationRecord(path: string): Promise<CircuitValidationRecord> {
+  const value = await readJson(path)
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    !("version" in value) ||
+    value.version !== 1 ||
+    !("passed" in value) ||
+    typeof value.passed !== "boolean" ||
+    !("errors" in value) ||
+    !Array.isArray(value.errors) ||
+    !value.errors.every((entry) => typeof entry === "string") ||
+    !("circuit_json" in value) ||
+    !isCircuitElementArray(value.circuit_json)
+  ) {
+    throw new Error(`Circuit validation record is invalid: ${path}`)
+  }
+  return {
+    version: 1,
+    passed: value.passed,
+    errors: [...value.errors],
+    circuit_json: value.circuit_json,
+  }
+}
+
 export function validateGeneratedSource(source: string, kind: "component" | "application"): void {
   if (!/\bexport\s+default\b/.test(source)) {
     throw new Error(`${kind} source must contain a default export`)
@@ -141,7 +225,7 @@ export function validateGeneratedSource(source: string, kind: "component" | "app
   if (/placementDrcChecksDisabled|routingDisabled|ignore-placement-drc/i.test(source)) {
     throw new Error(`${kind} source disables a required server validation`)
   }
-  if (kind === "application" && !/\bfrom\s*["']\.\/index\.circuit(?:\.tsx)?["']/.test(source)) {
-    throw new Error("application source must import ./index.circuit")
+  if (kind === "application" && !/\bfrom\s*["']\.\/component\.circuit(?:\.tsx)?["']/.test(source)) {
+    throw new Error("application source must import ./component.circuit")
   }
 }

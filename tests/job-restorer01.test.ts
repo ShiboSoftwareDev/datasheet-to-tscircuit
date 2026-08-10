@@ -667,16 +667,16 @@ test("restart recovers a component whose publish stage crossed the commit barrie
       application_visual: "not_applicable",
     },
     pipeline: {
-      pipeline_id: "datasheet_component",
+      pipeline_id: "component_generation",
       status: "completed",
       sequence: 20,
       started_at: timestamp,
       updated_at: timestamp,
       stage_results: {
-        publish: {
-          stage_id: "publish",
+        publish_component: {
+          stage_id: "publish_component",
           status: "completed",
-          debug_ref: "runs/invocation/.pipeline/stages/09-publish",
+          debug_ref: "runs/invocation/.pipeline/stages/06-publish_component",
           started_at: timestamp,
           completed_at: timestamp,
           duration_ms: 1,

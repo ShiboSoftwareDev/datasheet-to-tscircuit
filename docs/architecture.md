@@ -28,8 +28,8 @@ The new backend is split into small, directional layers:
   diagnostics, metrics, and artifact metadata shared with the browser.
 - `src/server/pipeline` validates definitions and executes stages. It has no
   component, model, agent, tscircuit, or ngspice policy.
-- `src/server/pipeline-replay` materializes retained task inputs and executes a task,
-  pipeline suffix, or full pipeline without modifying historical state.
+- `src/server/pipeline-local-run` materializes retained task inputs and executes a
+  task, pipeline suffix, or full pipeline either in a selected job or in a new clone.
 - `src/cli/pipeline-debug.ts` exposes the same contracts as machine-readable
   local commands for developers and coding agents.
 - `src/server/component-workflow` owns separate component and
@@ -124,13 +124,13 @@ trace:
 ├── input-objects/                # SHA-256-addressed task input bytes shared by stages
 ├── observer-errors.ndjson        # only when an optional snapshot sink fails
 └── stages/
-    ├── 01-prepare/
+    ├── 01-extract_evidence/
     │   ├── input.json
     │   ├── input-files.json
     │   ├── output.json
     │   ├── error.json
     │   └── metrics.json
-    ├── 02-extract_evidence/
+    ├── 02-generate_component/
     │   ├── attempt-history.json
     │   └── rejected-attempts/<attempt>/...
     └── ...
@@ -164,58 +164,64 @@ event is capped at 256 KiB with an explicit truncation marker, and live stores
 retain the latest 500 events. The pipeline trace is the authoritative
 state-machine record.
 
-### Local task and pipeline replay
+### Local task and pipeline runs
 
 The local debugger treats each stage as an independently addressable task. The
 pipeline is only an ordered composition that passes a completed output into the
 next task. `bun run debug -- task run --input <input.json>` selects exactly one
 task and validates that the supplied dependency keys match its registry
 contract. `pipeline run` accepts only the first registered task's input, while
-`job replay` locates retained inputs by job, pipeline, and task ID and supports
-exact-task, suffix, and whole-pipeline modes.
+`local run <job>` locates retained inputs by job, pipeline, and task ID and
+supports exact-task, suffix, and whole-pipeline modes.
 
-Replay is non-destructive by default. Immediately before a runnable task starts,
+Cloned Local execution is non-destructive. Immediately before a runnable task starts,
 the runtime snapshots its complete job input into a manifest and content-addressed
-object store, excluding runtime logs and earlier `runs` histories. Replay verifies
+object store, excluding runtime logs and earlier `runs` histories. A Local run verifies
 those hashes, materializes only those retained bytes in a fresh directory,
 rewrites every declared job-local path in the context and dependency payload,
 restores private stores from the retained checkpoints, and then invokes the
 ordinary production stage definition. It never clones or consults the job's
-current filesystem state. The replay directory contains a stable `summary.json`,
+current filesystem state. Supplying a target job instead restores that exact
+retained boundary into the selected job, refreshes its live stores from the
+restored checkpoints, and runs there under the same per-job execution lease as
+the UI. The Local directory contains a stable `summary.json`,
 a new event stream, new task bundles, canonical outputs, and immutable artifact
 snapshots. This gives a local AI the same task inputs, failures, graphs, and
 generated files as the UI without granting it an alternate workflow implementation.
 
 ## Component and typical-application pipelines
 
-The old combined workflow is split into two linear pipelines:
+The workflow is split into two linear pipelines. Component publication is the
+only dependency between them:
 
 ```text
-prepare
-  → extract_evidence
+extract_evidence
   → generate_component
+  → build_component
   → validate_component
   → repair_component
+  → publish_component
 
-prepare_application
-  → generate_application
+generate_application
+  → build_application
   → validate_application
   → repair_application
-  → publish
+  → publish_application
 ```
 
 | Stage | Responsibility |
 | --- | --- |
-| `prepare` | Record source/tool provenance, including the actual workflow-tree and evidence-contract hashes, and initialize public validation state. |
-| `extract_evidence` | Let an isolated agent inspect the PDF, canonicalize only representation-equivalent input forms, strictly parse pinout/package/application evidence, render every cited page on the server, then independently transcribe both PCB-top pad geometry and the application graph from trusted page images. Pad geometry and net partitions must agree before the server derives plans and publishes the semantic evidence-set commit. |
+| `extract_evidence` | Record source/tool provenance, initialize public validation state, let an isolated agent inspect the PDF, canonicalize only representation-equivalent input forms, strictly parse pinout/package/application evidence, render every cited page on the server, then independently transcribe both PCB-top pad geometry and the application graph from trusted page images. Pad geometry and net partitions must agree before the server derives plans and atomically publishes the shared semantic evidence-set commit. |
 | `generate_component` | Generate only `index.circuit.tsx` from accepted JSON plans and reference images. The PDF is not present in this workspace. |
-| `validate_component` | Run `tsci build`; reject Circuit JSON errors; verify the footprint, pinout, schematic plan, and a server-created board fixture. |
-| `repair_component` | Feed deterministic validation errors into bounded isolated repair attempts. Publish `component.circuit.tsx` as soon as the component passes. |
-| `prepare_application` | Bind the accepted component TSX, Circuit JSON, and application availability as an explicit pipeline input. |
-| `generate_application` | Generate a typical application only when the accepted application plan says one is documented. |
-| `validate_application` | Check source shape, values, connectivity, and the resulting Circuit JSON against the accepted plan. |
+| `build_component` | Run `tsci build` and the server-created board fixture, then save the unjudged Circuit JSON and execution diagnostics. |
+| `validate_component` | Deterministically compare the saved build against the accepted footprint, pinout, and schematic plans without invoking tools or agents. |
+| `repair_component` | Feed deterministic validation errors into bounded isolated repair attempts and re-run their build and validation checks. It does not publish. |
+| `publish_component` | Commit the passing candidate as the canonical `component.circuit.tsx` and `component.circuit.json`, then expose it to consumers. |
+| `generate_application` | Generate a typical application only when the accepted application plan says one is documented. This is the first application stage that requires the published component. |
+| `build_application` | Run `tsci build` and save the unjudged application Circuit JSON and execution diagnostics. |
+| `validate_application` | Deterministically check source shape, values, connectivity, and the saved Circuit JSON against the accepted plan. |
 | `repair_application` | Run bounded repairs. A still-invalid optional application becomes a warning rather than hiding a valid component. |
-| `publish` | Commit the validated component, optional application, previews, and warnings. The runner marks the job terminal only after the pipeline trace is fully finalized. |
+| `publish_application` | Expose the validated optional application and its warnings. The runner marks the job terminal only after the pipeline trace is fully finalized. |
 
 Important durable component artifacts include:
 

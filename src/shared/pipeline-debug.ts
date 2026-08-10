@@ -5,19 +5,29 @@ export const PIPELINE_DEBUG_CATALOG = Object.freeze([
   {
     pipeline_id: "component_generation" as const,
     title: "Component",
-    description: "Extract evidence, generate the component TSX, validate it, and repair it.",
-    stages: ["prepare", "extract_evidence", "generate_component", "validate_component", "repair_component"],
+    description: "Extract evidence, generate and build the component TSX, validate, repair, and publish it.",
+    stages: [
+      "extract_evidence",
+      "generate_component",
+      "build_component",
+      "validate_component",
+      "repair_component",
+      "publish_component",
+    ],
   },
   {
     pipeline_id: "typical_application" as const,
     title: "Typical application",
-    description: "Generate and validate a documented application around the accepted component.",
+    description:
+      "Extract application evidence, wait for the component when needed, then generate, validate, repair, and publish it.",
     stages: [
-      "prepare_application",
+      "extract_application_evidence",
+      "wait_for_component",
       "generate_application",
+      "build_application",
       "validate_application",
       "repair_application",
-      "publish",
+      "publish_application",
     ],
   },
   {
@@ -26,6 +36,7 @@ export const PIPELINE_DEBUG_CATALOG = Object.freeze([
     description: "Reconstruct and compare datasheet waveforms before publishing a SPICE-backed component.",
     stages: [
       "find_reference_graphs",
+      "wait_for_model_evidence",
       "create_comparison_graphs",
       "infer_spice_model",
       "create_simulation_tsx",

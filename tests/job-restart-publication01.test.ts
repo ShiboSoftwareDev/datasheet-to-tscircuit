@@ -66,3 +66,34 @@ test("restart never restores an invalid typical application that was not publish
     await rm(job_dir, { recursive: true, force: true })
   }
 })
+
+test("live checkpoint refresh preserves an active job instead of treating it as a restart", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "live-job-refresh-"))
+  const original_store = new JobStore()
+  original_store.createJob({ job_id: "active-job", job_dir, file_name: "sensor.pdf" })
+  original_store.updateJob("active-job", {
+    display_status: "agent_running",
+    is_complete: false,
+    has_errors: false,
+  })
+  await Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.7\nfixture")
+
+  try {
+    const restored_store = new JobStore({ checkpoint_writer: () => undefined })
+    const restored = await restoreJobDirectory({
+      job_id: "active-job",
+      job_dir,
+      job_store: restored_store,
+      active_job_state: "preserve",
+    })
+
+    expect(restored).toMatchObject({
+      display_status: "agent_running",
+      is_complete: false,
+      has_errors: false,
+    })
+    expect(restored?.error_message).toBeUndefined()
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})

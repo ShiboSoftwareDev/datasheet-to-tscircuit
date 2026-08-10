@@ -126,8 +126,10 @@ test("component and application validators reject empty Circuit JSON", async () 
       Bun.write(join(job_dir, "index.circuit.tsx"), 'export default () => <chip name="U1" />\n'),
       Bun.write(
         join(job_dir, "typical-application.circuit.tsx"),
-        'import Component from "./index.circuit"\nexport default () => <board><Component name="U1" /><capacitor name="C1" capacitance="100nF" /></board>\n',
+        'import Component from "./component.circuit"\nexport default () => <board><Component name="U1" /><capacitor name="C1" capacitance="100nF" /></board>\n',
       ),
+      Bun.write(join(job_dir, "component.circuit.tsx"), 'export default () => <chip name="U1" />\n'),
+      Bun.write(join(job_dir, "component.circuit.json"), "[]\n"),
     ])
 
     const component = await validateComponent({

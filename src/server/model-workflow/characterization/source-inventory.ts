@@ -179,7 +179,7 @@ function sourceProofCorrectionGuidance(
   }
   if (missing_proofs.some((proof) => proof.includes("declared_time_scale_matches_source"))) {
     instructions.push(
-      "Change the x-axis anchor values and x_range min/max together so they describe the printed time scale; do not change x-axis pixels. When server-required-x-anchor-value-span is reported, use that exact span instead of estimating it from rounded grid coordinates.",
+      "Change the x-axis anchor values and x_range min/max together so they describe the printed time scale; do not change x-axis pixels. When server-required-x-anchor-value-span is reported, use that exact span instead of estimating it from rounded grid coordinates. After changing the time calibration, recompute the electrical_binding stimulus PULSE delay, width, and period against the new nonnegative window: keep the printed first edge inside, place the second edge fully inside or hold it beyond the window, and keep the next period beyond the window.",
     )
   }
   if (missing_proofs.some((proof) => proof.includes("declared_voltage_scale_matches_source"))) {
@@ -322,10 +322,8 @@ export async function findReferenceGraphs(input: {
   attempt_dir: string
   debug_dir: string
   signal: AbortSignal
-  model_interface: ModelInterface
-  application_fixture: ApplicationFixtureContract
 }): Promise<FoundReferenceGraphInventory> {
-  const { context, services, attempt_dir, debug_dir, signal, model_interface, application_fixture } = input
+  const { context, services, attempt_dir, debug_dir, signal } = input
   const datasheet_path = join(context.model_dir, "datasheet.pdf")
   const extension = join(import.meta.dir, "../../infrastructure/agent/image-read-extension.ts")
   const logOutput = (stream: JobLogStream, message: string) =>
@@ -352,10 +350,6 @@ export async function findReferenceGraphs(input: {
         files: [
           { source: join(context.model_dir, "AGENTS.md") },
           { source: datasheet_path, destination: "datasheet.pdf" },
-          { source: join(context.model_dir, "model-interface.json") },
-          {
-            source: join(context.model_dir, "application-fixture-contract.json"),
-          },
           { source: time_graph_hints_path },
         ],
       }),
@@ -375,8 +369,6 @@ export async function findReferenceGraphs(input: {
           max_nodes: 20_000,
         }),
         time_graph_discovery,
-        model_interface,
-        application_fixture,
       )
       await assertFoundReferenceGraphCaptions({
         observation,

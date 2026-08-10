@@ -64,3 +64,25 @@ export async function assertEvidenceImageProvenance(input: {
     }),
   ])
 }
+
+export async function assertComponentEvidenceImageProvenance(input: {
+  workspace: string
+  component_evidence: ComponentEvidence
+}): Promise<void> {
+  await assertSourceImages({
+    workspace: input.workspace,
+    label: "component evidence sources",
+    sources: componentSources(input.component_evidence),
+  })
+}
+
+export async function assertApplicationEvidenceImageProvenance(input: {
+  workspace: string
+  application_plan: TypicalApplicationPlan
+}): Promise<void> {
+  await assertSourceImages({
+    workspace: input.workspace,
+    label: "typical application sources",
+    sources: applicationSources(input.application_plan),
+  })
+}

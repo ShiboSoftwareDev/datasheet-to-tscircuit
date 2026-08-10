@@ -1,13 +1,12 @@
 import { readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
-import { validateApplication } from "../component-validation"
+import { buildApplicationCandidate, validateBuiltApplication } from "../component-validation"
 import { generateApplicationSource } from "../source-candidates"
 import {
   appendJobLog,
   componentArtifact,
-  type CircuitValidationRecord,
-  readApprovedEvidence,
-  readJson,
+  readComponentBoundApplicationEvidence,
+  readCircuitValidationRecord,
 } from "../stage-helpers"
 import { defineApplicationStage } from "./stage-factory"
 
@@ -15,9 +14,7 @@ export const repairApplicationStage = defineApplicationStage({
   id: "repair_application",
   depends_on: ["validate_application"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
-    let result = (await readJson(
-      dependency_outputs.validate_application.result_path,
-    )) as CircuitValidationRecord
+    let result = await readCircuitValidationRecord(dependency_outputs.validate_application.result_path)
     if (result.passed) {
       return {
         status: "completed",
@@ -31,11 +28,12 @@ export const repairApplicationStage = defineApplicationStage({
         metrics: { repair_attempts: 0 },
       }
     }
-    const { application_plan } = await readApprovedEvidence(context.job_dir)
+    const application_plan = await readComponentBoundApplicationEvidence(context.job_dir)
     const max_repairs = 2
     for (let repair_attempt = 1; repair_attempt <= max_repairs; repair_attempt += 1) {
       await generateApplicationSource({
         job_dir: context.job_dir,
+        component_source_path: join(context.job_dir, "component.circuit.tsx"),
         plan: application_plan,
         signal,
         use_openai: context.use_openai,
@@ -44,7 +42,7 @@ export const repairApplicationStage = defineApplicationStage({
         feedback: result.errors.join("\n"),
         on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
       })
-      result = await validateApplication({
+      const build = await buildApplicationCandidate({
         job_id: context.job_id,
         job_dir: context.job_dir,
         job_store: services.job_store,
@@ -52,6 +50,12 @@ export const repairApplicationStage = defineApplicationStage({
         process_runner: services.process_runner,
         signal,
         on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
+      })
+      result = await validateBuiltApplication({
+        job_id: context.job_id,
+        job_dir: context.job_dir,
+        job_store: services.job_store,
+        build,
       })
       if (!result.passed) continue
       const result_path = join(context.job_dir, "application-validation.json")

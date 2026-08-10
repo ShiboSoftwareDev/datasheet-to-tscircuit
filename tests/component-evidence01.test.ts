@@ -10,7 +10,10 @@ import {
   getPinoutEvidenceErrors,
   parseComponentEvidence,
 } from "@/server/component-evidence"
-import { COMPONENT_EVIDENCE_GUIDE } from "@/server/component-workflow/evidence-schema"
+import {
+  APPLICATION_EVIDENCE_GUIDE,
+  COMPONENT_EVIDENCE_GUIDE,
+} from "@/server/component-workflow/evidence-schema"
 
 const visualSource = {
   page: 12,
@@ -435,18 +438,20 @@ test("derived pad geometry must share a page with a direct visual footprint anch
   }
 })
 
-test("agent-facing evidence guide is generated with the exact parser representations", () => {
+test("agent-facing evidence guides keep component and application parser representations separate", () => {
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"version": 1')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"number": "1"')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"kind": "smt"')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"value": "pcb_top"')
-  expect(COMPONENT_EVIDENCE_GUIDE).toContain('"version": 4')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"value": "BASE-PART-NUMBER"')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain('"value": "BASE-PART-NUMBER-A"')
   expect(COMPONENT_EVIDENCE_GUIDE).toContain("part_number is the base device/family printed throughout")
-  expect(COMPONENT_EVIDENCE_GUIDE).toContain("Never write footprint_source_references\n  at the plan root")
-  expect(COMPONENT_EVIDENCE_GUIDE).toContain('"48V BATT" becomes "48V_BATT"')
-  expect(COMPONENT_EVIDENCE_GUIDE).toContain('annotations such as "To MCU"')
-  expect(COMPONENT_EVIDENCE_GUIDE).toContain("bare external terminal per outgoing signal")
-  expect(COMPONENT_EVIDENCE_GUIDE).toContain("An SPDT symbol has one common and two throws")
+  expect(COMPONENT_EVIDENCE_GUIDE).not.toContain('"version": 4')
+  expect(APPLICATION_EVIDENCE_GUIDE).toContain('"version": 4')
+  expect(APPLICATION_EVIDENCE_GUIDE).toContain("Never write footprint_source_references\n  at the plan root")
+  expect(APPLICATION_EVIDENCE_GUIDE).toContain('"48V BATT" becomes "48V_BATT"')
+  expect(APPLICATION_EVIDENCE_GUIDE).toContain('annotations such as "To MCU"')
+  expect(APPLICATION_EVIDENCE_GUIDE).toContain("bare external terminal per outgoing signal")
+  expect(APPLICATION_EVIDENCE_GUIDE).toContain("An SPDT symbol has one common and two throws")
+  expect(APPLICATION_EVIDENCE_GUIDE).not.toContain('"kind": "smt"')
 })

@@ -1,7 +1,7 @@
 import { readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
-import { isCircuitJson } from "../component-circuit-json"
+import { isCircuitElementArray, isCircuitJson } from "../component-circuit-json"
 import { getPinoutEvidenceErrors } from "../component-evidence"
 import { getComponentSchematicPlanErrors } from "../component-schematic-plan"
 import { ProcessError, type ProcessRunner } from "../infrastructure/process"
@@ -14,9 +14,12 @@ import {
   getTypicalApplicationTargetComponentErrors,
 } from "../job-artifact-validator"
 import type { JobStore } from "../job-store"
+import { getApplicationTargetPinCoverageErrors } from "./application-connectivity-verification"
 import {
   type CircuitValidationRecord,
+  readApprovedApplicationEvidence,
   readApprovedEvidence,
+  readComponentBoundApplicationEvidence,
   readJson,
   updateJobValidation,
   validateGeneratedSource,
@@ -96,7 +99,43 @@ function applicationShapeErrors(
   return errors
 }
 
-export async function validateComponent(input: {
+export interface CircuitBuildRecord {
+  version: 1
+  source_errors: string[]
+  build_errors: string[]
+  drc_errors: string[]
+  circuit_json: AnyCircuitElement[]
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+export async function readCircuitBuildRecord(path: string): Promise<CircuitBuildRecord> {
+  const value = await readJson(path)
+  if (
+    !isRecord(value) ||
+    value.version !== 1 ||
+    !Array.isArray(value.source_errors) ||
+    !value.source_errors.every((entry) => typeof entry === "string") ||
+    !Array.isArray(value.build_errors) ||
+    !value.build_errors.every((entry) => typeof entry === "string") ||
+    !Array.isArray(value.drc_errors) ||
+    !value.drc_errors.every((entry) => typeof entry === "string") ||
+    !isCircuitElementArray(value.circuit_json)
+  ) {
+    throw new Error(`Circuit build record is invalid: ${path}`)
+  }
+  return {
+    version: 1,
+    source_errors: [...value.source_errors],
+    build_errors: [...value.build_errors],
+    drc_errors: [...value.drc_errors],
+    circuit_json: value.circuit_json,
+  }
+}
+
+interface CircuitBuildInput {
   job_id: string
   job_dir: string
   job_store: JobStore
@@ -104,8 +143,9 @@ export async function validateComponent(input: {
   process_runner: ProcessRunner
   signal: AbortSignal
   on_output: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
-}): Promise<CircuitValidationRecord> {
-  const evidence = await readApprovedEvidence(input.job_dir)
+}
+
+export async function buildComponentCandidate(input: CircuitBuildInput): Promise<CircuitBuildRecord> {
   let circuit_json: AnyCircuitElement[] = []
   const build_errors: string[] = []
   try {
@@ -127,15 +167,7 @@ export async function validateComponent(input: {
     if (isInfrastructureProcessFailure(error)) throw error
     build_errors.push(errorMessage(error))
   }
-  const shape_errors = componentShapeErrors(
-    circuit_json,
-    evidence.component_evidence.pinout.pins.length,
-    evidence.footprint_plan.pads.length,
-  )
-  const footprint_errors = getFootprintPlanErrors(evidence.footprint_plan, circuit_json)
-  const pinout_errors = getPinoutEvidenceErrors(evidence.component_evidence, circuit_json)
-  const schematic_errors = getComponentSchematicPlanErrors(evidence.schematic_plan, circuit_json)
-  const board_errors: string[] = []
+  const drc_errors: string[] = []
   if (build_errors.length === 0 && circuit_json.length > 0) {
     const fixture_path = join(input.job_dir, "component-validation.circuit.tsx")
     await Bun.write(
@@ -154,60 +186,143 @@ export async function validateComponent(input: {
         checks: ["placement", "routing-difficulty"],
         on_output: input.on_output,
       })
-      board_errors.push(...board.errors)
+      drc_errors.push(...board.errors)
     } catch (error) {
       if (input.signal.aborted) throw error
       if (isInfrastructureProcessFailure(error)) throw error
-      board_errors.push(errorMessage(error))
+      drc_errors.push(errorMessage(error))
     } finally {
       await rm(fixture_path, { force: true })
     }
   }
+  const record: CircuitBuildRecord = {
+    version: 1,
+    source_errors: [],
+    build_errors,
+    drc_errors,
+    circuit_json,
+  }
+  await writeJson(join(input.job_dir, "component-build.json"), record)
+  return record
+}
+
+export async function validateBuiltComponent(input: {
+  job_id: string
+  job_dir: string
+  job_store: JobStore
+  build: CircuitBuildRecord
+}): Promise<CircuitValidationRecord> {
+  const evidence = await readApprovedEvidence(input.job_dir)
+  const shape_errors = componentShapeErrors(
+    input.build.circuit_json,
+    evidence.component_evidence.pinout.pins.length,
+    evidence.footprint_plan.pads.length,
+  )
+  const footprint_errors = getFootprintPlanErrors(evidence.footprint_plan, input.build.circuit_json)
+  const pinout_errors = getPinoutEvidenceErrors(evidence.component_evidence, input.build.circuit_json)
+  const schematic_errors = getComponentSchematicPlanErrors(evidence.schematic_plan, input.build.circuit_json)
   const errors = [
-    ...build_errors.map((error) => `build: ${error}`),
+    ...input.build.build_errors.map((error) => `build: ${error}`),
     ...shape_errors.map((error) => `shape: ${error}`),
-    ...board_errors.map((error) => `board_drc: ${error}`),
+    ...input.build.drc_errors.map((error) => `board_drc: ${error}`),
     ...footprint_errors.map((error) => `footprint: ${error}`),
     ...pinout_errors.map((error) => `pinout: ${error}`),
     ...schematic_errors.map((error) => `schematic: ${error}`),
   ]
   updateJobValidation(input.job_store, input.job_id, {
-    component_build: build_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
+    component_build: input.build.build_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
     component_drc:
-      board_errors.length === 0 && build_errors.length === 0 && shape_errors.length === 0
+      input.build.drc_errors.length === 0 &&
+      input.build.build_errors.length === 0 &&
+      shape_errors.length === 0
         ? "passed"
         : "failed",
     footprint: footprint_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
     pinout: pinout_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
     component_schematic: schematic_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
-    component_visual: build_errors.length === 0 && shape_errors.length === 0 ? "inconclusive" : "failed",
+    component_visual:
+      input.build.build_errors.length === 0 && shape_errors.length === 0 ? "inconclusive" : "failed",
   })
   const record: CircuitValidationRecord = {
     version: 1,
     passed: errors.length === 0,
     errors,
-    circuit_json,
+    circuit_json: input.build.circuit_json,
   }
-  await Promise.all([
-    writeJson(join(input.job_dir, "component-validation.json"), record),
-    circuit_json.length > 0
-      ? writeJson(join(input.job_dir, "component.circuit.json"), circuit_json)
-      : Promise.resolve(),
-  ])
+  await writeJson(join(input.job_dir, "component-validation.json"), record)
   return record
 }
 
-export async function validateApplication(input: {
+export async function buildApplicationCandidate(input: CircuitBuildInput): Promise<CircuitBuildRecord> {
+  const extracted_application_plan = await readApprovedApplicationEvidence(input.job_dir)
+  if (extracted_application_plan.availability === "not_present") {
+    const record: CircuitBuildRecord = {
+      version: 1,
+      source_errors: [],
+      build_errors: [],
+      drc_errors: [],
+      circuit_json: [],
+    }
+    await writeJson(join(input.job_dir, "application-build.json"), record)
+    return record
+  }
+  const application_plan = await readComponentBoundApplicationEvidence(input.job_dir)
+  const source = await readFile(join(input.job_dir, "typical-application.circuit.tsx"), "utf8")
+  const source_errors: string[] = []
+  try {
+    validateGeneratedSource(source, "application")
+  } catch (error) {
+    source_errors.push(errorMessage(error))
+  }
+  let circuit_json: AnyCircuitElement[] = []
+  const build_errors: string[] = []
+  if (source_errors.length === 0) {
+    try {
+      const build = await buildTscircuitSource({
+        workspace: input.job_dir,
+        source_file: "typical-application.circuit.tsx",
+        output_stem: "typical-application",
+        tsci_bin: input.tsci_bin,
+        process_runner: input.process_runner,
+        signal: input.signal,
+        build_args: application_plan.pcb_implementation === "schematic_only" ? ["--disable-pcb"] : [],
+        checks:
+          application_plan.pcb_implementation === "schematic_only"
+            ? ["netlist"]
+            : ["netlist", "placement", "routing-difficulty"],
+        render: {
+          pcb: application_plan.pcb_implementation === "verified",
+          schematic: true,
+        },
+        on_output: input.on_output,
+      })
+      circuit_json = build.circuit_json
+      build_errors.push(...build.errors)
+    } catch (error) {
+      if (input.signal.aborted) throw error
+      if (isInfrastructureProcessFailure(error)) throw error
+      build_errors.push(errorMessage(error))
+    }
+  }
+  const record: CircuitBuildRecord = {
+    version: 1,
+    source_errors,
+    build_errors,
+    drc_errors: [],
+    circuit_json,
+  }
+  await writeJson(join(input.job_dir, "application-build.json"), record)
+  return record
+}
+
+export async function validateBuiltApplication(input: {
   job_id: string
   job_dir: string
   job_store: JobStore
-  tsci_bin: string
-  process_runner: ProcessRunner
-  signal: AbortSignal
-  on_output: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
+  build: CircuitBuildRecord
 }): Promise<CircuitValidationRecord> {
-  const evidence = await readApprovedEvidence(input.job_dir)
-  if (evidence.application_plan.availability === "not_present") {
+  const extracted_application_plan = await readApprovedApplicationEvidence(input.job_dir)
+  if (extracted_application_plan.availability === "not_present") {
     updateJobValidation(input.job_store, input.job_id, {
       application_build: "not_applicable",
       application_connectivity: "not_applicable",
@@ -223,90 +338,88 @@ export async function validateApplication(input: {
     await writeJson(join(input.job_dir, "application-validation.json"), record)
     return record
   }
+  const [application_plan, component_evidence] = await Promise.all([
+    readComponentBoundApplicationEvidence(input.job_dir),
+    readApprovedEvidence(input.job_dir),
+  ])
   const source = await readFile(join(input.job_dir, "typical-application.circuit.tsx"), "utf8")
-  const source_errors: string[] = []
-  try {
-    validateGeneratedSource(source, "application")
-    source_errors.push(
-      ...getTypicalApplicationSourceErrors(
-        source,
-        evidence.application_plan.pcb_implementation,
-        evidence.application_plan,
-      ),
-    )
-  } catch (error) {
-    source_errors.push(errorMessage(error))
-  }
-  let circuit_json: AnyCircuitElement[] = []
-  const build_errors: string[] = []
-  if (source_errors.length === 0) {
-    try {
-      const build = await buildTscircuitSource({
-        workspace: input.job_dir,
-        source_file: "typical-application.circuit.tsx",
-        output_stem: "typical-application",
-        tsci_bin: input.tsci_bin,
-        process_runner: input.process_runner,
-        signal: input.signal,
-        build_args:
-          evidence.application_plan.pcb_implementation === "schematic_only" ? ["--disable-pcb"] : [],
-        checks:
-          evidence.application_plan.pcb_implementation === "schematic_only"
-            ? ["netlist"]
-            : ["netlist", "placement", "routing-difficulty"],
-        render: {
-          pcb: evidence.application_plan.pcb_implementation === "verified",
-          schematic: true,
-        },
-        on_output: input.on_output,
-      })
-      circuit_json = build.circuit_json
-      build_errors.push(...build.errors)
-    } catch (error) {
-      if (input.signal.aborted) throw error
-      if (isInfrastructureProcessFailure(error)) throw error
-      build_errors.push(errorMessage(error))
-    }
-  }
-  const shape_errors = applicationShapeErrors(circuit_json, evidence.application_plan.pcb_implementation)
+  const semantic_source_errors = getTypicalApplicationSourceErrors(
+    source,
+    application_plan.pcb_implementation,
+    application_plan,
+  )
+  const shape_errors = applicationShapeErrors(input.build.circuit_json, application_plan.pcb_implementation)
   const target_component_errors: string[] = []
-  if (circuit_json.length > 0) {
+  if (input.build.circuit_json.length > 0) {
     const validated_component = await readJson(join(input.job_dir, "component.circuit.json"))
     if (!isCircuitJson(validated_component)) {
       target_component_errors.push("Validated component Circuit JSON is missing or malformed")
     } else {
       target_component_errors.push(
-        ...getTypicalApplicationTargetComponentErrors(validated_component, circuit_json),
+        ...getTypicalApplicationTargetComponentErrors(validated_component, input.build.circuit_json),
       )
     }
   }
   const connectivity_errors = [
     ...target_component_errors,
-    ...getTypicalApplicationConnectivityErrors(evidence.application_plan, circuit_json),
-    ...getTypicalApplicationComponentValueErrors(evidence.application_plan, circuit_json),
+    ...getApplicationTargetPinCoverageErrors({
+      availability: application_plan.availability,
+      connections: application_plan.connections,
+      evidence: component_evidence.component_evidence,
+      subject: "Extracted application",
+    }),
+    ...getTypicalApplicationConnectivityErrors(application_plan, input.build.circuit_json),
+    ...getTypicalApplicationComponentValueErrors(application_plan, input.build.circuit_json),
   ]
   const errors = [
-    ...source_errors.map((error) => `source: ${error}`),
-    ...build_errors.map((error) => `build: ${error}`),
+    ...input.build.source_errors.map((error) => `source: ${error}`),
+    ...semantic_source_errors.map((error) => `source: ${error}`),
+    ...input.build.build_errors.map((error) => `build: ${error}`),
     ...shape_errors.map((error) => `shape: ${error}`),
     ...connectivity_errors.map((error) => `connectivity: ${error}`),
   ]
   updateJobValidation(input.job_store, input.job_id, {
     application_build:
-      build_errors.length === 0 && source_errors.length === 0 && shape_errors.length === 0
+      input.build.build_errors.length === 0 &&
+      input.build.source_errors.length === 0 &&
+      shape_errors.length === 0
         ? "passed"
         : "failed",
     application_connectivity:
       connectivity_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
-    application_schematic: source_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
-    application_visual: build_errors.length === 0 && shape_errors.length === 0 ? "inconclusive" : "failed",
+    application_schematic:
+      input.build.source_errors.length === 0 &&
+      semantic_source_errors.length === 0 &&
+      shape_errors.length === 0
+        ? "passed"
+        : "failed",
+    application_visual:
+      input.build.build_errors.length === 0 && shape_errors.length === 0 ? "inconclusive" : "failed",
   })
   const record: CircuitValidationRecord = {
     version: 1,
     passed: errors.length === 0,
     errors,
-    circuit_json,
+    circuit_json: input.build.circuit_json,
   }
   await writeJson(join(input.job_dir, "application-validation.json"), record)
   return record
+}
+
+export async function validateComponent(input: CircuitBuildInput): Promise<CircuitValidationRecord> {
+  return validateBuiltComponent({
+    job_id: input.job_id,
+    job_dir: input.job_dir,
+    job_store: input.job_store,
+    build: await buildComponentCandidate(input),
+  })
+}
+
+export async function validateApplication(input: CircuitBuildInput): Promise<CircuitValidationRecord> {
+  return validateBuiltApplication({
+    job_id: input.job_id,
+    job_dir: input.job_dir,
+    job_store: input.job_store,
+    build: await buildApplicationCandidate(input),
+  })
 }

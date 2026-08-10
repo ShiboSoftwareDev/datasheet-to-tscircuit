@@ -16,15 +16,20 @@ import { defineModelStage } from "./stage-factory"
 
 type Readiness = "ready" | "failed" | "waiting"
 
-function inspectEvidenceReadiness(input: { job_id: string; job_store: JobStore }): Readiness {
+function inspectModelEvidenceReadiness(input: { job_id: string; job_store: JobStore }): Readiness {
   const job = input.job_store.getJob(input.job_id)
   if (!job) return "failed"
-  if (job.evidence_available) return "ready"
   const component_pipeline = job.pipelines?.component_generation ?? job.pipeline
+  const application_pipeline = job.pipelines?.typical_application
+  const application_evidence_ready =
+    application_pipeline?.stage_results.extract_application_evidence?.status === "completed"
+  if (job.evidence_available && application_evidence_ready) return "ready"
   if (
     job.is_complete ||
     component_pipeline?.status === "failed" ||
-    component_pipeline?.status === "cancelled"
+    component_pipeline?.status === "cancelled" ||
+    application_pipeline?.status === "failed" ||
+    application_pipeline?.status === "cancelled"
   ) {
     return "failed"
   }
@@ -41,7 +46,7 @@ function inspectComponentReadiness(input: { job_id: string; job_store: JobStore 
   if (component_pipeline?.status === "completed") {
     const committed =
       component_pipeline.pipeline_id === "component_generation"
-        ? component_pipeline.stage_results.repair_component?.status === "completed"
+        ? component_pipeline.stage_results.publish_component?.status === "completed"
         : component_pipeline.stage_results.publish?.status === "completed"
     return !job.has_errors && job.component_ready && committed ? "ready" : "failed"
   }
@@ -56,7 +61,26 @@ async function waitForTerminalReadiness(input: {
   job_store: JobStore
   signal: AbortSignal
   inspect: (input: { job_id: string; job_store: JobStore }) => Readiness
+  refresh_job?: () => Promise<void>
+  refresh_interval_ms?: number
 }): Promise<void> {
+  if (input.refresh_job) {
+    while (!input.signal.aborted) {
+      await input.refresh_job()
+      if (input.inspect(input) !== "waiting") return
+      await new Promise<void>((resolve) => {
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        const finish = () => {
+          if (timeout) clearTimeout(timeout)
+          input.signal.removeEventListener("abort", finish)
+          resolve()
+        }
+        input.signal.addEventListener("abort", finish, { once: true })
+        timeout = setTimeout(finish, input.refresh_interval_ms ?? 1_000)
+      })
+    }
+    return
+  }
   if (input.signal.aborted || input.inspect(input) !== "waiting") return
   await new Promise<void>((resolve) => {
     let unsubscribe: (() => void) | undefined
@@ -73,13 +97,15 @@ async function waitForTerminalReadiness(input: {
   })
 }
 
-/** Waits only for the committed evidence required by the first model task. */
-export async function waitForEvidenceBeforeModelPipeline(input: {
+/** Coordinates the exact committed evidence first consumed by comparison design. */
+export async function waitForModelEvidenceBeforeComparison(input: {
   job_id: string
   model_run_id: string
   job_store: JobStore
   model_run_store: ModelRunStore
   signal: AbortSignal
+  refresh_job?: () => Promise<void>
+  refresh_interval_ms?: number
 }): Promise<void> {
   input.model_run_store.updateModelRun(input.model_run_id, {
     status: "setting_up",
@@ -90,10 +116,10 @@ export async function waitForEvidenceBeforeModelPipeline(input: {
   updateModelProgress({
     store: input.model_run_store,
     model_run_id: input.model_run_id,
-    phase: "characterizing",
-    message: "Waiting for committed datasheet evidence",
+    phase: "designing_validation",
+    message: "Waiting for committed component and application evidence",
   })
-  await waitForTerminalReadiness({ ...input, inspect: inspectEvidenceReadiness })
+  await waitForTerminalReadiness({ ...input, inspect: inspectModelEvidenceReadiness })
 }
 
 /**
@@ -106,6 +132,8 @@ export async function waitForComponentBeforePublication(input: {
   job_store: JobStore
   model_run_store: ModelRunStore
   signal: AbortSignal
+  refresh_job?: () => Promise<void>
+  refresh_interval_ms?: number
 }): Promise<void> {
   input.model_run_store.updateModelRun(input.model_run_id, {
     status: "waiting_for_component",

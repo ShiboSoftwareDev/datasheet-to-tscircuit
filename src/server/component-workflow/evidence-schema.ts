@@ -119,8 +119,6 @@ const canonical_application_example = {
       figure: "Typical application",
       method: "pdf_visual",
       confidence: "high",
-      image: "visual-reference/typical-application.png",
-      render_dpi: 200,
     },
   ],
   components: [
@@ -138,7 +136,7 @@ const canonical_application_example = {
   ],
 }
 
-export const COMPONENT_EVIDENCE_GUIDE = `# Evidence artifact contract
+export const COMPONENT_EVIDENCE_GUIDE = `# Component evidence artifact contract
 
 Schema id: ${COMPONENT_EVIDENCE_SCHEMA_ID}
 
@@ -189,6 +187,16 @@ package outline, bottom view, or stencil aperture for a copper land pattern. If
 a material fact is ambiguous, use status "unresolved" and explain it instead of
 guessing.
 
+Use the cited PDF pages while extracting the evidence. The server discards
+agent-authored PNG pixels, renders every cited page itself at 200 DPI, and
+publishes trusted full-page aliases at visual-reference/land-pattern.png.
+`
+
+export const APPLICATION_EVIDENCE_GUIDE = `# Typical-application evidence artifact contract
+
+This contract is independent of component generation and describes only what is
+visibly documented in datasheet.pdf.
+
 ## typical-application-plan.json
 
 - version: exactly ${TYPICAL_APPLICATION_PLAN_VERSION}
@@ -224,28 +232,34 @@ switch contact. An SPDT symbol has one common and two throws on three distinct
 nodes; open contacts do not merge the load and charger branches.
 Before returning a documented plan, cross-check the complete datasheet pin table.
 Account for every electrically connectable U1 pin exactly once in connections and
-leave pins explicitly marked no-connect unwired. A plan that omits a connectable
+leave pins explicitly marked no-connect unwired. Spell every U1 endpoint with its
+physical pin number from that table (for example U1.1), not a pin-name alias. A plan that omits a connectable
 target pin cannot form a complete downstream SPICE application fixture.
 Preserve printed reference designators. When the
 figure omits them, assign conventional references by kind in deterministic visual
-order: top-to-bottom, then left-to-right; the datasheet target is always U1. Use
-the target's base part_number as U1 value. When manufacturer_part_number is
-included for U1, use the selected exact ordering_code, never the unsuffixed family
-name. The server binds canonical U1 to that authoritative selected identity. Use
+order: top-to-bottom, then left-to-right; the datasheet target is always U1.
+Preserve only the target identity text visibly printed in the selected application
+figure; do not append a package or ordering suffix found elsewhere. Do not consult
+a generated component. The server binds U1 to authoritative component evidence later. Use
 verified PCB mode only when every external part and footprint is precisely
 sourced (prefer a sourced scalar object for each manufacturer part number and
 footprint); otherwise use schematic_only. A not_present plan must omit
 pcb_implementation, use empty components/connections, and include the non-empty
 searched_sections[] that were checked.
 
-Use the cited PDF pages while extracting the evidence. The server discards
-agent-authored PNG pixels, renders every cited page itself at 200 DPI, and
-publishes trusted full-page aliases at visual-reference/land-pattern.png and,
-for a documented application, visual-reference/typical-application.png. Trace
+Use the cited PDF pages while extracting the evidence. Agent-authored pdf_visual
+sources should omit image and render_dpi. The server discards agent-authored PNG
+pixels, renders every cited page itself at 200 DPI, and
+publishes a trusted full-page alias at visual-reference/typical-application.png
+for a documented application. Trace
 every junction and crossing on the cited page before writing the connectivity
 graph.
 `
 
 export const COMPONENT_EVIDENCE_GUIDE_SHA256 = createHash("sha256")
   .update(COMPONENT_EVIDENCE_GUIDE)
+  .digest("hex")
+
+export const APPLICATION_EVIDENCE_GUIDE_SHA256 = createHash("sha256")
+  .update(APPLICATION_EVIDENCE_GUIDE)
   .digest("hex")

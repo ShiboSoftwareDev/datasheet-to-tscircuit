@@ -1,46 +1,18 @@
-import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { PipelineError } from "../../pipeline"
-import { validateComponent } from "../component-validation"
+import { buildComponentCandidate, validateBuiltComponent } from "../component-validation"
 import { generateComponentSource } from "../source-candidates"
-import { appendJobLog, type CircuitValidationRecord, componentArtifact, readJson } from "../stage-helpers"
-import type { ComponentPipelineContext, ComponentPipelineServices } from "../types"
+import { appendJobLog, componentArtifact, readCircuitValidationRecord } from "../stage-helpers"
 import { defineComponentStage } from "./stage-factory"
-
-async function publishComponentMilestone(input: {
-  context: Readonly<ComponentPipelineContext>
-  services: Readonly<ComponentPipelineServices>
-  result: CircuitValidationRecord
-}): Promise<void> {
-  const component_code = await readFile(join(input.context.job_dir, "index.circuit.tsx"), "utf8")
-  await Bun.write(join(input.context.job_dir, "component.circuit.tsx"), component_code)
-  input.services.job_store.updateJob(input.context.job_id, {
-    display_status: "agent_running",
-    component_ready: true,
-    component_code,
-    circuit_json: input.result.circuit_json,
-  })
-  await appendJobLog(
-    input.services.job_store,
-    input.context.job_id,
-    "system",
-    "Component passed source, pinout, footprint, schematic, and board-level checks.\n",
-  ).catch(() => undefined)
-}
 
 export const repairComponentStage = defineComponentStage({
   id: "repair_component",
   depends_on: ["validate_component"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
-    let result = (await readJson(
-      dependency_outputs.validate_component.result_path,
-    )) as CircuitValidationRecord
+    let result = await readCircuitValidationRecord(dependency_outputs.validate_component.result_path)
     if (dependency_outputs.validate_component.passed) {
-      signal.throwIfAborted()
-      await publishComponentMilestone({ context, services, result })
       return {
         status: "completed",
-        commit_state: "committed",
         output: {
           result_path: dependency_outputs.validate_component.result_path,
           passed: true,
@@ -62,7 +34,7 @@ export const repairComponentStage = defineComponentStage({
         on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
       })
       services.job_store.updateJob(context.job_id, { display_status: "building" })
-      result = await validateComponent({
+      const build = await buildComponentCandidate({
         job_id: context.job_id,
         job_dir: context.job_dir,
         job_store: services.job_store,
@@ -71,9 +43,13 @@ export const repairComponentStage = defineComponentStage({
         signal,
         on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
       })
+      result = await validateBuiltComponent({
+        job_id: context.job_id,
+        job_dir: context.job_dir,
+        job_store: services.job_store,
+        build,
+      })
       if (!result.passed) continue
-      signal.throwIfAborted()
-      await publishComponentMilestone({ context, services, result })
       const result_path = join(context.job_dir, "component-validation.json")
       return {
         status: "completed",
@@ -81,10 +57,10 @@ export const repairComponentStage = defineComponentStage({
         output: { result_path, passed: true, repair_attempts: repair_attempt },
         artifacts: [
           await componentArtifact({
-            id: "validated_component",
-            path: join(context.job_dir, "component.circuit.tsx"),
+            id: "repaired_component_candidate",
+            path: join(context.job_dir, "index.circuit.tsx"),
             media_type: "text/typescript",
-            role: "validated_component",
+            role: "generated_source",
           }),
         ],
         metrics: { repair_attempts: repair_attempt },

@@ -15,6 +15,7 @@ import {
   parseTypicalApplicationPlan,
   type TypicalApplicationPlan,
 } from "@/server/component-workflow/application-plan"
+import { writeApplicationEvidenceCommit } from "@/server/component-workflow/application-evidence-commit"
 import { writeEvidenceCommit } from "@/server/component-workflow/evidence-commit"
 import {
   compareFootprintGeometry,
@@ -102,6 +103,10 @@ export async function publishCommittedEvidenceFixture(input: {
     review: connectivity_review,
     evidence: component_evidence,
   })
+  const standalone_connectivity_verification = compareApplicationGraphs({
+    plan: application_plan,
+    review: connectivity_review,
+  })
   const footprint_review = parseFootprintGeometryReview(
     {
       version: 1,
@@ -144,6 +149,36 @@ export async function publishCommittedEvidenceFixture(input: {
         : {}),
     },
   }
+  const application_source_pages = [
+    ...new Set([
+      ...application_plan.source_references.map(({ page }) => page),
+      ...application_plan.components.flatMap((component) => [
+        ...(component.source_references ?? []).map(({ page }) => page),
+        ...(component.footprint_source_references ?? []).map(({ page }) => page),
+      ]),
+    ]),
+  ].sort((left, right) => left - right)
+  const application_image_manifest = {
+    version: 1,
+    renderer: "pdftoppm",
+    render_dpi: 200,
+    source_pdf_sha256: sha256(datasheet),
+    pages: application_source_pages.map((page) => ({
+      page,
+      image: `visual-reference/source-page-${page}.png`,
+      sha256: image_sha256,
+      size_bytes: png_bytes.byteLength,
+    })),
+    aliases: typical_application_source
+      ? {
+          typical_application: {
+            page: typical_application_source.page,
+            image: "visual-reference/typical-application.png",
+            sha256: image_sha256,
+          },
+        }
+      : {},
+  }
 
   await mkdir(join(input.job_dir, "visual-reference"), { recursive: true })
   await Promise.all([
@@ -163,6 +198,7 @@ export async function publishCommittedEvidenceFixture(input: {
     writeJson(join(input.job_dir, "application-connectivity-review.json"), connectivity_review),
     writeJson(join(input.job_dir, "application-connectivity-verification.json"), connectivity_verification),
     writeJson(join(input.job_dir, "evidence-image-manifest.json"), image_manifest),
+    writeJson(join(input.job_dir, "application-evidence-image-manifest.json"), application_image_manifest),
     ...pages.map((page) =>
       Bun.write(join(input.job_dir, "visual-reference", `source-page-${page}.png`), png_bytes),
     ),
@@ -172,5 +208,32 @@ export async function publishCommittedEvidenceFixture(input: {
       : []),
   ])
   await writeEvidenceCommit(input.job_dir)
-  return { component_evidence, application_plan }
+  await Promise.all(
+    application_source_pages.map((page) =>
+      Bun.write(join(input.job_dir, "visual-reference", `source-page-${page}.png`), png_bytes),
+    ),
+  )
+  const committed_application_plan =
+    application_plan.availability === "not_present"
+      ? {
+          ...application_plan,
+          source_references: application_plan.source_references.map(
+            ({ image: _image, render_dpi: _render_dpi, ...source }) => ({
+              ...source,
+              image: `visual-reference/source-page-${source.page}.png`,
+              render_dpi: 200,
+            }),
+          ),
+        }
+      : application_plan
+  await writeJson(join(input.job_dir, "typical-application-plan.json"), committed_application_plan)
+  await writeJson(
+    join(input.job_dir, "application-connectivity-verification.json"),
+    standalone_connectivity_verification,
+  )
+  await writeApplicationEvidenceCommit({
+    source_dir: input.job_dir,
+    destination_root: input.job_dir,
+  })
+  return { component_evidence, application_plan: committed_application_plan }
 }

@@ -105,7 +105,8 @@ export {
   validateViewerSimulation,
 } from "./viewer-simulation"
 export {
-  prepareReferenceGraphInputs,
+  prepareModelEvidenceInputs,
+  prepareReferenceDiscoveryInputs,
   readModelContract,
   writeModelContract,
 } from "./workspace"

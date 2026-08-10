@@ -1,16 +1,26 @@
 import { expect, test } from "bun:test"
 import { applicationSourceNetName } from "@/server/component-workflow/application-endpoint"
-import { parseTypicalApplicationPlan } from "@/server/component-workflow/application-plan"
+import {
+  parseTypicalApplicationPlan,
+  parseUnmaterializedTypicalApplicationPlan,
+} from "@/server/component-workflow/application-plan"
 import { applicationPrompt } from "@/server/component-workflow/prompts"
+
+interface DraftSourceReference {
+  page: number
+  figure?: string
+  method?: "pdf_text" | "pdf_visual" | "calculated" | "package_standard"
+  confidence?: "high" | "medium" | "low"
+}
 
 interface DraftApplicationComponent {
   reference: string
   kind: string
   value: string
   manufacturer_part_number?: string
-  source_references?: Array<{ page: number; figure?: string }>
+  source_references?: DraftSourceReference[]
   footprint?: string
-  footprint_source_references?: Array<{ page: number; figure?: string }>
+  footprint_source_references?: DraftSourceReference[]
 }
 
 function requiredItem<T>(items: readonly T[], index: number): T {
@@ -25,7 +35,7 @@ function documentedPlan(pcb_implementation: "verified" | "schematic_only" = "sch
   pcb_implementation?: "verified" | "schematic_only"
   title: string
   description: string
-  source_references: Array<{ page: number; figure?: string }>
+  source_references: DraftSourceReference[]
   components: DraftApplicationComponent[]
   connections: Array<{ net: string; pins: string[] }>
 } {
@@ -71,6 +81,39 @@ test("documented application plans require a mode and canonicalize the target co
   expect(() => parseTypicalApplicationPlan(missing_mode)).toThrow(
     "documented typical-application evidence must declare pcb_implementation",
   )
+})
+
+test("agent application evidence leaves PDF image materialization to the server", () => {
+  const draft = documentedPlan()
+  requiredItem(draft.components, 0).reference = "U1"
+  draft.connections = draft.connections.map((connection) => ({
+    ...connection,
+    pins: connection.pins.map((pin) => pin.replace("LM393P.", "U1.")),
+  }))
+  draft.source_references = [
+    {
+      page: 7,
+      figure: "Typical application",
+      method: "pdf_visual",
+      confidence: "high",
+    },
+  ]
+
+  expect(parseUnmaterializedTypicalApplicationPlan(draft).source_references[0]).toMatchObject({
+    page: 7,
+    method: "pdf_visual",
+  })
+  expect(() => parseTypicalApplicationPlan(draft)).toThrow("image rendered at exactly 200 DPI")
+})
+
+test("application prompts bind target identity and executable passive spelling", () => {
+  const input = documentedPlan()
+  requiredItem(input.components, 1).value = "10 µF"
+  const prompt = applicationPrompt({ plan: parseTypicalApplicationPlan(input, "LM393P") })
+
+  expect(prompt).toContain('literal name="U1"')
+  expect(prompt).toContain("exactly one <board> root")
+  expect(prompt).toContain('- C1: capacitance="10uF" (documented as "10 µF")')
 })
 
 test("verified PCB plans require sourced ordering and footprint facts for every external part", () => {
@@ -399,22 +442,28 @@ test("target canonicalization rejects a wrong visible family and a wrong selecte
     manufacturer_part_number: "INA237AIDGST",
   }
   expect(() => parseTypicalApplicationPlan(wrong_orderable, target)).toThrow(
-    'manufacturer_part_number, when present, must equal selected ordering identity "INA237AIDGSR"',
+    'manufacturer_part_number, when present, must identify that family or selected ordering identity "INA237AIDGSR"',
   )
 
-  const family_as_orderable = documentedPlan()
-  family_as_orderable.components[0] = {
+  const family_only_identity = documentedPlan()
+  family_only_identity.components[0] = {
     reference: "U1",
     kind: "current_monitor",
     value: "INA237",
     manufacturer_part_number: "INA237",
   }
-  expect(() => parseTypicalApplicationPlan(family_as_orderable, target)).toThrow(
-    'manufacturer_part_number, when present, must equal selected ordering identity "INA237AIDGSR"',
-  )
+  family_only_identity.connections = [
+    { net: "VCC", pins: ["U1.VCC", "C1.1"] },
+    { net: "GND", pins: ["U1.GND", "C1.2"] },
+  ]
+  expect(parseTypicalApplicationPlan(family_only_identity, target).components[0]).toMatchObject({
+    reference: "U1",
+    value: "INA237",
+    manufacturer_part_number: "INA237AIDGSR",
+  })
 
   expect(() =>
-    parseTypicalApplicationPlan(family_as_orderable, {
+    parseTypicalApplicationPlan(family_only_identity, {
       part_number: "INA237AIDGSR",
       ordering_code: "INA237",
     }),

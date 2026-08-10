@@ -9,6 +9,7 @@ import { publishModelStage } from "./stages/publish-model"
 import { repairModelStage } from "./stages/repair-model"
 import { runSimulationsStage } from "./stages/validate-model"
 import { waitForComponentStage } from "./stages/wait-for-component"
+import { waitForModelEvidenceStage } from "./stages/wait-for-model-evidence"
 
 /** The only authoritative model stage order. */
 export const MODEL_PIPELINE: PipelineDefinition<
@@ -19,6 +20,7 @@ export const MODEL_PIPELINE: PipelineDefinition<
   pipeline_id: "spice_generation",
   stages: Object.freeze([
     characterizeStage,
+    waitForModelEvidenceStage,
     designValidationStage,
     generateModelStage,
     createSimulationTsxStage,

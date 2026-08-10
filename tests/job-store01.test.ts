@@ -258,3 +258,40 @@ test("JobStore keeps a documented recent log window while publishing every live 
     await rm(job_dir, { recursive: true, force: true })
   }
 })
+
+test("component and application executions are mutually exclusive within one job workspace", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-pipeline-lease-"))
+  const job_store = new JobStore()
+  try {
+    job_store.createJob({ job_id: "job_pipeline_lease", job_dir, file_name: "sensor.pdf" })
+    expect(job_store.claimPipelineExecution("job_pipeline_lease", "component_generation")).toBe(true)
+    expect(job_store.claimPipelineExecution("job_pipeline_lease", "typical_application")).toBe(false)
+    job_store.releasePipelineExecution("job_pipeline_lease", "component_generation")
+    expect(job_store.claimPipelineExecution("job_pipeline_lease", "typical_application")).toBe(true)
+    expect(job_store.claimPipelineExecution("job_pipeline_lease", "component_generation")).toBe(false)
+    job_store.releasePipelineExecution("job_pipeline_lease", "typical_application")
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})
+
+test("the production coordinator atomically leases component and application together", async () => {
+  const job_dir = await mkdtemp(join(tmpdir(), "datasheet-job-coordinated-pipeline-lease-"))
+  const job_store = new JobStore()
+  try {
+    job_store.createJob({ job_id: "job_coordinated_lease", job_dir, file_name: "sensor.pdf" })
+    expect(
+      job_store.claimCoordinatedPipelineExecutions("job_coordinated_lease", [
+        "component_generation",
+        "typical_application",
+      ]),
+    ).toBe(true)
+    expect(job_store.claimPipelineExecution("job_coordinated_lease", "component_generation")).toBe(false)
+    job_store.releasePipelineExecution("job_coordinated_lease", "component_generation")
+    expect(job_store.claimPipelineExecution("job_coordinated_lease", "component_generation")).toBe(false)
+    job_store.releasePipelineExecution("job_coordinated_lease", "typical_application")
+    expect(job_store.claimPipelineExecution("job_coordinated_lease", "component_generation")).toBe(true)
+  } finally {
+    await rm(job_dir, { recursive: true, force: true })
+  }
+})

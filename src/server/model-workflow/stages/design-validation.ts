@@ -20,7 +20,7 @@ import { defineModelStage } from "./stage-factory"
 
 export const designValidationStage = defineModelStage({
   id: "create_comparison_graphs",
-  depends_on: ["find_reference_graphs"],
+  depends_on: ["find_reference_graphs", "wait_for_model_evidence"],
   async execute({ context, services, dependency_outputs, signal, debug_dir }) {
     updateModelProgress({
       store: services.model_run_store,
@@ -29,10 +29,11 @@ export const designValidationStage = defineModelStage({
       message: "Digitizing found references and building their comparison circuits",
     })
     const found = dependency_outputs.find_reference_graphs
+    const evidence = dependency_outputs.wait_for_model_evidence
     const attempt_dir = dirname(found.reference_observation_path)
-    const model_interface = parseModelInterface(await readJson(found.model_interface_path))
+    const model_interface = parseModelInterface(await readJson(evidence.model_interface_path))
     const application_fixture = parseApplicationFixtureContract(
-      await readJson(found.application_fixture_path),
+      await readJson(evidence.application_fixture_path),
     )
     const inventory = await digitizeReferenceGraphs({
       context,

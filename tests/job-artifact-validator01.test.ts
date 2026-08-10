@@ -44,14 +44,14 @@ test("application source gate rejects only standalone netlabel JSX elements", ()
   }
   expect(
     getTypicalApplicationSourceErrors(
-      'import Component from "./index.circuit"\nexport default () => <board><Component name="U1" /><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0805" /></board>',
+      'import Component from "./component.circuit"\nexport default () => <board><Component name="U1" /><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0805" /></board>',
       "verified",
       verified_plan,
     ),
   ).toEqual([])
   expect(
     getTypicalApplicationSourceErrors(
-      'import Component from "./index.circuit"\nexport default () => <board><Component name="U1" /><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0402" /></board>',
+      'import Component from "./component.circuit"\nexport default () => <board><Component name="U1" /><inductor name="L1" inductance="0.47uH" manufacturerPartNumber="DFE201612E-R47M" footprint="0402" /></board>',
       "verified",
       verified_plan,
     ),
@@ -69,14 +69,14 @@ test("application source gate rejects only standalone netlabel JSX elements", ()
   }
   expect(
     getTypicalApplicationSourceErrors(
-      'import Component from "./index.circuit"\nexport default () => <group><Component name="U1" /><capacitor name="C1" capacitance="10uF" /></group>',
+      'import Component from "./component.circuit"\nexport default () => <group><Component name="U1" /><capacitor name="C1" capacitance="10uF" /></group>',
       "schematic_only",
       schematic_only_plan,
     ),
   ).toEqual(['Application component C1 must set literal manufacturerPartNumber="GRM188R60J106ME84"'])
   expect(
     getTypicalApplicationSourceErrors(
-      'import Component from "./index.circuit"\nexport default () => <group><Component name="U1" /><capacitor name="C1" capacitance="10uF" manufacturerPartNumber="GRM188R60J106ME84" /></group>',
+      'import Component from "./component.circuit"\nexport default () => <group><Component name="U1" /><capacitor name="C1" capacitance="10uF" manufacturerPartNumber="GRM188R60J106ME84" /></group>',
       "schematic_only",
       schematic_only_plan,
     ),
@@ -89,7 +89,7 @@ test("unknown-value passives must use the explicit generic chip representation",
     connections: [{ net: "SENSE", pins: ["U1.SENSE", "RSHUNT.pin1"] }],
   }
   const source = (passive: string) =>
-    `import ValidatedComponent from "./index.circuit"\nexport default () => <group><ValidatedComponent name="U1" />${passive}</group>`
+    `import ValidatedComponent from "./component.circuit"\nexport default () => <group><ValidatedComponent name="U1" />${passive}</group>`
 
   expect(
     getTypicalApplicationSourceErrors(
@@ -113,28 +113,28 @@ test("application source must instantiate the validated default import as U1", (
   const plan = { components: [{ reference: "U1" }], connections: [] }
   expect(
     getTypicalApplicationSourceErrors(
-      'import ValidatedComponent from "./index.circuit"\nexport default () => <chip name="U1" manufacturerPartNumber="SUBSTITUTE" />',
+      'import ValidatedComponent from "./component.circuit"\nexport default () => <chip name="U1" manufacturerPartNumber="SUBSTITUTE" />',
       "schematic_only",
       plan,
     ),
   ).toEqual([
-    'Typical application must instantiate the default import ValidatedComponent from ./index.circuit exactly once with literal name="U1"',
+    'Typical application must instantiate the default import ValidatedComponent from ./component.circuit exactly once with literal name="U1"',
   ])
   expect(
     getTypicalApplicationSourceErrors(
-      'import ValidatedComponent from "./index.circuit"\nexport default () => <ValidatedComponent name="U1" />',
+      'import ValidatedComponent from "./component.circuit"\nexport default () => <ValidatedComponent name="U1" />',
       "schematic_only",
       plan,
     ),
   ).toEqual([])
   expect(
     getTypicalApplicationSourceErrors(
-      'import ValidatedComponent from "./index.circuit"\nexport default () => <><ValidatedComponent name="U1" /><ValidatedComponent name="U2" /></>',
+      'import ValidatedComponent from "./component.circuit"\nexport default () => <><ValidatedComponent name="U1" /><ValidatedComponent name="U2" /></>',
       "schematic_only",
       plan,
     ),
   ).toEqual([
-    'Typical application must instantiate the default import ValidatedComponent from ./index.circuit exactly once with literal name="U1"',
+    'Typical application must instantiate the default import ValidatedComponent from ./component.circuit exactly once with literal name="U1"',
   ])
 })
 
