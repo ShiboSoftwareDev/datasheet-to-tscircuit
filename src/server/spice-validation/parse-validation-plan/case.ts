@@ -13,6 +13,7 @@ import {
   validateExactApplicationCase,
   validateRequirementElectricalBindings,
 } from "./application-fixture"
+import { deterministicDutPinBiases } from "../dut-pin-bias"
 
 function analysisCoversRequirement(
   requirement_analysis: ModelRequirement["analysis"],
@@ -143,6 +144,13 @@ export function parseCase(
       path,
       collector,
       allowed_extra_passive_ids,
+      required_extra_passives: binding
+        ? deterministicDutPinBiases({
+            model_interface: model_definition,
+            binding,
+            application_fixture,
+          })
+        : [],
     })
   } else if (record.application_fixture !== undefined) {
     collector.add(

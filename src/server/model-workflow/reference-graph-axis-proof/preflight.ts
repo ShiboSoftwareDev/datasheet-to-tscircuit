@@ -10,15 +10,17 @@ import {
   divisionScaleCandidates,
   measurementCandidates,
   parseTesseractTsv,
+  scopeControlDivisionScaleCandidates,
   tesseractVersion,
 } from "./ocr-extraction"
 import { extractPdfTextBBox, figureIdentityFromPdfText } from "./pdf-extraction"
 import {
+  canonicalGridLineCenters,
   dominantGridSpacing,
   neutralGridProfileForCrop,
   ocrScopePanels,
+  preferredTimeDivisionScale,
   recoverMissingTimeDivisionPrefix,
-  uniqueDivisionScale,
 } from "./scope-divisions"
 import { MAX_TSV_BYTES, OCR_DPI, OCR_SCALE, sha256 } from "./shared"
 import type {
@@ -40,6 +42,7 @@ export interface ReferenceGraphImmutableSourceAnalysis {
   tsv: string
   bbox_html: string
   full_words: TesseractWord[]
+  selected_time_scale?: ReferenceDivisionScaleSource
 }
 
 function uniqueSortedNumbers(numbers: readonly number[]): number[] {
@@ -56,37 +59,30 @@ function recommendedGridAnchorPixels({
   axis: "x" | "y"
 }): { minimum_value_pixel: number; maximum_value_pixel: number } | undefined {
   if (spacing === undefined || lines.length < 2) return undefined
-  const clustered: number[][] = []
-  for (const line of uniqueSortedNumbers(lines)) {
-    const current = clustered.at(-1)
-    if (!current || line - current.at(-1)! > spacing * 0.2) clustered.push([line])
-    else current.push(line)
-  }
-  const centers = clustered.map((cluster) => cluster.reduce((sum, value) => sum + value, 0) / cluster.length)
-  const tolerance = Math.max(2, spacing * 0.08)
-  const runs: number[][] = []
-  let current_run: number[] = []
-  for (const center of centers) {
-    const prior = current_run.at(-1)
-    if (prior === undefined || Math.abs(center - prior - spacing) <= tolerance) current_run.push(center)
-    else {
-      if (current_run.length > 0) runs.push(current_run)
-      current_run = [center]
-    }
-  }
-  if (current_run.length > 0) runs.push(current_run)
-  runs.sort((left, right) => {
-    const left_span = left.at(-1)! - left[0]!
-    const right_span = right.at(-1)! - right[0]!
-    return right.length - left.length || right_span - left_span || left[0]! - right[0]!
-  })
-  const best = runs[0]
-  if (!best || best.length < 3) return undefined
-  const low_pixel = best[0]!
-  const high_pixel = best.at(-1)!
+  const centers = canonicalGridLineCenters({ lines, spacing })
+  const tolerance = Math.max(2, Math.min(4, spacing * 0.08))
+  const supported = centers.filter((center) =>
+    centers.some((other) => other !== center && Math.abs(Math.abs(other - center) - spacing) <= tolerance),
+  )
+  if (supported.length < 3) return undefined
+  const low_pixel = Math.min(...supported)
+  const high_pixel = Math.max(...supported)
   return axis === "x"
     ? { minimum_value_pixel: low_pixel, maximum_value_pixel: high_pixel }
     : { minimum_value_pixel: high_pixel, maximum_value_pixel: low_pixel }
+}
+
+function recommendedPlotRightPixel(
+  lines: readonly number[],
+  spacing: number | undefined,
+): number | undefined {
+  if (spacing === undefined) return undefined
+  const centers = canonicalGridLineCenters({ lines, spacing })
+  const tolerance = Math.max(2, Math.min(4, spacing * 0.08))
+  const supported = centers.filter((center) =>
+    centers.some((other) => other !== center && Math.abs(Math.abs(other - center) - spacing) <= tolerance),
+  )
+  return supported.length < 3 ? undefined : Math.max(...supported)
 }
 
 function boundedDivisionScales(
@@ -266,12 +262,14 @@ export async function analyzeReferenceGraphPreflight(input: {
       spacing: y_spacing,
       axis: "y",
     })
+    const plot_right_pixel = recommendedPlotRightPixel(x_lines, x_spacing)
     const panels = await ocrScopePanels({
       graph: input.graph,
       full_words,
       render_width: decoded.width,
       render_height: decoded.height,
-      plot_right_px: x_anchor_pixels?.maximum_value_pixel,
+      plot_right_px: plot_right_pixel ?? x_anchor_pixels?.maximum_value_pixel,
+      prefer_right_edge_panel: explicit_time !== undefined,
       workspace: workspace.path,
       process_runner: input.process_runner,
       signal: input.signal,
@@ -279,24 +277,39 @@ export async function analyzeReferenceGraphPreflight(input: {
     input.signal.throwIfAborted()
     const horizontal_scales = divisionScaleCandidates(panels?.horizontal_words ?? [])
     const channel_scales = divisionScaleCandidates(panels?.channel_words ?? [])
-    const division_scales = [...full_scales, ...horizontal_scales, ...channel_scales]
-    let selected_time_scale =
-      uniqueDivisionScale(horizontal_scales, "s") ?? uniqueDivisionScale(full_scales, "s")
+    const scope_control_scales = scopeControlDivisionScaleCandidates({
+      horizontal_words: panels?.horizontal_words ?? [],
+      channel_words: panels?.channel_words ?? [],
+    })
+    const division_scales = [...full_scales, ...horizontal_scales, ...channel_scales, ...scope_control_scales]
+    let selected_time_scale = preferredTimeDivisionScale({
+      full_candidates: full_scales,
+      horizontal_candidates: horizontal_scales,
+      channel_candidates: channel_scales,
+      scope_control_candidates: scope_control_scales,
+    })
     selected_time_scale = recoverMissingTimeDivisionPrefix(
       selected_time_scale,
       panels?.horizontal_words ?? [],
     )
+    // Aligned printed ticks are stronger than an inferred compact control
+    // value. An explicit `/div` label remains the strongest scope timebase.
+    if (explicit_time && selected_time_scale && !/\/\s*div(?:ision)?/i.test(selected_time_scale.raw_text)) {
+      selected_time_scale = undefined
+    }
     const voltage_division_values = uniqueSortedNumbers(
       division_scales
         .filter(({ normalized_unit, confidence }) => normalized_unit === "V" && confidence >= 15)
         .map(({ value_per_division_si }) => value_per_division_si),
     )
     const source_seconds_per_pixel_candidates = uniqueSortedNumbers([
-      ...(explicit_time ? [explicit_time.units_per_pixel] : []),
       ...(selected_time_scale && x_spacing ? [selected_time_scale.value_per_division_si / x_spacing] : []),
+      ...(!selected_time_scale && explicit_time ? [explicit_time.units_per_pixel] : []),
     ])
-    const source_volts_per_pixel_candidates =
-      y_spacing === undefined ? [] : voltage_division_values.map((value) => value / y_spacing)
+    const source_volts_per_pixel_candidates = uniqueSortedNumbers([
+      ...(explicit_voltage ? [explicit_voltage.units_per_pixel] : []),
+      ...(y_spacing === undefined ? [] : voltage_division_values.map((value) => value / y_spacing)),
+    ])
     const crop_proof = canonicalReferenceCropProof(crop)
     const preflight: ReferenceGraphPreflight = {
       version: 1,
@@ -317,7 +330,7 @@ export async function analyzeReferenceGraphPreflight(input: {
         ...(x_spacing === undefined ? {} : { median_grid_spacing_px: x_spacing }),
         ...(x_anchor_pixels ? { recommended_anchor_pixels: x_anchor_pixels } : {}),
         division_scale_candidates: boundedDivisionScales(division_scales, "s"),
-        ...(explicit_time
+        ...(!selected_time_scale && explicit_time
           ? {
               explicit_tick_calibration: {
                 first: explicit_time.first,
@@ -377,6 +390,7 @@ export async function analyzeReferenceGraphPreflight(input: {
         tsv,
         bbox_html,
         full_words,
+        ...(selected_time_scale ? { selected_time_scale: structuredClone(selected_time_scale) } : {}),
       },
     }
   } finally {

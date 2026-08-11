@@ -47,6 +47,13 @@ function StageStatus({ stage }: { stage?: PublicPipelineStage }) {
     )
   }
   if (stage.status === "failed") {
+    if (stage.error?.code === "no_eligible_time_domain_graph") {
+      return (
+        <span className="pipeline-stage-status status-muted">
+          <CircleAlert size={12} /> Unsupported
+        </span>
+      )
+    }
     return (
       <span className="pipeline-stage-status status-failed">
         <CircleAlert size={12} /> Failed

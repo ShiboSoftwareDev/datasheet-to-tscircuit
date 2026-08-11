@@ -27,21 +27,29 @@ export function DatasheetReference({
   component_view,
   on_component_view_change,
   local_run_id,
+  footprint_id,
 }: {
   job: Job
   artifact: ComponentArtifact
   component_view: ComponentReferenceView
   on_component_view_change: (view: ComponentReferenceView) => void
   local_run_id?: string
+  footprint_id?: string
 }) {
   const is_application = artifact === "typical_application"
   const view = is_application ? "schematic" : component_view
   const file_kind: JobFileKind = is_application
     ? "application_reference"
     : view === "footprint"
-      ? "land_pattern"
+      ? footprint_id
+        ? "component_footprint_reference"
+        : "land_pattern"
       : "component_schematic_reference"
-  const image_url = getJobFileUrl(job.job_id, file_kind, "inline", local_run_id)
+  const image_url = getJobFileUrl(job.job_id, file_kind, {
+    display: "inline",
+    local_run_id,
+    ...(footprint_id ? { footprint_id } : {}),
+  })
   const [image_failed, setImageFailed] = useState(false)
 
   useEffect(() => setImageFailed(false), [image_url, job.evidence_available])

@@ -4,15 +4,23 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { expect, test } from "bun:test"
 import { BunProcessRunner } from "@/server/infrastructure/process"
+import type { DecodedModelEvidencePng } from "@/server/model-workflow/model-evidence-pages"
 import {
   applyReferenceGraphSourceEligibility,
   buildReferenceGraphSourceProof,
   parseReferenceGraphSourceProof,
 } from "@/server/model-workflow/reference-graph-axis-proof"
-import { divisionScaleCandidates } from "@/server/model-workflow/reference-graph-axis-proof/ocr-extraction"
 import {
+  divisionScaleCandidates,
+  scopeControlDivisionScaleCandidates,
+} from "@/server/model-workflow/reference-graph-axis-proof/ocr-extraction"
+import {
+  axisZeroReferencePixel,
+  canonicalGridLineCenters,
+  dominantGrid,
   divisionScaleNearestTrace,
   recoverMissingTimeDivisionPrefix,
+  neutralGridProfileForCrop,
   uniqueDivisionScale,
 } from "@/server/model-workflow/reference-graph-axis-proof/scope-divisions"
 import { canonicalJson, sha256 } from "@/server/model-workflow/reference-graph-axis-proof/shared"
@@ -27,6 +35,59 @@ const archived_run93_pdf = join(
   ".runtime/jobs/ca181c1a-27ee-4013-beb9-683c7c985fc0/spice/datasheet.pdf",
 )
 const testWithArchivedRun93 = existsSync(archived_run93_pdf) ? test : test.skip
+
+test("uses canonical raster-grid centers consistently between preflight and final proof", () => {
+  const grid = dominantGrid({
+    lines: [91.6667, 181.6667, 271.6667, 451.3333, 541, 546.3333, 557.3333, 631, 640],
+    first_anchor: 635.5,
+    second_anchor: 271.6667,
+  })
+  expect(grid?.first_anchor_line_pixel).toBeCloseTo(635.5)
+  expect(grid?.second_anchor_line_pixel).toBeCloseTo(271.6667)
+})
+
+test("prefers a strict neutral grid over pale waveform texture", () => {
+  const grid_pixels = new Set([90, 180, 270, 360, 450, 540, 630, 720, 810])
+  const decoded: DecodedModelEvidencePng = {
+    width: 900,
+    height: 600,
+    rgbAt(x, y) {
+      if (grid_pixels.has(x)) return [180, 180, 180]
+      if (y < 60) return [180, 190, 220]
+      return [255, 255, 255]
+    },
+  }
+
+  expect(neutralGridProfileForCrop({ decoded, axis: "x" })).toEqual([
+    30, 60, 90, 120, 150, 180, 210, 240, 270,
+  ])
+})
+
+test("keeps nearby waveform strokes out of canonical grid centers", () => {
+  expect(
+    canonicalGridLineCenters({
+      lines: [
+        37.67, 38.33, 45, 91, 144.67, 198, 251.67, 305, 358, 411.67, 465, 518.67, 572.33, 573, 579.67, 581.67,
+      ],
+      spacing: 53.67,
+    }),
+  ).toEqual([38, 91, 144.67, 198, 251.67, 305, 358, 411.67, 465, 518.67, 572.665])
+})
+
+test("derives a visible scope channel zero independently of waveform edge state", () => {
+  expect(
+    axisZeroReferencePixel({
+      first: { pixel: 361.3333, value: 0 },
+      second: { pixel: 91.6667, value: 6 },
+    }),
+  ).toBeCloseTo(361.3333)
+  expect(
+    axisZeroReferencePixel({
+      first: { pixel: 500, value: -2 },
+      second: { pixel: 300, value: 2 },
+    }),
+  ).toBe(400)
+})
 
 const canonical_run93_crop = {
   page: 25,
@@ -486,6 +547,52 @@ test("accepts unique low-confidence scope unit tokens after normalizing common V
   const micro_as_y_scale = uniqueDivisionScale(divisionScaleCandidates(micro_as_y_words), "s")
   expect(micro_as_y_scale?.raw_text).toBe("500 ys/div")
   expect(micro_as_y_scale?.value_per_division_si).toBeCloseTo(500e-6, 12)
+
+  const slash_as_i_words = structuredClone(words)
+  slash_as_i_words[0]!.text = "2"
+  slash_as_i_words[1]!.text = "Vidiv"
+  const slash_as_i_scale = uniqueDivisionScale(divisionScaleCandidates(slash_as_i_words), "V")
+  expect(slash_as_i_scale?.raw_text).toBe("2 Vidiv")
+  expect(slash_as_i_scale?.value_per_division_si).toBe(2)
+})
+
+test("normalizes Docker OCR yen glyphs in compact scope voltage controls", () => {
+  const words = [
+    {
+      block: 1,
+      paragraph: 1,
+      line: 1,
+      word: 1,
+      confidence: 76,
+      text: "2.00",
+      bbox: { left: 388, top: 131, width: 178, height: 59 },
+    },
+    {
+      block: 1,
+      paragraph: 1,
+      line: 1,
+      word: 2,
+      confidence: 76,
+      text: "¥",
+      bbox: { left: 604, top: 131, width: 48, height: 59 },
+    },
+    {
+      block: 1,
+      paragraph: 1,
+      line: 1,
+      word: 3,
+      confidence: 20,
+      text: "(200ns",
+      bbox: { left: 1908, top: 39, width: 248, height: 60 },
+    },
+  ]
+
+  const scales = scopeControlDivisionScaleCandidates({
+    horizontal_words: words,
+    channel_words: words,
+  })
+
+  expect(scales.find(({ normalized_unit }) => normalized_unit === "V")?.value_per_division_si).toBe(2)
 })
 
 test("recovers a missing time prefix only from an adjacent same-panel measurement", () => {

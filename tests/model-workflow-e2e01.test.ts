@@ -462,9 +462,11 @@ class ModelWorkflowBoundaryRunner implements ProcessRunner {
       if (!output_base) throw new Error("Fixture tesseract command omitted its output base")
       const rows = [
         [1, 1, 1, 1, 20, 166, 8, 6, 95, "0s"],
-        [2, 1, 1, 1, 252, 166, 24, 6, 95, "3ms"],
-        [3, 1, 1, 1, 2, 165, 16, 6, 95, "0V"],
-        [4, 1, 1, 1, 2, 21, 16, 6, 95, "2V"],
+        [2, 1, 1, 1, 132, 166, 24, 6, 95, "1.5ms"],
+        [3, 1, 1, 1, 252, 166, 24, 6, 95, "3ms"],
+        [4, 1, 1, 1, 2, 165, 16, 6, 95, "0V"],
+        [5, 1, 1, 1, 2, 93, 16, 6, 95, "1V"],
+        [6, 1, 1, 1, 2, 21, 16, 6, 95, "2V"],
       ]
       const tsv = [
         "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
@@ -739,7 +741,7 @@ testWithProductionSimulation(
         ({ command, command_label }) =>
           command[0] === "tesseract" && command_label === "Read reference-axis OCR engine version",
       ),
-    ).toHaveLength(2)
+    ).toHaveLength(3)
     expect(
       process_runner.calls.filter(
         ({ command, command_label }) =>
@@ -751,7 +753,7 @@ testWithProductionSimulation(
         ({ command, command_label }) =>
           command[0] === "pdftotext" && command_label.startsWith("Extract canonical figure geometry"),
       ),
-    ).toHaveLength(3)
+    ).toHaveLength(4)
     expect(
       process_runner.calls.filter(
         ({ command, command_label }) =>

@@ -489,6 +489,58 @@ test("extractor and independent review share canonical external terminal labels"
   expect(compareApplicationGraphs({ plan: spaced_plan, review, evidence }).status).toBe("verified")
 })
 
+test("independent review canonicalizes descriptive decimal-voltage terminals", () => {
+  const decimal_plan = parseTypicalApplicationPlan(
+    {
+      version: 4,
+      availability: "documented",
+      pcb_implementation: "schematic_only",
+      title: "Voltage-domain connection",
+      description: "A controller drives the low-voltage domain.",
+      source_references: [{ page: 17, figure: "Typical application" }],
+      components: [{ reference: "U1", kind: "integrated_circuit", value: "REGULATOR" }],
+      connections: [
+        {
+          net: "1.8_V",
+          pins: ["U1.VOUT", "System_Controller_1.8_V"],
+        },
+        { net: "FEEDBACK", pins: ["U1.FB", "FB"] },
+        { net: "GROUND", pins: ["U1.GND", "GND"] },
+      ],
+    },
+    "REGULATOR",
+  )
+  const parsed_review = parseApplicationConnectivityReview(
+    {
+      version: 1,
+      availability: "documented",
+      source: {
+        page: 17,
+        figure: "Typical application",
+        method: "pdf_visual",
+        confidence: "high",
+        image: "visual-reference/typical-application.png",
+        render_dpi: 200,
+      },
+      components: visibleComponents(decimal_plan),
+      connections: [
+        { pins: ["U1.1", "System_Controller_1.8_V"] },
+        { pins: ["U1.2", "FB"] },
+        { pins: ["U1.3", "GND"] },
+      ],
+    },
+    decimal_plan,
+  )
+
+  expect(
+    compareApplicationGraphs({
+      plan: decimal_plan,
+      evidence,
+      review: parsed_review,
+    }).status,
+  ).toBe("verified")
+})
+
 test("documented reviews reject low-confidence sources and isolated inventory entries", () => {
   expect(() =>
     parseApplicationConnectivityReview(
@@ -1230,9 +1282,9 @@ test("verifier workspace exposes no extractor hints, crop, inventory, or graph",
         ).toBe(false)
         expect(input.prompt).not.toContain("target_pin_naming_hints")
         expect(input.prompt).not.toContain("verification-request.json")
-        expect(await Bun.file(join(input.workspace, "APPLICATION-CONNECTIVITY-SCHEMA.md")).text()).toContain(
-          "an SPDT switch has one common",
-        )
+        const reviewGuide = await Bun.file(join(input.workspace, "APPLICATION-CONNECTIVITY-SCHEMA.md")).text()
+        expect(reviewGuide).toContain("an SPDT switch has one common")
+        expect(reviewGuide).toContain("controller-driven ENABLE wire with a pull-down")
         await Bun.write(
           join(input.workspace, "application-connectivity-review.json"),
           `${JSON.stringify(raw_review)}\n`,
@@ -1315,15 +1367,17 @@ test("verifier independently checks not_present without requiring an application
       image_extension: "test-image-extension.ts",
       on_output: () => undefined,
     })
-    expect(calls).toBe(2)
+    expect(calls).toBe(1)
     expect(verified).toMatchObject({
       status: "verified",
       availability: "not_present",
-      verifier_attempts: 2,
-      verifier_agent_duration_ms: 22,
+      verifier_attempts: 1,
+      verifier_agent_duration_ms: 11,
     })
-    expect(await Bun.file(join(workspace, "application-connectivity-review.json")).json()).toMatchObject({
+    expect(await Bun.file(join(workspace, "application-connectivity-review.json")).json()).toEqual({
+      version: 1,
       availability: "not_present",
+      searched_sections: ["application information", "reference design"],
     })
   } finally {
     await rm(workspace, { recursive: true, force: true })

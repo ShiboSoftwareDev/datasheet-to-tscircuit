@@ -1,5 +1,6 @@
 import type { AnyCircuitElement } from "circuit-json"
 import { CircuitRecord, ComponentSchematicPlan, SchematicSide } from "./types"
+import { physicalPinFromHints } from "../component-evidence"
 
 function normalizePin(value: string): string {
   return value
@@ -13,6 +14,8 @@ function asStringArray(value: unknown): string[] {
 }
 
 function getPortPinNumber(port: CircuitRecord): string | undefined {
+  const physical_pin = physicalPinFromHints(asStringArray(port.port_hints))
+  if (physical_pin) return normalizePin(physical_pin)
   if (typeof port.pin_number === "number" || typeof port.pin_number === "string") {
     return normalizePin(String(port.pin_number))
   }

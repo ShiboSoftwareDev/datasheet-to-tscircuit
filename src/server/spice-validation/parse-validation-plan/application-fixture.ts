@@ -119,6 +119,7 @@ export function validateExactApplicationCase(input: {
   path: string
   collector: ValidationCollector
   allowed_extra_passive_ids?: ReadonlySet<string>
+  required_extra_passives?: readonly FixtureElement[]
 }): void {
   const expected_nets = exactApplicationNetIds(input.application_fixture)
   if (stableStringify(input.nets) !== stableStringify(expected_nets)) {
@@ -137,11 +138,25 @@ export function validateExactApplicationCase(input: {
   }
   const expected_passives = input.application_fixture.fixtures.map(applicationPassiveToFixture)
   const expected_by_id = new Map(expected_passives.map((fixture) => [fixture.id, fixture]))
+  const required_extra_by_id = new Map(
+    (input.required_extra_passives ?? []).map((fixture) => [fixture.id, fixture]),
+  )
   const passive_types = new Set<FixtureElement["type"]>(["resistor", "capacitor", "inductor", "diode"])
   for (const [fixture_index, fixture] of input.fixtures.entries()) {
     if (!passive_types.has(fixture.type)) continue
     const expected = expected_by_id.get(fixture.id)
     if (!expected) {
+      const required_extra = required_extra_by_id.get(fixture.id)
+      if (required_extra) {
+        if (stableStringify(fixture) !== stableStringify(required_extra)) {
+          input.collector.add(
+            `${input.path}.fixtures[${fixture_index}]`,
+            "application_fixture_changed_supplemental_passive",
+            `must exactly match server-owned supplemental passive ${JSON.stringify(required_extra)}`,
+          )
+        }
+        continue
+      }
       if (!input.allowed_extra_passive_ids?.has(fixture.id)) {
         input.collector.add(
           `${input.path}.fixtures[${fixture_index}]`,
@@ -168,6 +183,18 @@ export function validateExactApplicationCase(input: {
         `${input.path}.fixtures`,
         "application_fixture_passive_count",
         `must contain exactly one unchanged server-owned passive ${expected.id}; found ${matches.length}`,
+      )
+    }
+  }
+  for (const required of input.required_extra_passives ?? []) {
+    const matches = input.fixtures.filter(
+      (fixture) => fixture.id === required.id && stableStringify(fixture) === stableStringify(required),
+    )
+    if (matches.length !== 1) {
+      input.collector.add(
+        `${input.path}.fixtures`,
+        "application_fixture_supplemental_passive_count",
+        `must contain exactly one server-owned supplemental passive ${required.id}; found ${matches.length}`,
       )
     }
   }

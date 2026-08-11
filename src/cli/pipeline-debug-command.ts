@@ -216,7 +216,11 @@ async function runLocalJob({
     jobStore: state.jobStore,
     modelRunStore: state.modelRunStore,
   })
-  const retainedTask = snapshot?.stage_results[taskId]
+  const selectedTask = snapshot?.stage_results[taskId]
+  // A pipeline snapshot advertises every stage before execution. Pending
+  // stages have a debug_ref for UI projection but no captured input boundary
+  // yet, so an initial full run must derive its input from the current job.
+  const retainedTask = selectedTask?.status === "pending" ? undefined : selectedTask
   const sourceJob = state.jobStore.getJob(sourceJobId)
   if (!sourceJob) throw new Error(`Job ${sourceJobId} was not found`)
   const derivedModelRunId =

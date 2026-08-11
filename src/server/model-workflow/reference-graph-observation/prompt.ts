@@ -40,10 +40,13 @@ This task discovers references only. Every graph must omit electrical_binding
 and channels. Calibration, plotted-channel inventory, trace points, and all
 numeric comparison data belong exclusively to Create Comparison Graphs.
 
-Use time-graph-hints.json as the authority for simulator eligibility. An
-elapsed-time graph is reproducible only when its deterministic hint has a
-complete transient_fixture_evidence receipt and no unsupported fixture
-condition. Supported fixtures are pulsed/DC voltage or current sources and
+Use time-graph-hints.json as the authority for unsupported fixture conditions.
+At this discovery boundary, mark a public voltage graph potentially
+reproducible when either its hint has a complete transient_fixture_evidence
+receipt or the visible plot has a numeric elapsed-time calibration such as
+200 ns/div. In the latter case, the plot must visibly contain both stimulus and
+response; exact electrical binding is deferred to Create Comparison Graphs.
+Supported fixtures are pulsed/DC voltage or current sources and
 resistors, capacitors, inductors, and diodes connected to public DUT pins.
 Steady-state stimuli are not reproducible for causal elapsed-time switching.
 Register programming, digital protocols, inaccessible state, unsupported
@@ -115,13 +118,15 @@ A low logic state references gnd. A high logic state must reference the exact
 positive public input-supply endpoint from the single printed dc_voltage
 auxiliary fixture; it must not reference gnd.
 
-The source receipt fixes pulse low, high, rise, and fall. Derive its remaining
-timing only from the visible elapsed-time plot: delay is the first plotted
-stimulus edge; when a second edge is visible, width places that entire edge in
-the calibrated window; otherwise width holds the stepped level through the end
-of the window. Set period beyond the calibrated window and beyond both edges so
-the plot contains no invented repeat. Never leave an edge straddling the end of
-the calibrated window.
+When transient_fixture_evidence exists, its source receipt fixes pulse low,
+high, rise, and fall. Otherwise derive low/high from the visible stimulus trace
+and bind every public supply/control from application-fixture-contract.json.
+Derive timing only from the visible elapsed-time plot: delay is the first
+plotted stimulus edge and width ends at its first complete opposite edge. When
+the stimulus repeats, period must match the repeated trace and any frequency in
+the figure caption (for example, 2.5 MHz means 400 ns). Only a single-edge plot
+may hold the next period beyond the calibrated window. Never suppress visible
+repeats or leave an edge straddling the end of the calibrated window.
 
 Inventory every visually distinct plotted line in the source plot. Create
 exactly one channels[] entry for every line that tscircuit can simulate:

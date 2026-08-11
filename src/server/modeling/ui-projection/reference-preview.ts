@@ -159,8 +159,9 @@ export function projectModelReferencePreview(input: {
       result: result_by_observation.get(observation.id),
     }),
   )
-  const primary = series[0]
-  const primary_observation = input.validation_case.observations[0]
+  const primary_index = series.findIndex(({ role }) => role === "response")
+  const primary = series[primary_index]
+  const primary_observation = input.validation_case.observations[primary_index]
   if (!primary || !primary_observation) {
     throw new Error(`Validation case ${input.validation_case.id} has no observations`)
   }

@@ -81,6 +81,8 @@ export interface ReferenceDivisionScaleSource {
     algorithm:
       | "missing_time_prefix_from_adjacent_measurement_v1"
       | "low_confidence_micro_prefix_from_adjacent_measurement_v1"
+      | "scope_horizontal_control_implies_per_division_v1"
+      | "scope_channel_control_implies_per_division_v1"
     corroborating_raw_text: string
     multiplier: number
   }
@@ -197,6 +199,42 @@ export interface PrintedExperimentExplicitTimeScopeVoltageReferenceGraphAxisCali
   y_axis: PrintedExperimentScopeDivisionReferenceGraphAxisCalibrationReceipt["y_axis"]
 }
 
+export interface VisibleZeroScopeChannelCalibrationReceipt {
+  channel_id: string
+  division_scale: ReferenceDivisionScaleSource
+  grid: ReferenceGridCalibrationSource
+  declared_volts_per_pixel: number
+  source_volts_per_pixel: number
+  zero_reference_volts: 0
+  zero_reference_pixel: number
+  zero_marker: {
+    algorithm: "trace_color_left_edge_zero_marker_v1"
+    ocr_bbox_px: OcrBoundingBox
+    matching_pixel_count: number
+  }
+}
+
+interface VisibleZeroScopeDivisionReferenceGraphAxisCalibrationReceiptBase
+  extends Omit<ScopeDivisionReferenceGraphAxisCalibrationReceiptBase, "y_axis"> {
+  y_axis: {
+    quantity: "voltage"
+    unit: "V"
+    channels: VisibleZeroScopeChannelCalibrationReceipt[]
+  }
+}
+
+/** Scope calibration whose per-channel 0 V offsets come from visible channel markers. */
+export interface VisibleZeroScopeDivisionReferenceGraphAxisCalibrationReceipt
+  extends VisibleZeroScopeDivisionReferenceGraphAxisCalibrationReceiptBase {
+  algorithm: "canonical_pdf_tesseract_scope_divisions_v4"
+}
+
+export interface VisibleZeroExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
+  extends Omit<VisibleZeroScopeDivisionReferenceGraphAxisCalibrationReceiptBase, "x_axis"> {
+  algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v3"
+  x_axis: ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceiptBase["x_axis"]
+}
+
 export type ReferenceGraphAxisCalibrationReceipt =
   | ExplicitReferenceGraphAxisCalibrationReceipt
   | LegacyScopeDivisionReferenceGraphAxisCalibrationReceipt
@@ -204,6 +242,8 @@ export type ReferenceGraphAxisCalibrationReceipt =
   | PrintedExperimentScopeDivisionReferenceGraphAxisCalibrationReceipt
   | ExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
   | PrintedExperimentExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
+  | VisibleZeroScopeDivisionReferenceGraphAxisCalibrationReceipt
+  | VisibleZeroExplicitTimeScopeVoltageReferenceGraphAxisCalibrationReceipt
 
 export type ReferenceGraphAxisProofResult =
   | {

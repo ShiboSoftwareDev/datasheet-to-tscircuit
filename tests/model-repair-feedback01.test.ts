@@ -240,3 +240,27 @@ test("viewer model simulation failures enter repair as convergence feedback", ()
     recommended_actions: ["improve_numerical_convergence", "bound_internal_state"],
   })
 })
+
+test("viewer parser failures enter repair as rejected simulator syntax", () => {
+  const result: ValidationRunResult = {
+    version: 1,
+    passed: true,
+    hashes: {
+      plan_sha256: "a".repeat(64),
+      model_sha256: "b".repeat(64),
+      manifest_sha256: "c".repeat(64),
+    },
+    cases: [],
+    errors: [],
+  }
+  expect(
+    createModelRepairFeedback(result, undefined, undefined, {
+      public_transient: "simulation_unknown_experiment_error: YYparse syntax error at line 26",
+    }).issues,
+  ).toContainEqual({
+    category: "simulator_rejected_model",
+    affected_cases: 1,
+    affected_observations: 0,
+    recommended_actions: ["replace_unsupported_ngspice_syntax"],
+  })
+})

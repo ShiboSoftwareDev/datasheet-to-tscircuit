@@ -23,6 +23,14 @@ function failedStageMessage(result: PublicPipelineSnapshot): string {
   return "The model pipeline failed without a stage diagnostic."
 }
 
+function unsupportedStageMessage(result: PublicPipelineSnapshot): string | undefined {
+  for (const stage of Object.values(result.stage_results)) {
+    if (stage.status !== "failed" || stage.error?.code !== "no_eligible_time_domain_graph") continue
+    return stage.error.message
+  }
+  return undefined
+}
+
 function retainedAcceptedWarnings(input: {
   context: ModelRunnerContext
   model_run_id: string
@@ -255,6 +263,39 @@ async function runClaimedModel(input: { model_run_id: string }, context: ModelRu
       has_errors: false,
       error_message: undefined,
       ...(warnings === undefined ? {} : { warnings }),
+      completed_at: new Date().toISOString(),
+      pipeline: public_result,
+    })
+    return
+  }
+
+  const unsupported_message = unsupportedStageMessage(public_result)
+  if (unsupported_message) {
+    const current_warnings = context.model_run_store.getModelRun(input.model_run_id)?.warnings ?? []
+    const retained_warnings = markAcceptedArtifactsAsRetained({
+      context,
+      model_run_id: input.model_run_id,
+      state: "paused",
+    })
+    const warnings = [...new Set([...(retained_warnings ?? current_warnings), unsupported_message])]
+    updateModelProgress({
+      store: context.model_run_store,
+      model_run_id: input.model_run_id,
+      phase: "unsupported",
+      message: "No supported reproducible elapsed-time voltage graph exists in this datasheet",
+    })
+    await appendModelLog(
+      context.model_run_store,
+      input.model_run_id,
+      "system",
+      `Model pipeline stopped without an error: ${unsupported_message}\n`,
+    ).catch(() => undefined)
+    context.model_run_store.finishSegment(input.model_run_id, {
+      status: "unsupported",
+      is_complete: true,
+      has_errors: false,
+      error_message: undefined,
+      warnings,
       completed_at: new Date().toISOString(),
       pipeline: public_result,
     })

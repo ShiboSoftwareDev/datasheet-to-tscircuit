@@ -8,6 +8,7 @@ import {
   getComponentEvidenceBlockingReasons,
   getFootprintEvidenceErrors,
   getPinoutEvidenceErrors,
+  parseComponentFootprintCatalog,
   parseComponentEvidence,
 } from "@/server/component-evidence"
 import {
@@ -69,6 +70,59 @@ test("resolved evidence is source-backed without assuming a package family", () 
   expect(derived_plan.source_references).toEqual([{ page: 12, figure: "Recommended land pattern" }])
   expect(derived_plan.pads.every((pad) => !("sources" in pad))).toBe(true)
   expect(getFootprintEvidenceErrors(parsed, derived_plan)).toEqual([])
+})
+
+test("physical footprint catalog merges aliases and rotated drawing representations", () => {
+  const first = evidence()
+  const rotated = structuredClone(first)
+  rotated.ordering_code!.value = "GENERIC-2-B"
+  rotated.package.name.value = "Carrier alias"
+  rotated.package.code!.value = "PKG2B"
+  rotated.pinout.pins[0]!.labels = ["IN"]
+  rotated.pinout.pins[0]!.role = "passive"
+  rotated.pinout.pins[1]!.labels = ["GND"]
+  rotated.footprint.pads = rotated.footprint.pads.map((pad) => ({
+    ...pad,
+    x: -pad.y,
+    y: pad.x,
+    width: pad.height,
+    height: pad.width,
+  }))
+  const distinct = structuredClone(first)
+  distinct.ordering_code!.value = "GENERIC-2-C"
+  distinct.package.name.value = "Wider package"
+  distinct.package.code!.value = "PKG2C"
+  distinct.footprint.pads[0]!.x = -1
+  distinct.footprint.pads[1]!.x = 1
+
+  const catalog = parseComponentFootprintCatalog({
+    version: 1,
+    default_footprint_id: "package-a",
+    footprints: [
+      { footprint_id: "package-a", component_evidence: first },
+      { footprint_id: "package-a-carrier", component_evidence: rotated },
+      { footprint_id: "package-c", component_evidence: distinct },
+    ],
+  })
+
+  expect(catalog.footprints).toHaveLength(2)
+  expect(catalog.default_footprint_id).toBe("package-a")
+  expect(catalog.footprints[0]?.aliases).toEqual(
+    expect.arrayContaining(["package-a", "package-a-carrier", "PKG2", "PKG2B"]),
+  )
+  expect(catalog.footprints[0]?.ordering_codes).toEqual(["GENERIC-2-A", "GENERIC-2-B"])
+})
+
+test("physical footprint catalog rejects stencil apertures as copper geometry", () => {
+  const stencil = evidence()
+  stencil.footprint.drawing_orientation.sources[0]!.figure = "Stencil aperture layout"
+  expect(() =>
+    parseComponentFootprintCatalog({
+      version: 1,
+      default_footprint_id: "stencil",
+      footprints: [{ footprint_id: "stencil", component_evidence: stencil }],
+    }),
+  ).toThrow("stencil aperture drawing")
 })
 
 test("ordering identities must be distinct extensions of their base part number", () => {

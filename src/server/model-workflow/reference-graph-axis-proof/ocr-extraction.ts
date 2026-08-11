@@ -55,6 +55,10 @@ function parseDivisionScale(
     .replace(/v{2,}/gi, "v")
     // Another common anti-aliased V artifact is "m\V/div".
     .replace(/\\(?=v)/gi, "")
+    // The slash in a compact scope label is sometimes rasterized as a narrow
+    // `i` or `l` (for example `2 Vidiv`). This sequence is not a valid unit in
+    // its own right, so it is safe to normalize only between V/S and `div`.
+    .replace(/(?<=[sv])[il](?=div$)/i, "/")
     // On compact oscilloscope panels, Tesseract commonly reads the micro glyph
     // in "us/div" as a lowercase y. Y is not a valid SI prefix, so this
     // normalization is unambiguous when it occurs immediately before s/div.
@@ -118,7 +122,18 @@ export function divisionScaleCandidates(words: readonly TesseractWord[]): Refere
 }
 
 function parseMeasurement(raw_text: string): Pick<MeasurementCandidate, "unit" | "value_si"> | undefined {
-  const normalized = raw_text.normalize("NFKC").replace(/[−–—]/g, "-").replace(/\s+/g, "").replace(/,$/, "")
+  const normalized = raw_text
+    .normalize("NFKC")
+    .replace(/[−–—]/g, "-")
+    // Colored scope-control text is rasterized differently across Poppler and
+    // Tesseract versions. In particular, Docker's OCR commonly reads a
+    // saturated V glyph as the visually similar yen sign.
+    .replace(/¥/g, "v")
+    .replace(/\s+/g, "")
+    // Focused scope OCR often retains a border or trigger glyph immediately
+    // beside an otherwise exact control value, for example "__(200ns".
+    .replace(/^[_(\[{|]+/, "")
+    .replace(/[),;:_\]}|]+$/, "")
   const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(p|n|u|µ|μ|m)?(s|v)$/i.exec(normalized)
   if (!match) return undefined
   const numeric = Number(match[1])
@@ -138,6 +153,58 @@ function parseMeasurement(raw_text: string): Pick<MeasurementCandidate, "unit" |
     unit: match[3]!.toLowerCase() === "s" ? "s" : "V",
     value_si: numeric * multiplier,
   }
+}
+
+/**
+ * Modern oscilloscopes commonly print compact control values (`200ns`,
+ * `2.00 V`) instead of spelling out `/div`. Only values in the focused bottom
+ * control strip are eligible for this normalization. The top-most time value
+ * is the horizontal timebase; voltage values to its left are channel scales,
+ * while measurements to its right belong to acquisition/readout controls.
+ */
+export function scopeControlDivisionScaleCandidates(input: {
+  horizontal_words: readonly TesseractWord[]
+  channel_words: readonly TesseractWord[]
+}): ReferenceDivisionScaleSource[] {
+  const horizontal_measurements = measurementCandidates(input.horizontal_words)
+  const channel_measurements = measurementCandidates(input.channel_words)
+  const time_candidates = [...horizontal_measurements, ...channel_measurements]
+    .filter(({ unit, value_si, confidence }) => unit === "s" && value_si > 0 && confidence >= 15)
+    .sort(
+      (left, right) =>
+        left.bbox.top - right.bbox.top ||
+        left.bbox.left - right.bbox.left ||
+        right.confidence - left.confidence,
+    )
+  const timebase = time_candidates[0]
+  if (!timebase) return []
+  const asDivisionScale = (
+    measurement: MeasurementCandidate,
+    algorithm:
+      | "scope_horizontal_control_implies_per_division_v1"
+      | "scope_channel_control_implies_per_division_v1",
+  ): ReferenceDivisionScaleSource => ({
+    raw_text: measurement.raw_text,
+    normalized_unit: measurement.unit,
+    value_per_division_si: measurement.value_si,
+    confidence: measurement.confidence,
+    ocr_bbox_px: measurement.bbox,
+    normalization: {
+      algorithm,
+      corroborating_raw_text: measurement.raw_text,
+      multiplier: 1,
+    },
+  })
+  const voltage_scales = channel_measurements.filter(
+    ({ unit, value_si, confidence, bbox }) =>
+      unit === "V" && value_si > 0 && confidence >= 15 && bbox.left + bbox.width < timebase.bbox.left,
+  )
+  return [
+    asDivisionScale(timebase, "scope_horizontal_control_implies_per_division_v1"),
+    ...voltage_scales.map((measurement) =>
+      asDivisionScale(measurement, "scope_channel_control_implies_per_division_v1"),
+    ),
+  ]
 }
 
 export function measurementCandidates(words: readonly TesseractWord[]): MeasurementCandidate[] {

@@ -204,6 +204,8 @@ function parseReferenceGraphObservationWithPointPolicy(
           model_interface,
           application_fixture,
           phase,
+          preserve_find_ineligibility: phase === "find" && point_field_policy === "canonical",
+          preserve_source_ineligibility: point_field_policy === "canonical",
         }),
       ]
     } catch (error) {

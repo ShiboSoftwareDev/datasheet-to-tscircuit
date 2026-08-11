@@ -68,7 +68,14 @@ const REPAIR_ACTION_DESCRIPTIONS: Readonly<Record<ModelRepairAction, string>> = 
     "review the model equations and public-pin behavior against every visible modeled requirement",
 }
 
+function simulatorRejectedSource(message: string): boolean {
+  return /\b(?:yyparse|syntax error|parse error|unknown (?:device|model|subcircuit)|undefined parameter|no such model|unrecognized|unsupported syntax)\b/i.test(
+    message,
+  )
+}
+
 function repairFeedbackCategory(error: ValidationRunResult["errors"][number]): ModelRepairFeedbackCategory {
+  if (simulatorRejectedSource(error.message)) return "simulator_rejected_model"
   if (error.kind === "convergence") return "convergence_failure"
   if (error.kind === "simulator" && error.code === "ngspice_failed") {
     return "simulator_rejected_model"
@@ -148,7 +155,9 @@ export function createModelRepairFeedback(
     }
   })
   Object.values(viewer_model_errors_by_case ?? {}).forEach((message, case_index) => {
-    if (message) add("convergence_failure", case_index)
+    if (message) {
+      add(simulatorRejectedSource(message) ? "simulator_rejected_model" : "convergence_failure", case_index)
+    }
   })
   if (stimulus_causality?.required && !stimulus_causality.passed) {
     const current = aggregate.get("stimulus_insensitive") ?? {

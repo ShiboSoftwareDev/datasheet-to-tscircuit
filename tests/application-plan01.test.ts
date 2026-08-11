@@ -207,6 +207,32 @@ test("printed external terminal whitespace canonicalizes without changing compon
   expect(applicationPrompt({ plan: parsed })).toContain("- 48V_BATT -> net.N_X34_38_56_5F_42_41_54_54")
 })
 
+test("decimal voltage text stays an external terminal even inside a descriptive label", () => {
+  const input = documentedPlan()
+  input.connections[0] = {
+    net: "1.8_V",
+    pins: ["LM393P.VCC", "C1.1", "System_Controller_1.8_V"],
+  }
+
+  expect(parseTypicalApplicationPlan(input, "LM393P").connections[0]).toEqual({
+    net: "1_8_V",
+    pins: ["U1.VCC", "C1.1", "System_Controller_1_8_V"],
+  })
+})
+
+test("decimal voltage-domain terminals do not become component ports", () => {
+  const input = documentedPlan()
+  input.connections[0] = {
+    net: "1.8_V",
+    pins: ["LM393P.VCC", "C1.1", "1.8_V"],
+  }
+  const parsed = parseTypicalApplicationPlan(input, "LM393P")
+  expect(parsed.connections[0]).toEqual({
+    net: "1_8_V",
+    pins: ["U1.VCC", "C1.1", "1_8_V"],
+  })
+})
+
 test("application source-net encoding is injective across encoded-looking semantic names", () => {
   for (const [semantic, encoded_looking] of [
     ["48V_BATT", "N_X34_38_56_5F_42_41_54_54"],

@@ -70,6 +70,7 @@ export interface RestoreJobInput extends CreateJobInput {
   component_ready?: boolean
   component_code?: string
   circuit_json?: Job["circuit_json"]
+  component_footprints?: Job["component_footprints"]
   typical_application_title?: string
   typical_application_code?: string
   typical_application_circuit_json?: Job["typical_application_circuit_json"]
@@ -93,6 +94,7 @@ export type JobUpdate = Partial<
     | "component_ready"
     | "component_code"
     | "circuit_json"
+    | "component_footprints"
     | "typical_application_title"
     | "typical_application_code"
     | "typical_application_circuit_json"
@@ -120,6 +122,7 @@ function getPublicJob(job_record: JobRecord): Job {
     component_ready: job_record.component_ready,
     component_code: job_record.component_code,
     circuit_json: job_record.circuit_json,
+    component_footprints: job_record.component_footprints,
     typical_application_title: job_record.typical_application_title,
     typical_application_code: job_record.typical_application_code,
     typical_application_circuit_json: job_record.typical_application_circuit_json,
@@ -454,6 +457,20 @@ export class JobStore {
       additional_instructions: job_record.additional_instructions,
       retry_source_job_id: job_record.retry_source_job_id,
       component_ready: job_record.component_ready,
+      component_footprints: job_record.component_footprints
+        ? {
+            default_footprint_id: job_record.component_footprints.default_footprint_id,
+            footprints: job_record.component_footprints.footprints.map((footprint) => ({
+              footprint_id: footprint.footprint_id,
+              label: footprint.label,
+              aliases: footprint.aliases,
+              ordering_codes: footprint.ordering_codes,
+              package_name: footprint.package_name,
+              ...(footprint.package_code ? { package_code: footprint.package_code } : {}),
+              pin_count: footprint.pin_count,
+            })),
+          }
+        : undefined,
       typical_application_title: job_record.typical_application_title,
       validation: job_record.validation,
       provenance: job_record.provenance,

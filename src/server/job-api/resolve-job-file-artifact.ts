@@ -6,6 +6,7 @@ import {
   readCommittedApplicationEvidenceSnapshot,
 } from "../component-workflow/application-evidence-commit"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
+import { parseComponentFootprintCatalog } from "../component-evidence"
 import { readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
 
 interface JobFileMetadata {
@@ -82,6 +83,11 @@ const static_job_files = {
 
 const component_schematic_reference: JobFileMetadata = {
   download_name: "component-schematic-reference.png",
+  content_type: "image/png",
+}
+
+const component_footprint_reference: JobFileMetadata = {
+  download_name: "component-footprint-reference.png",
   content_type: "image/png",
 }
 
@@ -247,12 +253,22 @@ function isVisualReferencePath(image_path: string): boolean {
 
 function findComponentSchematicReference(
   files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
+  footprint_id?: string,
 ): Uint8Array<ArrayBuffer> | undefined {
-  const component_evidence = files.get("component-evidence.json")
-  if (!component_evidence) return undefined
+  const component_evidence_bytes = files.get("component-evidence.json")
+  if (!component_evidence_bytes) return undefined
   let evidence: unknown
   try {
-    evidence = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(component_evidence)) as unknown
+    evidence = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(component_evidence_bytes))
+    const catalog_bytes = footprint_id ? files.get("component-footprint-catalog.json") : undefined
+    if (footprint_id && catalog_bytes) {
+      const catalog = parseComponentFootprintCatalog(
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(catalog_bytes)),
+      )
+      evidence = catalog.footprints.find(
+        (footprint) => footprint.footprint_id === footprint_id,
+      )?.component_evidence
+    }
   } catch {
     return undefined
   }
@@ -261,6 +277,29 @@ function findComponentSchematicReference(
     if (artifact && artifact.byteLength > 0) return artifact
   }
   return undefined
+}
+
+function findComponentFootprintReference(
+  files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
+  footprint_id: string,
+): Uint8Array<ArrayBuffer> | undefined {
+  const catalog_bytes = files.get("component-footprint-catalog.json")
+  if (!catalog_bytes) return undefined
+  let catalog_value: unknown
+  try {
+    catalog_value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(catalog_bytes))
+  } catch {
+    return undefined
+  }
+  const catalog = parseComponentFootprintCatalog(catalog_value)
+  const footprint = catalog.footprints.find((candidate) => candidate.footprint_id === footprint_id)
+  if (!footprint) return undefined
+  const sources = [
+    ...footprint.component_evidence.footprint.drawing_orientation.sources,
+    ...footprint.component_evidence.footprint.pads.flatMap((pad) => pad.sources),
+  ]
+  const image_path = sources.find((source) => source.method === "pdf_visual" && source.image)?.image
+  return image_path && isVisualReferencePath(image_path) ? files.get(image_path) : undefined
 }
 
 async function resolveSafeRegularFile(job_dir: string, artifact_path: string): Promise<string | undefined> {
@@ -283,19 +322,35 @@ async function resolveSafeRegularFile(job_dir: string, artifact_path: string): P
   return artifact_real_path
 }
 
-export async function resolveJobFileArtifact(
-  job_dir: string,
-  job_id: string,
-  file_kind: string | null,
-): Promise<JobFileResolution> {
+export async function resolveJobFileArtifact(input: {
+  job_dir: string
+  job_id: string
+  file_kind: string | null
+  footprint_id?: string
+}): Promise<JobFileResolution> {
+  const { job_dir, job_id, file_kind, footprint_id } = input
   let descriptor: JobFileMetadata
   let artifact_path: string | undefined
 
-  if (file_kind === "component_schematic_reference") {
+  if (file_kind === "component_footprint_reference") {
+    descriptor = component_footprint_reference
+    if (!footprint_id) return { status: "missing", download_name: descriptor.download_name }
+    const committed_evidence = await readCommittedEvidenceSnapshot(job_dir)
+    const artifact_bytes = committed_evidence
+      ? findComponentFootprintReference(committed_evidence.files, footprint_id)
+      : undefined
+    if (!artifact_bytes) return { status: "missing", download_name: descriptor.download_name }
+    return {
+      status: "ready",
+      artifact_bytes,
+      download_name: descriptor.download_name,
+      content_type: descriptor.content_type,
+    }
+  } else if (file_kind === "component_schematic_reference") {
     descriptor = component_schematic_reference
     const committed_evidence = await readCommittedEvidenceSnapshot(job_dir)
     const artifact_bytes = committed_evidence
-      ? findComponentSchematicReference(committed_evidence.files)
+      ? findComponentSchematicReference(committed_evidence.files, footprint_id)
       : undefined
     if (!artifact_bytes) return { status: "missing", download_name: descriptor.download_name }
     return {

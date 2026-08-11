@@ -35,7 +35,11 @@ export function CodePanel({
             {is_copied ? <Check size={14} /> : <Clipboard size={14} />}
             {is_copied ? "Copied" : "Copy"}
           </button>
-          <a href={getJobFileUrl(job.job_id, artifact, undefined, local_run_id)}>
+          <a
+            href={getJobFileUrl(job.job_id, artifact, {
+              local_run_id,
+            })}
+          >
             <Download size={14} /> Download
           </a>
         </div>

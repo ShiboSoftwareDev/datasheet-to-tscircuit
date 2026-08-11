@@ -154,18 +154,25 @@ export type JobFileKind =
   | "footprint_plan"
   | "application_plan"
   | "land_pattern"
+  | "component_footprint_reference"
   | "component_schematic_reference"
   | "application_reference"
 
 export function getJobFileUrl(
   job_id: string,
   file: JobFileKind,
-  display?: "inline",
-  local_run_id?: string,
+  options: {
+    display?: "inline"
+    local_run_id?: string
+    footprint_id?: string
+  } = {},
 ): string {
-  const inline_query = display === "inline" ? "&display=inline" : ""
-  const local_query = local_run_id ? `&local_run_id=${encodeURIComponent(local_run_id)}` : ""
-  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}${inline_query}${local_query}`
+  const inline_query = options.display === "inline" ? "&display=inline" : ""
+  const local_query = options.local_run_id ? `&local_run_id=${encodeURIComponent(options.local_run_id)}` : ""
+  const footprint_query = options.footprint_id
+    ? `&footprint_id=${encodeURIComponent(options.footprint_id)}`
+    : ""
+  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}${inline_query}${local_query}${footprint_query}`
 }
 
 export async function getModelRun(job_id: string, local_run_id?: string): Promise<ModelRun | undefined> {

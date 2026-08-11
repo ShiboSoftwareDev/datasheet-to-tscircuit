@@ -10,6 +10,7 @@ import {
   buildValidationPlanGuide,
   buildValidationPlanPrompt,
   createModelInterface,
+  createEvidenceModelInterface,
   createModelManifest,
   ModelStrategyRegistry,
   parseFreshModelContract,
@@ -79,6 +80,34 @@ describe("server-owned model interface", () => {
     expect(model_interface.entry_name).toBe("ABC_123")
     expect(model_interface.pins.map(({ component_pin }) => component_pin)).toEqual(["pin1", "pin2", "pin3"])
     expect(model_interface.pins.map(({ spice_node }) => spice_node)).toEqual(["INPOS", "INNEG", "OUT"])
+  })
+
+  test("excludes datasheet no-connect pins from the electrical model interface", () => {
+    const evidence_with_nc: ComponentEvidence = {
+      ...evidence,
+      package: { ...evidence.package, pin_count: { value: 4, sources: [] } },
+      pinout: {
+        pins: [...evidence.pinout.pins, { number: "4", labels: ["NC"], role: "no_connect", sources: [] }],
+      },
+    }
+    const circuit_with_nc = [
+      ...component_circuit,
+      {
+        type: "source_port",
+        source_port_id: "port-4",
+        source_component_id: "component",
+        pin_number: "4",
+        name: "NC",
+        port_hints: ["pin4", "NC"],
+      },
+    ] as AnyCircuitElement[]
+
+    expect(
+      createEvidenceModelInterface(evidence_with_nc).pins.map(({ physical_pin }) => physical_pin),
+    ).toEqual(["1", "2", "3"])
+    expect(
+      createModelInterface(evidence_with_nc, circuit_with_nc).pins.map(({ physical_pin }) => physical_pin),
+    ).toEqual(["1", "2", "3"])
   })
 
   test("strictly parses persisted interfaces before downstream use", () => {

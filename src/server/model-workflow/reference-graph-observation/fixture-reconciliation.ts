@@ -161,6 +161,266 @@ function matchingPublicPins(model_interface: ModelInterface, signal: string): Mo
   return []
 }
 
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? (sorted[middle - 1]! + sorted[middle]!) / 2 : sorted[middle]!
+}
+
+function visibleCurveLevels(points: readonly { y: number }[]): { low: number; high: number } {
+  const values = points.map(({ y }) => y).sort((left, right) => left - right)
+  const sample_count = Math.max(2, Math.floor(values.length * 0.2))
+  const low = median(values.slice(0, sample_count))
+  const high = median(values.slice(-sample_count))
+  if (!(high > low)) throw new Error("a plotted step channel must contain two distinct voltage levels")
+  return { low, high }
+}
+
+function valuesApproximatelyEqual(left: number, right: number, scale: number): boolean {
+  return Math.abs(left - right) <= Math.max(1e-12, Math.abs(scale) * 0.12)
+}
+
+function visibleTransitions(points: readonly { x: number; y: number }[]): Array<{
+  direction: "rising" | "falling"
+  time: number
+}> {
+  const { low, high } = visibleCurveLevels(points)
+  const midpoint = (low + high) / 2
+  const states = points.map(({ y }) => y >= midpoint)
+  return points.slice(1).flatMap((point, index) => {
+    const before = states[index]!
+    const after = states[index + 1]!
+    if (before === after) return []
+    return [
+      {
+        direction: after ? ("rising" as const) : ("falling" as const),
+        time: (points[index]!.x + point.x) / 2,
+      },
+    ]
+  })
+}
+
+function sourceFrequencyHertz(source_hints: TimeGraphDiscovery["hints"]): number | undefined {
+  const values = source_hints.flatMap(({ reason, operating_condition_evidence }) => {
+    const text = `${reason} ${operating_condition_evidence}`
+    return [...text.matchAll(/(?:^|\b)(\d+(?:\.\d*)?|\.\d+)\s*([kmg]?)hz\b/gi)].flatMap((match) => {
+      const value = Number(match[1])
+      const multiplier =
+        match[2]?.toLowerCase() === "k"
+          ? 1e3
+          : match[2]?.toLowerCase() === "m"
+            ? 1e6
+            : match[2]?.toLowerCase() === "g"
+              ? 1e9
+              : 1
+      return Number.isFinite(value) && value > 0 ? [value * multiplier] : []
+    })
+  })
+  const unique = [...new Set(values)]
+  return unique.length === 1 ? unique[0] : undefined
+}
+
+function voltageFromApplicationIdentity(value: string): number | undefined {
+  const normalized = value.trim().toUpperCase()
+  const decimal = normalized.match(/(?:^|_)(\d+)[._](\d+)(?:_?V)(?:_|$)/)
+  if (decimal) return Number(`${decimal[1]}.${decimal[2]}`)
+  const embedded = normalized.match(/(?:^|_)(\d+)V(\d+)(?:_|$)/)
+  if (embedded) return Number(`${embedded[1]}.${embedded[2]}`)
+  const integer = normalized.match(/(?:^|_)(\d+)(?:_?V)(?:_|$)/)
+  return integer ? Number(integer[1]) : undefined
+}
+
+function applicationVoltageForEndpoint(input: {
+  endpoint: string
+  application_fixture: ApplicationFixtureContract
+}): number | undefined {
+  const groups = input.application_fixture.node_groups.filter(({ dut_endpoints }) =>
+    dut_endpoints.includes(input.endpoint as `dut.${string}`),
+  )
+  if (groups.length !== 1) return undefined
+  const group = groups[0]!
+  const values = [group.source_net, ...group.external_terminals].flatMap((identity) => {
+    const value = voltageFromApplicationIdentity(identity)
+    return value === undefined ? [] : [value]
+  })
+  const unique = [...new Set(values)]
+  return unique.length === 1 ? unique[0] : undefined
+}
+
+function assertVisiblePulseTiming(input: {
+  graph: ObservedReferenceGraph & {
+    electrical_binding: ModelReferenceElectricalBinding
+    channels: NonNullable<ObservedReferenceGraph["channels"]>
+  }
+  source_hints: TimeGraphDiscovery["hints"]
+}): void {
+  const { graph } = input
+  if (graph.electrical_binding.stimulus.type !== "voltage_step") {
+    throw new Error(
+      `Eligible graph ${graph.graph_id} visibly plots a voltage stimulus and requires voltage_step`,
+    )
+  }
+  const stimulus_channels = graph.channels.filter(({ role }) => role === "stimulus")
+  if (stimulus_channels.length !== 1 || stimulus_channels[0]!.measurement.type !== "voltage") {
+    throw new Error(
+      `Eligible graph ${graph.graph_id} must retain exactly one visible voltage stimulus channel when no printed fixture receipt exists`,
+    )
+  }
+  const stimulus_curve = stimulus_channels[0]!.digitized_curve
+  const levels = visibleCurveLevels(stimulus_curve.points)
+  const pulse = graph.electrical_binding.stimulus.pulse
+  const level_span = levels.high - levels.low
+  if (
+    !valuesApproximatelyEqual(pulse.low, levels.low, level_span) ||
+    !valuesApproximatelyEqual(pulse.high, levels.high, level_span)
+  ) {
+    throw new Error(
+      `Eligible graph ${graph.graph_id} PULSE low/high must match the two pixel-traced stimulus levels (${levels.low} V, ${levels.high} V)`,
+    )
+  }
+  const transitions = visibleTransitions(stimulus_curve.points)
+  const rising = transitions.filter(({ direction }) => direction === "rising").map(({ time }) => time)
+  const falling = transitions.filter(({ direction }) => direction === "falling").map(({ time }) => time)
+  if (rising.length === 0 || falling.length === 0) {
+    throw new Error(
+      `Eligible graph ${graph.graph_id} visible stimulus must retain both rising and falling edges`,
+    )
+  }
+  const periods = rising.slice(1).map((time, index) => time - rising[index]!)
+  const visible_period = periods.length > 0 ? median(periods) : undefined
+  const source_frequency = sourceFrequencyHertz(input.source_hints)
+  const source_period = source_frequency === undefined ? undefined : 1 / source_frequency
+  const expected_period = source_period ?? visible_period
+  if (
+    expected_period !== undefined &&
+    !valuesApproximatelyEqual(pulse.period, expected_period, expected_period)
+  ) {
+    throw new Error(
+      `Eligible graph ${graph.graph_id} PULSE period ${pulse.period} s must match the repeated visible/source period ${expected_period} s`,
+    )
+  }
+  if (visible_period !== undefined && source_period !== undefined) {
+    if (!valuesApproximatelyEqual(visible_period, source_period, source_period)) {
+      throw new Error(
+        `Eligible graph ${graph.graph_id} pixel-traced stimulus period ${visible_period} s does not match printed frequency ${source_frequency} Hz`,
+      )
+    }
+  }
+  const first_rising = rising[0]!
+  const first_falling_after_rise = falling.find((time) => time > first_rising)
+  const timing_scale = expected_period ?? stimulus_curve.x_range.max - stimulus_curve.x_range.min
+  if (!valuesApproximatelyEqual(pulse.delay, first_rising, timing_scale)) {
+    throw new Error(
+      `Eligible graph ${graph.graph_id} PULSE delay ${pulse.delay} s must match the first pixel-traced rising edge ${first_rising} s`,
+    )
+  }
+  if (
+    first_falling_after_rise !== undefined &&
+    !valuesApproximatelyEqual(pulse.width, first_falling_after_rise - first_rising, timing_scale)
+  ) {
+    throw new Error(
+      `Eligible graph ${graph.graph_id} PULSE width ${pulse.width} s must match the visible high interval ${first_falling_after_rise - first_rising} s`,
+    )
+  }
+  if (pulse.rise + pulse.fall > timing_scale * 0.25) {
+    throw new Error(`Eligible graph ${graph.graph_id} PULSE rise/fall consume too much of one visible cycle`)
+  }
+}
+
+/**
+ * Validates a complete experiment derived from a calibrated multi-channel
+ * scope capture when prose does not restate the already-visible PULSE.
+ */
+export function assertBindingMatchesVisibleScopeGraph(input: {
+  graph: ObservedReferenceGraph & {
+    electrical_binding: ModelReferenceElectricalBinding
+    channels: NonNullable<ObservedReferenceGraph["channels"]>
+  }
+  source_hints: TimeGraphDiscovery["hints"]
+  model_interface: ModelInterface
+  application_fixture: ApplicationFixtureContract
+}): void {
+  const { graph, model_interface, application_fixture } = input
+  const path = `Eligible graph ${graph.graph_id}`
+  if (application_fixture.availability !== "documented") {
+    throw new Error(`${path} requires documented application evidence for its source-derived fixture`)
+  }
+  assertVisiblePulseTiming({ graph, source_hints: input.source_hints })
+  const response_channel = graph.channels.find(
+    ({ role, measurement }) =>
+      role === "response" &&
+      measurement.type === "voltage" &&
+      measurement.positive === graph.electrical_binding.response.positive &&
+      measurement.negative === graph.electrical_binding.response.negative,
+  )
+  if (!response_channel) throw new Error(`${path} is missing its visible response voltage channel`)
+  const response_levels = visibleCurveLevels(response_channel.digitized_curve.points)
+  const response_nominal = graph.electrical_binding.response.nominal_volts
+  if (
+    response_nominal === undefined ||
+    !valuesApproximatelyEqual(
+      response_nominal,
+      response_levels.high,
+      response_levels.high - response_levels.low,
+    )
+  ) {
+    throw new Error(`${path} response nominal must match the pixel-traced high response level`)
+  }
+  const stimulus = graph.electrical_binding.stimulus
+  if (stimulus.type !== "voltage_step") throw new Error(`${path} requires a visible voltage step`)
+  for (const endpoint of [stimulus.positive, graph.electrical_binding.response.positive]) {
+    const groups = application_fixture.node_groups.filter(({ dut_endpoints }) =>
+      dut_endpoints.includes(endpoint as `dut.${string}`),
+    )
+    if (groups.length !== 1 || groups[0]!.external_terminals.length === 0) {
+      throw new Error(`${path} endpoint ${endpoint} must map to one documented external application signal`)
+    }
+  }
+  const stimulus_index = stimulus.positive.match(/(\d+)$/)?.[1]
+  const response_index = graph.electrical_binding.response.positive.match(/(\d+)$/)?.[1]
+  if (stimulus_index && response_index && stimulus_index !== response_index) {
+    throw new Error(`${path} must bind the same indexed application signal on both sides of the DUT`)
+  }
+  const auxiliary = graph.electrical_binding.auxiliary_fixtures ?? []
+  for (const pin of model_interface.pins.filter(({ role }) => role === "power_input")) {
+    const endpoint = `dut.${pin.spice_node}` as const
+    const documented_voltage = applicationVoltageForEndpoint({ endpoint, application_fixture })
+    const sources = auxiliary.filter(
+      (fixture) =>
+        fixture.type === "dc_voltage" && fixture.positive === endpoint && fixture.negative === "gnd",
+    )
+    if (
+      documented_voltage === undefined ||
+      sources.length !== 1 ||
+      sources[0]!.type !== "dc_voltage" ||
+      sources[0]!.dc_volts !== documented_voltage
+    ) {
+      throw new Error(`${path} must bind exact documented DC voltage for public supply ${endpoint}`)
+    }
+  }
+  for (const pin of model_interface.pins.filter(({ role }) => role === "input")) {
+    const endpoint = `dut.${pin.spice_node}` as const
+    const conditions = auxiliary.filter(
+      (fixture) => fixture.type === "logic_state" && fixture.endpoint === endpoint,
+    )
+    if (conditions.length !== 1 || conditions[0]!.type !== "logic_state") {
+      throw new Error(`${path} must bind one exact logic state for public control ${endpoint}`)
+    }
+    const condition = conditions[0]!
+    if (
+      condition.state === "high" &&
+      !auxiliary.some(
+        (fixture) =>
+          fixture.type === "dc_voltage" &&
+          fixture.positive === condition.reference &&
+          fixture.negative === "gnd",
+      )
+    ) {
+      throw new Error(`${path} high control ${endpoint} must reference one documented DC supply`)
+    }
+  }
+}
+
 function uniquePrintedSignalEndpoint(input: {
   model_interface: ModelInterface
   signal: string

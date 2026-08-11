@@ -3,6 +3,7 @@ import { normalizeElectricalPinLabel } from "../pin-label-normalization"
 import { normalizePin, normalizeText } from "./get-pad-agreement-errors"
 import type { CircuitRecord } from "./parse-component-evidence"
 import type { ComponentEvidence } from "./types"
+import { physicalPinHint } from "./tscircuit-pin-mapping"
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
@@ -35,16 +36,23 @@ export function getPinoutEvidenceErrors(
   }
   for (const pin of evidence.pinout.pins) {
     const expected_number = normalizePin(pin.number)
-    const candidates = [...unmatched].filter((index) => {
-      const port = ports[index]!
-      const number_aliases = [
-        typeof port.pin_number === "number" || typeof port.pin_number === "string"
-          ? String(port.pin_number)
-          : "",
-        ...asStringArray(port.port_hints),
-      ]
-      return number_aliases.some((alias) => normalizePin(alias) === expected_number)
-    })
+    const exact_physical_candidates = [...unmatched].filter((index) =>
+      asStringArray(ports[index]!.port_hints).includes(physicalPinHint(pin.number)),
+    )
+    const candidates =
+      exact_physical_candidates.length > 0
+        ? exact_physical_candidates
+        : [...unmatched].filter((index) => {
+            const port = ports[index]!
+            const port_hints = asStringArray(port.port_hints)
+            const number_aliases = [
+              typeof port.pin_number === "number" || typeof port.pin_number === "string"
+                ? String(port.pin_number)
+                : "",
+              ...port_hints,
+            ]
+            return number_aliases.some((alias) => normalizePin(alias) === expected_number)
+          })
     if (candidates.length !== 1) {
       errors.push(`evidence pin ${pin.number} resolved to ${candidates.length} Circuit JSON ports`)
       continue

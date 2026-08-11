@@ -1,6 +1,6 @@
 import type { TabId } from "@tscircuit/runframe"
 import { Boxes, CircuitBoard, LoaderCircle } from "lucide-react"
-import { lazy, Suspense, useState } from "react"
+import { lazy, Suspense, useEffect, useState } from "react"
 import type { Job } from "@/shared/job-types"
 import { CodePanel } from "./code-panel"
 import type { ComponentArtifact, ComponentReferenceView } from "./component-preview-types"
@@ -72,15 +72,22 @@ function ArtifactRunframe({
   active_tab,
   on_active_tab_change,
   local_run_id,
+  footprint_id,
 }: {
   job: Job
   artifact: ComponentArtifact
   active_tab: ComponentPreviewTab
   on_active_tab_change: (tab: ComponentPreviewTab) => void
   local_run_id?: string
+  footprint_id?: string
 }) {
   const is_application = artifact === "typical_application"
-  const circuit_json = is_application ? job.typical_application_circuit_json : job.circuit_json
+  const selected_footprint = !is_application
+    ? job.component_footprints?.footprints.find((footprint) => footprint.footprint_id === footprint_id)
+    : undefined
+  const circuit_json = is_application
+    ? job.typical_application_circuit_json
+    : (selected_footprint?.circuit_json ?? job.circuit_json)
   const code = is_application ? job.typical_application_code : job.component_code
 
   if (!circuit_json) return <EmptyPreview job={job} artifact={artifact} />
@@ -92,7 +99,7 @@ function ArtifactRunframe({
   return (
     <Suspense fallback={<EmptyPreview job={job} artifact={artifact} />}>
       <CircuitJsonPreview
-        key={`${job.job_id}-${artifact}`}
+        key={`${job.job_id}-${artifact}-${footprint_id ?? "default"}`}
         circuitJson={circuit_json}
         code={code}
         showCodeTab={Boolean(code)}
@@ -127,11 +134,37 @@ export function CircuitPreview({
   const [artifact, setArtifact] = useState<ComponentArtifact>("component")
   const [component_reference_view, setComponentReferenceView] = useState<ComponentReferenceView>("footprint")
   const [application_preview_tab, setApplicationPreviewTab] = useState<ComponentPreviewTab>("schematic")
+  const [selected_footprint_id, setSelectedFootprintId] = useState(
+    job.component_footprints?.default_footprint_id,
+  )
+  useEffect(() => {
+    setSelectedFootprintId(job.component_footprints?.default_footprint_id)
+  }, [job.job_id, job.component_footprints?.default_footprint_id])
+  const footprint_options = job.component_footprints?.footprints ?? []
+  const has_multiple_footprints = footprint_options.length > 1
   const artifact_preview_tab = artifact === "component" ? active_tab : application_preview_tab
   const setArtifactPreviewTab = artifact === "component" ? on_active_tab_change : setApplicationPreviewTab
 
   return (
     <section className="workspace-card preview-card" aria-label="Component and typical application preview">
+      {has_multiple_footprints && (
+        <div className="footprint-selector-bar">
+          <span className="multiple-footprints-tag">Multiple footprints</span>
+          <label>
+            <span className="sr-only">Displayed footprint</span>
+            <select
+              value={selected_footprint_id}
+              onChange={(event) => setSelectedFootprintId(event.target.value)}
+            >
+              {footprint_options.map((footprint) => (
+                <option key={footprint.footprint_id} value={footprint.footprint_id}>
+                  {footprint.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
       <div className="artifact-tabs" role="tablist" aria-label="Component artifacts">
         <div className="artifact-tab-group">
           <button
@@ -165,6 +198,7 @@ export function CircuitPreview({
             active_tab={artifact_preview_tab}
             on_active_tab_change={setArtifactPreviewTab}
             local_run_id={local_run_id}
+            footprint_id={artifact === "component" ? selected_footprint_id : undefined}
           />
         </div>
         <DatasheetReference
@@ -173,6 +207,7 @@ export function CircuitPreview({
           component_view={component_reference_view}
           on_component_view_change={setComponentReferenceView}
           local_run_id={local_run_id}
+          footprint_id={artifact === "component" ? selected_footprint_id : undefined}
         />
       </div>
     </section>

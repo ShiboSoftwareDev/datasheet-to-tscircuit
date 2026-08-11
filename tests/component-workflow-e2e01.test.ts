@@ -2,7 +2,7 @@ import { afterEach, expect, setDefaultTimeout, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
-import { APPLICATION_PIPELINE, runJob } from "@/server/component-workflow"
+import { APPLICATION_PIPELINE, COMPONENT_PIPELINE, runJob } from "@/server/component-workflow"
 import type { AgentClient } from "@/server/infrastructure/agent"
 import {
   ProcessError,
@@ -126,6 +126,32 @@ const component_evidence = {
   unresolved_ambiguities: [],
 }
 
+const wider_visual_source = {
+  ...visual_source,
+  page: 4,
+  image: "visual-reference/wider-land-pattern.png",
+}
+
+const wider_component_evidence = structuredClone(component_evidence)
+wider_component_evidence.package.name.value = "Wider two-terminal test package"
+wider_component_evidence.package.name.sources = [wider_visual_source]
+wider_component_evidence.package.pin_count.sources = [wider_visual_source]
+wider_component_evidence.footprint.drawing_orientation.sources = [wider_visual_source]
+wider_component_evidence.footprint.pads = wider_component_evidence.footprint.pads.map((pad, index) => ({
+  ...pad,
+  x: index === 0 ? -1 : 1,
+  sources: [wider_visual_source],
+}))
+
+const component_footprint_catalog = {
+  version: 1,
+  default_footprint_id: "standard",
+  footprints: [
+    { footprint_id: "standard", component_evidence },
+    { footprint_id: "wide", component_evidence: wider_component_evidence },
+  ],
+}
+
 const application_plan = {
   version: 4,
   availability: "documented",
@@ -190,7 +216,41 @@ const footprint_geometry_review = {
 }
 
 const component_source = `export default function Generic2() {
-  return <chip name="U1" manufacturerPartNumber="GENERIC-2" />
+  return (
+    <chip
+      name="U1"
+      manufacturerPartNumber="GENERIC-2"
+      footprint={
+        <footprint>
+          <smtpad pcbX={-0.75} pcbY={0} width={0.55} height={0.8} portHints={["pin1"]} />
+          <smtpad pcbX={0.75} pcbY={0} width={0.55} height={0.8} portHints={["pin2"]} />
+        </footprint>
+      }
+    />
+  )
+}
+`
+
+const multi_footprint_component_source = `import type { ChipProps } from "tscircuit"
+
+const pinLabels = { pin1: "INPUT", pin2: "RETURN" } as const
+type Props = ChipProps<typeof pinLabels> & { footprintVariant?: "standard" | "wide" }
+
+export default function Generic2({ footprintVariant = "standard", ...props }: Props) {
+  const padX = footprintVariant === "wide" ? 1 : 0.75
+  return (
+    <chip
+      {...props}
+      manufacturerPartNumber="GENERIC-2"
+      pinLabels={pinLabels}
+      footprint={
+        <footprint>
+          <smtpad shape="rect" layer="top" pcbX={-padX} pcbY={0} width={0.55} height={0.8} portHints={["pin1"]} />
+          <smtpad shape="rect" layer="top" pcbX={padX} pcbY={0} width={0.55} height={0.8} portHints={["pin2"]} />
+        </footprint>
+      }
+    />
+  )
 }
 `
 
@@ -279,6 +339,15 @@ const component_circuit_json = [
     port_hints: ["pin2"],
   },
 ]
+
+const wider_component_circuit_json = component_circuit_json.map((element) =>
+  "pcb_smtpad_id" in element && typeof element.pcb_smtpad_id === "string"
+    ? {
+        ...element,
+        x: element.pcb_smtpad_id.endsWith("_1") ? -1 : 1,
+      }
+    : { ...element },
+)
 
 const application_circuit_json = [
   {
@@ -407,11 +476,46 @@ function deterministicAgent(calls: string[]): AgentClient {
   }
 }
 
+function multiFootprintAgent(calls: string[]): AgentClient {
+  const single_footprint_agent = deterministicAgent(calls)
+  return {
+    async run(input) {
+      if (input.phase_label === "Datasheet evidence extraction") {
+        calls.push(input.phase_label)
+        await Bun.write(
+          join(input.workspace, "component-footprint-catalog.json"),
+          `${JSON.stringify(component_footprint_catalog, null, 2)}\n`,
+        )
+        await input.on_output("stdout", "fixture completed multi-footprint evidence extraction\n")
+        return { attempts: 1, duration_ms: 1, output_tail: "" }
+      }
+      if (input.phase_label === "Component source generation") {
+        calls.push(input.phase_label)
+        await Bun.write(join(input.workspace, "index.circuit.tsx"), multi_footprint_component_source)
+        await input.on_output("stdout", `fixture completed ${input.phase_label}\n`)
+        return { attempts: 1, duration_ms: 1, output_tail: "" }
+      }
+      return single_footprint_agent.run(input)
+    },
+  }
+}
+
 class FakeTscircuitRunner implements ProcessRunner {
   readonly calls: ProcessRunRequest[] = []
 
+  constructor(
+    private readonly componentCircuitJsonForSource: (source_file: string) => unknown[] = () =>
+      component_circuit_json,
+  ) {}
+
   async run(request: ProcessRunRequest): Promise<ProcessRunResult> {
     this.calls.push(request)
+    if (request.command[0] === "pdftotext") {
+      const output_path = request.command.at(-1)
+      if (!output_path) throw new Error("Fixture pdftotext command omitted its output path")
+      await Bun.write(output_path, "")
+      return { exit_code: 0, duration_ms: 1, output_tail: "" }
+    }
     if (request.command[0] === "pdftoppm") {
       const output_prefix = request.command.at(-1)
       if (!output_prefix) throw new Error("Fixture pdftoppm command omitted its output prefix")
@@ -427,7 +531,9 @@ class FakeTscircuitRunner implements ProcessRunner {
       const output_stem = basename(source_file).replace(/\.circuit\.tsx$/, "")
       const output_dir = join(request.cwd, "dist", output_stem)
       const circuit_json =
-        source_file === "typical-application.circuit.tsx" ? application_circuit_json : component_circuit_json
+        source_file === "typical-application.circuit.tsx"
+          ? application_circuit_json
+          : this.componentCircuitJsonForSource(source_file)
       await mkdir(output_dir, { recursive: true })
       await Bun.write(join(output_dir, "circuit.json"), `${JSON.stringify(circuit_json, null, 2)}\n`)
       if (request.command.includes("--pcb-png")) {
@@ -622,6 +728,86 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
         command.includes("--disable-pcb"),
     ),
   ).toBe(true)
+})
+
+test("COMPONENT_PIPELINE publishes every distinct physical footprint without changing its default", async () => {
+  const root = await mkdtemp(join(tmpdir(), "datasheet-component-multi-footprint-e2e-"))
+  temporary_directories.push(root)
+  const job_dir = join(root, "job")
+  const run_dir = join(job_dir, "runs", "component_generation", "multi-footprint")
+  await mkdir(run_dir, { recursive: true })
+  await Promise.all([
+    Bun.write(join(job_dir, "datasheet.pdf"), "%PDF-1.4\n% deterministic fixture\n"),
+    Bun.write(join(job_dir, "package.json"), '{"private":true}\n'),
+    Bun.write(join(job_dir, "tsconfig.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.json"), "{}\n"),
+    Bun.write(join(job_dir, "tscircuit.config.ts"), "export default {}\n"),
+  ])
+  const job_store = new JobStore()
+  job_store.createJob({ job_id: "component_multi", job_dir, file_name: "generic-2.pdf" })
+  const agent_calls: string[] = []
+  const process_runner = new FakeTscircuitRunner((source_file) =>
+    source_file.includes("wide") ? wider_component_circuit_json : component_circuit_json,
+  )
+
+  const result = await runPipeline({
+    definition: COMPONENT_PIPELINE,
+    run_id: "component_multi",
+    workspace_dir: run_dir,
+    context: {
+      job_id: "component_multi",
+      job_dir,
+      use_openai: false,
+      invocation_id: "multi-footprint",
+    },
+    services: {
+      job_store,
+      agent_client: multiFootprintAgent(agent_calls),
+      process_runner,
+      tsci_bin: "fixture-tsci",
+    },
+  })
+
+  expect(result).toMatchObject({ status: "completed" })
+  expect(job_store.getJob("component_multi")?.component_footprints).toMatchObject({
+    default_footprint_id: "standard",
+    footprints: [
+      { footprint_id: "standard", package_name: "Two-terminal test package" },
+      { footprint_id: "wide", package_name: "Wider two-terminal test package" },
+    ],
+  })
+  expect(
+    JSON.stringify(
+      job_store
+        .getJob("component_multi")
+        ?.component_footprints?.footprints.find(({ footprint_id }) => footprint_id === "wide")?.circuit_json,
+    ),
+  ).toBe(JSON.stringify(wider_component_circuit_json))
+  expect(job_store.getJob("component_multi")?.component_code).toBe(multi_footprint_component_source)
+  expect(await readFile(join(job_dir, "component.circuit.tsx"), "utf8")).toBe(
+    multi_footprint_component_source,
+  )
+  expect(await Bun.file(join(job_dir, "component-variants", "standard.circuit.tsx")).exists()).toBe(false)
+  expect(await Bun.file(join(job_dir, "component-variants", "wide.circuit.tsx")).exists()).toBe(false)
+  expect(await Bun.file(join(job_dir, "component-variants", "wide.circuit.json")).json()).toEqual(
+    wider_component_circuit_json,
+  )
+  expect(await Bun.file(join(job_dir, "component-validation.json")).json()).toMatchObject({
+    passed: true,
+    errors: [],
+  })
+  expect(
+    process_runner.calls.some(
+      ({ command }) => command[1] === "build" && command[2] === "component-variant-wide.circuit.tsx",
+    ),
+  ).toBe(true)
+  expect(
+    process_runner.calls.some(
+      ({ command }) =>
+        command[1] === "build" && command[2] === "component-variant-wide-validation.circuit.tsx",
+    ),
+  ).toBe(true)
+  expect(agent_calls.filter((phase) => phase === "Component source generation")).toHaveLength(1)
 })
 
 test("evidence correction repairs a retained agent-71-shaped candidate without re-extraction", async () => {
@@ -904,6 +1090,12 @@ test("component workflow preserves missing-tsci failures and never invokes sourc
   const agent_calls: string[] = []
   const process_runner: ProcessRunner = {
     async run(request) {
+      if (request.command[0] === "pdftotext") {
+        const output_path = request.command.at(-1)
+        if (!output_path) throw new Error("Fixture pdftotext command omitted its output path")
+        await Bun.write(output_path, "")
+        return { exit_code: 0, duration_ms: 1, output_tail: "" }
+      }
       if (request.command[0] === "pdftoppm") {
         const output_prefix = request.command.at(-1)
         if (!output_prefix) throw new Error("Fixture pdftoppm command omitted its output prefix")

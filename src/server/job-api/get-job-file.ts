@@ -19,7 +19,12 @@ export async function getJobFile(request_url: URL, context: JobApiContext): Prom
 
   let resolution: Awaited<ReturnType<typeof resolveJobFileArtifact>>
   try {
-    resolution = await resolveJobFileArtifact(job_dir, job_id, file_kind)
+    resolution = await resolveJobFileArtifact({
+      job_dir,
+      job_id,
+      file_kind,
+      footprint_id: request_url.searchParams.get("footprint_id") ?? undefined,
+    })
   } catch (error) {
     console.error("[job-artifact] reader_failed", {
       job_id,

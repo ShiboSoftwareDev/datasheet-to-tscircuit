@@ -26,6 +26,7 @@ const MODEL_STATUS_COPY: Record<ModelRunStatus, string> = {
   cancelling: "Stopping",
   cancelled: "Cancelled",
   complete: "Ready",
+  unsupported: "Not simulatable",
   timed_out: "Timed out",
   failed: "Failed",
 }
@@ -34,7 +35,7 @@ type StatusTone = "idle" | "working" | "ready" | "unsupported" | "failed"
 
 function getStatusTone(status: string): StatusTone {
   if (["Ready", "Ready with warnings", "Output with warnings"].includes(status)) return "ready"
-  if (status === "Not convertible") return "unsupported"
+  if (["Not convertible", "Not simulatable"].includes(status)) return "unsupported"
   if (["Failed", "Cancelled", "Timed out"].includes(status)) return "failed"
   if (status === "Not started") return "idle"
   return "working"
@@ -55,7 +56,7 @@ function getModelStatus(model_run: ModelRun | undefined, is_loading: boolean): s
 
 function getCompactStatus(status: string): string {
   if (status === "Ready with warnings" || status === "Output with warnings") return "Ready"
-  if (status === "Not convertible") return "Unavailable"
+  if (["Not convertible", "Not simulatable"].includes(status)) return "Unavailable"
   if (status === "Not started") return "Off"
   return status
 }
@@ -142,7 +143,7 @@ export function WorkspaceStatusBar({
               <DropdownMenu.Item asChild>
                 <a
                   className="workspace-download-item"
-                  href={getJobFileUrl(job.job_id, "component", undefined, local_run_id)}
+                  href={getJobFileUrl(job.job_id, "component", { local_run_id })}
                 >
                   <Boxes size={14} /> Component TSX
                 </a>
@@ -162,7 +163,7 @@ export function WorkspaceStatusBar({
                     <DropdownMenu.Item asChild>
                       <a
                         className="workspace-download-item"
-                        href={getJobFileUrl(job.job_id, "typical_application", undefined, local_run_id)}
+                        href={getJobFileUrl(job.job_id, "typical_application", { local_run_id })}
                       >
                         <CircuitBoard size={14} /> {job.typical_application_title ?? "Typical application"}{" "}
                         TSX

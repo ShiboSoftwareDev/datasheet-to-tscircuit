@@ -13,11 +13,15 @@ import {
   loadPipelineTaskInputBundle,
   materializePipelineTaskInputFiles,
   type PipelineTaskInputBundle,
-  restorePipelineTaskInputFiles,
 } from "../pipeline"
 import { PIPELINE_REGISTRY, type RegisteredPipelineId } from "../pipeline-registry"
 import { executePipeline, type PreparedPipelineLocalRun, validateLocalInput } from "./run"
-import { type LocalWorkspace, retainLocalInputBundle, rewriteWorkspacePaths } from "./workspace"
+import {
+  type LocalWorkspace,
+  retainCurrentJobInputBundle,
+  retainLocalInputBundle,
+  rewriteWorkspacePaths,
+} from "./workspace"
 
 export interface PipelineJobExecutionContext {
   rootDir: string
@@ -102,7 +106,7 @@ function cloneJobProjection(source: Job): Parameters<JobStore["updateJob"]>[1] {
   }
 }
 
-async function refreshJobFromRestoredWorkspace(input: {
+async function refreshJobFromWorkspace(input: {
   context: PipelineJobExecutionContext
   jobId: string
   jobDir: string
@@ -117,7 +121,7 @@ async function refreshJobFromRestoredWorkspace(input: {
     job_store: restoredStore,
     active_job_state: "preserve",
   })
-  if (!restored) throw new Error(`Retained input for job ${input.jobId} has no restorable job checkpoint`)
+  if (!restored) throw new Error(`Job ${input.jobId} has no restorable checkpoint`)
   const retrySource = restoredStore.getJobRetrySource(input.jobId)
   input.context.jobStore.refreshRestoredJob({
     ...restored,
@@ -344,14 +348,21 @@ export async function createPipelineJobRun(input: {
   await mkdir(input.context.localRunsRoot, { recursive: true })
   await mkdir(executionDir)
   let inputPath: string
-  let retainedBundle: PipelineTaskInputBundle
   try {
-    inputPath = await retainLocalInputBundle({
-      bundle: reboundBundle,
-      executionDir,
-      envelope,
-    })
-    retainedBundle = await loadPipelineTaskInputBundle(inputPath)
+    inputPath =
+      input.executionKind === "in_place"
+        ? await retainCurrentJobInputBundle({
+            jobDir: targetJobDir,
+            executionDir,
+            envelope,
+            excludedRoots: envelope.pipeline_id === "spice_generation" ? [] : ["spice"],
+          })
+        : await retainLocalInputBundle({
+            bundle: reboundBundle,
+            executionDir,
+            envelope,
+          })
+    await loadPipelineTaskInputBundle(inputPath)
   } catch (error) {
     await rm(executionDir, { recursive: true, force: true }).catch(() => undefined)
     throw error
@@ -372,33 +383,6 @@ export async function createPipelineJobRun(input: {
   if (!claimed) {
     await rm(executionDir, { recursive: true, force: true }).catch(() => undefined)
     throw new Error(`${envelope.pipeline_id} for job ${input.targetJobId} is already running`)
-  }
-  try {
-    if (input.executionKind === "in_place") {
-      await restorePipelineTaskInputFiles({
-        bundle: retainedBundle,
-        destination_root: targetJobDir,
-        excluded_roots: envelope.pipeline_id === "spice_generation" ? [] : ["spice"],
-        // A retained task boundary supplies the task's explicit dependency
-        // paths, but it must never roll back the selected job's accumulated
-        // SPICE candidates, reference graphs, simulations, or live preview.
-        preserved_roots: envelope.pipeline_id === "spice_generation" ? ["spice"] : [],
-        // The selected job is the execution container, not a task artifact.
-        // Rewinding its live checkpoint can erase progress written by another
-        // pipeline or by the server process coordinating this Local run.
-        preserved_paths: ["job.json"],
-      })
-      await refreshJobFromRestoredWorkspace({
-        context: input.context,
-        jobId: input.targetJobId,
-        jobDir: targetJobDir,
-      })
-    }
-  } catch (error) {
-    if (claimedModelRunId) input.context.modelRunStore.releaseModelExecution(claimedModelRunId)
-    else input.context.jobStore.releasePipelineExecution(input.targetJobId, envelope.pipeline_id)
-    await rm(executionDir, { recursive: true, force: true }).catch(() => undefined)
-    throw error
   }
   const pipelineDir = join(runDir, ".pipeline")
   const summaryPath = join(executionDir, "summary.json")
@@ -527,7 +511,7 @@ export async function createPipelineJobRun(input: {
       runDir,
       signal: executionSignal,
       refresh_job: () =>
-        refreshJobFromRestoredWorkspace({
+        refreshJobFromWorkspace({
           context: input.context,
           jobId: input.targetJobId,
           jobDir: targetJobDir,

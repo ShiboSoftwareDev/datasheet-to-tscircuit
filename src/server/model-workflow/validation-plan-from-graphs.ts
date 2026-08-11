@@ -4,7 +4,9 @@ import type {
   ModelReferenceElectricalBinding,
 } from "../modeling"
 import { modelReferenceElectricalBindingsEqual } from "../modeling/reference-electrical-binding"
+import { deterministicDutPinBiases } from "../spice-validation/dut-pin-bias"
 import { parseAgentValidationPlan, type FixtureElement, type ValidationPlan } from "../spice-validation"
+import { resolveApplicationFixtureForBinding } from "../modeling/application-fixture-contract"
 
 function fixtureForAuxiliary(auxiliary: ModelReferenceAuxiliaryFixture, index: number): FixtureElement {
   const id = `condition_${index + 1}`
@@ -92,21 +94,6 @@ function transientAnalysis(points: readonly { x: number }[], binding: ModelRefer
   }
 }
 
-function protectedEndpoints(binding: ModelReferenceElectricalBinding): Set<string> {
-  return new Set([
-    binding.response.positive,
-    binding.response.negative,
-    ...(binding.stimulus.type === "steady_state"
-      ? []
-      : [binding.stimulus.positive, binding.stimulus.negative]),
-    ...(binding.auxiliary_fixtures ?? []).flatMap((fixture) =>
-      fixture.type === "logic_state"
-        ? [fixture.endpoint, fixture.reference]
-        : [fixture.positive, fixture.negative],
-    ),
-  ])
-}
-
 /**
  * Generates exactly one transient tscircuit/ngspice case per modeled graph.
  * Reference curves, observations, and application topology remain server-owned;
@@ -159,6 +146,12 @@ export function buildGraphValidationPlan(contract: ModelContract): ValidationPla
       }
     }
     const stimulus_fixture = stimulusFixture(binding)
+    const application_fixture = has_documented_application
+      ? resolveApplicationFixtureForBinding({
+          contract: contract.application_fixture!,
+          binding,
+        })
+      : undefined
     const fixtures: FixtureElement[] = [
       ...(stimulus_fixture ? [stimulus_fixture] : []),
       ...(binding.auxiliary_fixtures ?? []).flatMap((auxiliary, index) =>
@@ -167,25 +160,13 @@ export function buildGraphValidationPlan(contract: ModelContract): ValidationPla
           : [fixtureForAuxiliary(auxiliary, index)],
       ),
     ]
-    if (!has_documented_application) {
-      const connected = new Set(
-        fixtures.flatMap((fixture) =>
-          fixture.type === "diode" ? [fixture.anode, fixture.cathode] : [fixture.positive, fixture.negative],
-        ),
-      )
-      const protected_endpoints = protectedEndpoints(binding)
-      for (const [pin_index, pin] of contract.interface.pins.entries()) {
-        const endpoint = `dut.${pin.spice_node}` as const
-        if (connected.has(endpoint)) continue
-        fixtures.push({
-          id: `pin_bias_${pin_index + 1}`,
-          type: "resistor",
-          positive: endpoint,
-          negative: "gnd",
-          resistance_ohms: protected_endpoints.has(endpoint) ? 1e12 : 1e9,
-        })
-      }
-    }
+    fixtures.push(
+      ...deterministicDutPinBiases({
+        model_interface: contract.interface,
+        binding,
+        application_fixture,
+      }),
+    )
     return {
       id: graph_id,
       title: first_requirement.title.replace(/\s+—\s+.+$/, ""),

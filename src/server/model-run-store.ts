@@ -103,7 +103,13 @@ const ACTIVE_STATUSES = new Set<ModelRunStatus>([
   "cancelling",
 ])
 
-const RESTARTABLE_STATUSES = new Set<ModelRunStatus>(["cancelled", "complete", "failed", "timed_out"])
+const RESTARTABLE_STATUSES = new Set<ModelRunStatus>([
+  "cancelled",
+  "complete",
+  "unsupported",
+  "failed",
+  "timed_out",
+])
 
 function computeElapsedTime(record: ModelRunRecord, now = Date.now()): number {
   if (!record.segment_started_at) return record.elapsed_time_ms

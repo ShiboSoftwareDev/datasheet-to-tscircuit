@@ -153,13 +153,15 @@ test("geometry review schema rejects unknown fields and untrusted image provenan
   ).toThrow("footprint geometry review source.confidence is invalid")
 })
 
-test("geometry review rejects duplicate physical pin identities before matching", () => {
+test("geometry review allows distinct copper pads on one pin but rejects contained duplicates", () => {
   const duplicate_pin = reviewPads()
   duplicate_pin[1] = { ...duplicate_pin[1]!, pin: "pin1" }
 
-  expect(() => review(duplicate_pin)).toThrow(
-    "footprint geometry review repeats physical pin pin1 at pads 0 and 1",
-  )
+  expect(() => review(duplicate_pin)).not.toThrow()
+
+  expect(() =>
+    review([...reviewPads(), { pin: null, kind: "smt", x: 1, y: 0, width: 1.5, height: 1 }]),
+  ).toThrow(/represents one physical copper area twice/)
 })
 
 test("verifier workspace exposes no extractor pin names or geometry", async () => {

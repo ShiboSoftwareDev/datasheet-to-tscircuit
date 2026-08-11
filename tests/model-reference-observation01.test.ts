@@ -31,6 +31,7 @@ import {
   buildReferenceGraphObserverPrompt,
   eligibleObservedGraphs,
   foundObservedGraphs,
+  parseCanonicalFoundReferenceGraphObservation,
   parseCanonicalReferenceGraphObservation,
   parseFoundReferenceGraphObservation,
   parseReferenceGraphObservation,
@@ -40,6 +41,7 @@ import {
   verifyCharacterizationGraphEvidence,
   verifyReferenceGraphObservationPixels,
 } from "../src/server/model-workflow/reference-graph-observation"
+import { sourceCalibrationIneligibilityReason } from "../src/server/model-workflow/reference-graph-observation/source-canonicalization"
 import {
   assertFoundReferenceGraphCaptions,
   assertReferenceGraphObservationVerified,
@@ -481,6 +483,154 @@ test("Find Reference Graphs rejects comparison fields and retains server-owned s
   expect(buildReferenceGraphObserverPrompt()).toContain("at most 96")
 })
 
+test("Find Reference Graphs retains a numerically calibrated public scope capture for later binding", () => {
+  const scope_discovery: TimeGraphDiscovery = {
+    version: 1,
+    source_pdf_sha256,
+    page_count: 24,
+    hints: [
+      {
+        hint_id: "time_graph_001",
+        page: 24,
+        figure: "Figure 8-1",
+        reason: "Figure 8-1. Level-Translation of a 2.5-MHz Signal",
+        operating_condition_evidence: "Figure 8-1. Level-Translation of a 2.5-MHz Signal",
+        fixture_evidence_context: "Figure 8-1. Level-Translation of a 2.5-MHz Signal",
+        summary_fixture_evidence_context: null,
+        condition_conflicts: [],
+        graph_local_conditions: { method: "graph_local_fixture_conditions_v1", conditions: [] },
+        unsupported_fixture_conditions: [],
+        transient_fixture_evidence: null,
+      },
+    ],
+  }
+  const retained = parseFoundReferenceGraphObservation(
+    {
+      version: 1,
+      source_pdf_sha256,
+      reviewed_hints: [
+        {
+          hint_id: "time_graph_001",
+          disposition: "graph",
+          graph_id: "figure_8_1",
+          reason: "Visible two-channel scope capture.",
+        },
+      ],
+      graphs: [
+        {
+          graph_id: "figure_8_1",
+          page: 24,
+          locator: "Figure 8-1. Level-Translation of a 2.5-MHz Signal",
+          x_axis: "time",
+          time_axis_evidence: "Oscilloscope horizontal scale reads 200 ns/div.",
+          response_quantity: "voltage",
+          public_pin_observable: true,
+          fixture_reproducible: true,
+          reason: "Both public signal channels are visible.",
+          crop: { page: 24, render_dpi: 200, x_px: 10, y_px: 10, width_px: 500, height_px: 400 },
+        },
+      ],
+    },
+    scope_discovery,
+  )
+
+  expect(foundObservedGraphs(retained).map(({ graph_id }) => graph_id)).toEqual(["figure_8_1"])
+  expect(retained.graphs[0]?.reason).toContain("binding are deferred")
+})
+
+test("Find Reference Graphs excludes autonomous switching when the source has no transient receipt", () => {
+  const switching_discovery: TimeGraphDiscovery = {
+    version: 1,
+    source_pdf_sha256,
+    page_count: 24,
+    hints: [
+      {
+        hint_id: "time_graph_001",
+        page: 24,
+        figure: "Figure 10-16",
+        reason: "Figure 10-16. Switching Waveforms, Buck-Boost Operation",
+        operating_condition_evidence: "VI = 3.3 V, VO = 3.3 V, MODE = Low",
+        fixture_evidence_context: "VI = 3.3 V, VO = 3.3 V, MODE = Low",
+        summary_fixture_evidence_context: "Switching Waveforms, Buck-Boost Operation",
+        condition_conflicts: [],
+        graph_local_conditions: { method: "graph_local_fixture_conditions_v1", conditions: [] },
+        unsupported_fixture_conditions: [],
+        transient_fixture_evidence: null,
+      },
+    ],
+  }
+  const retained = parseFoundReferenceGraphObservation(
+    {
+      version: 1,
+      source_pdf_sha256,
+      reviewed_hints: [
+        {
+          hint_id: "time_graph_001",
+          disposition: "graph",
+          graph_id: "switching_waveform",
+          reason: "Visible scope capture.",
+        },
+      ],
+      graphs: [
+        {
+          graph_id: "switching_waveform",
+          page: 24,
+          locator: "Figure 10-16. Switching Waveforms, Buck-Boost Operation",
+          x_axis: "time",
+          time_axis_evidence: "Horizontal 20 us/div",
+          response_quantity: "voltage",
+          public_pin_observable: true,
+          fixture_reproducible: true,
+          reason: "Public signals are visible.",
+          crop: { page: 24, render_dpi: 200, x_px: 10, y_px: 10, width_px: 500, height_px: 400 },
+        },
+      ],
+    },
+    switching_discovery,
+  )
+
+  expect(foundObservedGraphs(retained)).toEqual([])
+  expect(retained.graphs[0]?.reason).toContain("no source-grounded changing public-pin stimulus")
+})
+
+test("Find Reference Graphs keeps symbolic timing diagrams ineligible without a numeric time scale", () => {
+  const symbolic_discovery: TimeGraphDiscovery = {
+    ...discovery,
+    hints: [discovery.hints[1]!],
+  }
+  const retained = parseFoundReferenceGraphObservation(
+    {
+      version: 1,
+      source_pdf_sha256,
+      reviewed_hints: [
+        {
+          hint_id: "time_graph_002",
+          disposition: "graph",
+          graph_id: "symbolic_timing",
+          reason: "Visible timing diagram.",
+        },
+      ],
+      graphs: [
+        {
+          graph_id: "symbolic_timing",
+          page: 8,
+          locator: "Figure 8-19",
+          x_axis: "time",
+          time_axis_evidence: "Intervals are labeled tPLH and tPHL.",
+          response_quantity: "voltage",
+          public_pin_observable: true,
+          fixture_reproducible: true,
+          reason: "Symbolic intervals only.",
+          crop: { page: 8, render_dpi: 200, x_px: 10, y_px: 10, width_px: 500, height_px: 400 },
+        },
+      ],
+    },
+    symbolic_discovery,
+  )
+
+  expect(foundObservedGraphs(retained)).toEqual([])
+})
+
 test("Find Reference Graphs rejects a crop that omits its own printed figure caption", async () => {
   const value = validObservationValue()
   delete (value.graphs[0] as Partial<(typeof value.graphs)[number]>).electrical_binding
@@ -532,6 +682,41 @@ test("cannot dismiss a source-proven public graph as fixture-ineligible", () => 
 
   expect(() => parseReferenceGraphObservation(value, discovery, model_interface)).toThrow(
     /cannot be marked fixture_reproducible:false: server-owned printed conditions resolve to one public response and a tscircuit-supported transient fixture/,
+  )
+})
+
+test("canonical Find output preserves server-owned calibration ineligibility", () => {
+  const value = validObservationValue()
+  const graph = value.graphs[0] as Partial<(typeof value.graphs)[number]>
+  graph.fixture_reproducible = false
+  graph.reason = sourceCalibrationIneligibilityReason([
+    "the crop has no unambiguous printed time calibration",
+  ])
+  delete graph.electrical_binding
+  delete graph.channels
+
+  const parsed = parseCanonicalFoundReferenceGraphObservation(value, discovery, model_interface)
+
+  expect(parsed.graphs[0]?.fixture_reproducible).toBe(false)
+  expect(foundObservedGraphs(parsed)).toEqual([])
+})
+
+test("canonical comparison output preserves Find-stage source calibration ineligibility", () => {
+  const value = validObservationValue()
+  const graph = value.graphs[0] as Partial<(typeof value.graphs)[number]>
+  graph.fixture_reproducible = false
+  graph.reason = sourceCalibrationIneligibilityReason([
+    "the crop has no unambiguous printed time calibration",
+  ])
+  delete graph.electrical_binding
+  delete graph.channels
+
+  const parsed = parseCanonicalReferenceGraphObservation(value, discovery, model_interface)
+
+  expect(parsed.graphs[0]?.fixture_reproducible).toBe(false)
+  expect(eligibleObservedGraphs(parsed)).toEqual([])
+  expect(() => parseReferenceGraphObservation(value, discovery, model_interface)).toThrow(
+    /cannot be marked fixture_reproducible:false/,
   )
 })
 
@@ -603,6 +788,15 @@ test("reference observation rejects traced pixels before the zero-time axis anch
   expect(() => parseReferenceGraphObservation(value, discovery, model_interface)).toThrow(
     /points cannot contain negative elapsed time derived from the pixel-axis calibration/,
   )
+})
+
+test("reference observation normalizes subpixel zero-time grid quantization", () => {
+  const value = validObservationValue()
+  const curve = value.graphs[0]!.channels![0]!.digitized_curve
+  curve.x_axis.first.pixel = 10.5
+
+  const parsed = parseReferenceGraphObservation(value, discovery, model_interface)
+  expect(parsed.graphs[0]!.channels![0]!.digitized_curve.points[0]!.x).toBe(0)
 })
 
 test("reference observation reports the exact unsampled trace interval", () => {
@@ -798,9 +992,9 @@ test("reference graph inventory retry considers only prior promoted observations
       mkdir(join(attempts_dir, invocation_id), { recursive: true }),
     ),
   )
-  const older_path = join(attempts_dir, "older", "model-reference-observation.json")
-  const newer_path = join(attempts_dir, "newer", "model-reference-observation.json")
-  const current_path = join(attempts_dir, "current", "model-reference-observation.json")
+  const older_path = join(attempts_dir, "older", "found-reference-observation.json")
+  const newer_path = join(attempts_dir, "newer", "found-reference-observation.json")
+  const current_path = join(attempts_dir, "current", "found-reference-observation.json")
   await Promise.all([
     Bun.write(older_path, "{}\n"),
     Bun.write(newer_path, "{}\n"),
@@ -1311,6 +1505,20 @@ VOUT (50 mV/div)                  Time(ms)
     ])
     expect(candidates[0]?.reason).toContain("Load Transient Response")
     expect(candidates[1]?.reason).toBe("printed Time (unit) axis")
+  })
+
+  test("finds frequency-labeled application scope captures without relying on agent discovery", () => {
+    const candidates = findLikelyTimeGraphCandidates(`8.2.3 Application Curves
+Figure 8-1. Level-Translation of a 2.5-MHz Signal
+`)
+
+    expect(candidates.map(({ page, figure, reason }) => ({ page, figure, reason }))).toEqual([
+      {
+        page: 1,
+        figure: "Figure 8-1",
+        reason: "Figure 8-1. Level-Translation of a 2.5-MHz Signal",
+      },
+    ])
   })
 
   test("inventories every time plot in the exact run-93 pdftotext layout", async () => {
@@ -2089,7 +2297,7 @@ describe("independent reference-graph observation", () => {
     }
   })
 
-  test("characterize stage stops a stubborn run-94 observer after one canonicalized attempt", async () => {
+  test("characterize stage keeps discovery separate from a downstream comparison observation", async () => {
     const root = await mkdtemp(join(tmpdir(), "run94-characterize-boundary-"))
     temporary_directories.push(root)
     const job_dir = join(root, "job")
@@ -2153,6 +2361,8 @@ describe("independent reference-graph observation", () => {
       },
       application_plan,
     })
+    const downstream_observation = '{"owned_by":"create_comparison_graphs"}\n'
+    await Bun.write(join(attempt_dir, "model-reference-observation.json"), downstream_observation)
     const run94_text = (
       await readFile(join(import.meta.dir, "fixtures/model-run-replays/run94-ina237-time-graphs.txt"), "utf8")
     ).replaceAll("\\f", "\f")
@@ -2258,10 +2468,13 @@ describe("independent reference-graph observation", () => {
     })
     expect(agent_calls).toBe(1)
     const retained = JSON.parse(
-      await readFile(join(attempt_dir, "model-reference-observation.json"), "utf8"),
+      await readFile(join(attempt_dir, "found-reference-observation.json"), "utf8"),
     ) as ReferenceGraphObservation
     expect(retained.graphs.every((graph) => graph.fixture_reproducible === false)).toBe(true)
     expect(retained.graphs.every((graph) => graph.electrical_binding === undefined)).toBe(true)
+    expect(await readFile(join(attempt_dir, "model-reference-observation.json"), "utf8")).toBe(
+      downstream_observation,
+    )
   })
 
   test("stops run 94 at characterization with a typed no-eligible-graph error", async () => {

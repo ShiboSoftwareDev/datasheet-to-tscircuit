@@ -44,6 +44,7 @@ const MODEL_STATUS_COPY: Record<ModelRunStatus, string> = {
   cancelling: "Stopping",
   cancelled: "Cancelled",
   complete: "Ready",
+  unsupported: "Not simulatable",
   timed_out: "Timed out",
   failed: "Failed",
 }
@@ -55,7 +56,7 @@ function getModelStatusCopy(status: ModelRunStatus, error_message?: string): str
 
 function getStatusTone(status: string): string {
   if (["Ready", "Complete", "Validated"].includes(status)) return "ready"
-  if (status === "Not convertible") return "unsupported"
+  if (["Not convertible", "Not simulatable"].includes(status)) return "unsupported"
   if (["Failed", "Cancelled", "Stopped", "Timed out"].includes(status)) return "failed"
   return "working"
 }

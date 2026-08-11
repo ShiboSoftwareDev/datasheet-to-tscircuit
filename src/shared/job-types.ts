@@ -90,6 +90,22 @@ export interface JobProvenance {
   prompt_sha256: Record<string, string>
 }
 
+export interface ComponentFootprintPreview {
+  footprint_id: string
+  label: string
+  aliases: string[]
+  ordering_codes: string[]
+  package_name: string
+  package_code?: string
+  pin_count: number
+  circuit_json?: AnyCircuitElement[]
+}
+
+export interface ComponentFootprintPreviews {
+  default_footprint_id: string
+  footprints: ComponentFootprintPreview[]
+}
+
 export interface Job {
   job_id: string
   file_name: string
@@ -106,6 +122,7 @@ export interface Job {
   component_ready?: boolean
   component_code?: string
   circuit_json?: AnyCircuitElement[]
+  component_footprints?: ComponentFootprintPreviews
   typical_application_title?: string
   typical_application_code?: string
   typical_application_circuit_json?: AnyCircuitElement[]
@@ -170,6 +187,7 @@ export type ModelRunStatus =
   | "cancelling"
   | "cancelled"
   | "complete"
+  | "unsupported"
   | "timed_out"
   | "failed"
 
@@ -277,6 +295,7 @@ export type ModelProgressPhase =
   | "finalizing"
   | "validating"
   | "complete"
+  | "unsupported"
   | "timed_out"
   | "failed"
   | "cancelled"

@@ -5,10 +5,13 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import {
   createFootprintPlanFromEvidence,
+  getDefaultFootprint,
   getComponentEvidenceBlockingReasons,
   getFootprintEvidenceErrors,
+  parseComponentFootprintCatalog,
   parseComponentEvidence,
   type ComponentEvidence,
+  type ComponentFootprintCatalog,
   type EvidenceSource,
 } from "../component-evidence"
 import { createComponentSchematicPlan } from "../component-schematic-plan"
@@ -46,6 +49,7 @@ const COMPONENT_EVIDENCE_JSON_FILES = [
   "footprint-geometry-verification.json",
   "evidence-image-manifest.json",
 ] as const
+const COMPONENT_OPTIONAL_EVIDENCE_JSON_FILES = ["component-footprint-catalog.json"] as const
 const APPLICATION_EVIDENCE_JSON_FILES = [
   "typical-application-plan.json",
   "application-connectivity-review.json",
@@ -279,8 +283,25 @@ async function evidenceFilePaths(
     if (application_presence.some(Boolean) && !application_presence.every(Boolean)) {
       throw new Error("Application evidence files must be committed as one complete set")
     }
+    const optional_component_paths = COMPONENT_OPTIONAL_EVIDENCE_JSON_FILES.filter((path) =>
+      committed_paths.length > 0 ? committed_paths.includes(path) : false,
+    )
+    if (committed_paths.length === 0) {
+      const optional_presence = await Promise.all(
+        COMPONENT_OPTIONAL_EVIDENCE_JSON_FILES.map(async (path) =>
+          lstat(join(job_dir, path)).then(
+            (metadata) => metadata.isFile() && !metadata.isSymbolicLink(),
+            () => false,
+          ),
+        ),
+      )
+      for (const [index, present] of optional_presence.entries()) {
+        if (present) optional_component_paths.push(COMPONENT_OPTIONAL_EVIDENCE_JSON_FILES[index]!)
+      }
+    }
     json_paths = [
       ...COMPONENT_EVIDENCE_JSON_FILES,
+      ...optional_component_paths,
       ...(application_presence.every(Boolean) ? APPLICATION_EVIDENCE_JSON_FILES : []),
     ]
   }
@@ -363,6 +384,7 @@ async function validateEvidenceImageManifest(input: {
   job_dir: string
   files: ReadonlyMap<string, Uint8Array>
   component_evidence: ComponentEvidence
+  component_footprint_catalog?: ComponentFootprintCatalog
   application_plan?: TypicalApplicationPlan
   source_pdf?: Uint8Array<ArrayBuffer>
 }): Promise<Uint8Array<ArrayBuffer>> {
@@ -414,8 +436,11 @@ async function validateEvidenceImageManifest(input: {
   if ([...declared_images].sort().join("\0") !== committed_images.join("\0")) {
     throw new Error("evidence-image-manifest.json does not enumerate every committed evidence image")
   }
+  const catalog_evidence = input.component_footprint_catalog?.footprints.map(
+    (footprint) => footprint.component_evidence,
+  ) ?? [input.component_evidence]
   for (const source of [
-    ...componentSources(input.component_evidence),
+    ...catalog_evidence.flatMap(componentSources),
     ...(input.application_plan ? applicationSources(input.application_plan) : []),
   ]) {
     if (!source.image) continue
@@ -450,6 +475,35 @@ async function validateV2Evidence(
   ]
   if (blocking_reasons.length > 0) {
     throw new Error(`Committed component evidence is not publishable: ${blocking_reasons.join("; ")}`)
+  }
+
+  let component_footprint_catalog: ComponentFootprintCatalog | undefined
+  if (files.has("component-footprint-catalog.json")) {
+    const raw_catalog = parseJsonBytes(files, "component-footprint-catalog.json")
+    component_footprint_catalog = parseComponentFootprintCatalog(raw_catalog)
+    if (!isDeepStrictEqual(raw_catalog, component_footprint_catalog)) {
+      throw new Error("component-footprint-catalog.json is not in canonical version-1 form")
+    }
+    if (
+      !isDeepStrictEqual(
+        getDefaultFootprint(component_footprint_catalog).component_evidence,
+        component_evidence,
+      )
+    ) {
+      throw new Error("component-evidence.json must be the default footprint catalog projection")
+    }
+    for (const footprint of component_footprint_catalog.footprints) {
+      const plan = createFootprintPlanFromEvidence(footprint.component_evidence)
+      const variant_blocking = [
+        ...getComponentEvidenceBlockingReasons(footprint.component_evidence),
+        ...getFootprintEvidenceErrors(footprint.component_evidence, plan),
+      ]
+      if (variant_blocking.length > 0) {
+        throw new Error(
+          `Committed footprint ${footprint.footprint_id} is not publishable: ${variant_blocking.join("; ")}`,
+        )
+      }
+    }
   }
 
   const raw_footprint_plan = parseJsonBytes(files, "footprint-plan.json")
@@ -549,6 +603,7 @@ async function validateV2Evidence(
     job_dir,
     files,
     component_evidence,
+    ...(component_footprint_catalog ? { component_footprint_catalog } : {}),
     ...(application_plan ? { application_plan } : {}),
     source_pdf,
   })

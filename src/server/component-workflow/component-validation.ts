@@ -1,5 +1,5 @@
-import { readFile, rm } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdir, readFile, rm } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 import { isCircuitElementArray, isCircuitJson } from "../component-circuit-json"
 import { getPinoutEvidenceErrors } from "../component-evidence"
@@ -17,6 +17,7 @@ import type { JobStore } from "../job-store"
 import { getApplicationTargetPinCoverageErrors } from "./application-connectivity-verification"
 import {
   type CircuitValidationRecord,
+  type ApprovedComponentEvidence,
   readApprovedApplicationEvidence,
   readApprovedEvidence,
   readComponentBoundApplicationEvidence,
@@ -143,16 +144,21 @@ interface CircuitBuildInput {
   process_runner: ProcessRunner
   signal: AbortSignal
   on_output: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
+  source_relative_path?: string
+  output_stem?: string
+  build_result_relative_path?: string
 }
 
 export async function buildComponentCandidate(input: CircuitBuildInput): Promise<CircuitBuildRecord> {
+  const source_relative_path = input.source_relative_path ?? "index.circuit.tsx"
+  const output_stem = input.output_stem ?? "index"
   let circuit_json: AnyCircuitElement[] = []
   const build_errors: string[] = []
   try {
     const build = await buildTscircuitSource({
       workspace: input.job_dir,
-      source_file: "index.circuit.tsx",
-      output_stem: "index",
+      source_file: source_relative_path,
+      output_stem,
       tsci_bin: input.tsci_bin,
       process_runner: input.process_runner,
       signal: input.signal,
@@ -169,16 +175,19 @@ export async function buildComponentCandidate(input: CircuitBuildInput): Promise
   }
   const drc_errors: string[] = []
   if (build_errors.length === 0 && circuit_json.length > 0) {
-    const fixture_path = join(input.job_dir, "component-validation.circuit.tsx")
+    const validation_output_stem =
+      output_stem === "index" ? "component-validation" : `${output_stem}-validation`
+    const fixture_path = join(input.job_dir, `${validation_output_stem}.circuit.tsx`)
+    const source_import = `./${source_relative_path.replace(/\.tsx$/, "")}`
     await Bun.write(
       fixture_path,
-      `import Component from "./index.circuit"\nexport default () => <board><Component /></board>\n`,
+      `import Component from ${JSON.stringify(source_import)}\nexport default () => <board><Component /></board>\n`,
     )
     try {
       const board = await buildTscircuitSource({
         workspace: input.job_dir,
-        source_file: "component-validation.circuit.tsx",
-        output_stem: "component-validation",
+        source_file: `${validation_output_stem}.circuit.tsx`,
+        output_stem: validation_output_stem,
         tsci_bin: input.tsci_bin,
         process_runner: input.process_runner,
         signal: input.signal,
@@ -202,7 +211,9 @@ export async function buildComponentCandidate(input: CircuitBuildInput): Promise
     drc_errors,
     circuit_json,
   }
-  await writeJson(join(input.job_dir, "component-build.json"), record)
+  const build_result_path = join(input.job_dir, input.build_result_relative_path ?? "component-build.json")
+  await mkdir(dirname(build_result_path), { recursive: true })
+  await writeJson(build_result_path, record)
   return record
 }
 
@@ -211,8 +222,11 @@ export async function validateBuiltComponent(input: {
   job_dir: string
   job_store: JobStore
   build: CircuitBuildRecord
+  evidence?: ApprovedComponentEvidence
+  validation_result_relative_path?: string
+  update_job_validation?: boolean
 }): Promise<CircuitValidationRecord> {
-  const evidence = await readApprovedEvidence(input.job_dir)
+  const evidence = input.evidence ?? (await readApprovedEvidence(input.job_dir))
   const shape_errors = componentShapeErrors(
     input.build.circuit_json,
     evidence.component_evidence.pinout.pins.length,
@@ -229,27 +243,34 @@ export async function validateBuiltComponent(input: {
     ...pinout_errors.map((error) => `pinout: ${error}`),
     ...schematic_errors.map((error) => `schematic: ${error}`),
   ]
-  updateJobValidation(input.job_store, input.job_id, {
-    component_build: input.build.build_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
-    component_drc:
-      input.build.drc_errors.length === 0 &&
-      input.build.build_errors.length === 0 &&
-      shape_errors.length === 0
-        ? "passed"
-        : "failed",
-    footprint: footprint_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
-    pinout: pinout_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
-    component_schematic: schematic_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
-    component_visual:
-      input.build.build_errors.length === 0 && shape_errors.length === 0 ? "inconclusive" : "failed",
-  })
+  if (input.update_job_validation !== false)
+    updateJobValidation(input.job_store, input.job_id, {
+      component_build:
+        input.build.build_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
+      component_drc:
+        input.build.drc_errors.length === 0 &&
+        input.build.build_errors.length === 0 &&
+        shape_errors.length === 0
+          ? "passed"
+          : "failed",
+      footprint: footprint_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
+      pinout: pinout_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
+      component_schematic: schematic_errors.length === 0 && shape_errors.length === 0 ? "passed" : "failed",
+      component_visual:
+        input.build.build_errors.length === 0 && shape_errors.length === 0 ? "inconclusive" : "failed",
+    })
   const record: CircuitValidationRecord = {
     version: 1,
     passed: errors.length === 0,
     errors,
     circuit_json: input.build.circuit_json,
   }
-  await writeJson(join(input.job_dir, "component-validation.json"), record)
+  const validation_result_path = join(
+    input.job_dir,
+    input.validation_result_relative_path ?? "component-validation.json",
+  )
+  await mkdir(dirname(validation_result_path), { recursive: true })
+  await writeJson(validation_result_path, record)
   return record
 }
 

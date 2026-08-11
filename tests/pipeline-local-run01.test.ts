@@ -431,11 +431,18 @@ test("input references and --job clone while a positional job runs in place", as
     expect(progressEvents).toContain("started")
     expect(progressEvents).toContain("pipeline")
     expect(await readFile(join(sourceJobDir, "datasheet.pdf"), "utf8")).toBe(
-      "%PDF-1.4\nLocal fixture\n%%EOF\n",
+      "%PDF-1.4\nmutated after retention\n%%EOF\n",
     )
     expect(await readFile(join(sourceJobDir, "job.json"), "utf8")).not.toBe(retainedCheckpoint)
     expect(JSON.parse(await readFile(join(sourceJobDir, "job.json"), "utf8")).component_ready).toBe(false)
-    expect(await pathExists(join(sourceJobDir, "component.circuit.tsx"))).toBe(false)
+    expect(await readFile(join(sourceJobDir, "component.circuit.tsx"), "utf8")).toBe(
+      "stale published component\n",
+    )
+    const retainedInPlaceInput = await loadPipelineTaskInputBundle(sourceLocal.input_path)
+    const retainedDatasheet = retainedInPlaceInput.manifest.files.find(({ path }) => path === "datasheet.pdf")
+    expect(retainedDatasheet?.hash).toBe(
+      createHash("sha256").update("%PDF-1.4\nmutated after retention\n%%EOF\n").digest("hex"),
+    )
     const sourceLocalSummaryBefore = await readFile(sourceLocal.summary_path, "utf8")
     const sourceStageResults = sourceLocal.stage_results as Record<
       string,
@@ -589,6 +596,23 @@ test("a full application clone derives its extraction input from a component-onl
             stage_id: "publish_component",
             status: "completed",
             debug_ref: "runs/component_generation/component-only/.pipeline/stages/06-publish_component",
+          },
+        },
+      },
+      pipelines: {
+        typical_application: {
+          pipeline_id: "typical_application",
+          status: "running",
+          sequence: 1,
+          started_at: "2026-08-09T00:01:00.000Z",
+          updated_at: "2026-08-09T00:01:00.000Z",
+          stage_results: {
+            extract_application_evidence: {
+              stage_id: "extract_application_evidence",
+              status: "pending",
+              debug_ref:
+                "runs/typical_application/not-started/.pipeline/stages/01-extract_application_evidence",
+            },
           },
         },
       },

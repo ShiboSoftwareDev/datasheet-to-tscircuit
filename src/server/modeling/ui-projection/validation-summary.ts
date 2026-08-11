@@ -86,7 +86,7 @@ export function projectModelValidationSummary(
       return {
         series_id: observation.id,
         title: titleFromIdentifier(observation.id),
-        role: "response",
+        role: observation.role ?? "response",
         unit: observation.unit,
         tolerance: observationTolerance(observation),
         normalized_rmse: series_result?.metrics.normalized_rmse,

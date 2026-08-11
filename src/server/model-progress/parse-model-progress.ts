@@ -19,6 +19,7 @@ const PROGRESS_PHASES = new Set<ModelProgressPhase>([
   "finalizing",
   "validating",
   "complete",
+  "unsupported",
   "timed_out",
   "failed",
   "cancelled",

@@ -18,6 +18,7 @@ export type ComponentPipelineOutputs = {
     evidence_path: string
     part_number: string
     pin_count: number
+    footprint_count: number
   }
   generate_component: {
     source_path: string

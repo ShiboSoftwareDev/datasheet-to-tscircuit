@@ -167,17 +167,8 @@ function parsePad(value: unknown, index: number): ExpectedFootprintPad {
 }
 
 function assertUniquePadIdentities(pads: readonly ExpectedFootprintPad[], label: string): void {
-  const assigned_pins = new Map<string, number>()
   const physical_pads = new Map<string, number>()
   for (const [index, pad] of pads.entries()) {
-    if (pad.pin !== null) {
-      const pin = normalizePin(pad.pin)
-      const earlier = assigned_pins.get(pin)
-      if (earlier !== undefined) {
-        throw new Error(`${label} repeats physical pin ${pad.pin} at pads ${earlier} and ${index}`)
-      }
-      assigned_pins.set(pin, index)
-    }
     const signature = JSON.stringify({
       kind: pad.kind,
       x: pad.x,
@@ -192,6 +183,24 @@ function assertUniquePadIdentities(pads: readonly ExpectedFootprintPad[], label:
       throw new Error(`${label} repeats the same physical copper pad at indexes ${earlier} and ${index}`)
     }
     physical_pads.set(signature, index)
+  }
+
+  for (let first_index = 0; first_index < pads.length; first_index += 1) {
+    const first = pads[first_index]!
+    for (let second_index = first_index + 1; second_index < pads.length; second_index += 1) {
+      const second = pads[second_index]!
+      if (first.kind !== second.kind) continue
+      const contains = (outer: ExpectedFootprintPad, inner: ExpectedFootprintPad) =>
+        inner.x - inner.width / 2 >= outer.x - outer.width / 2 - FOOTPRINT_GEOMETRY_TOLERANCE_MM &&
+        inner.x + inner.width / 2 <= outer.x + outer.width / 2 + FOOTPRINT_GEOMETRY_TOLERANCE_MM &&
+        inner.y - inner.height / 2 >= outer.y - outer.height / 2 - FOOTPRINT_GEOMETRY_TOLERANCE_MM &&
+        inner.y + inner.height / 2 <= outer.y + outer.height / 2 + FOOTPRINT_GEOMETRY_TOLERANCE_MM
+      if (contains(first, second) || contains(second, first)) {
+        throw new Error(
+          `${label} represents one physical copper area twice at indexes ${first_index} and ${second_index}; a contained rectangle is not a separate pad`,
+        )
+      }
+    }
   }
 }
 
@@ -307,8 +316,10 @@ Write exactly this version-1 shape to footprint-geometry-review.json:
   ]
 }
 
-Transcribe every copper pad, including exposed or mechanical pads. Use null for
-a truly unassigned mechanical pad. Pad x/y are pad-center coordinates relative
+Transcribe every physical copper area once, including exposed or mechanical
+pads. Multiple distinct copper pads may share one electrical pin. Use null only
+for a truly unassigned mechanical pad; never add an ordinary pad underneath a
+wider special pad or represent one copper area twice. Pad x/y are pad-center coordinates relative
 to the footprint center. Width and height are copper dimensions. Convert the
 manufacturer drawing to a PCB-top view; do not return package-bottom
 coordinates. Use plated_hole only for through-hole copper and include positive

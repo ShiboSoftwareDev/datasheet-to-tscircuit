@@ -165,7 +165,9 @@ test("component correction attempts reuse one committed in-memory evidence snaps
       } else {
         await Bun.write(
           join(input.workspace, "index.circuit.tsx"),
-          'export default () => <chip name="U1" />\n',
+          `export default () => (
+  <chip name="U1" footprint={<footprint><smtpad pcbX={0} pcbY={0} width={1} height={1} portHints={["pin1"]} /></footprint>} />
+)\n`,
         )
       }
       return { attempts: 1, duration_ms: 1, output_tail: "" }

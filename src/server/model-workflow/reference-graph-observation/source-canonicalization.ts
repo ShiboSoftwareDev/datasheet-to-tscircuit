@@ -6,6 +6,7 @@ import type { ModelInterface, ModelReferenceElectricalBinding } from "../../mode
 import type { TimeGraphDiscovery, TimeGraphTransientFixtureEvidence } from "../time-graph-hints"
 import {
   assertBindingMatchesPrintedFixture,
+  assertBindingMatchesVisibleScopeGraph,
   assertCurrentChannelsUseResolvedFixtures,
   assertPrintedFixtureEndpointsResolvable,
   FixtureEndpointResolutionError,
@@ -19,14 +20,61 @@ function withoutComparisonState(graph: ObservedReferenceGraph): ObservedReferenc
   return found
 }
 
+const SOURCE_CALIBRATION_INELIGIBILITY_PREFIX =
+  "Server-owned source preflight retained this graph as reference-only after the crop correction budget was exhausted:"
+
+export function sourceCalibrationIneligibilityReason(errors: readonly string[]): string {
+  return `${SOURCE_CALIBRATION_INELIGIBILITY_PREFIX} ${errors.join("; ")}`
+}
+
+function isSourceCalibrationIneligible(graph: ObservedReferenceGraph): boolean {
+  return !graph.fixture_reproducible && graph.reason.startsWith(SOURCE_CALIBRATION_INELIGIBILITY_PREFIX)
+}
+
+function hasNumericElapsedTimeCalibration(graph: ObservedReferenceGraph): boolean {
+  return /(?:^|\s)[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*(?:fs|ps|ns|us|µs|μs|ms|s)(?:\s*\/\s*div(?:ision)?)?(?:\s|[.,;)]|$)/i.test(
+    graph.time_axis_evidence,
+  )
+}
+
+function describesAutonomousSwitchingWaveform(input: {
+  graph: ObservedReferenceGraph
+  source_hints: TimeGraphDiscovery["hints"]
+}): boolean {
+  if (input.source_hints.some(({ transient_fixture_evidence }) => transient_fixture_evidence !== null)) {
+    return false
+  }
+  const source_text = [
+    input.graph.locator,
+    ...input.source_hints.flatMap(
+      ({ reason, fixture_evidence_context, summary_fixture_evidence_context }) => [
+        reason,
+        fixture_evidence_context,
+        summary_fixture_evidence_context ?? "",
+      ],
+    ),
+  ].join(" ")
+  return /\bswitching\s+waveforms?\b/i.test(source_text)
+}
+
 export function canonicalizeObservedGraphSource(input: {
   graph: ObservedReferenceGraph
   source_hints: TimeGraphDiscovery["hints"]
   model_interface?: ModelInterface
   application_fixture?: ApplicationFixtureContract
   phase?: ReferenceGraphArtifactPhase
+  preserve_find_ineligibility?: boolean
+  preserve_source_ineligibility?: boolean
 }): ObservedReferenceGraph {
-  const { graph, source_hints, model_interface, application_fixture, phase = "comparison" } = input
+  const {
+    graph,
+    source_hints,
+    model_interface,
+    application_fixture,
+    phase = "comparison",
+    preserve_find_ineligibility = false,
+    preserve_source_ineligibility = false,
+  } = input
   const unsupported_conditions = [
     ...new Set(source_hints.flatMap(({ unsupported_fixture_conditions }) => unsupported_fixture_conditions)),
   ]
@@ -45,19 +93,6 @@ export function canonicalizeObservedGraphSource(input: {
   const unique_fixture_evidence = [
     ...new Set(fixture_evidence.flatMap((evidence) => (evidence ? [JSON.stringify(evidence)] : []))),
   ]
-  if (
-    source_hints.length > 0 &&
-    (fixture_evidence.some((evidence) => evidence === null) || unique_fixture_evidence.length !== 1)
-  ) {
-    const without_binding = withoutComparisonState(graph)
-    return {
-      ...without_binding,
-      fixture_reproducible: false,
-      reason:
-        "Server-owned datasheet text does not prove one complete tscircuit-supported transient setup; an electrical fixture cannot be invented for this graph.",
-    }
-  }
-
   const printed_fixture_evidence =
     unique_fixture_evidence.length === 1
       ? (JSON.parse(unique_fixture_evidence[0]!) as TimeGraphTransientFixtureEvidence)
@@ -72,11 +107,42 @@ export function canonicalizeObservedGraphSource(input: {
     }
   }
 
+  if (describesAutonomousSwitchingWaveform({ graph, source_hints })) {
+    return {
+      ...withoutComparisonState(graph),
+      fixture_reproducible: false,
+      reason:
+        "The printed switching waveform has no source-grounded changing public-pin stimulus. A numeric scope timebase does not make internally generated switching reproducible by the causal tscircuit model.",
+    }
+  }
+
+  // A canonical Find artifact has already passed the server-owned source
+  // checks. Preserve a graph that preflight retained as reference-only after
+  // exhausting crop corrections; electrical reproducibility alone cannot
+  // restore missing immutable-source calibration.
+  if (
+    (phase === "find" && preserve_find_ineligibility && !graph.fixture_reproducible) ||
+    (preserve_source_ineligibility && isSourceCalibrationIneligible(graph))
+  ) {
+    return withoutComparisonState(graph)
+  }
+
   if (phase === "find") {
     const found = withoutComparisonState(graph)
-    const potentially_eligible = graph.response_quantity === "voltage" && graph.public_pin_observable
-    if (!potentially_eligible || !printed_fixture_evidence) {
+    const potentially_eligible =
+      graph.response_quantity === "voltage" &&
+      graph.public_pin_observable &&
+      (printed_fixture_evidence !== undefined || hasNumericElapsedTimeCalibration(graph))
+    if (!potentially_eligible) {
       return { ...found, fixture_reproducible: false }
+    }
+    if (!printed_fixture_evidence) {
+      return {
+        ...found,
+        fixture_reproducible: true,
+        reason:
+          "The source shows a public voltage waveform with numeric elapsed-time calibration; exact stimulus, response, and application binding are deferred to Create Comparison Graphs and must be proven from the plotted channels.",
+      }
     }
     if (!model_interface) {
       return {
@@ -192,14 +258,27 @@ export function canonicalizeObservedGraphSource(input: {
   }
 
   try {
-    assertBindingMatchesPrintedFixture({
-      graph: graph as ObservedReferenceGraph & {
-        electrical_binding: ModelReferenceElectricalBinding
-        channels: NonNullable<ObservedReferenceGraph["channels"]>
-      },
-      evidence: printed_fixture_evidence!,
-      model_interface,
-    })
+    const eligible_graph = graph as ObservedReferenceGraph & {
+      electrical_binding: ModelReferenceElectricalBinding
+      channels: NonNullable<ObservedReferenceGraph["channels"]>
+    }
+    if (printed_fixture_evidence) {
+      assertBindingMatchesPrintedFixture({
+        graph: eligible_graph,
+        evidence: printed_fixture_evidence,
+        model_interface,
+      })
+    } else {
+      if (!application_fixture) {
+        throw new Error(`Eligible graph ${graph.graph_id} requires application-fixture-contract.json`)
+      }
+      assertBindingMatchesVisibleScopeGraph({
+        graph: eligible_graph,
+        source_hints,
+        model_interface,
+        application_fixture,
+      })
+    }
   } catch (error) {
     if (error instanceof FixtureEndpointResolutionError) {
       const { electrical_binding: _unmappable_binding, ...without_binding } = graph

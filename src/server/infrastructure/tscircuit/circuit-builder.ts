@@ -2,6 +2,7 @@ import { readdir, readFile, rm } from "node:fs/promises"
 import { join, relative } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 import { isCircuitJson } from "../../component-circuit-json"
+import { ensureJobTscircuitRuntimeConfig } from "../../job-scaffold"
 import { ProcessError, type ProcessRunner } from "../process"
 
 export type TscircuitCheck = "netlist" | "placement" | "routing-difficulty"
@@ -91,6 +92,10 @@ export async function buildTscircuitSource(input: {
   render?: { pcb: boolean; schematic: boolean }
   on_output?: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
 }): Promise<CircuitBuildResult> {
+  // A job can move between Docker and the host through normal/local execution.
+  // Refresh the generated import URL for the environment that is actually
+  // executing tsci instead of trusting the creator's absolute source path.
+  await ensureJobTscircuitRuntimeConfig(input.workspace)
   const output_dir = join(input.workspace, "dist", input.output_stem)
   await rm(output_dir, { recursive: true, force: true })
   const errors: string[] = []

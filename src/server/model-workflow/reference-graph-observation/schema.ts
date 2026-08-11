@@ -37,6 +37,7 @@ export const MAX_NORMALIZED_ERROR = 0.1
 export const MAX_OBSERVED_GRAPHS = 64
 export const MAX_ELIGIBLE_GRAPHS = 32
 export const MAX_CHANNELS_PER_GRAPH = 12
+const ELAPSED_TIME_PIXEL_QUANTIZATION_TOLERANCE = 1
 
 export function minimumTracePointCount(horizontal_axis_pixel_span: number): number {
   return Math.min(
@@ -154,6 +155,19 @@ function valueAtPixel(axis: ReferenceGraphAxisCalibration, pixel: number): numbe
   return axis.first.value + ratio * (axis.second.value - axis.first.value)
 }
 
+export function elapsedTimeAtPixel(axis: ReferenceGraphAxisCalibration, pixel: number): number {
+  const pixel_direction = Math.sign(axis.second.pixel - axis.first.pixel)
+  const pixel_offset = (pixel - axis.first.pixel) * pixel_direction
+  if (
+    axis.first.value === 0 &&
+    pixel_offset < 0 &&
+    pixel_offset >= -ELAPSED_TIME_PIXEL_QUANTIZATION_TOLERANCE
+  ) {
+    return 0
+  }
+  return valueAtPixel(axis, pixel)
+}
+
 function valuesAgree(actual: number, expected: number, span: number): boolean {
   return (
     Math.abs(actual - expected) <=
@@ -266,7 +280,11 @@ function parseDigitizedCurve(
     ) {
       throw new Error(`${point_path} pixel coordinates must be inside the exact graph crop`)
     }
-    const x = valueAtPixel(x_axis, parsed.pixel_x)
+    // Agent traces use crop pixels while server-owned grid centers may land on
+    // fractional pixels after the canonical 3x OCR scan is projected back to
+    // the crop. Treat a point within one crop pixel of the zero grid line as
+    // the same raster location; larger pre-trigger traces remain invalid.
+    const x = elapsedTimeAtPixel(x_axis, parsed.pixel_x)
     const y = valueAtPixel(y_axis, parsed.pixel_y)
     if (point_field_policy === "canonical") {
       const supplied_x = finiteNumber(point.x, `${point_path}.x`)

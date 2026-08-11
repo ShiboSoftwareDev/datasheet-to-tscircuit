@@ -12,6 +12,7 @@ import {
   buildReferenceGraphSourceProof,
   printedNominalSourcesByGraphId,
   type ReferenceGraphImmutableSourceAnalysis,
+  type ReferenceGraphPreflight,
   type ReferenceGraphSourceProof,
 } from "../reference-graph-axis-proof"
 import { extractPdfTextBBox, figureIdentityFromPdfText } from "../reference-graph-axis-proof/pdf-extraction"
@@ -28,7 +29,10 @@ import {
   type ReferenceGraphObservation,
   verifyReferenceGraphObservationPixels,
 } from "../reference-graph-observation"
-import { canonicalizeObservedGraphSource } from "../reference-graph-observation/source-canonicalization"
+import {
+  canonicalizeObservedGraphSource,
+  sourceCalibrationIneligibilityReason,
+} from "../reference-graph-observation/source-canonicalization"
 import { isRecord, parseGraph } from "../reference-graph-observation/schema"
 import { discoverTimeGraphHints } from "../time-graph-hints"
 import { assertObserverFoundEligibleTimeDomainGraph } from "./eligibility"
@@ -114,7 +118,7 @@ export async function findPriorReferenceObservationCandidates(input: {
     entries
       .filter((entry) => entry.isDirectory() && entry.name !== input.current_invocation_id)
       .map(async (entry): Promise<PriorObservationCandidate | undefined> => {
-        const observation_path = join(attempts_dir, entry.name, "model-reference-observation.json")
+        const observation_path = join(attempts_dir, entry.name, "found-reference-observation.json")
         try {
           const metadata = await stat(observation_path)
           return {
@@ -291,6 +295,7 @@ async function buildPreflight(input: {
   datasheet_path: string
   services: ModelPipelineServices
   signal: AbortSignal
+  stage_id: "find_reference_graphs" | "create_comparison_graphs"
 }) {
   try {
     return await analyzeReferenceGraphPreflight({
@@ -306,13 +311,99 @@ async function buildPreflight(input: {
       {
         code: "reference_axis_infrastructure_failed",
         message: `Reference graph preflight could not run: ${error instanceof Error ? error.message : String(error)}`,
-        stage_id: "create_comparison_graphs",
+        stage_id: input.stage_id,
         operation: "preflight_reference_axis",
         hint: "Install and verify pdftoppm, pdftotext, and tesseract with English OCR data in the server runtime. Preflight failures are infrastructure failures, not agent artifact rejections.",
         retryable: false,
       },
       { cause: error },
     )
+  }
+}
+
+export function referenceGraphDiscoveryPreflightErrors(preflight: ReferenceGraphPreflight): string[] {
+  const errors: string[] = []
+  if (!preflight.figure_identity) {
+    errors.push("the immutable crop does not include or immediately adjoin its own printed figure identity")
+  }
+  if (
+    preflight.x_axis.source_seconds_per_pixel_candidates.length === 0 &&
+    preflight.x_axis.division_scale_candidates.length === 0 &&
+    preflight.x_axis.explicit_tick_calibration === undefined
+  ) {
+    errors.push("the immutable crop has no unambiguous printed elapsed-time calibration")
+  }
+  if (
+    preflight.y_axis.source_volts_per_pixel_candidates.length === 0 &&
+    preflight.y_axis.division_scale_candidates.length === 0 &&
+    preflight.y_axis.explicit_tick_calibration === undefined
+  ) {
+    errors.push("the immutable crop has no unambiguous printed voltage calibration")
+  }
+  return errors
+}
+
+interface FoundReferenceGraphPreflightFailure {
+  graph_id: string
+  errors: string[]
+}
+
+async function foundReferenceGraphPreflightFailures(input: {
+  observation: ReferenceGraphObservation
+  datasheet_path: string
+  debug_dir: string
+  services: ModelPipelineServices
+  signal: AbortSignal
+}): Promise<FoundReferenceGraphPreflightFailure[]> {
+  const results = await runReferenceGraphWorkerPool({
+    graphs: foundObservedGraphs(input.observation),
+    signal: input.signal,
+    digitize: async (graph, _graph_index, graph_signal) => {
+      const preflight = await buildPreflight({
+        graph,
+        source_pdf_sha256: input.observation.source_pdf_sha256,
+        datasheet_path: input.datasheet_path,
+        services: input.services,
+        signal: graph_signal,
+        stage_id: "find_reference_graphs",
+      })
+      const errors = referenceGraphDiscoveryPreflightErrors(preflight.preflight)
+      await mkdir(join(input.debug_dir, "reference-finder", "preflight"), { recursive: true })
+      await writeJson(
+        join(input.debug_dir, "reference-finder", "preflight", `${graph.graph_id}.json`),
+        preflight.preflight,
+      )
+      return { graph_id: graph.graph_id, errors }
+    },
+  })
+  return results.flatMap(({ graph_id, errors }) => (errors.length === 0 ? [] : [{ graph_id, errors }]))
+}
+
+function foundReferenceGraphPreflightError(failures: readonly FoundReferenceGraphPreflightFailure[]): Error {
+  const diagnostics = failures.map(({ graph_id, errors }) => `${graph_id}: ${errors.join("; ")}`)
+  throw new Error(
+    "Find Reference Graphs marked crop(s) usable before their immutable source calibration was complete:\n" +
+      `${diagnostics.join("\n")}\n` +
+      "Adjust each named crop to include the complete plot, time and voltage scales, scope controls, and its own caption. If the source figure itself lacks either numeric calibration, mark it fixture_reproducible:false. Create Comparison Graphs cannot repair a Find-stage crop.",
+  )
+}
+
+function retainCalibrationFailuresAsReferences(input: {
+  observation: ReferenceGraphObservation
+  failures: readonly FoundReferenceGraphPreflightFailure[]
+}): ReferenceGraphObservation {
+  return {
+    ...input.observation,
+    graphs: input.observation.graphs.map((graph) => {
+      const failure = input.failures.find(({ graph_id }) => graph_id === graph.graph_id)
+      if (!failure) return graph
+      const { electrical_binding: _binding, channels: _channels, ...found } = graph
+      return {
+        ...found,
+        fixture_reproducible: false,
+        reason: sourceCalibrationIneligibilityReason(failure.errors),
+      }
+    }),
   }
 }
 
@@ -360,7 +451,7 @@ export async function findReferenceGraphs(input: {
       debug_dir: join(debug_dir, "reference-finder"),
       files: ["model-reference-observation.json"],
     },
-    validate: async (workspace) => {
+    validate: async (workspace, attempt) => {
       const observation = parseFoundReferenceGraphObservation(
         await readBoundedJsonArtifact({
           path: join(workspace, "model-reference-observation.json"),
@@ -376,10 +467,19 @@ export async function findReferenceGraphs(input: {
         process_runner: services.process_runner,
         signal,
       })
-      return observation
+      const preflight_failures = await foundReferenceGraphPreflightFailures({
+        observation,
+        datasheet_path: join(workspace, "datasheet.pdf"),
+        debug_dir,
+        services,
+        signal,
+      })
+      if (preflight_failures.length === 0) return observation
+      if (attempt < 4) throw foundReferenceGraphPreflightError(preflight_failures)
+      return retainCalibrationFailuresAsReferences({ observation, failures: preflight_failures })
     },
     promote: async (_workspace, observation) => {
-      await writeJson(join(attempt_dir, "model-reference-observation.json"), observation)
+      await writeJson(join(attempt_dir, "found-reference-observation.json"), observation)
     },
   })
   assertObserverFoundEligibleTimeDomainGraph(observer.value)
@@ -490,6 +590,7 @@ export async function digitizeReferenceGraphs(input: {
         datasheet_path,
         services,
         signal: graph_signal,
+        stage_id: "create_comparison_graphs",
       })
       const preflight_duration_ms = Date.now() - preflight_started_at
       graph_signal.throwIfAborted()

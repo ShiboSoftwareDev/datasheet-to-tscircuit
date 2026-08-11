@@ -1,6 +1,9 @@
 import { join } from "node:path"
 import { PipelineError } from "../../pipeline"
-import { buildComponentCandidate, validateBuiltComponent } from "../component-validation"
+import {
+  buildComponentFootprintCandidates,
+  validateComponentFootprintCandidates,
+} from "../component-footprint-validation"
 import { generateComponentSource } from "../source-candidates"
 import { appendJobLog, componentArtifact, readCircuitValidationRecord } from "../stage-helpers"
 import { defineComponentStage } from "./stage-factory"
@@ -34,7 +37,7 @@ export const repairComponentStage = defineComponentStage({
         on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
       })
       services.job_store.updateJob(context.job_id, { display_status: "building" })
-      const build = await buildComponentCandidate({
+      const builds = await buildComponentFootprintCandidates({
         job_id: context.job_id,
         job_dir: context.job_dir,
         job_store: services.job_store,
@@ -43,12 +46,13 @@ export const repairComponentStage = defineComponentStage({
         signal,
         on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
       })
-      result = await validateBuiltComponent({
+      const validation = await validateComponentFootprintCandidates({
         job_id: context.job_id,
         job_dir: context.job_dir,
         job_store: services.job_store,
-        build,
+        builds,
       })
+      result = validation.summary
       if (!result.passed) continue
       const result_path = join(context.job_dir, "component-validation.json")
       return {

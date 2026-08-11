@@ -27,6 +27,7 @@ const TIME_AXIS_PATTERN =
   /\btime\s*[([]\s*(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*)?(?:[fpnumµμ]?s|[fpnumµμ]?sec(?:ond)?s?|seconds?)\s*(?:\/\s*div(?:ision)?)?\s*[)\]]/gi
 const TIME_GRAPH_TITLE_PATTERN =
   /\b(?:transient|waveforms?|response\s+time|startup|start-up|turn-on|turn-off|rise\s+time|fall\s+time)\b/i
+const FREQUENCY_SIGNAL_TITLE_PATTERN = /\b(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*)?(?:[kmg]?hz)\s+signal\b/i
 const NON_GRAPH_TITLE_PATTERN = /\b(?:scheme|block\s+diagram|flow\s*chart|state\s+diagram)\b/i
 
 interface ScoredTimeGraphCandidate {
@@ -228,8 +229,10 @@ export function findLikelyTimeGraphCandidates(datasheet_text: string): Omit<Time
       if (!figure || !normalized) continue
       const figure_offset = match.index ?? 0
       const caption = lineCaptionParts(page_text, figure_offset, figure_offset + match[0].length)
-      const title_after_figure = TIME_GRAPH_TITLE_PATTERN.test(caption.after)
-      const title_before_figure = TIME_GRAPH_TITLE_PATTERN.test(caption.before)
+      const title_after_figure =
+        TIME_GRAPH_TITLE_PATTERN.test(caption.after) || FREQUENCY_SIGNAL_TITLE_PATTERN.test(caption.after)
+      const title_before_figure =
+        TIME_GRAPH_TITLE_PATTERN.test(caption.before) || FREQUENCY_SIGNAL_TITLE_PATTERN.test(caption.before)
       const title_indicates_timing = title_after_figure || title_before_figure
       const title_text = title_after_figure ? caption.after : caption.before
       const title_is_non_graph = title_indicates_timing && NON_GRAPH_TITLE_PATTERN.test(title_text)

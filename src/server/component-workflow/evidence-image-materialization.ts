@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { constants } from "node:fs"
 import { lstat, mkdir, open, readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
-import type { ComponentEvidence, EvidenceSource } from "../component-evidence"
+import type { ComponentEvidence, ComponentFootprintCatalog, EvidenceSource } from "../component-evidence"
 import { ProcessError, type ProcessRunner } from "../infrastructure/process"
 import type { ApplicationSourceReference, TypicalApplicationPlan } from "./application-plan"
 
@@ -317,12 +317,14 @@ async function sha256File(
 async function materializeEvidenceImagesInternal(input: {
   workspace: string
   component_evidence: ComponentEvidence
+  component_footprint_catalog?: ComponentFootprintCatalog
   application_plan?: TypicalApplicationPlan
   process_runner: ProcessRunner
   signal: AbortSignal
   on_output?: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
 }): Promise<{
   component_evidence: ComponentEvidence
+  component_footprint_catalog?: ComponentFootprintCatalog
   application_plan?: TypicalApplicationPlan
   manifest: EvidenceImageManifest
 }> {
@@ -337,8 +339,11 @@ async function materializeEvidenceImagesInternal(input: {
     input.application_plan?.availability === "documented"
       ? primaryVisualPage(input.application_plan.source_references, "Documented typical application")
       : undefined
+  const catalog_component_evidence = input.component_footprint_catalog?.footprints.map(
+    (footprint) => footprint.component_evidence,
+  ) ?? [input.component_evidence]
   const all_sources = [
-    ...collectComponentSources(input.component_evidence),
+    ...catalog_component_evidence.flatMap(collectComponentSources),
     ...(input.application_plan ? collectApplicationSources(input.application_plan) : []),
   ]
   const pages = [...new Set(all_sources.map(({ page }) => page))].sort((left, right) => left - right)
@@ -438,8 +443,22 @@ async function materializeEvidenceImagesInternal(input: {
     join(input.workspace, "evidence-image-manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
   )
+  const rewritten_catalog = input.component_footprint_catalog
+    ? {
+        ...input.component_footprint_catalog,
+        footprints: input.component_footprint_catalog.footprints.map((footprint) => ({
+          ...footprint,
+          component_evidence: rewriteComponentEvidence(footprint.component_evidence, land_pattern_page),
+        })),
+      }
+    : undefined
+  const rewritten_component_evidence =
+    rewritten_catalog?.footprints.find(
+      (footprint) => footprint.footprint_id === rewritten_catalog.default_footprint_id,
+    )?.component_evidence ?? rewriteComponentEvidence(input.component_evidence, land_pattern_page)
   return {
-    component_evidence: rewriteComponentEvidence(input.component_evidence, land_pattern_page),
+    component_evidence: rewritten_component_evidence,
+    ...(rewritten_catalog ? { component_footprint_catalog: rewritten_catalog } : {}),
     ...(input.application_plan
       ? { application_plan: rewriteApplicationPlan(input.application_plan, typical_application_page) }
       : {}),
@@ -456,6 +475,35 @@ export async function materializeComponentEvidenceImages(input: {
 }): Promise<{ component_evidence: ComponentEvidence; manifest: EvidenceImageManifest }> {
   const materialized = await materializeEvidenceImagesInternal(input)
   return { component_evidence: materialized.component_evidence, manifest: materialized.manifest }
+}
+
+export async function materializeComponentFootprintCatalogImages(input: {
+  workspace: string
+  component_footprint_catalog: ComponentFootprintCatalog
+  process_runner: ProcessRunner
+  signal: AbortSignal
+  on_output?: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
+}): Promise<{
+  component_evidence: ComponentEvidence
+  component_footprint_catalog: ComponentFootprintCatalog
+  manifest: EvidenceImageManifest
+}> {
+  const default_footprint = input.component_footprint_catalog.footprints.find(
+    (footprint) => footprint.footprint_id === input.component_footprint_catalog.default_footprint_id,
+  )
+  if (!default_footprint) throw new Error("Component footprint catalog has no default footprint")
+  const materialized = await materializeEvidenceImagesInternal({
+    ...input,
+    component_evidence: default_footprint.component_evidence,
+  })
+  if (!materialized.component_footprint_catalog) {
+    throw new Error("Footprint catalog image materialization returned no catalog")
+  }
+  return {
+    component_evidence: materialized.component_evidence,
+    component_footprint_catalog: materialized.component_footprint_catalog,
+    manifest: materialized.manifest,
+  }
 }
 
 export async function materializeEvidenceImages(input: {

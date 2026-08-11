@@ -13,6 +13,15 @@ function hasReliableDirectSource(sources: EvidenceSource[]): boolean {
   )
 }
 
+function isServerRenderedFootprintSource(source: EvidenceSource): boolean {
+  return (
+    source.method === "pdf_visual" &&
+    source.render_dpi === 200 &&
+    (source.image === "visual-reference/land-pattern.png" ||
+      source.image === `visual-reference/source-page-${source.page}.png`)
+  )
+}
+
 export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence): string[] {
   const errors: string[] = []
   if (evidence.status !== "resolved") {
@@ -32,7 +41,11 @@ export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence)
     if (pad.pin === null) continue
     const pad_pin = normalizePin(pad.pin)
     padded_pins.add(pad_pin)
-    if (!pin_numbers.has(pad_pin)) errors.push(`footprint pad references unknown electrical pin ${pad.pin}`)
+    if (!pin_numbers.has(pad_pin)) {
+      errors.push(
+        `footprint pad references unknown electrical pin ${pad.pin}; electrically bonded copper, including exposed or thermal pads, must reuse its documented physical pin number, while pin:null is reserved for copper proven to be mechanically present and electrically unassigned`,
+      )
+    }
   }
   for (const pin of evidence.pinout.pins) {
     if (!padded_pins.has(normalizePin(pin.number))) {
@@ -41,12 +54,11 @@ export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence)
   }
   const reliable_footprint_visual_pages = new Set(
     [
-      ...evidence.footprint.drawing_orientation.sources.filter(
-        (source) => source.image === "visual-reference/land-pattern.png",
-      ),
+      ...evidence.footprint.drawing_orientation.sources,
       ...evidence.footprint.pads.flatMap((pad) => pad.sources),
     ].flatMap((source) =>
-      source.method === "pdf_visual" && (source.confidence === "high" || source.confidence === "medium")
+      isServerRenderedFootprintSource(source) &&
+      (source.confidence === "high" || source.confidence === "medium")
         ? [source.page]
         : [],
     ),
@@ -80,12 +92,8 @@ export function getComponentEvidenceBlockingReasons(evidence: ComponentEvidence)
       `land-pattern orientation is ${evidence.footprint.drawing_orientation.value}, not an approved PCB-top view`,
     )
   }
-  if (
-    !evidence.footprint.drawing_orientation.sources.some(
-      (source) => source.method === "pdf_visual" && source.image === "visual-reference/land-pattern.png",
-    )
-  ) {
-    errors.push("PCB-top orientation is not tied to the inspected land-pattern reference image")
+  if (!evidence.footprint.drawing_orientation.sources.some(isServerRenderedFootprintSource)) {
+    errors.push("PCB-top orientation is not tied to a server-rendered footprint reference image")
   }
   const direct_fact_sources = [
     ["part number", evidence.part_number.sources],

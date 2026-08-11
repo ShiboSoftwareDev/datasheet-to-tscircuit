@@ -1,6 +1,20 @@
 import { expect, test } from "bun:test"
+import { referenceChannelKey } from "@/server/model-workflow/reference-graph-observation"
 import { buildGraphValidationPlan } from "@/server/model-workflow/validation-plan-from-graphs"
 import type { ModelContract, ModelRequirement } from "@/server/modeling"
+import { IDENTIFIER_PATTERN } from "@/server/spice-validation/identifiers"
+
+test("long graph and channel names produce distinct stable requirement identifiers", () => {
+  const graph_id = "figure_8_1_level_translation_2_5_mhz"
+  const response = referenceChannelKey(graph_id, "channel_4_b1_output_voltage")
+  const stimulus = referenceChannelKey(graph_id, "channel_3_a1_input_voltage")
+
+  expect(response).not.toBe(stimulus)
+  expect(response.length).toBeLessThanOrEqual(64)
+  expect(stimulus.length).toBeLessThanOrEqual(64)
+  expect(IDENTIFIER_PATTERN.test(response)).toBe(true)
+  expect(IDENTIFIER_PATTERN.test(stimulus)).toBe(true)
+})
 
 function loadTransientRequirement(
   id: string,

@@ -1820,6 +1820,42 @@ a {
   flex-direction: column;
 }
 
+.footprint-selector-bar {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid #e7e7e3;
+  background: #fff;
+}
+
+.multiple-footprints-tag {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid #bcd5f1;
+  border-radius: 999px;
+  color: #2864a6;
+  background: #edf4fd;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.footprint-selector-bar select {
+  height: 28px;
+  min-width: 180px;
+  max-width: 320px;
+  padding: 0 28px 0 9px;
+  border: 1px solid #d8d9d5;
+  border-radius: 7px;
+  color: #3f4954;
+  background: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .artifact-tabs {
   display: flex;
   width: 100%;

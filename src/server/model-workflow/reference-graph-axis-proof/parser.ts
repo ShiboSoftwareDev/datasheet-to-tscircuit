@@ -37,6 +37,11 @@ function proofNumber(value: unknown, path: string): number {
   return value
 }
 
+function proofNumberArray(value: unknown, path: string): number[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`)
+  return value.map((item, index) => proofNumber(item, `${path}[${index}]`))
+}
+
 function proofSha(value: unknown, path: string): string {
   const digest = proofString(value, path)
   if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error(`${path} must be a lowercase SHA-256 digest`)
@@ -191,11 +196,16 @@ function parseDivisionSource(value: unknown, path: string): ReferenceDivisionSca
   if (record.normalization !== undefined) {
     const value = proofRecord(record.normalization, `${path}.normalization`)
     proofKeys(value, ["algorithm", "corroborating_raw_text", "multiplier"], `${path}.normalization`)
-    if (value.algorithm !== "missing_time_prefix_from_adjacent_measurement_v1") {
+    if (
+      value.algorithm !== "missing_time_prefix_from_adjacent_measurement_v1" &&
+      value.algorithm !== "low_confidence_micro_prefix_from_adjacent_measurement_v1" &&
+      value.algorithm !== "scope_horizontal_control_implies_per_division_v1" &&
+      value.algorithm !== "scope_channel_control_implies_per_division_v1"
+    ) {
       throw new Error(`${path}.normalization.algorithm is unsupported`)
     }
     normalization = {
-      algorithm: "missing_time_prefix_from_adjacent_measurement_v1",
+      algorithm: value.algorithm,
       corroborating_raw_text: proofString(
         value.corroborating_raw_text,
         `${path}.normalization.corroborating_raw_text`,
@@ -274,8 +284,10 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
       receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v1" &&
       receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v2" &&
       receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v3" &&
+      receipt.algorithm !== "canonical_pdf_tesseract_scope_divisions_v4" &&
       receipt.algorithm !== "canonical_pdf_tesseract_explicit_time_scope_voltage_v1" &&
-      receipt.algorithm !== "canonical_pdf_tesseract_explicit_time_scope_voltage_v2")
+      receipt.algorithm !== "canonical_pdf_tesseract_explicit_time_scope_voltage_v2" &&
+      receipt.algorithm !== "canonical_pdf_tesseract_explicit_time_scope_voltage_v3")
   ) {
     throw new Error(`${path} uses an unsupported receipt version or algorithm`)
   }
@@ -293,11 +305,17 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
     receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v1" ||
     receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2" ||
     receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v3" ||
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v4" ||
     receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v1" ||
-    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v2"
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v2" ||
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v3"
   const has_explicit_time =
     receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v1" ||
-    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v2"
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v2" ||
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v3"
+  const is_visible_zero_scope =
+    receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v4" ||
+    receipt.algorithm === "canonical_pdf_tesseract_explicit_time_scope_voltage_v3"
   const is_server_calibrated_scope =
     receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v2" ||
     receipt.algorithm === "canonical_pdf_tesseract_scope_divisions_v3" ||
@@ -413,23 +431,25 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
   const y = proofRecord(receipt.y_axis, `${path}.y_axis`)
   proofKeys(
     y,
-    [
-      "quantity",
-      "unit",
-      "division_scale",
-      "grid",
-      "declared_volts_per_pixel",
-      "source_volts_per_pixel",
-      "nominal_baseline_volts",
-      ...(is_printed_experiment_scope
-        ? ["nominal_source"]
-        : ["nominal_source_text", "nominal_source_bbox_pdf_points"]),
-      ...(is_server_calibrated_scope ? ["nominal_baseline_pixel"] : []),
-      "nominal_trace_point_indexes",
-    ],
+    is_visible_zero_scope
+      ? ["quantity", "unit", "channels"]
+      : [
+          "quantity",
+          "unit",
+          "division_scale",
+          "grid",
+          "declared_volts_per_pixel",
+          "source_volts_per_pixel",
+          "nominal_baseline_volts",
+          ...(is_printed_experiment_scope
+            ? ["nominal_source"]
+            : ["nominal_source_text", "nominal_source_bbox_pdf_points"]),
+          ...(is_server_calibrated_scope ? ["nominal_baseline_pixel"] : []),
+          "nominal_trace_point_indexes",
+        ],
     `${path}.y_axis`,
   )
-  if (!Array.isArray(y.nominal_trace_point_indexes)) {
+  if (!is_visible_zero_scope && !Array.isArray(y.nominal_trace_point_indexes)) {
     throw new Error(`${path}.y_axis.nominal_trace_point_indexes must be an array`)
   }
   if (x.quantity !== "time" || x.unit !== "s") {
@@ -441,10 +461,12 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
   const x_division_scale = has_explicit_time
     ? undefined
     : parseDivisionSource(x.division_scale, `${path}.x_axis.division_scale`)
-  const y_division_scale = parseDivisionSource(y.division_scale, `${path}.y_axis.division_scale`)
+  const y_division_scale = is_visible_zero_scope
+    ? undefined
+    : parseDivisionSource(y.division_scale, `${path}.y_axis.division_scale`)
   if (
     (!has_explicit_time && x_division_scale?.normalized_unit !== "s") ||
-    y_division_scale.normalized_unit !== "V"
+    (!is_visible_zero_scope && y_division_scale?.normalized_unit !== "V")
   ) {
     throw new Error(`${path} division scales do not match their axes`)
   }
@@ -509,16 +531,132 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
         ),
       }
     : undefined
+  const scope_ocr = {
+    ...common_ocr,
+    panel_tsv_sha256: proofSha(ocr.panel_tsv_sha256, `${path}.ocr.panel_tsv_sha256`),
+  }
+  if (is_visible_zero_scope) {
+    if (!Array.isArray(y.channels) || y.channels.length === 0) {
+      throw new Error(`${path}.y_axis.channels must be a non-empty array`)
+    }
+    const channel_ids = new Set<string>()
+    const channels = y.channels.map((value, index) => {
+      const channel_path = `${path}.y_axis.channels[${index}]`
+      const channel = proofRecord(value, channel_path)
+      proofKeys(
+        channel,
+        [
+          "channel_id",
+          "division_scale",
+          "grid",
+          "declared_volts_per_pixel",
+          "source_volts_per_pixel",
+          "zero_reference_volts",
+          "zero_reference_pixel",
+          "zero_marker",
+        ],
+        channel_path,
+      )
+      const channel_id = proofString(channel.channel_id, `${channel_path}.channel_id`)
+      if (channel_ids.has(channel_id)) {
+        throw new Error(`${path}.y_axis.channels contains duplicate channel_id ${channel_id}`)
+      }
+      channel_ids.add(channel_id)
+      const division_scale = parseDivisionSource(channel.division_scale, `${channel_path}.division_scale`)
+      if (division_scale.normalized_unit !== "V") {
+        throw new Error(`${channel_path}.division_scale must retain volts per division`)
+      }
+      const grid = parseGridSource(channel.grid, `${channel_path}.grid`)
+      const declared_volts_per_pixel = proofNumber(
+        channel.declared_volts_per_pixel,
+        `${channel_path}.declared_volts_per_pixel`,
+      )
+      const source_volts_per_pixel = proofNumber(
+        channel.source_volts_per_pixel,
+        `${channel_path}.source_volts_per_pixel`,
+      )
+      const expected_volts_per_pixel = division_scale.value_per_division_si / grid.median_spacing_px
+      if (
+        !(source_volts_per_pixel > 0) ||
+        Math.abs(source_volts_per_pixel - expected_volts_per_pixel) > expected_volts_per_pixel * 0.04 ||
+        Math.abs(declared_volts_per_pixel - source_volts_per_pixel) > source_volts_per_pixel * 0.04
+      ) {
+        throw new Error(`${channel_path} voltage scale is internally inconsistent`)
+      }
+      if (channel.zero_reference_volts !== 0) {
+        throw new Error(`${channel_path}.zero_reference_volts must be 0`)
+      }
+      const marker_path = `${channel_path}.zero_marker`
+      const marker = proofRecord(channel.zero_marker, marker_path)
+      proofKeys(marker, ["algorithm", "ocr_bbox_px", "matching_pixel_count"], marker_path)
+      if (marker.algorithm !== "trace_color_left_edge_zero_marker_v1") {
+        throw new Error(`${marker_path}.algorithm is unsupported`)
+      }
+      const bbox_path = `${marker_path}.ocr_bbox_px`
+      const bbox = proofRecord(marker.ocr_bbox_px, bbox_path)
+      proofKeys(bbox, ["left", "top", "width", "height"], bbox_path)
+      const ocr_bbox_px = {
+        left: proofNumber(bbox.left, `${bbox_path}.left`),
+        top: proofNumber(bbox.top, `${bbox_path}.top`),
+        width: proofNumber(bbox.width, `${bbox_path}.width`),
+        height: proofNumber(bbox.height, `${bbox_path}.height`),
+      }
+      if (!(ocr_bbox_px.width > 0) || !(ocr_bbox_px.height > 0)) {
+        throw new Error(`${bbox_path} must have positive dimensions`)
+      }
+      const matching_pixel_count = proofNumber(
+        marker.matching_pixel_count,
+        `${marker_path}.matching_pixel_count`,
+      )
+      if (!Number.isSafeInteger(matching_pixel_count) || matching_pixel_count < 30) {
+        throw new Error(`${marker_path}.matching_pixel_count must be an integer of at least 30`)
+      }
+      return {
+        channel_id,
+        division_scale,
+        grid,
+        declared_volts_per_pixel,
+        source_volts_per_pixel,
+        zero_reference_volts: 0 as const,
+        zero_reference_pixel: proofNumber(
+          channel.zero_reference_pixel,
+          `${channel_path}.zero_reference_pixel`,
+        ),
+        zero_marker: {
+          algorithm: "trace_color_left_edge_zero_marker_v1" as const,
+          ocr_bbox_px,
+          matching_pixel_count,
+        },
+      }
+    })
+    const visible_common = {
+      ...common,
+      ocr: scope_ocr,
+      y_axis: {
+        quantity: "voltage" as const,
+        unit: "V" as const,
+        channels,
+      },
+    }
+    return has_explicit_time
+      ? {
+          ...visible_common,
+          algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v3",
+          x_axis: explicit_x_axis!,
+        }
+      : {
+          ...visible_common,
+          algorithm: "canonical_pdf_tesseract_scope_divisions_v4",
+          x_axis: division_x_axis!,
+        }
+  }
   const scope_common = {
     ...common,
-    ocr: {
-      ...common_ocr,
-      panel_tsv_sha256: proofSha(ocr.panel_tsv_sha256, `${path}.ocr.panel_tsv_sha256`),
-    },
+    ocr: scope_ocr,
     y_axis: {
       quantity: "voltage" as const,
       unit: "V" as const,
-      division_scale: y_division_scale,
+      division_scale: y_division_scale!,
       grid: parseGridSource(y.grid, `${path}.y_axis.grid`),
       declared_volts_per_pixel: proofNumber(
         y.declared_volts_per_pixel,
@@ -526,8 +664,9 @@ function parseAxisReceipt(value: unknown, path: string): ReferenceGraphAxisCalib
       ),
       source_volts_per_pixel: proofNumber(y.source_volts_per_pixel, `${path}.y_axis.source_volts_per_pixel`),
       nominal_baseline_volts: proofNumber(y.nominal_baseline_volts, `${path}.y_axis.nominal_baseline_volts`),
-      nominal_trace_point_indexes: y.nominal_trace_point_indexes.map((index, item_index) =>
-        proofNumber(index, `${path}.y_axis.nominal_trace_point_indexes[${item_index}]`),
+      nominal_trace_point_indexes: proofNumberArray(
+        y.nominal_trace_point_indexes,
+        `${path}.y_axis.nominal_trace_point_indexes`,
       ),
     },
   }

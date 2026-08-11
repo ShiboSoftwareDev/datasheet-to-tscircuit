@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto"
 import { join } from "node:path"
-import { isDeepStrictEqual } from "node:util"
 import type { ComponentEvidence } from "../component-evidence"
 import { normalizePin } from "../component-evidence/get-pad-agreement-errors"
 import type { AgentClient } from "../infrastructure/agent"
@@ -996,6 +995,13 @@ is a component. Inventory every visible contact: an SPDT switch has one common a
 two throws, represented by three distinct component terminals on three nodes. An
 open contact is not a junction; never merge the load and charger branches across it.
 
+A wire that visibly enters or leaves a drawn controller, system, host, supply,
+or load block is an external terminal and must remain in that node. This is true
+even when the same node also contains a pull-up, pull-down, bypass component,
+or U1 pin. For example, a controller-driven ENABLE wire with a pull-down has
+three endpoints: the controller terminal, the resistor terminal, and U1.ENABLE;
+do not collapse it to only the resistor and U1 pin.
+
 Before returning a documented review, cross-check the complete datasheet pin table.
 Account for every electrically connectable U1 pin exactly once in connections and
 leave pins explicitly marked no-connect unwired. Do not infer that two polarity pins
@@ -1097,9 +1103,14 @@ export async function observeApplicationConnectivity(
       const parsed_review = parseApplicationConnectivityReview(raw_review, input.plan, {
         source_materialization: "unmaterialized",
       })
-      if (!isDeepStrictEqual(raw_review, parsed_review)) {
-        throw new Error("application-connectivity-review.json must contain only the canonical review fields")
-      }
+      // The parser rejects unknown or malformed fields and deterministically
+      // canonicalizes printed external labels. Persist that typed value so a
+      // harmless source spelling such as `1.8_V` does not consume every agent
+      // retry while still keeping the promoted artifact canonical.
+      await Bun.write(
+        join(workspace, "application-connectivity-review.json"),
+        `${JSON.stringify(parsed_review, null, 2)}\n`,
+      )
       const coverage_errors = input.evidence
         ? getApplicationTargetPinCoverageErrors({
             availability: parsed_review.availability,

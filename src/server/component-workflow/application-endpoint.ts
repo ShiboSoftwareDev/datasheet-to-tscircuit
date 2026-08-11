@@ -5,6 +5,13 @@
  */
 export function canonicalizeApplicationEndpoint(value: string, path: string): string {
   const endpoint = value.trim()
+  // Decimal voltage-domain labels such as `1.8_V` and
+  // `SYSTEM_CONTROLLER_1.8_V` are external semantic terminals, not
+  // component.port endpoints. Component references themselves may contain
+  // underscores, so the decimal token is the relevant distinction.
+  if (/(?:^|_)\d+\.\d+(?:_|$)/.test(endpoint)) {
+    return endpoint.replaceAll(".", "_")
+  }
   if (/^[^.\s]+\.[^.\s]+$/.test(endpoint)) return endpoint
   if (/^[^.\s]+$/.test(endpoint)) return endpoint
   if (/^[A-Z0-9][A-Z0-9_+/-]*(?:\s+[A-Z0-9][A-Z0-9_+/-]*)+$/.test(endpoint)) {

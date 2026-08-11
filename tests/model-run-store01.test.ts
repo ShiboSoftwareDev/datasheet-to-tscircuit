@@ -205,11 +205,11 @@ test("ModelRunStore retries a stopped run at the maximum repair budget", async (
   }
 })
 
-test("ModelRunStore restarts successful and timed-out runs without adding repair budget", async () => {
+test("ModelRunStore restarts completed, unsupported, and timed-out runs without adding repair budget", async () => {
   const model_dir = await mkdtemp(join(tmpdir(), "datasheet-model-store-finished-restart-"))
   const store = new ModelRunStore()
   try {
-    for (const status of ["complete", "timed_out"] as const) {
+    for (const status of ["complete", "unsupported", "timed_out"] as const) {
       const model_run_id = `model_${status}`
       store.createModelRun({
         model_run_id,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type { ModelReferenceElectricalBinding } from "../../modeling/types"
 import type {
   CharacterizerReferenceGraphObservation,
@@ -24,7 +25,10 @@ export type EligibleObservedReferenceChannel = Omit<EligibleObservedReferenceGra
 }
 
 export function referenceChannelKey(graph_id: string, channel_id: string): string {
-  return `${graph_id}__${channel_id}`
+  const key = `${graph_id}__${channel_id}`
+  if (key.length <= 64) return key
+  const digest = createHash("sha256").update(key).digest("hex").slice(0, 12)
+  return `${key.slice(0, 51)}_${digest}`
 }
 
 export type FoundObservedReferenceGraph = ObservedReferenceGraph & {

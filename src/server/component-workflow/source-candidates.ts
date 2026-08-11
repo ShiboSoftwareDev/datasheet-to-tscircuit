@@ -3,6 +3,8 @@ import { dirname, join } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import { type AgentClient, runAgentArtifactStage } from "../infrastructure/agent"
 import { createStageWorkspace, promoteStageFile, readBoundedTextArtifact } from "../infrastructure/artifacts"
+import { createFootprintPlanFromEvidence, createTscircuitPinMappings } from "../component-evidence"
+import { createComponentSchematicPlan } from "../component-schematic-plan"
 import type { TypicalApplicationPlan } from "./application-plan"
 import {
   applicationEvidenceFilePath,
@@ -13,6 +15,7 @@ import { applicationPrompt, componentPrompt } from "./prompts"
 import {
   readApprovedApplicationEvidenceBundle,
   readApprovedComponentEvidenceBundle,
+  parseApprovedFootprintCatalogSnapshot,
   readComponentBoundApplicationEvidence,
   validateGeneratedSource,
 } from "./stage-helpers"
@@ -39,6 +42,7 @@ function committedGenerationFiles(
 ): Array<{ relative_path: string; bytes: Uint8Array }> {
   const relative_paths = [
     ...GENERATION_EVIDENCE_FILES,
+    ...(snapshot.files.has("component-footprint-catalog.json") ? ["component-footprint-catalog.json"] : []),
     ...[...snapshot.files.keys()]
       .filter((relative_path) => relative_path.startsWith("visual-reference/"))
       .sort(),
@@ -82,7 +86,7 @@ async function materializeCommittedApplicationEvidence(
 
 async function createSourceWorkspace(input: {
   prefix: string
-  files: Array<{ source: string; required?: boolean }>
+  files: Array<{ source: string; destination?: string; required?: boolean }>
   evidence_snapshot: CommittedEvidenceSnapshot
   instructions: string
 }) {
@@ -110,15 +114,73 @@ export async function generateComponentSource(input: {
   on_output: (stream: "system" | "stdout" | "stderr", message: string) => void | Promise<void>
 }) {
   const { snapshot } = await readApprovedComponentEvidenceBundle(input.job_dir)
-  return runAgentArtifactStage({
+  const catalog = parseApprovedFootprintCatalogSnapshot(snapshot)
+  const variant_plans = {
+    version: 1,
+    default_footprint_id: catalog.default_footprint_id,
+    footprints: catalog.footprints.map((footprint) => {
+      const tscircuit_pins = createTscircuitPinMappings(footprint.component_evidence)
+      const tscircuit_pin_number_by_physical_pin = Object.fromEntries(
+        tscircuit_pins.map(({ physical_pin, tscircuit_pin_number }) => [
+          physical_pin,
+          String(tscircuit_pin_number),
+        ]),
+      )
+      const footprint_plan = createFootprintPlanFromEvidence(footprint.component_evidence)
+      const schematic_plan = createComponentSchematicPlan(footprint.component_evidence)
+      const map_schematic_pins = (pins: string[]) =>
+        pins.map((pin) => tscircuit_pin_number_by_physical_pin[pin] ?? pin)
+      return {
+        footprint_id: footprint.footprint_id,
+        ordering_codes: footprint.ordering_codes,
+        tscircuit_pins,
+        footprint_plan,
+        tscircuit_footprint_plan: {
+          ...footprint_plan,
+          pads: footprint_plan.pads.map((pad) => {
+            if (pad.pin === null) return { ...pad, port_hints: [] }
+            const mapping = tscircuit_pins.find(({ physical_pin }) => physical_pin === pad.pin)
+            if (!mapping) throw new Error(`No tscircuit pin mapping exists for ${pad.pin}`)
+            return {
+              ...pad,
+              port_hints: [String(mapping.tscircuit_pin_number), mapping.physical_pin_hint],
+            }
+          }),
+        },
+        schematic_plan,
+        tscircuit_schematic_plan: {
+          ...schematic_plan,
+          schPinArrangement: {
+            leftSide: {
+              ...schematic_plan.schPinArrangement.leftSide,
+              pins: map_schematic_pins(schematic_plan.schPinArrangement.leftSide.pins),
+            },
+            rightSide: {
+              ...schematic_plan.schPinArrangement.rightSide,
+              pins: map_schematic_pins(schematic_plan.schPinArrangement.rightSide.pins),
+            },
+            topSide: {
+              ...schematic_plan.schPinArrangement.topSide,
+              pins: map_schematic_pins(schematic_plan.schPinArrangement.topSide.pins),
+            },
+            bottomSide: {
+              ...schematic_plan.schPinArrangement.bottomSide,
+              pins: map_schematic_pins(schematic_plan.schPinArrangement.bottomSide.pins),
+            },
+          },
+        },
+      }
+    }),
+  }
+  const attempt = await runAgentArtifactStage({
     stage_id: input.feedback ? "repair_component" : "generate_component",
     phase_label: input.feedback ? "Component source repair" : "Component source generation",
     max_artifact_attempts: 2,
     signal: input.signal,
     use_openai: input.use_openai,
     agent_client: input.agent_client,
-    create_workspace: () =>
-      createSourceWorkspace({
+    create_workspace: async () => {
+      const workspace = await createSourceWorkspace({
         prefix: "component-source",
         files: [
           ...PROJECT_FILES.map((file_name) => ({ source: join(input.job_dir, file_name) })),
@@ -129,9 +191,17 @@ export async function generateComponentSource(input: {
         ],
         evidence_snapshot: snapshot,
         instructions: COMPONENT_SOURCE_STAGE_INSTRUCTIONS,
-      }),
+      })
+      await Bun.write(
+        join(workspace.path, "component-footprint-plans.json"),
+        `${JSON.stringify(variant_plans, null, 2)}\n`,
+      )
+      return workspace
+    },
     build_prompt: (artifact_feedback) =>
       componentPrompt({
+        default_footprint_id: catalog.default_footprint_id,
+        footprint_ids: catalog.footprints.map(({ footprint_id }) => footprint_id),
         feedback: [input.feedback, artifact_feedback].filter(Boolean).join("\n\n"),
       }),
     heartbeat_paths: (workspace) => [join(workspace, "index.circuit.tsx")],
@@ -157,6 +227,7 @@ export async function generateComponentSource(input: {
         signal: input.signal,
       }),
   })
+  return { attempts: attempt.attempts, agent_duration_ms: attempt.agent_duration_ms }
 }
 
 export async function generateApplicationSource(input: {

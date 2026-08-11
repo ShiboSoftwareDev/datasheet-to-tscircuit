@@ -1,5 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
-import type { ComponentEvidence } from "../component-evidence"
+import { physicalPinHint, type ComponentEvidence } from "../component-evidence"
 import { normalizePin } from "../component-evidence/get-pad-agreement-errors"
 import { normalizeElectricalPinLabel } from "../pin-label-normalization"
 import type { ModelInterface } from "./types"
@@ -39,15 +39,21 @@ function resolveComponentSelector(input: {
     .map((element) => element as unknown as Record<string, unknown> & { type: string })
     .filter(({ type }) => type === "source_port")
   const expected_pin = normalizePin(input.pin.number)
-  const matches = ports.filter((port) => {
-    const aliases = [
-      typeof port.pin_number === "string" || typeof port.pin_number === "number"
-        ? String(port.pin_number)
-        : "",
-      ...stringArray(port.port_hints),
-    ]
-    return aliases.some((alias) => normalizePin(alias) === expected_pin)
-  })
+  const exact_physical_matches = ports.filter((port) =>
+    stringArray(port.port_hints).includes(physicalPinHint(input.pin.number)),
+  )
+  const matches =
+    exact_physical_matches.length > 0
+      ? exact_physical_matches
+      : ports.filter((port) => {
+          const aliases = [
+            typeof port.pin_number === "string" || typeof port.pin_number === "number"
+              ? String(port.pin_number)
+              : "",
+            ...stringArray(port.port_hints),
+          ]
+          return aliases.some((alias) => normalizePin(alias) === expected_pin)
+        })
   if (matches.length !== 1) {
     throw new Error(
       `Physical pin ${input.pin.number} maps to ${matches.length} Circuit JSON source ports; the model interface requires exactly one`,
@@ -84,7 +90,8 @@ function createModelInterfaceWithSelectors(
 ): ModelInterface {
   const entry_name = identifier(evidence.part_number.value) || "DATASHEET_MODEL"
   const used_nodes = new Set<string>()
-  const pins = evidence.pinout.pins.map((pin, index) => {
+  const electrical_pins = evidence.pinout.pins.filter(({ role }) => role !== "no_connect")
+  const pins = electrical_pins.map((pin, index) => {
     const selector = selector_for_pin(pin, index)
     const primary_label = pin.labels[0]
     const base =

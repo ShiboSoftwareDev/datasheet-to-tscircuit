@@ -11,6 +11,7 @@ import type { ProcessRunner } from "@/server/infrastructure/process"
 import {
   assertComparisonGraphPreservesDiscovery,
   assertReferenceGraphObservationVerified,
+  referenceGraphDiscoveryPreflightErrors,
 } from "@/server/model-workflow/characterization/source-inventory"
 import { runReferenceGraphWorkerPool } from "@/server/model-workflow/characterization/reference-graph-worker-pool"
 import {
@@ -18,6 +19,11 @@ import {
   buildReferenceGraphPreflight,
   buildReferenceGraphSourceProof,
 } from "@/server/model-workflow/reference-graph-axis-proof"
+import {
+  hasRightEdgeScopeControlStrip,
+  preferredTimeDivisionScale,
+} from "@/server/model-workflow/reference-graph-axis-proof/scope-divisions"
+import type { ReferenceDivisionScaleSource } from "@/server/model-workflow/reference-graph-axis-proof/types"
 import { buildSingleComparisonReferenceGraphObserverPrompt } from "@/server/model-workflow/reference-graph-observation"
 import type {
   ObservedReferenceGraph,
@@ -344,6 +350,100 @@ function eligibleObservation(source_pdf_sha256: string): ReferenceGraphObservati
   }
 }
 
+test("Find-stage preflight owns immutable crop calibration viability", () => {
+  const complete = {
+    version: 1,
+    graph_id: "graph",
+    source_pdf_sha256: "a".repeat(64),
+    page: 1,
+    canonical_crop: foundGraph().crop,
+    canonical_crop_sha256: "b".repeat(64),
+    figure_identity: {
+      algorithm: "pdftotext_bbox_adjacent_figure_v1",
+      normalized_figure: "figure 1",
+      source_text: "Figure 1",
+      bbox_pdf_points: { x_min: 1, y_min: 1, x_max: 2, y_max: 2 },
+      crop_edge_gap_pdf_points: 0,
+      bbox_output_sha256: "c".repeat(64),
+    },
+    x_axis: {
+      quantity: "time",
+      unit: "s",
+      elapsed_time_origin: 0,
+      grid_line_candidates_px: [],
+      division_scale_candidates: [],
+      source_seconds_per_pixel_candidates: [0.001],
+      required_anchor_value_span_candidates: [],
+    },
+    y_axis: {
+      quantity: "voltage",
+      unit: "V",
+      grid_line_candidates_px: [],
+      division_scale_candidates: [],
+      source_volts_per_pixel_candidates: [0.01],
+      required_anchor_value_span_candidates: [],
+    },
+    recognized_measurements: [],
+  } satisfies import("@/server/model-workflow/reference-graph-axis-proof").ReferenceGraphPreflight
+
+  expect(referenceGraphDiscoveryPreflightErrors(complete)).toEqual([])
+  expect(
+    referenceGraphDiscoveryPreflightErrors({
+      ...complete,
+      x_axis: {
+        ...complete.x_axis,
+        source_seconds_per_pixel_candidates: [],
+        division_scale_candidates: [
+          { raw_text: "100 us/div", value_per_division_si: 100e-6, observer_center_px: { x: 20, y: 10 } },
+        ],
+      },
+      y_axis: {
+        ...complete.y_axis,
+        source_volts_per_pixel_candidates: [],
+        division_scale_candidates: [
+          { raw_text: "100 mV/div", value_per_division_si: 0.1, observer_center_px: { x: 20, y: 40 } },
+        ],
+      },
+    }),
+  ).toEqual([])
+  expect(
+    referenceGraphDiscoveryPreflightErrors({
+      ...complete,
+      figure_identity: undefined,
+      y_axis: { ...complete.y_axis, source_volts_per_pixel_candidates: [] },
+    }),
+  ).toEqual([
+    "the immutable crop does not include or immediately adjoin its own printed figure identity",
+    "the immutable crop has no unambiguous printed voltage calibration",
+  ])
+})
+
+test("preflight prefers a printed time-per-division label over a compact cursor readout", () => {
+  const candidate = (raw_text: string, value_per_division_si: number): ReferenceDivisionScaleSource => ({
+    raw_text,
+    normalized_unit: "s",
+    value_per_division_si,
+    confidence: 95,
+    ocr_bbox_px: { left: 0, top: 0, width: 30, height: 20 },
+  })
+  const printed_timebase = candidate("500 us/div", 500e-6)
+  const cursor_readout = candidate("500 ps", 500e-12)
+
+  expect(
+    preferredTimeDivisionScale({
+      full_candidates: [printed_timebase, cursor_readout],
+      horizontal_candidates: [],
+      channel_candidates: [],
+      scope_control_candidates: [cursor_readout],
+    }),
+  ).toEqual(printed_timebase)
+})
+
+test("preflight keeps scope OCR in a physical control strip beside the plot", () => {
+  expect(hasRightEdgeScopeControlStrip({ render_width: 693 * 3, plot_right_px: 572 })).toBe(true)
+  expect(hasRightEdgeScopeControlStrip({ render_width: 693 * 3, plot_right_px: 650 })).toBe(false)
+})
+
 test("reference graph preflight deterministically extracts immutable source calibration", async () => {
   const root = await mkdtemp(join(tmpdir(), "reference-preflight-"))
   temporary_directories.push(root)
@@ -383,6 +483,7 @@ test("reference graph preflight deterministically extracts immutable source cali
     expect.objectContaining({ raw_text: "2V/div", value_per_division_si: 2 }),
   ])
   expect(first.x_axis.source_seconds_per_pixel_candidates).toHaveLength(1)
+  expect(first_analysis.source_analysis.selected_time_scale).toBeUndefined()
 
   const verification_runner = new DeterministicPreflightRunner()
   await buildReferenceGraphSourceProof({

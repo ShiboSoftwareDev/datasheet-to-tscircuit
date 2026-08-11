@@ -71,7 +71,7 @@ export async function retryModelRun(request_url: URL, context: ModelRunApiContex
   appendModelRunLogBestEffort(
     execution_context,
     current_run.model_run_id,
-    `Restarting SPICE generation after ${current_run.status === "complete" ? "successful completion" : current_run.status === "cancelled" ? "the stopped run" : current_run.status === "timed_out" ? "the run timed out" : "failure"}; prior contracts, plans, candidates, and debug bundles remain preserved.\n`,
+    `Restarting SPICE generation after ${current_run.status === "complete" ? "successful completion" : current_run.status === "unsupported" ? "the prior datasheet had no supported executable transient" : current_run.status === "cancelled" ? "the stopped run" : current_run.status === "timed_out" ? "the run timed out" : "failure"}; prior contracts, plans, candidates, and debug bundles remain preserved.\n`,
   )
   launchModelRunner(current_run.model_run_id, execution_context)
   return jsonResponse({ model_run: context.model_run_store.getModelRun(current_run.model_run_id) }, 202)

@@ -39,7 +39,7 @@ export function AgentLogs({
           )}
           <a
             className="toolbar-icon-link"
-            href={getJobFileUrl(job.job_id, "log", undefined, local_run_id)}
+            href={getJobFileUrl(job.job_id, "log", { local_run_id })}
             aria-label="Download complete agent log"
           >
             <Download size={15} />

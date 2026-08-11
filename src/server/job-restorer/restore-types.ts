@@ -27,6 +27,7 @@ export const MODEL_STATUSES = new Set<ModelRunStatus>([
   "cancelling",
   "cancelled",
   "complete",
+  "unsupported",
   "timed_out",
   "failed",
 ])

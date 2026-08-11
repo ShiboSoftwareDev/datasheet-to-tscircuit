@@ -30,22 +30,41 @@ function tscircuitPassiveValue(value: string): string | undefined {
     : undefined
 }
 
-export function evidencePrompt(input: { additional_instructions?: string; feedback?: string }): string {
+export function evidencePrompt(input: {
+  additional_instructions?: string
+  footprint_hints?: readonly { page: number; package_code: string; pin_count: number }[]
+  feedback?: string
+}): string {
+  const footprint_inventory = input.footprint_hints?.length
+    ? `\nThe server found explicit PCB land-pattern drawings that must all be covered:\n${input.footprint_hints
+        .map(
+          ({ page, package_code, pin_count }) =>
+            `- PDF page ${page}: package ${package_code}, ${pin_count} pins`,
+        )
+        .join("\n")}\n`
+    : ""
   return `Extract authoritative component evidence from datasheet.pdf.
 
-Read AGENTS.md and EVIDENCE-SCHEMA.md. Write only component-evidence.json,
+Read AGENTS.md and EVIDENCE-SCHEMA.md. Write only component-footprint-catalog.json,
 and files under visual-reference/. Do not search for a typical application and
 do not create circuit TSX.
 
 Use pdftotext/pdfinfo to find relevant pages. Render selected PDF pages at 200
-DPI with stable names, then inspect the pixels. Resolve one exact orderable
-part/package combination. Cite every identity, pin, orientation, and pad value.
-Trace land-pattern dimension leaders. Record unresolved rather than guessing.
-The server strictly parses the artifact and derives its own footprint and
-schematic plans. Before returning, compare component-evidence.json field-by-field
-against the canonical example. On a correction attempt, edit the retained
+DPI with stable names, then inspect the pixels. Find every distinct physical
+package that has a complete, usable PCB copper land pattern and pinout in the
+datasheet. Write one catalog entry per physical copper footprint. Tape/reel,
+quantity, temperature-grade, and orderable suffixes are aliases, not footprints.
+A package outline, bottom view, example board layout, and stencil drawing are
+representations or fabrication aids for one package, not separate footprints;
+never use stencil apertures as copper pads. Cite every identity, pin,
+orientation, and pad value. Trace land-pattern dimension leaders. Record
+unresolved rather than guessing. Choose one documented orderable as the
+deterministic default. The server strictly parses and physically deduplicates
+the catalog, then derives its own footprint and schematic plans. Before
+returning, compare every component_evidence entry field-by-field against the
+canonical examples. On a correction attempt, edit the retained
 candidate instead of re-extracting facts that are already supported.
-${input.feedback ? `\nThe previous artifact was rejected. Correct every item:\n${boundedFeedback(input.feedback)}\n` : ""}${userContext(input.additional_instructions)}`
+${footprint_inventory}${input.feedback ? `\nThe previous artifact was rejected. Correct every item:\n${boundedFeedback(input.feedback)}\n` : ""}${userContext(input.additional_instructions)}`
 }
 
 export function applicationEvidencePrompt(input: {
@@ -72,19 +91,45 @@ retained candidate.
 ${input.feedback ? `\nThe previous artifact was rejected. Correct every item:\n${boundedFeedback(input.feedback)}\n` : ""}${userContext(input.additional_instructions)}`
 }
 
-export function componentPrompt(input: { feedback?: string }): string {
+export function componentPrompt(input: {
+  default_footprint_id?: string
+  footprint_ids?: readonly string[]
+  feedback?: string
+}): string {
+  const footprint_ids = input.footprint_ids ?? ["<catalog-footprint-id>"]
+  const default_footprint_id = input.default_footprint_id ?? "<catalog-default-footprint-id>"
   return `Create the reusable tscircuit component from the approved artifacts.
 
-Read AGENTS.md, component-evidence.json, component-schematic-plan.json, and
-footprint-plan.json. Write only index.circuit.tsx. The datasheet is intentionally
-not present. Treat every input JSON and reference image as read-only.
+Read AGENTS.md, component-footprint-catalog.json, and the server-derived
+component-footprint-plans.json. Write one component to index.circuit.tsx. The
+datasheet is intentionally not present. Treat every input JSON and reference
+image as read-only.
 
-Default-export a production component using the exact ordering code (or part
-number), complete pin labels, exact PCB-top pad geometry, and the server-owned
-schPinArrangement. Map power_input to requiresPower, power_output to
+The component has these physical footprint options: ${footprint_ids.join(", ")}.
+Add an optional footprintVariant prop whose exact string union contains every
+listed id and whose default is ${default_footprint_id}. One default-exported
+component must select its manufacturer part number, physical pin map, schematic
+arrangement, and footprint from that prop. Do not export or generate separate
+component implementations for the variants. Keep all shared functional pin
+aliases usable through the same component API.
+
+Use each catalog entry's exact ordering code (or part number), complete pin
+labels, and its server-derived PCB-top pad geometry and schematic arrangement.
+Do not recalculate or simplify the supplied plans. Map
+power_input to requiresPower, power_output to
 providesPower, ground to requiresGround, and documented open-drain pins to both
 open-drain attributes. Preserve punctuation-bearing labels as safe aliases such
 as IN_NEG/IN_POS plus source comments. Do not disable placement, routing, or DRC.
+The chip API accepts only numeric pinLabels keys. Follow each variant's
+tscircuit_pins exactly: use pinLabels key pin<tscircuit_pin_number>, use the
+tscircuit_schematic_plan, and copy each tscircuit_footprint_plan pad's
+port_hints verbatim. This preserves alphanumeric ball names without invalid
+keys such as pinA1 and without confusing a physical ball with a functional
+label. Render the selected plan through a <footprint> containing <smtpad> and
+<platedhole> JSX elements whose portHints props are copied from port_hints.
+Never pass the raw pad-plan array directly to the chip footprint prop: raw pad
+objects bypass tscircuit's JSX port binding. Type reusable props with ChipProps plus footprintVariant; do not use any,
+as any, as unknown, or an untyped index signature.
 The server performs all builds and checks after this stage.
 ${input.feedback ? `\nThe last server build was rejected. Correct every item:\n${boundedFeedback(input.feedback)}\n` : ""}`
 }

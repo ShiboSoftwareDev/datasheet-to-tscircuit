@@ -1,16 +1,20 @@
 import { readFile } from "node:fs/promises"
 import type { AnyCircuitElement } from "circuit-json"
-import type { JobValidation } from "@/shared/job-types"
+import type { ComponentFootprintPreviews, JobValidation } from "@/shared/job-types"
 import { isCircuitElementArray } from "../component-circuit-json"
 import {
   type ComponentEvidence,
+  type ComponentFootprintCatalog,
+  createSingleFootprintCatalog,
   createFootprintPlanFromEvidence,
+  parseComponentFootprintCatalog,
   parseComponentEvidence,
 } from "../component-evidence"
 import { type ComponentSchematicPlan, createComponentSchematicPlan } from "../component-schematic-plan"
 import type { FootprintPlan } from "../job-artifact-validator"
 import type { JobStore } from "../job-store"
 import { createPipelineArtifact, type PipelineArtifact } from "../pipeline"
+import { getComponentSourceStructureErrors } from "./component-source-validation"
 import {
   applicationTargetIdentityFromEvidence,
   parseTypicalApplicationPlan,
@@ -113,6 +117,46 @@ export async function readApprovedComponentEvidenceBundle(job_dir: string): Prom
 
 export async function readApprovedEvidence(job_dir: string): Promise<ApprovedComponentEvidence> {
   return (await readApprovedComponentEvidenceBundle(job_dir)).evidence
+}
+
+export function parseApprovedFootprintCatalogSnapshot(
+  snapshot: CommittedEvidenceSnapshot,
+): ComponentFootprintCatalog {
+  if (!snapshot.files.has("component-footprint-catalog.json")) {
+    return createSingleFootprintCatalog({
+      component_evidence: parseApprovedEvidenceSnapshot(snapshot).component_evidence,
+    })
+  }
+  return parseComponentFootprintCatalog(parseCommittedJson(snapshot, "component-footprint-catalog.json"))
+}
+
+export async function readApprovedComponentFootprintCatalog(
+  job_dir: string,
+): Promise<ComponentFootprintCatalog> {
+  const snapshot = await readCommittedEvidenceSnapshot(job_dir)
+  if (!snapshot) {
+    throw new Error("Approved evidence is unavailable because evidence-commit.json has not been published")
+  }
+  return parseApprovedFootprintCatalogSnapshot(snapshot)
+}
+
+export function componentFootprintPreviewsFromCatalog(
+  catalog: ComponentFootprintCatalog,
+): ComponentFootprintPreviews {
+  return {
+    default_footprint_id: catalog.default_footprint_id,
+    footprints: catalog.footprints.map((footprint) => ({
+      footprint_id: footprint.footprint_id,
+      label: footprint.label,
+      aliases: footprint.aliases,
+      ordering_codes: footprint.ordering_codes,
+      package_name: footprint.component_evidence.package.name.value,
+      ...(footprint.component_evidence.package.code
+        ? { package_code: footprint.component_evidence.package.code.value }
+        : {}),
+      pin_count: footprint.component_evidence.package.pin_count.value,
+    })),
+  }
 }
 
 function parseCommittedApplicationJson(
@@ -225,7 +269,16 @@ export function validateGeneratedSource(source: string, kind: "component" | "app
   if (/placementDrcChecksDisabled|routingDisabled|ignore-placement-drc/i.test(source)) {
     throw new Error(`${kind} source disables a required server validation`)
   }
+  if (/\bas\s+(?:any|unknown)\b|:\s*any\b/.test(source)) {
+    throw new Error(`${kind} source uses an unsafe TypeScript escape hatch`)
+  }
   if (kind === "application" && !/\bfrom\s*["']\.\/component\.circuit(?:\.tsx)?["']/.test(source)) {
     throw new Error("application source must import ./component.circuit")
+  }
+  if (kind === "component") {
+    const structure_errors = getComponentSourceStructureErrors(source)
+    if (structure_errors.length > 0) {
+      throw new Error(structure_errors.join("\n"))
+    }
   }
 }

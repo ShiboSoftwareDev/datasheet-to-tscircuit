@@ -136,6 +136,17 @@ const canonical_application_example = {
   ],
 }
 
+const canonical_footprint_catalog_example = {
+  version: 1,
+  default_footprint_id: "package-name-2",
+  footprints: [
+    {
+      footprint_id: "package-name-2",
+      component_evidence: canonical_component_example,
+    },
+  ],
+}
+
 export const COMPONENT_EVIDENCE_GUIDE = `# Component evidence artifact contract
 
 Schema id: ${COMPONENT_EVIDENCE_SCHEMA_ID}
@@ -144,7 +155,27 @@ The JSON representations below are exact. Keep every required version field.
 Physical pin identifiers are JSON strings even when they contain only digits.
 Do not replace enum values with explanatory prose.
 
-## component-evidence.json
+## component-footprint-catalog.json
+
+- version: exactly 1
+- default_footprint_id: the lowercase hyphenated id of one entry
+- footprints: one entry per distinct, usable physical PCB copper footprint
+- footprints[].footprint_id: stable lowercase hyphenated package identity
+- footprints[].component_evidence: the exact component evidence shape below
+
+Extractor example (the server adds canonical label/alias metadata):
+
+\`\`\`json
+${JSON.stringify(canonical_footprint_catalog_example, null, 2)}
+\`\`\`
+
+Do not create separate entries for tape/reel or quantity orderables, package
+outline and board-layout views, repeated drawings, or stencil apertures. The
+server also compares normalized copper geometry and pad-to-pin mapping under
+drawing rotations and merges physical duplicates. Pin labels and roles do not
+turn another representation of the same copper pattern into a new footprint.
+
+## footprints[].component_evidence
 
 - version: exactly ${COMPONENT_EVIDENCE_VERSION}
 - status: ${["resolved", "unresolved"].map((value) => `"${value}"`).join(" | ")}
@@ -181,15 +212,21 @@ Calculated and package-standard sources cannot establish those facts. They are
 allowed for pad geometry only when the same PDF page has a medium- or
 high-confidence pdf_visual footprint citation anchoring the derivation.
 
-Resolve one exact orderable part/package. Record every electrical pin and every
-copper pad. Coordinates are millimeters in PCB-top view. Never substitute a
+For every catalog entry, resolve an exact orderable part/package. Record every
+electrical pin and every physical copper area exactly once. Distinct copper pads
+may share one physical electrical pin. An exposed or thermal pad that the
+datasheet bonds to an existing pin must reuse that documented physical pin
+number; do not invent names such as "thermal-pad". Use null only when the copper
+is proven to be mechanically present and electrically unassigned. Coordinates
+are millimeters in PCB-top view. Never substitute a
 package outline, bottom view, or stencil aperture for a copper land pattern. If
 a material fact is ambiguous, use status "unresolved" and explain it instead of
 guessing.
 
 Use the cited PDF pages while extracting the evidence. The server discards
 agent-authored PNG pixels, renders every cited page itself at 200 DPI, and
-publishes trusted full-page aliases at visual-reference/land-pattern.png.
+publishes trusted full-page renders. The default footprint is also available at
+visual-reference/land-pattern.png.
 `
 
 export const APPLICATION_EVIDENCE_GUIDE = `# Typical-application evidence artifact contract

@@ -384,6 +384,77 @@ test("a declared curve with no finite result is reported as attempted, not valid
   })
 })
 
+test("a multi-channel preview mirrors the response even when the stimulus is listed first", () => {
+  const validation_case = structuredClone(plan.cases[0]!)
+  validation_case.id = "translated_signal"
+  validation_case.analysis = { type: "transient", step: 1e-9, stop: 2e-6 }
+  validation_case.observations = [
+    {
+      ...structuredClone(validation_case.observations[0]!),
+      id: "input_voltage",
+      role: "stimulus",
+      reference: {
+        type: "curve",
+        tolerance: 0.05,
+        points: [
+          { x: 0, y: 0 },
+          { x: 1e-6, y: 1.8 },
+        ],
+      },
+    },
+    {
+      ...structuredClone(validation_case.observations[0]!),
+      id: "output_voltage",
+      role: "response",
+      reference: {
+        type: "curve",
+        tolerance: 0.05,
+        points: [
+          { x: 0, y: 0 },
+          { x: 1e-6, y: 3.3 },
+        ],
+      },
+    },
+  ]
+
+  const preview = projectModelReferencePreview({
+    validation_case,
+    updated_at: "2026-08-11T00:00:00.000Z",
+  })
+
+  expect(preview.series?.map(({ role }) => role)).toEqual(["stimulus", "response"])
+  const response = preview.series?.[1]
+  if (!response) throw new Error("Expected the response preview series")
+  expect(preview.reference_points).toEqual(response.reference_points)
+  expect(preview.y_axis_unit).toBe(response.unit)
+  expect(preview.source_file).toBe(response.source_file)
+
+  const summary = projectModelValidationSummary(
+    { version: 1, model: plan.model, cases: [validation_case] },
+    {
+      version: 1,
+      passed: false,
+      hashes: result.hashes,
+      cases: [
+        {
+          case_id: validation_case.id,
+          status: "failed",
+          analysis: "transient",
+          elapsed_ms: 1,
+          series: [],
+          errors: [],
+          netlist_sha256: "multi-channel-netlist",
+          raw_sha256: "multi-channel-result",
+        },
+      ],
+      errors: [],
+    },
+  )
+  const benchmark = summary.benchmarks[0]
+  if (!benchmark) throw new Error("Expected a multi-channel validation summary")
+  expect(benchmark.series?.map(({ role }) => role)).toEqual(["stimulus", "response"])
+})
+
 test("a direct ngspice pass cannot make candidate UI verified without a tscircuit waveform", () => {
   const transient_plan: ValidationPlan = {
     version: 1,

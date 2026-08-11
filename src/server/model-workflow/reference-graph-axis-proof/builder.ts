@@ -6,6 +6,7 @@ import { decodeModelEvidencePng } from "../model-evidence-pages"
 import {
   eligibleObservedGraphs,
   type EligibleObservedReferenceChannel,
+  type EligibleObservedReferenceGraph,
   primaryResponseChannel,
   type ReferenceGraphObservation,
 } from "../reference-graph-observation"
@@ -16,18 +17,23 @@ import {
   divisionScaleCandidates,
   measurementCandidates,
   parseTesseractTsv,
+  scopeControlDivisionScaleCandidates,
   tesseractVersion,
 } from "./ocr-extraction"
 import { extractPdfTextBBox, figureIdentityFromPdfText, nominalVoltageFromPdfText } from "./pdf-extraction"
 import type { ReferenceGraphImmutableSourceAnalysis } from "./preflight"
 import {
+  axisZeroReferencePixel,
   dominantGrid,
   divisionScaleNearestTrace,
   neutralGridProfile,
   ocrScopePanels,
+  preferredTimeDivisionScale,
   recoverMissingTimeDivisionPrefix,
   relativeScaleAgreement,
+  scopeChannelControlDivisionScales,
   uniqueDivisionScale,
+  visibleScopeZeroMarker,
 } from "./scope-divisions"
 import { canonicalJson, MAX_TSV_BYTES, OCR_DPI, OCR_SCALE, sha256 } from "./shared"
 import type {
@@ -37,6 +43,7 @@ import type {
   ReferenceGraphSourceProof,
   ReferenceGridCalibrationSource,
   TesseractWord,
+  VisibleZeroScopeChannelCalibrationReceipt,
 } from "./types"
 
 export function printedNominalSourcesByGraphId(input: {
@@ -99,8 +106,23 @@ function stableTraceEdgeBaseline(
   }
 }
 
+function eligibleChannels(graph: EligibleObservedReferenceGraph): EligibleObservedReferenceChannel[] {
+  const { channels: _channels, ...source_graph } = graph
+  return graph.channels.map((channel) => ({
+    ...source_graph,
+    graph_id: `${graph.graph_id}__${channel.channel_id}`,
+    source_graph_id: graph.graph_id,
+    channel_id: channel.channel_id,
+    channel_label: channel.label,
+    channel_role: channel.role,
+    measurement: structuredClone(channel.measurement),
+    digitized_curve: structuredClone(channel.digitized_curve),
+  }))
+}
+
 async function proveGraphAxis(input: {
   graph: EligibleObservedReferenceChannel
+  source_graph: EligibleObservedReferenceGraph
   source_pdf_sha256: string
   workspace: string
   process_runner: ProcessRunner
@@ -288,6 +310,7 @@ async function proveGraphAxis(input: {
   let nominal_baseline_pixel: number | undefined
   let source_seconds_per_pixel: number | undefined
   let source_volts_per_pixel: number | undefined
+  let visible_zero_channels: VisibleZeroScopeChannelCalibrationReceipt[] | undefined
   let use_explicit_time = false
   if (!receipt) {
     const panels = await ocrScopePanels({
@@ -304,30 +327,44 @@ async function proveGraphAxis(input: {
     const full_division_candidates = divisionScaleCandidates(full_words)
     const horizontal_division_candidates = divisionScaleCandidates(panels?.horizontal_words ?? [])
     const channel_division_candidates = divisionScaleCandidates(panels?.channel_words ?? [])
+    const scope_control_candidates = scopeControlDivisionScaleCandidates({
+      horizontal_words: panels?.horizontal_words ?? [],
+      channel_words: panels?.channel_words ?? [],
+    })
     division_candidates = [
       ...full_division_candidates,
       ...horizontal_division_candidates,
       ...channel_division_candidates,
+      ...scope_control_candidates,
     ]
-    // Prefer semantically localized scope panels. A unique scale visible in
-    // the exact canonical crop remains valid when a tight crop includes the
-    // printed value but clips the faint panel heading used for focused OCR.
-    // Ambiguous full-crop values still fail closed.
-    time_scale =
-      uniqueDivisionScale(horizontal_division_candidates, "s") ??
-      uniqueDivisionScale(full_division_candidates, "s")
+    time_scale = preferredTimeDivisionScale({
+      full_candidates: full_division_candidates,
+      horizontal_candidates: horizontal_division_candidates,
+      channel_candidates: channel_division_candidates,
+      scope_control_candidates,
+    })
     time_scale = recoverMissingTimeDivisionPrefix(time_scale, panels?.horizontal_words ?? [])
+    if (explicit_time && time_scale && !/\/\s*div(?:ision)?/i.test(time_scale.raw_text)) {
+      time_scale = undefined
+    }
+    // Preflight and final verification operate on the same immutable crop.
+    // Reuse the preflight-selected scale so a noisier focused OCR pass cannot
+    // reinterpret a cursor readout as the scope timebase for that same crop.
+    if (analysis?.selected_time_scale) {
+      time_scale = structuredClone(analysis.selected_time_scale)
+    }
     voltage_scale =
       divisionScaleNearestTrace({
         candidates: [
           ...full_division_candidates,
           ...horizontal_division_candidates,
           ...channel_division_candidates,
+          ...scope_control_candidates,
         ],
         unit: "V",
         graph: input.graph,
       }) ??
-      uniqueDivisionScale(channel_division_candidates, "V") ??
+      uniqueDivisionScale([...channel_division_candidates, ...scope_control_candidates], "V") ??
       uniqueDivisionScale(full_division_candidates, "V")
     x_grid_lines = neutralGridProfile({
       decoded: png_dimensions,
@@ -386,6 +423,71 @@ async function proveGraphAxis(input: {
         : explicit_time?.units_per_pixel
     source_volts_per_pixel =
       voltage_scale && y_grid ? voltage_scale.value_per_division_si / y_grid.median_spacing_px : undefined
+    const source_channels = eligibleChannels(input.source_graph)
+    const channel_control_scales = scopeChannelControlDivisionScales({
+      decoded: png_dimensions,
+      horizontal_words: panels?.horizontal_words ?? [],
+      channel_words: panels?.channel_words ?? [],
+      channels: source_channels,
+    })
+    const visible_channel_calibrations = source_channels.flatMap(
+      (channel): VisibleZeroScopeChannelCalibrationReceipt[] => {
+        const division_scale = channel_control_scales.find(
+          (candidate) => candidate.channel_id === channel.channel_id,
+        )?.division_scale
+        if (!division_scale) return []
+        const channel_grid_lines = neutralGridProfile({
+          decoded: png_dimensions,
+          axis: "y",
+          graph: channel,
+        })
+        const grid = dominantGrid({
+          lines: channel_grid_lines,
+          first_anchor: channel.digitized_curve.y_axis.first.pixel,
+          second_anchor: channel.digitized_curve.y_axis.second.pixel,
+        })
+        if (!grid) return []
+        const { first, second } = channel.digitized_curve.y_axis
+        const zero_reference_pixel = axisZeroReferencePixel({ first, second })
+        if (zero_reference_pixel === undefined) return []
+        const zero_marker = visibleScopeZeroMarker({
+          decoded: png_dimensions,
+          graph: channel,
+          zero_reference_pixel,
+        })
+        if (!zero_marker) return []
+        const declared_volts_per_pixel = Math.abs(
+          (channel.digitized_curve.y_axis.second.value - channel.digitized_curve.y_axis.first.value) /
+            (channel.digitized_curve.y_axis.second.pixel - channel.digitized_curve.y_axis.first.pixel),
+        )
+        const channel_source_volts_per_pixel = division_scale.value_per_division_si / grid.median_spacing_px
+        if (
+          !relativeScaleAgreement(declared_volts_per_pixel, channel_source_volts_per_pixel) ||
+          channel.digitized_curve.y_axis.first.pixel <= channel.digitized_curve.y_axis.second.pixel
+        ) {
+          return []
+        }
+        return [
+          {
+            channel_id: channel.channel_id,
+            division_scale,
+            grid: {
+              ...grid,
+              first_anchor_error_px: 0,
+              second_anchor_error_px: 0,
+            },
+            declared_volts_per_pixel: channel_source_volts_per_pixel,
+            source_volts_per_pixel: channel_source_volts_per_pixel,
+            zero_reference_volts: 0,
+            zero_reference_pixel,
+            zero_marker,
+          },
+        ]
+      },
+    )
+    if (visible_channel_calibrations.length === source_channels.length) {
+      visible_zero_channels = visible_channel_calibrations
+    }
     if (!figure_identity) missing_proofs.push("adjacent_figure_identity")
     if (!panels) missing_proofs.push("oscilloscope_panels")
     if (!time_scale && !explicit_time) {
@@ -394,7 +496,9 @@ async function proveGraphAxis(input: {
     if (!voltage_scale) missing_proofs.push("unique_printed_voltage_per_division")
     if (!x_grid) missing_proofs.push("time_grid_and_anchor_alignment")
     if (!y_grid) missing_proofs.push("voltage_grid_and_anchor_alignment")
-    if (!nominal_source) missing_proofs.push("printed_output_nominal_voltage")
+    if (!nominal_source && !visible_zero_channels) {
+      missing_proofs.push("printed_output_nominal_voltage_or_visible_channel_zero_markers")
+    }
     if (input.graph.digitized_curve.x_axis.first.value !== 0) {
       missing_proofs.push("server_elapsed_time_zero_origin")
     }
@@ -404,7 +508,7 @@ async function proveGraphAxis(input: {
     if (input.graph.digitized_curve.y_axis.first.pixel <= input.graph.digitized_curve.y_axis.second.pixel) {
       missing_proofs.push("voltage_axis_screen_orientation")
     }
-    if (nominal_point_indexes.length < 2 || nominal_baseline_pixel === undefined) {
+    if (nominal_source && (nominal_point_indexes.length < 2 || nominal_baseline_pixel === undefined)) {
       missing_proofs.push("nominal_voltage_trace_baseline")
     }
     if (
@@ -427,8 +531,7 @@ async function proveGraphAxis(input: {
       voltage_scale &&
       x_grid &&
       y_grid &&
-      nominal_source &&
-      nominal_baseline_pixel !== undefined &&
+      (visible_zero_channels || (nominal_source && nominal_baseline_pixel !== undefined)) &&
       source_seconds_per_pixel !== undefined &&
       source_volts_per_pixel !== undefined
     ) {
@@ -464,7 +567,7 @@ async function proveGraphAxis(input: {
               source_seconds_per_pixel,
             }
           : undefined
-      const scope_receipt_common = {
+      const scope_receipt_base = {
         ...common,
         figure_identity,
         ocr: {
@@ -475,69 +578,95 @@ async function proveGraphAxis(input: {
           tsv_sha256: sha256(tsv),
           panel_tsv_sha256,
         },
-        y_axis: {
+      }
+      if (visible_zero_channels) {
+        const y_axis = {
           quantity: "voltage" as const,
           unit: "V" as const,
-          division_scale: voltage_scale,
-          grid: {
-            ...y_grid,
-            first_anchor_error_px: 0,
-            second_anchor_error_px: 0,
-          },
-          declared_volts_per_pixel: source_volts_per_pixel,
-          source_volts_per_pixel,
-          nominal_baseline_volts:
-            nominal_source.kind === "pdf"
-              ? nominal_source.value
-              : nominal_source.evidence.response.nominal_volts,
-          nominal_baseline_pixel,
-          nominal_trace_point_indexes: nominal_point_indexes,
-        },
-      }
-      if (nominal_source.kind === "pdf") {
-        const y_axis = {
-          ...scope_receipt_common.y_axis,
-          nominal_source_text: nominal_source.source_text,
-          nominal_source_bbox_pdf_points: nominal_source.bbox,
+          channels: visible_zero_channels,
         }
         if (explicit_x_axis) {
           receipt = {
-            ...scope_receipt_common,
-            algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v1",
+            ...scope_receipt_base,
+            algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v3",
             x_axis: explicit_x_axis,
             y_axis,
           }
         } else if (division_x_axis) {
           receipt = {
-            ...scope_receipt_common,
-            algorithm: "canonical_pdf_tesseract_scope_divisions_v2",
+            ...scope_receipt_base,
+            algorithm: "canonical_pdf_tesseract_scope_divisions_v4",
             x_axis: division_x_axis,
             y_axis,
           }
         }
-      } else {
-        const y_axis = {
-          ...scope_receipt_common.y_axis,
-          nominal_source: {
-            algorithm: "printed_experiment_conditions_v3" as const,
-            source_excerpts: structuredClone(nominal_source.evidence.source_excerpts),
-            signal: nominal_source.evidence.response.signal,
-            nominal_volts: nominal_source.evidence.response.nominal_volts,
+      } else if (nominal_source && nominal_baseline_pixel !== undefined) {
+        const scope_receipt_common = {
+          ...scope_receipt_base,
+          y_axis: {
+            quantity: "voltage" as const,
+            unit: "V" as const,
+            division_scale: voltage_scale,
+            grid: {
+              ...y_grid,
+              first_anchor_error_px: 0,
+              second_anchor_error_px: 0,
+            },
+            declared_volts_per_pixel: source_volts_per_pixel,
+            source_volts_per_pixel,
+            nominal_baseline_volts:
+              nominal_source.kind === "pdf"
+                ? nominal_source.value
+                : nominal_source.evidence.response.nominal_volts,
+            nominal_baseline_pixel,
+            nominal_trace_point_indexes: nominal_point_indexes,
           },
         }
-        if (explicit_x_axis) {
-          receipt = {
-            ...scope_receipt_common,
-            algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v2",
-            x_axis: explicit_x_axis,
-            y_axis,
+        if (nominal_source.kind === "pdf") {
+          const y_axis = {
+            ...scope_receipt_common.y_axis,
+            nominal_source_text: nominal_source.source_text,
+            nominal_source_bbox_pdf_points: nominal_source.bbox,
           }
-        } else if (division_x_axis) {
-          receipt = {
-            ...scope_receipt_common,
-            algorithm: "canonical_pdf_tesseract_scope_divisions_v3",
-            x_axis: division_x_axis,
-            y_axis,
+          if (explicit_x_axis) {
+            receipt = {
+              ...scope_receipt_common,
+              algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v1",
+              x_axis: explicit_x_axis,
+              y_axis,
+            }
+          } else if (division_x_axis) {
+            receipt = {
+              ...scope_receipt_common,
+              algorithm: "canonical_pdf_tesseract_scope_divisions_v2",
+              x_axis: division_x_axis,
+              y_axis,
+            }
+          }
+        } else {
+          const y_axis = {
+            ...scope_receipt_common.y_axis,
+            nominal_source: {
+              algorithm: "printed_experiment_conditions_v3" as const,
+              source_excerpts: structuredClone(nominal_source.evidence.source_excerpts),
+              signal: nominal_source.evidence.response.signal,
+              nominal_volts: nominal_source.evidence.response.nominal_volts,
+            },
+          }
+          if (explicit_x_axis) {
+            receipt = {
+              ...scope_receipt_common,
+              algorithm: "canonical_pdf_tesseract_explicit_time_scope_voltage_v2",
+              x_axis: explicit_x_axis,
+              y_axis,
+            }
+          } else if (division_x_axis) {
+            receipt = {
+              ...scope_receipt_common,
+              algorithm: "canonical_pdf_tesseract_scope_divisions_v3",
+              x_axis: division_x_axis,
+              y_axis,
+            }
           }
         }
       }
@@ -617,12 +746,14 @@ export async function buildReferenceGraphSourceProof(input: {
   if (actual_sha256 !== input.observation.source_pdf_sha256) {
     throw new Error("Reference-axis proof received a datasheet that does not match the observation digest")
   }
-  const graphs = eligibleObservedGraphs(input.observation).map((graph) => {
-    const channel = primaryResponseChannel(graph)
+  const graphs = eligibleObservedGraphs(input.observation).map((source_graph) => {
+    const channel = primaryResponseChannel(source_graph)
     if (!channel) {
-      throw new Error(`Eligible reference graph ${graph.graph_id} has no bound primary response channel`)
+      throw new Error(
+        `Eligible reference graph ${source_graph.graph_id} has no bound primary response channel`,
+      )
     }
-    return channel
+    return { channel, source_graph }
   })
   if (graphs.length === 0) {
     return { version: 1, source_pdf_sha256: actual_sha256, results: [] }
@@ -636,7 +767,7 @@ export async function buildReferenceGraphSourceProof(input: {
     let engine_version = ""
     if (
       graphs.some(
-        (graph) => input.immutable_source_analysis_by_graph_id?.[graph.source_graph_id] === undefined,
+        ({ channel }) => input.immutable_source_analysis_by_graph_id?.[channel.source_graph_id] === undefined,
       )
     ) {
       try {
@@ -654,18 +785,19 @@ export async function buildReferenceGraphSourceProof(input: {
       }
     }
     const results: ReferenceGraphAxisProofResult[] = []
-    for (const graph of graphs) {
+    for (const { channel, source_graph } of graphs) {
       input.signal.throwIfAborted()
       results.push(
         await proveGraphAxis({
-          graph,
+          graph: channel,
+          source_graph,
           source_pdf_sha256: actual_sha256,
           workspace: workspace.path,
           process_runner: input.process_runner,
           signal: input.signal,
           engine_version,
-          printed_nominal_source: input.printed_nominal_sources_by_graph_id?.[graph.source_graph_id],
-          immutable_source_analysis: input.immutable_source_analysis_by_graph_id?.[graph.source_graph_id],
+          printed_nominal_source: input.printed_nominal_sources_by_graph_id?.[channel.source_graph_id],
+          immutable_source_analysis: input.immutable_source_analysis_by_graph_id?.[channel.source_graph_id],
         }),
       )
     }

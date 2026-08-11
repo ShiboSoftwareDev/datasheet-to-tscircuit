@@ -17,8 +17,67 @@ function conditionConflict(message: string, endpoint?: ModelPublicElectricalEndp
   throw new ApplicationConditionConflictError(message, endpoint)
 }
 
-function hasExecutableAnchorAfterDetach(group: ResolvedApplicationNodeGroup): boolean {
-  return group.is_ground || group.dut_endpoints.length > 0
+function hasExecutableAnchorAfterDetach(input: {
+  group: ResolvedApplicationNodeGroup
+  contract: ApplicationFixtureContract
+}): boolean {
+  if (input.group.is_ground || input.group.dut_endpoints.length > 0) return true
+  const application_endpoint = `net.${input.group.id}`
+  return !input.contract.fixtures.some((fixture) =>
+    fixture.type === "diode"
+      ? fixture.anode === application_endpoint || fixture.cathode === application_endpoint
+      : fixture.positive === application_endpoint || fixture.negative === application_endpoint,
+  )
+}
+
+function fixtureGroupIds(fixture: ApplicationFixtureContract["fixtures"][number]): string[] {
+  const endpoints =
+    fixture.type === "diode" ? [fixture.anode, fixture.cathode] : [fixture.positive, fixture.negative]
+  return endpoints.flatMap((endpoint) => (endpoint.startsWith("net.") ? [endpoint.slice("net.".length)] : []))
+}
+
+/**
+ * Removes application leaves that add no executable topology. A node joining
+ * one DUT pin only to an external label is electrically identical to using the
+ * DUT pin directly; retaining it creates a dangling simulator net. Passive
+ * networks and nodes that join multiple DUT pins remain intact, including
+ * intermediate passive-only nodes reached from those roots.
+ */
+function executableApplicationProjection(input: {
+  groups: ResolvedApplicationNodeGroup[]
+  contract: ApplicationFixtureContract
+}): {
+  groups: ResolvedApplicationNodeGroup[]
+  fixtures: ApplicationFixtureContract["fixtures"]
+} {
+  const passive_group_ids = new Set(input.contract.fixtures.flatMap(fixtureGroupIds))
+  const retained_group_ids = new Set(
+    input.groups.flatMap((group) =>
+      group.is_ground ||
+      group.dut_endpoints.length >= 2 ||
+      (group.dut_endpoints.length >= 1 && passive_group_ids.has(group.id))
+        ? [group.id]
+        : [],
+    ),
+  )
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const fixture of input.contract.fixtures) {
+      const ids = fixtureGroupIds(fixture)
+      if (!ids.some((id) => retained_group_ids.has(id))) continue
+      for (const id of ids) {
+        if (retained_group_ids.has(id)) continue
+        retained_group_ids.add(id)
+        changed = true
+      }
+    }
+  }
+  const groups = input.groups.filter(({ id }) => retained_group_ids.has(id))
+  const fixtures = input.contract.fixtures.filter((fixture) =>
+    fixtureGroupIds(fixture).every((id) => retained_group_ids.has(id)),
+  )
+  return { groups, fixtures }
 }
 
 /**
@@ -61,7 +120,7 @@ export function resolveApplicationFixtureForBinding(input: {
     containing_group.dut_endpoints = containing_group.dut_endpoints.filter(
       (candidate) => candidate !== endpoint,
     )
-    if (!hasExecutableAnchorAfterDetach(containing_group)) {
+    if (!hasExecutableAnchorAfterDetach({ group: containing_group, contract })) {
       conditionConflict(
         `condition endpoint ${endpoint} is the only electrical anchor for non-ground application node ${containing_group.source_net}; detaching it would orphan a required passive/network`,
         endpoint,
@@ -124,11 +183,12 @@ export function resolveApplicationFixtureForBinding(input: {
       )
     }
   }
+  const executable = executableApplicationProjection({ groups, contract })
   const payload: ResolvedApplicationFixturePayload = {
     version: 1,
     contract_sha256: contract.contract_sha256,
-    node_groups: groups,
-    fixtures: contract.fixtures.map((fixture) => ({
+    node_groups: executable.groups,
+    fixtures: executable.fixtures.map((fixture) => ({
       ...fixture,
       source_terminals: [...fixture.source_terminals] as [string, string],
     })),

@@ -2,11 +2,17 @@ import { constants } from "node:fs"
 import { lstat, open, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import type { Job, JobDisplayStatus } from "@/shared/job-types"
+import { isCircuitElementArray } from "../component-circuit-json"
 import {
   applicationEvidenceFilePath,
   readCommittedApplicationEvidenceSnapshot,
 } from "../component-workflow/application-evidence-commit"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
+import { componentPublishedCircuitJsonRelativePath } from "../component-workflow/component-footprint-artifacts"
+import {
+  componentFootprintPreviewsFromCatalog,
+  parseApprovedFootprintCatalogSnapshot,
+} from "../component-workflow/stage-helpers"
 import type { JobStore } from "../job-store"
 import { MODEL_PUBLICATION_FILE, readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
 import { parsePublicPipelineSnapshot } from "../pipeline"
@@ -203,6 +209,39 @@ export async function restoreJobDirectory(input: {
     stat(input.job_dir),
   ])
   const { component_code, circuit_json } = component_artifacts
+  const component_footprints = evidence_snapshot
+    ? await (async () => {
+        const catalog = parseApprovedFootprintCatalogSnapshot(evidence_snapshot)
+        const metadata = componentFootprintPreviewsFromCatalog(catalog)
+        const footprints = await Promise.all(
+          metadata.footprints.map(async (footprint) => {
+            const raw_circuit_json = await readFile(
+              join(input.job_dir, componentPublishedCircuitJsonRelativePath(footprint.footprint_id)),
+              "utf8",
+            ).catch(() => undefined)
+            let restored_circuit_json: unknown
+            if (raw_circuit_json) {
+              try {
+                restored_circuit_json = JSON.parse(raw_circuit_json)
+              } catch {
+                restored_circuit_json = undefined
+              }
+            }
+            const is_default = footprint.footprint_id === metadata.default_footprint_id
+            const variant_circuit_json = isCircuitElementArray(restored_circuit_json)
+              ? restored_circuit_json
+              : is_default
+                ? circuit_json
+                : undefined
+            return {
+              ...footprint,
+              ...(variant_circuit_json ? { circuit_json: variant_circuit_json } : {}),
+            }
+          }),
+        )
+        return { ...metadata, footprints }
+      })()
+    : undefined
   const publication_is_usable = Boolean(publication && !publication_integrity_error)
   const evidence_is_committed = evidence_snapshot !== undefined
   let restored_application_plan: unknown
@@ -380,6 +419,7 @@ export async function restoreJobDirectory(input: {
     component_ready,
     component_code,
     circuit_json,
+    component_footprints,
     typical_application_title,
     typical_application_code,
     typical_application_circuit_json,

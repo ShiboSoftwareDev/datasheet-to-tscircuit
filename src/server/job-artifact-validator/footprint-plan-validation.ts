@@ -1,4 +1,5 @@
 import type { AnyCircuitElement } from "circuit-json"
+import { physicalPinFromHints } from "../component-evidence"
 
 export interface ExpectedFootprintPad {
   pin: string | null
@@ -55,6 +56,7 @@ function getActualFootprintPads(circuit_json: AnyCircuitElement[]): ActualFootpr
     const record = asRecord(element)
     if (record.type !== "pcb_smtpad" && record.type !== "pcb_plated_hole") return []
     const hints = asStringArray(record.port_hints)
+    const physical_pin = physicalPinFromHints(hints)
     const x = finiteNumber(record.x)
     const y = finiteNumber(record.y)
     if (x === undefined || y === undefined) return []
@@ -63,7 +65,16 @@ function getActualFootprintPads(circuit_json: AnyCircuitElement[]): ActualFootpr
       const width = finiteNumber(record.width)
       const height = finiteNumber(record.height)
       if (width === undefined || height === undefined) return []
-      return [{ pins: hints.map(normalizedPin), kind: "smt" as const, x, y, width, height }]
+      return [
+        {
+          pins: [...(physical_pin ? [normalizedPin(physical_pin)] : []), ...hints.map(normalizedPin)],
+          kind: "smt" as const,
+          x,
+          y,
+          width,
+          height,
+        },
+      ]
     }
 
     let width: number | undefined
@@ -93,7 +104,7 @@ function getActualFootprintPads(circuit_json: AnyCircuitElement[]): ActualFootpr
     }
     return [
       {
-        pins: hints.map(normalizedPin),
+        pins: [...(physical_pin ? [normalizedPin(physical_pin)] : []), ...hints.map(normalizedPin)],
         kind: "plated_hole" as const,
         x,
         y,

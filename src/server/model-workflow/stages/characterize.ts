@@ -60,7 +60,7 @@ export const characterizeStage = defineModelStage({
       on_output: (stream, message) =>
         services.model_run_store.appendLog(context.model_run_id, { stream, message }).then(() => undefined),
     })
-    const reference_observation_path = join(attempt_dir, "model-reference-observation.json")
+    const reference_observation_path = join(attempt_dir, "found-reference-observation.json")
 
     await projectFoundReferencesUi({
       model_run_store: services.model_run_store,
@@ -87,7 +87,7 @@ export const characterizeStage = defineModelStage({
           role: "source_observation",
         }),
         await modelArtifact({
-          id: "model_reference_observation",
+          id: "found_reference_observation",
           path: reference_observation_path,
           media_type: "application/json",
           role: "source_observation",

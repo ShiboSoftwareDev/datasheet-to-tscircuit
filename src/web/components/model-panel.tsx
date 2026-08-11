@@ -35,6 +35,7 @@ const STATUS_COPY: Record<ModelRunStatus, string> = {
   cancelling: "Stopping",
   cancelled: "Stopped",
   complete: "Validated",
+  unsupported: "Not simulatable",
   timed_out: "Repair time exhausted",
   failed: "Failed",
 }

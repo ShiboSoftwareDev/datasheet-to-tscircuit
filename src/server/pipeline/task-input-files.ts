@@ -27,6 +27,7 @@ const MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 const MAX_FILES = 100_000
 const MAX_DIRECTORIES = 100_000
 const COPY_BUFFER_BYTES = 64 * 1024
+const MAX_STABLE_FILE_SNAPSHOT_ATTEMPTS = 4
 const EXCLUDED_FILE_NAMES = new Set([
   "agent.log",
   "agent.log.1",
@@ -121,7 +122,7 @@ async function hashFile(path: string): Promise<string> {
   return hash.digest("hex")
 }
 
-async function snapshotFile(input: {
+async function snapshotFileAttempt(input: {
   source_path: string
   relative_path: string
   objects_dir: string
@@ -228,6 +229,23 @@ async function snapshotFile(input: {
     await closeQuietly(source)
     await unlinkQuietly(temporary_path)
   }
+}
+
+async function snapshotFile(input: {
+  source_path: string
+  relative_path: string
+  objects_dir: string
+}): Promise<PipelineTaskFileEntry> {
+  for (let attempt = 1; attempt <= MAX_STABLE_FILE_SNAPSHOT_ATTEMPTS; attempt += 1) {
+    try {
+      return await snapshotFileAttempt(input)
+    } catch (error) {
+      const source_changed =
+        error instanceof PipelineError && error.diagnostic.code === "task_input_file_changed"
+      if (!source_changed || attempt === MAX_STABLE_FILE_SNAPSHOT_ATTEMPTS) throw error
+    }
+  }
+  throw new Error("Stable task input snapshot attempts were exhausted")
 }
 
 export async function retainPipelineTaskInputFiles(input: {

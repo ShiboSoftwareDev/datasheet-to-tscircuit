@@ -3,7 +3,7 @@ import { constants } from "node:fs"
 import { type FileHandle, mkdir, open, unlink, writeFile } from "node:fs/promises"
 import { join, sep } from "node:path"
 import type { PipelineJsonValue } from "@/shared/pipeline-types"
-import type { PipelineTaskInputBundle } from "../pipeline/task-input-files"
+import { type PipelineTaskInputBundle, retainPipelineTaskInputFiles } from "../pipeline/task-input-files"
 
 function isRecord(value: PipelineJsonValue): value is Readonly<Record<string, PipelineJsonValue>> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -141,6 +141,30 @@ export async function retainLocalInputBundle(input: {
   await writeFile(
     retainedInputPath,
     `${JSON.stringify(input.envelope ?? input.bundle.envelope, null, 2)}\n`,
+    "utf8",
+  )
+  return retainedInputPath
+}
+
+/** Captures the selected job's live pre-run boundary for an in-place execution. */
+export async function retainCurrentJobInputBundle(input: {
+  jobDir: string
+  executionDir: string
+  envelope: PipelineTaskInputBundle["envelope"]
+  excludedRoots?: readonly string[]
+}): Promise<string> {
+  const retainedInputDir = join(input.executionDir, "input", "stages", input.envelope.task_id)
+  const retainedInputPath = join(retainedInputDir, "input.json")
+  await mkdir(retainedInputDir, { recursive: true })
+  const inputFiles = await retainPipelineTaskInputFiles({
+    root_dir: input.jobDir,
+    debug_dir: retainedInputDir,
+    objects_dir: join(input.executionDir, "input", "input-objects"),
+    excluded_roots: input.excludedRoots,
+  })
+  await writeFile(
+    retainedInputPath,
+    `${JSON.stringify({ ...input.envelope, input_files: inputFiles }, null, 2)}\n`,
     "utf8",
   )
   return retainedInputPath
