@@ -122,6 +122,18 @@ test("generated sources reject unsafe TypeScript escape hatches", () => {
   )
 })
 
+test("generated application sources require tscircuit traces", () => {
+  expect(() =>
+    validateGeneratedSource(
+      `import Part from "./component.circuit"
+       export default function Application() {
+         return <board><Part name="U1" /><connection net="VCC" pins={["U1.VCC", "VCC"]} /></board>
+       }`,
+      "application",
+    ),
+  ).toThrow(/express electrical connections with <trace/)
+})
+
 test("generated component sources require JSX footprint port binding", () => {
   expect(() =>
     validateGeneratedSource(
@@ -134,7 +146,7 @@ test("generated component sources require JSX footprint port binding", () => {
   expect(() =>
     validateGeneratedSource(
       `export default function Part() {
-         return <chip footprint={<footprint><smtpad pcbX={0} pcbY={0} width={1} height={1} /></footprint>} />
+         return <chip footprint={<footprint><smtpad shape="rect" pcbX={0} pcbY={0} width={1} height={1} /></footprint>} />
        }`,
       "component",
     ),
@@ -144,9 +156,18 @@ test("generated component sources require JSX footprint port binding", () => {
     validateGeneratedSource(
       `const pads = [{ x: 0, y: 0, portHints: ["1"] }]
        export default function Part() {
-         return <chip footprint={<footprint>{pads.map((pad) => <smtpad pcbX={pad.x} pcbY={pad.y} width={1} height={1} portHints={pad.portHints} />)}</footprint>} />
+         return <chip footprint={<footprint>{pads.map((pad) => <smtpad shape="rect" pcbX={pad.x} pcbY={pad.y} width={1} height={1} portHints={pad.portHints} />)}</footprint>} />
        }`,
       "component",
     ),
   ).not.toThrow()
+
+  expect(() =>
+    validateGeneratedSource(
+      `export default function Part() {
+         return <chip footprint={<footprint><smtpad pcbX={0} pcbY={0} width={1} height={1} portHints={["1"]} /></footprint>} />
+       }`,
+      "component",
+    ),
+  ).toThrow(/literal shape="rect"/)
 })

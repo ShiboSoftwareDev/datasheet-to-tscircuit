@@ -4,7 +4,7 @@ import {
   parseTypicalApplicationPlan,
   parseUnmaterializedTypicalApplicationPlan,
 } from "@/server/component-workflow/application-plan"
-import { applicationPrompt } from "@/server/component-workflow/prompts"
+import { applicationPlanningPrompt, applicationPrompt } from "@/server/component-workflow/prompts"
 
 interface DraftSourceReference {
   page: number
@@ -83,6 +83,24 @@ test("documented application plans require a mode and canonicalize the target co
   )
 })
 
+test("documented application plans reject incomplete executable passives", () => {
+  const incomplete = documentedPlan()
+  incomplete.connections = [{ net: "VCC", pins: ["LM393P.VCC", "C1.1"] }]
+
+  expect(() => parseTypicalApplicationPlan(incomplete, "LM393P")).toThrow(
+    "typical application capacitor C1 must have exactly two distinct connected terminals; found 1 endpoints across 1 distinct terminals",
+  )
+
+  const repeated_terminal = documentedPlan()
+  repeated_terminal.connections = [
+    { net: "VCC", pins: ["LM393P.VCC", "C1.1"] },
+    { net: "GND", pins: ["LM393P.GND", "C1.pin1"] },
+  ]
+  expect(() => parseTypicalApplicationPlan(repeated_terminal, "LM393P")).toThrow(
+    "typical application capacitor C1 must have exactly two distinct connected terminals; found 2 endpoints across 1 distinct terminals",
+  )
+})
+
 test("agent application evidence leaves PDF image materialization to the server", () => {
   const draft = documentedPlan()
   requiredItem(draft.components, 0).reference = "U1"
@@ -114,6 +132,18 @@ test("application prompts bind target identity and executable passive spelling",
   expect(prompt).toContain('literal name="U1"')
   expect(prompt).toContain("exactly one <board> root")
   expect(prompt).toContain('- C1: capacitance="10uF" (documented as "10 µF")')
+  expect(prompt).toContain("connection.net field is only the documented grouping label")
+  expect(prompt).toContain('with one or more <trace from="..." to="..." />')
+  expect(prompt).toContain("Never invent a <connection> element")
+  expect(prompt).not.toContain("- VCC -> net.VCC")
+  expect(prompt).not.toContain("- GND -> net.GND")
+})
+
+test("application planning keeps external terminals out of the component list", () => {
+  const prompt = applicationPlanningPrompt()
+  expect(prompt).toContain("external terminals only as bare endpoints")
+  expect(prompt).toContain("never list")
+  expect(prompt).toContain("other terminals as components")
 })
 
 test("verified PCB plans require sourced ordering and footprint facts for every external part", () => {
@@ -223,13 +253,13 @@ test("decimal voltage text stays an external terminal even inside a descriptive 
 test("decimal voltage-domain terminals do not become component ports", () => {
   const input = documentedPlan()
   input.connections[0] = {
-    net: "1.8_V",
-    pins: ["LM393P.VCC", "C1.1", "1.8_V"],
+    net: "1.8V",
+    pins: ["LM393P.VCC", "C1.1", "1.8V_SYSTEM_CONTROLLER_POWER"],
   }
   const parsed = parseTypicalApplicationPlan(input, "LM393P")
   expect(parsed.connections[0]).toEqual({
-    net: "1_8_V",
-    pins: ["U1.VCC", "C1.1", "1_8_V"],
+    net: "1_8V",
+    pins: ["U1.VCC", "C1.1", "1_8V_SYSTEM_CONTROLLER_POWER"],
   })
 })
 

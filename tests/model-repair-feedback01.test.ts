@@ -264,3 +264,27 @@ test("viewer parser failures enter repair as rejected simulator syntax", () => {
     recommended_actions: ["replace_unsupported_ngspice_syntax"],
   })
 })
+
+test("missing simulator functions enter repair as rejected simulator syntax", () => {
+  const result: ValidationRunResult = {
+    version: 1,
+    passed: true,
+    hashes: {
+      plan_sha256: "a".repeat(64),
+      model_sha256: "b".repeat(64),
+      manifest_sha256: "c".repeat(64),
+    },
+    cases: [],
+    errors: [],
+  }
+  const feedback = createModelRepairFeedback(result, undefined, undefined, {
+    public_transient: "Error: no such function 'if' at line 11",
+  })
+
+  expect(feedback.issues).toContainEqual({
+    category: "simulator_rejected_model",
+    affected_cases: 1,
+    affected_observations: 0,
+    recommended_actions: ["replace_unsupported_ngspice_syntax"],
+  })
+})

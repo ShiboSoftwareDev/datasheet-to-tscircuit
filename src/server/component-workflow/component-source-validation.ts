@@ -12,6 +12,22 @@ function hasJsxAttribute(node: ts.JsxOpeningLikeElement, attribute_name: string)
   )
 }
 
+function jsxStringAttribute(node: ts.JsxOpeningLikeElement, attribute_name: string): string | undefined {
+  const attribute = node.attributes.properties.find(
+    (property) => ts.isJsxAttribute(property) && property.name.getText() === attribute_name,
+  )
+  if (!attribute || !ts.isJsxAttribute(attribute) || !attribute.initializer) return undefined
+  if (ts.isStringLiteral(attribute.initializer)) return attribute.initializer.text
+  if (
+    ts.isJsxExpression(attribute.initializer) &&
+    attribute.initializer.expression &&
+    ts.isStringLiteral(attribute.initializer.expression)
+  ) {
+    return attribute.initializer.expression.text
+  }
+  return undefined
+}
+
 /**
  * Component footprints must be expressed through tscircuit's JSX primitives.
  * Raw circuit-json-like pad arrays are accepted by TypeScript but bypass the
@@ -28,6 +44,7 @@ export function getComponentSourceStructureErrors(source: string): string[] {
   let footprint_count = 0
   let copper_pad_count = 0
   let unbound_copper_pad_count = 0
+  let invalid_smt_shape_count = 0
   const visit = (node: ts.Node): void => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const tag_name = jsxTagName(node, source_file)
@@ -35,6 +52,9 @@ export function getComponentSourceStructureErrors(source: string): string[] {
       if (COPPER_PAD_ELEMENTS.has(tag_name)) {
         copper_pad_count += 1
         if (!hasJsxAttribute(node, "portHints")) unbound_copper_pad_count += 1
+      }
+      if (tag_name === "smtpad" && jsxStringAttribute(node, "shape") !== "rect") {
+        invalid_smt_shape_count += 1
       }
     }
     ts.forEachChild(node, visit)
@@ -50,6 +70,11 @@ export function getComponentSourceStructureErrors(source: string): string[] {
   if (unbound_copper_pad_count > 0) {
     errors.push(
       `Component source contains ${unbound_copper_pad_count} copper pad JSX element(s) without portHints`,
+    )
+  }
+  if (invalid_smt_shape_count > 0) {
+    errors.push(
+      `Component source contains ${invalid_smt_shape_count} smtpad JSX element(s) without literal shape="rect"; server-derived pad plans provide rectangular width/height bounds and tscircuit requires an explicit supported shape discriminator`,
     )
   }
   return errors

@@ -148,7 +148,11 @@ export async function deleteJob(job_id: string): Promise<void> {
 
 export type JobFileKind =
   | "component"
+  | "component_tsx"
+  | "component_kicad"
   | "typical_application"
+  | "typical_application_tsx"
+  | "typical_application_kicad"
   | "log"
   | "component_evidence"
   | "footprint_plan"
@@ -165,6 +169,7 @@ export function getJobFileUrl(
     display?: "inline"
     local_run_id?: string
     footprint_id?: string
+    application_id?: string
   } = {},
 ): string {
   const inline_query = options.display === "inline" ? "&display=inline" : ""
@@ -172,7 +177,10 @@ export function getJobFileUrl(
   const footprint_query = options.footprint_id
     ? `&footprint_id=${encodeURIComponent(options.footprint_id)}`
     : ""
-  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}${inline_query}${local_query}${footprint_query}`
+  const application_query = options.application_id
+    ? `&application_id=${encodeURIComponent(options.application_id)}`
+    : ""
+  return `/api/job/file?job_id=${encodeURIComponent(job_id)}&file=${file}${inline_query}${local_query}${footprint_query}${application_query}`
 }
 
 export async function getModelRun(job_id: string, local_run_id?: string): Promise<ModelRun | undefined> {

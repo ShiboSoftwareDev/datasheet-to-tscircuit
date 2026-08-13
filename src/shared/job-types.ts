@@ -106,6 +106,19 @@ export interface ComponentFootprintPreviews {
   footprints: ComponentFootprintPreview[]
 }
 
+export interface TypicalApplicationPreview {
+  application_id: string
+  title: string
+  origin: "datasheet_reference" | "ai_generated"
+  code?: string
+  circuit_json?: AnyCircuitElement[]
+}
+
+export interface TypicalApplicationPreviews {
+  default_application_id: string
+  applications: TypicalApplicationPreview[]
+}
+
 export interface Job {
   job_id: string
   file_name: string
@@ -126,6 +139,7 @@ export interface Job {
   typical_application_title?: string
   typical_application_code?: string
   typical_application_circuit_json?: AnyCircuitElement[]
+  typical_applications?: TypicalApplicationPreviews
   validation?: JobValidation
   provenance?: JobProvenance
   evidence_available?: boolean

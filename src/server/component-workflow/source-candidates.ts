@@ -234,6 +234,8 @@ export async function generateApplicationSource(input: {
   job_dir: string
   component_source_path: string
   plan: TypicalApplicationPlan
+  plan_origin?: "datasheet_reference" | "ai_generated"
+  source_relative_path?: string
   signal: AbortSignal
   use_openai: boolean
   agent_client: AgentClient
@@ -245,10 +247,11 @@ export async function generateApplicationSource(input: {
     readApprovedApplicationEvidenceBundle(input.job_dir),
     readComponentBoundApplicationEvidence(input.job_dir),
   ])
-  if (!isDeepStrictEqual(input.plan, application_plan)) {
+  if (input.plan_origin !== "ai_generated" && !isDeepStrictEqual(input.plan, application_plan)) {
     throw new Error("Application source plan does not match the committed evidence snapshot")
   }
-  const committed_plan = application_plan
+  const committed_plan = input.plan_origin === "ai_generated" ? input.plan : application_plan
+  const source_relative_path = input.source_relative_path ?? "typical-application.circuit.tsx"
   return runAgentArtifactStage({
     stage_id: input.feedback ? "repair_application" : "generate_application",
     phase_label: input.feedback ? "Application source repair" : "Application source generation",
@@ -264,13 +267,18 @@ export async function generateApplicationSource(input: {
             ...PROJECT_FILES.map((file_name) => ({ source: join(input.job_dir, file_name) })),
             { source: input.component_source_path },
             {
-              source: join(input.job_dir, "typical-application.circuit.tsx"),
+              source: join(input.job_dir, source_relative_path),
+              destination: "typical-application.circuit.tsx",
               required: false,
             },
           ],
         })
         try {
           await materializeCommittedApplicationEvidence(workspace.path, snapshot)
+          await Bun.write(
+            join(workspace.path, "typical-application-plan.json"),
+            `${JSON.stringify(committed_plan, null, 2)}\n`,
+          )
           await Bun.write(join(workspace.path, "AGENTS.md"), APPLICATION_SOURCE_STAGE_INSTRUCTIONS)
           return workspace
         } catch (error) {
@@ -281,6 +289,7 @@ export async function generateApplicationSource(input: {
     build_prompt: (artifact_feedback) =>
       applicationPrompt({
         plan: committed_plan,
+        origin: input.plan_origin,
         feedback: [input.feedback, artifact_feedback].filter(Boolean).join("\n\n"),
       }),
     heartbeat_paths: (workspace) => [join(workspace, "typical-application.circuit.tsx")],
@@ -302,6 +311,7 @@ export async function generateApplicationSource(input: {
         workspace,
         source: "typical-application.circuit.tsx",
         destination_root: input.job_dir,
+        destination: source_relative_path,
         max_bytes: 1024 * 1024,
         signal: input.signal,
       }),

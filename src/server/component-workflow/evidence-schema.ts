@@ -11,6 +11,7 @@ import {
   TYPICAL_APPLICATION_AVAILABILITIES,
   TYPICAL_APPLICATION_PLAN_VERSION,
 } from "./application-plan"
+import { APPLICATION_DESIGN_EVIDENCE_VERSION } from "./application-design-evidence"
 
 const canonical_component_example = {
   version: COMPONENT_EVIDENCE_VERSION,
@@ -136,15 +137,34 @@ const canonical_application_example = {
   ],
 }
 
+const canonical_application_design_evidence_example = {
+  version: APPLICATION_DESIGN_EVIDENCE_VERSION,
+  capabilities: [
+    {
+      evidence_id: "supported-function",
+      statement: "The target supports the stated functional use.",
+      source_references: [{ page: 2, method: "pdf_text", confidence: "high" }],
+    },
+  ],
+  constraints: [
+    {
+      evidence_id: "operating-constraint",
+      statement: "The implementation must remain within the documented operating condition.",
+      source_references: [{ page: 3, method: "pdf_text", confidence: "high" }],
+    },
+  ],
+  prohibited_uses: [],
+}
+
 const canonical_footprint_catalog_example = {
   version: 1,
   default_footprint_id: "package-name-2",
-  footprints: [
-    {
-      footprint_id: "package-name-2",
-      component_evidence: canonical_component_example,
-    },
-  ],
+  footprint_files: ["component-footprints/package-name-2.json"],
+}
+
+const canonical_footprint_variant_example = {
+  footprint_id: "package-name-2",
+  component_evidence: canonical_component_example,
 }
 
 export const COMPONENT_EVIDENCE_GUIDE = `# Component evidence artifact contract
@@ -159,14 +179,21 @@ Do not replace enum values with explanatory prose.
 
 - version: exactly 1
 - default_footprint_id: the lowercase hyphenated id of one entry
-- footprints: one entry per distinct, usable physical PCB copper footprint
-- footprints[].footprint_id: stable lowercase hyphenated package identity
-- footprints[].component_evidence: the exact component evidence shape below
+- footprint_files: one component-footprints/<footprint-id>.json path per
+  distinct, usable physical PCB copper footprint
 
-Extractor example (the server adds canonical label/alias metadata):
+Index example:
 
 \`\`\`json
 ${JSON.stringify(canonical_footprint_catalog_example, null, 2)}
+\`\`\`
+
+Each listed file contains one independent footprint variant. The file name and
+footprint_id must match. The server assembles these files into the committed
+catalog and adds canonical label/alias metadata. Each variant uses this shape:
+
+\`\`\`json
+${JSON.stringify(canonical_footprint_variant_example, null, 2)}
 \`\`\`
 
 Do not create separate entries for tape/reel or quantity orderables, package
@@ -175,7 +202,7 @@ server also compares normalized copper geometry and pad-to-pin mapping under
 drawing rotations and merges physical duplicates. Pin labels and roles do not
 turn another representation of the same copper pattern into a new footprint.
 
-## footprints[].component_evidence
+## component-footprints/<footprint-id>.json component_evidence
 
 - version: exactly ${COMPONENT_EVIDENCE_VERSION}
 - status: ${["resolved", "unresolved"].map((value) => `"${value}"`).join(" | ")}
@@ -234,6 +261,10 @@ export const APPLICATION_EVIDENCE_GUIDE = `# Typical-application evidence artifa
 This contract is independent of component generation and describes only what is
 visibly documented in datasheet.pdf.
 
+Write both JSON artifacts in this contract. The reference plan records only the
+manufacturer-drawn circuit. The design-evidence artifact records reusable facts
+for a later planning step; it must not invent application circuits.
+
 ## typical-application-plan.json
 
 - version: exactly ${TYPICAL_APPLICATION_PLAN_VERSION}
@@ -256,6 +287,22 @@ Canonical example:
 ${JSON.stringify(canonical_application_example, null, 2)}
 \`\`\`
 
+## application-design-evidence.json
+
+- version: exactly ${APPLICATION_DESIGN_EVIDENCE_VERSION}
+- capabilities: supported device functions that can ground useful applications
+- constraints: operating, interface, sequencing, biasing, and external-component requirements
+- prohibited_uses: explicitly unsupported or unsafe uses; an empty array is allowed
+- every fact has a unique lowercase-hyphenated evidence_id, one factual
+  statement, and at least one medium/high-confidence datasheet source
+- do not propose, rank, or describe generated application circuits here
+
+Canonical example:
+
+\`\`\`json
+${JSON.stringify(canonical_application_design_evidence_example, null, 2)}
+\`\`\`
+
 A documented plan must include target U1 and every net must contain at least one
 component.port endpoint. A bare endpoint is the semantic identity of a real
 external terminal such as INPUT, OUTPUT, or GND. Do not turn it into a component
@@ -267,6 +314,9 @@ bare external terminal per outgoing signal (for example SCL, SDA, and ALERT), an
 never reuse the same bare endpoint on different nodes. Inventory every visible
 switch contact. An SPDT symbol has one common and two throws on three distinct
 nodes; open contacts do not merge the load and charger branches.
+Every resistor, capacitor, inductor, ferrite, and diode must contribute exactly
+two distinct connected component.port endpoints. Never omit a terminal merely
+because its wire joins a common rail such as GND.
 Before returning a documented plan, cross-check the complete datasheet pin table.
 Account for every electrically connectable U1 pin exactly once in connections and
 leave pins explicitly marked no-connect unwired. Spell every U1 endpoint with its

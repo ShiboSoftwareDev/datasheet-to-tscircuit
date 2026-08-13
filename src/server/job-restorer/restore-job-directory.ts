@@ -10,8 +10,14 @@ import {
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import { componentPublishedCircuitJsonRelativePath } from "../component-workflow/component-footprint-artifacts"
 import {
+  applicationSourceRelativePath,
+  applicationValidationRelativePath,
+} from "../component-workflow/application-artifacts"
+import {
   componentFootprintPreviewsFromCatalog,
   parseApprovedFootprintCatalogSnapshot,
+  readApplicationPlanCatalog,
+  readCircuitValidationRecord,
 } from "../component-workflow/stage-helpers"
 import type { JobStore } from "../job-store"
 import { MODEL_PUBLICATION_FILE, readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
@@ -286,6 +292,45 @@ export async function restoreJobDirectory(input: {
   const typical_application_circuit_json = application_artifact_is_validated
     ? typical_application_circuit_json_candidate
     : undefined
+  const typical_applications = await (async () => {
+    if (!(await Bun.file(join(input.job_dir, "application-plan-catalog.json")).exists())) return undefined
+    try {
+      const catalog = await readApplicationPlanCatalog(input.job_dir)
+      const applications = await Promise.all(
+        catalog.applications.map(async (entry) => {
+          const [code, validation] = await Promise.all([
+            readFile(join(input.job_dir, applicationSourceRelativePath(entry)), "utf8").catch(
+              () => undefined,
+            ),
+            readCircuitValidationRecord(join(input.job_dir, applicationValidationRelativePath(entry))).catch(
+              () => undefined,
+            ),
+          ])
+          return code?.includes("export default") && validation?.passed
+            ? {
+                application_id: entry.application_id,
+                title: entry.title,
+                origin: entry.origin,
+                code,
+                circuit_json: validation.circuit_json,
+              }
+            : undefined
+        }),
+      )
+      const available = applications.filter(
+        (application): application is NonNullable<typeof application> => application !== undefined,
+      )
+      if (available.length === 0) return undefined
+      return {
+        default_application_id:
+          available.find(({ application_id }) => application_id === catalog.default_application_id)
+            ?.application_id ?? available[0]!.application_id,
+        applications: available,
+      }
+    } catch {
+      return undefined
+    }
+  })()
   const has_component_artifact = Boolean(component_code?.includes("export default") && circuit_json)
   const has_complete_artifact = Boolean(
     has_component_artifact &&
@@ -423,6 +468,7 @@ export async function restoreJobDirectory(input: {
     typical_application_title,
     typical_application_code,
     typical_application_circuit_json,
+    typical_applications,
     validation: restored_validation,
     provenance: isJobProvenance(saved.provenance) ? saved.provenance : undefined,
     evidence_available: evidence_is_committed,

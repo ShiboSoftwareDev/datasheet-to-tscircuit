@@ -73,6 +73,7 @@ function ArtifactRunframe({
   on_active_tab_change,
   local_run_id,
   footprint_id,
+  application_id,
 }: {
   job: Job
   artifact: ComponentArtifact
@@ -80,15 +81,23 @@ function ArtifactRunframe({
   on_active_tab_change: (tab: ComponentPreviewTab) => void
   local_run_id?: string
   footprint_id?: string
+  application_id?: string
 }) {
   const is_application = artifact === "typical_application"
   const selected_footprint = !is_application
     ? job.component_footprints?.footprints.find((footprint) => footprint.footprint_id === footprint_id)
     : undefined
+  const selected_application = is_application
+    ? job.typical_applications?.applications.find(
+        (application) => application.application_id === application_id,
+      )
+    : undefined
   const circuit_json = is_application
-    ? job.typical_application_circuit_json
+    ? (selected_application?.circuit_json ?? job.typical_application_circuit_json)
     : (selected_footprint?.circuit_json ?? job.circuit_json)
-  const code = is_application ? job.typical_application_code : job.component_code
+  const code = is_application
+    ? (selected_application?.code ?? job.typical_application_code)
+    : job.component_code
 
   if (!circuit_json) return <EmptyPreview job={job} artifact={artifact} />
   const has_pcb_artifact = circuit_json.some((element) => element.type.startsWith("pcb_"))
@@ -99,11 +108,18 @@ function ArtifactRunframe({
   return (
     <Suspense fallback={<EmptyPreview job={job} artifact={artifact} />}>
       <CircuitJsonPreview
-        key={`${job.job_id}-${artifact}-${footprint_id ?? "default"}`}
+        key={`${job.job_id}-${artifact}-${footprint_id ?? application_id ?? "default"}`}
         circuitJson={circuit_json}
         code={code}
         showCodeTab={Boolean(code)}
-        codeTabContent={<CodePanel job={job} artifact={artifact} local_run_id={local_run_id} />}
+        codeTabContent={
+          <CodePanel
+            job={job}
+            artifact={artifact}
+            local_run_id={local_run_id}
+            application_id={application_id}
+          />
+        }
         availableTabs={available_tabs}
         defaultActiveTab={active_tab}
         defaultTab={active_tab}
@@ -137,17 +153,25 @@ export function CircuitPreview({
   const [selected_footprint_id, setSelectedFootprintId] = useState(
     job.component_footprints?.default_footprint_id,
   )
+  const [selected_application_id, setSelectedApplicationId] = useState(
+    job.typical_applications?.default_application_id,
+  )
   useEffect(() => {
     setSelectedFootprintId(job.component_footprints?.default_footprint_id)
   }, [job.job_id, job.component_footprints?.default_footprint_id])
+  useEffect(() => {
+    setSelectedApplicationId(job.typical_applications?.default_application_id)
+  }, [job.job_id, job.typical_applications?.default_application_id])
   const footprint_options = job.component_footprints?.footprints ?? []
   const has_multiple_footprints = footprint_options.length > 1
+  const application_options = job.typical_applications?.applications ?? []
+  const has_multiple_applications = application_options.length > 1
   const artifact_preview_tab = artifact === "component" ? active_tab : application_preview_tab
   const setArtifactPreviewTab = artifact === "component" ? on_active_tab_change : setApplicationPreviewTab
 
   return (
     <section className="workspace-card preview-card" aria-label="Component and typical application preview">
-      {has_multiple_footprints && (
+      {artifact === "component" && has_multiple_footprints && (
         <div className="footprint-selector-bar">
           <span className="multiple-footprints-tag">Multiple footprints</span>
           <label>
@@ -159,6 +183,24 @@ export function CircuitPreview({
               {footprint_options.map((footprint) => (
                 <option key={footprint.footprint_id} value={footprint.footprint_id}>
                   {footprint.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+      {artifact === "typical_application" && has_multiple_applications && (
+        <div className="footprint-selector-bar">
+          <span className="multiple-footprints-tag">Multiple applications</span>
+          <label>
+            <span className="sr-only">Displayed application</span>
+            <select
+              value={selected_application_id}
+              onChange={(event) => setSelectedApplicationId(event.target.value)}
+            >
+              {application_options.map((application) => (
+                <option key={application.application_id} value={application.application_id}>
+                  {application.title}
                 </option>
               ))}
             </select>
@@ -199,6 +241,7 @@ export function CircuitPreview({
             on_active_tab_change={setArtifactPreviewTab}
             local_run_id={local_run_id}
             footprint_id={artifact === "component" ? selected_footprint_id : undefined}
+            application_id={artifact === "typical_application" ? selected_application_id : undefined}
           />
         </div>
         <DatasheetReference
@@ -208,6 +251,7 @@ export function CircuitPreview({
           on_component_view_change={setComponentReferenceView}
           local_run_id={local_run_id}
           footprint_id={artifact === "component" ? selected_footprint_id : undefined}
+          application_id={artifact === "typical_application" ? selected_application_id : undefined}
         />
       </div>
     </section>

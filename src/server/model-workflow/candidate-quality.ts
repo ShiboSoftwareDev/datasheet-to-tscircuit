@@ -113,11 +113,63 @@ const QUALITY_FIELDS: readonly (keyof CandidateQuality)[] = [
   "mean_normalized_error",
 ]
 
+const QUALITY_FIELD_LABELS: Readonly<Record<keyof CandidateQuality, string>> = {
+  passed: "validation target",
+  non_repairable_error_count: "non-repairable errors",
+  causality_failure_count: "stimulus-causality failures",
+  viewer_unavailable_count: "unavailable viewer simulations",
+  failed_case_count: "failed cases",
+  failed_series_count: "failed series",
+  worst_normalized_error: "worst normalized error",
+  mean_normalized_error: "mean normalized error",
+}
+
+type CandidateQualityDirection = "improved" | "unchanged" | "worsened"
+
+function qualityFieldValue(quality: CandidateQuality, field: keyof CandidateQuality): number {
+  return field === "passed" ? (quality.passed ? 0 : 1) : quality[field]
+}
+
+function qualityDirection(input: {
+  candidate: CandidateQuality
+  incumbent: CandidateQuality
+  field: keyof CandidateQuality
+}): CandidateQualityDirection {
+  const candidate_value = qualityFieldValue(input.candidate, input.field)
+  const incumbent_value = qualityFieldValue(input.incumbent, input.field)
+  if (candidate_value < incumbent_value) return "improved"
+  if (candidate_value > incumbent_value) return "worsened"
+  return "unchanged"
+}
+
+/**
+ * Gives the next repair attempt qualitative feedback about a rejected result.
+ * The ordered, server-owned gates are disclosed without exposing reference
+ * points or encouraging a candidate to optimize a private validation sample.
+ */
+export function formatRejectedCandidateQualityFeedback(input: {
+  candidate: CandidateQuality
+  incumbent: CandidateQuality
+}): string {
+  const comparisons = QUALITY_FIELDS.map((field) => ({
+    field,
+    direction: qualityDirection({ ...input, field }),
+  }))
+  const decisive = comparisons.find(({ direction }) => direction !== "unchanged")
+  return [
+    "Server evaluation of the rejected candidate (gates are listed in acceptance priority):",
+    ...comparisons.map(({ field, direction }) => `- ${QUALITY_FIELD_LABELS[field]}: ${direction}.`),
+    decisive
+      ? `The candidate was rejected because its first changed gate, ${QUALITY_FIELD_LABELS[decisive.field]}, ${decisive.direction}. Preserve the incumbent and choose a different diagnosis.`
+      : "The candidate tied the incumbent at every quality gate. Preserve the incumbent and choose a different diagnosis.",
+  ].join("\n")
+}
+
 /** Negative means left is better, positive means right is better, zero is a tie. */
 export function compareCandidateQuality(left: CandidateQuality, right: CandidateQuality): number {
   for (const field of QUALITY_FIELDS) {
-    const left_value = field === "passed" ? (left.passed ? 0 : 1) : left[field]
-    const right_value = field === "passed" ? (right.passed ? 0 : 1) : right[field]
+    const left_value = qualityFieldValue(left, field)
+    const right_value = qualityFieldValue(right, field)
     if (left_value < right_value) return -1
     if (left_value > right_value) return 1
   }

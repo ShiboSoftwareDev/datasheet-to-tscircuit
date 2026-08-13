@@ -50,6 +50,7 @@ test("reference graph results retain discovery order when workers finish out of 
 
   const run = runReferenceGraphWorkerPool({
     graphs,
+    concurrency: 2,
     signal: new AbortController().signal,
     async digitize(graph) {
       starts[graph]!.resolve()
@@ -87,6 +88,7 @@ test("a graph failure aborts active siblings and cannot publish partial canonica
   const run = (async () => {
     const results = await runReferenceGraphWorkerPool({
       graphs,
+      concurrency: 2,
       signal: new AbortController().signal,
       async digitize(graph, _graph_index, signal) {
         started.push(graph)
@@ -131,6 +133,7 @@ test("cancellation reaches active graph work and prevents queued graphs from sta
 
   const run = runReferenceGraphWorkerPool({
     graphs: ["graph-1", "graph-2", "graph-3", "graph-4"],
+    concurrency: 2,
     signal: controller.signal,
     async digitize(graph, _graph_index, signal) {
       started.push(graph)

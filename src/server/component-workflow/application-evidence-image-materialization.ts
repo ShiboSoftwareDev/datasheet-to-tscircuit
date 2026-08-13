@@ -3,6 +3,11 @@ import { constants } from "node:fs"
 import { lstat, mkdir, open, readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { ProcessError, type ProcessRunner } from "../infrastructure/process"
+import {
+  applicationDesignEvidenceSources,
+  rewriteApplicationDesignEvidenceSources,
+  type ApplicationDesignEvidence,
+} from "./application-design-evidence"
 import type { ApplicationSourceReference, TypicalApplicationPlan } from "./application-plan"
 
 const RENDER_DPI = 200 as const
@@ -97,17 +102,26 @@ function rewritePlan(plan: TypicalApplicationPlan, primary_page: number | undefi
 export async function materializeApplicationEvidenceImages(input: {
   workspace: string
   application_plan: TypicalApplicationPlan
+  application_design_evidence?: ApplicationDesignEvidence
   process_runner: ProcessRunner
   signal: AbortSignal
   on_output?: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
 }): Promise<{
   application_plan: TypicalApplicationPlan
+  application_design_evidence?: ApplicationDesignEvidence
   manifest: ApplicationEvidenceImageManifest
 }> {
   const primary_page = primaryPage(input.application_plan)
-  const pages = [...new Set(sources(input.application_plan).map(({ page }) => page))].sort(
-    (left, right) => left - right,
-  )
+  const pages = [
+    ...new Set(
+      [
+        ...sources(input.application_plan),
+        ...(input.application_design_evidence
+          ? applicationDesignEvidenceSources(input.application_design_evidence)
+          : []),
+      ].map(({ page }) => page),
+    ),
+  ].sort((left, right) => left - right)
   if (pages.length > MAX_RENDERED_SOURCE_PAGES) {
     throw new Error(
       `Application evidence cites ${pages.length} source pages; the maximum is ${MAX_RENDERED_SOURCE_PAGES}`,
@@ -185,5 +199,24 @@ export async function materializeApplicationEvidenceImages(input: {
     join(input.workspace, "application-evidence-image-manifest.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
   )
-  return { application_plan: rewritePlan(input.application_plan, primary_page), manifest }
+  const rewriteSource = (source: ApplicationSourceReference): ApplicationSourceReference => ({
+    ...source,
+    image:
+      primary_page !== undefined && source.page === primary_page
+        ? "visual-reference/typical-application.png"
+        : `visual-reference/source-page-${source.page}.png`,
+    render_dpi: RENDER_DPI,
+  })
+  return {
+    application_plan: rewritePlan(input.application_plan, primary_page),
+    ...(input.application_design_evidence
+      ? {
+          application_design_evidence: rewriteApplicationDesignEvidenceSources(
+            input.application_design_evidence,
+            rewriteSource,
+          ),
+        }
+      : {}),
+    manifest,
+  }
 }

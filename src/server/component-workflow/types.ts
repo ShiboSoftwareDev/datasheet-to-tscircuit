@@ -62,30 +62,45 @@ export type ApplicationPipelineOutputs = {
         component_sha256: string
         component_circuit_json_sha256: string
       }
+  plan_applications: {
+    catalog_path: string
+    application_count: number
+  }
   generate_application:
     | { available: false }
     | {
         available: true
-        source_path: string
+        applications: Array<{ application_id: string; source_path: string }>
       }
   build_application: {
-    result_path: string
     available: boolean
+    applications: Array<{ application_id: string; result_path: string }>
     build_errors: string[]
     circuit_element_count: number
   }
   validate_application: {
-    result_path: string
     available: boolean
+    applications: Array<{
+      application_id: string
+      result_path: string
+      passed: boolean
+      errors: string[]
+    }>
     passed: boolean
     errors: string[]
   }
   repair_application: {
-    result_path: string
     available: boolean
     passed: boolean
     repair_attempts: number
     errors: string[]
+    applications: Array<{
+      application_id: string
+      result_path: string
+      passed: boolean
+      repair_attempts: number
+      errors: string[]
+    }>
   }
   publish_application: {
     application_ready: boolean

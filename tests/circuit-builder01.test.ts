@@ -40,6 +40,7 @@ test("every tscircuit subprocess has idle and absolute deadlines", async () => {
     for (const request of process_runner.requests) {
       expect(request.idle_timeout_ms).toBeGreaterThan(0)
       expect(request.wall_timeout_ms).toBeGreaterThan(request.idle_timeout_ms ?? 0)
+      expect(request.env?.NODE_PATH).toContain("node_modules")
     }
   } finally {
     await rm(workspace, { recursive: true, force: true })

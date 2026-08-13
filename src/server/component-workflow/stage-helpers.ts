@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 import type { AnyCircuitElement } from "circuit-json"
 import type { ComponentFootprintPreviews, JobValidation } from "@/shared/job-types"
 import { isCircuitElementArray } from "../component-circuit-json"
@@ -15,6 +16,7 @@ import type { FootprintPlan } from "../job-artifact-validator"
 import type { JobStore } from "../job-store"
 import { createPipelineArtifact, type PipelineArtifact } from "../pipeline"
 import { getComponentSourceStructureErrors } from "./component-source-validation"
+import { parseApplicationPlanCatalog, type ApplicationPlanCatalog } from "./application-plan-catalog"
 import {
   applicationTargetIdentityFromEvidence,
   parseTypicalApplicationPlan,
@@ -25,6 +27,7 @@ import {
   type CommittedApplicationEvidenceSnapshot,
   readCommittedApplicationEvidenceSnapshot,
 } from "./application-evidence-commit"
+import { parseApplicationDesignEvidence, type ApplicationDesignEvidence } from "./application-design-evidence"
 import { type CommittedEvidenceSnapshot, readCommittedEvidenceSnapshot } from "./evidence-commit"
 
 export const INITIAL_JOB_VALIDATION: JobValidation = {
@@ -201,6 +204,35 @@ export async function readApprovedApplicationEvidence(job_dir: string): Promise<
   return (await readApprovedApplicationEvidenceBundle(job_dir)).application_plan
 }
 
+export async function readApprovedApplicationDesignEvidence(
+  job_dir: string,
+): Promise<ApplicationDesignEvidence> {
+  const snapshot = await readCommittedApplicationEvidenceSnapshot(job_dir)
+  if (!snapshot) {
+    throw new Error(
+      "Approved application evidence is unavailable because application-evidence-commit.json has not been published",
+    )
+  }
+  return parseApplicationDesignEvidence(
+    parseCommittedApplicationJson(snapshot, "application-design-evidence.json"),
+  )
+}
+
+export async function readApplicationPlanCatalog(job_dir: string): Promise<ApplicationPlanCatalog> {
+  const [raw_catalog, reference_plan, design_evidence, component] = await Promise.all([
+    readJson(join(job_dir, "application-plan-catalog.json")),
+    readApprovedApplicationEvidence(job_dir),
+    readApprovedApplicationDesignEvidence(job_dir),
+    readApprovedEvidence(job_dir),
+  ])
+  return parseApplicationPlanCatalog({
+    value: raw_catalog,
+    reference_plan,
+    component_evidence: component.component_evidence,
+    design_evidence,
+  })
+}
+
 /** Resolve the independently extracted U1 endpoints against component evidence. */
 export async function readComponentBoundApplicationEvidence(
   job_dir: string,
@@ -274,6 +306,11 @@ export function validateGeneratedSource(source: string, kind: "component" | "app
   }
   if (kind === "application" && !/\bfrom\s*["']\.\/component\.circuit(?:\.tsx)?["']/.test(source)) {
     throw new Error("application source must import ./component.circuit")
+  }
+  if (kind === "application" && /<\s*connection\b/i.test(source)) {
+    throw new Error(
+      'application source must express electrical connections with <trace from="..." to="..." /> elements, not <connection>',
+    )
   }
   if (kind === "component") {
     const structure_errors = getComponentSourceStructureErrors(source)

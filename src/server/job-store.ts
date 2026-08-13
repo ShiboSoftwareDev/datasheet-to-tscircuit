@@ -74,6 +74,7 @@ export interface RestoreJobInput extends CreateJobInput {
   typical_application_title?: string
   typical_application_code?: string
   typical_application_circuit_json?: Job["typical_application_circuit_json"]
+  typical_applications?: Job["typical_applications"]
   validation?: Job["validation"]
   provenance?: Job["provenance"]
   evidence_available?: boolean
@@ -98,6 +99,7 @@ export type JobUpdate = Partial<
     | "typical_application_title"
     | "typical_application_code"
     | "typical_application_circuit_json"
+    | "typical_applications"
     | "validation"
     | "provenance"
     | "evidence_available"
@@ -126,6 +128,7 @@ function getPublicJob(job_record: JobRecord): Job {
     typical_application_title: job_record.typical_application_title,
     typical_application_code: job_record.typical_application_code,
     typical_application_circuit_json: job_record.typical_application_circuit_json,
+    typical_applications: job_record.typical_applications,
     validation: job_record.validation,
     provenance: job_record.provenance,
     evidence_available: job_record.evidence_available,
@@ -472,6 +475,16 @@ export class JobStore {
           }
         : undefined,
       typical_application_title: job_record.typical_application_title,
+      typical_applications: job_record.typical_applications
+        ? {
+            default_application_id: job_record.typical_applications.default_application_id,
+            applications: job_record.typical_applications.applications.map((application) => ({
+              application_id: application.application_id,
+              title: application.title,
+              origin: application.origin,
+            })),
+          }
+        : undefined,
       validation: job_record.validation,
       provenance: job_record.provenance,
       evidence_available: job_record.evidence_available,

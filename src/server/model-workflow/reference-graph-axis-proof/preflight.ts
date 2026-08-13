@@ -15,7 +15,7 @@ import {
 } from "./ocr-extraction"
 import { extractPdfTextBBox, figureIdentityFromPdfText } from "./pdf-extraction"
 import {
-  canonicalGridLineCenters,
+  dominantGridLineRun,
   dominantGridSpacing,
   neutralGridProfileForCrop,
   ocrScopePanels,
@@ -59,11 +59,7 @@ function recommendedGridAnchorPixels({
   axis: "x" | "y"
 }): { minimum_value_pixel: number; maximum_value_pixel: number } | undefined {
   if (spacing === undefined || lines.length < 2) return undefined
-  const centers = canonicalGridLineCenters({ lines, spacing })
-  const tolerance = Math.max(2, Math.min(4, spacing * 0.08))
-  const supported = centers.filter((center) =>
-    centers.some((other) => other !== center && Math.abs(Math.abs(other - center) - spacing) <= tolerance),
-  )
+  const supported = dominantGridLineRun({ lines, spacing })
   if (supported.length < 3) return undefined
   const low_pixel = Math.min(...supported)
   const high_pixel = Math.max(...supported)
@@ -77,11 +73,7 @@ function recommendedPlotRightPixel(
   spacing: number | undefined,
 ): number | undefined {
   if (spacing === undefined) return undefined
-  const centers = canonicalGridLineCenters({ lines, spacing })
-  const tolerance = Math.max(2, Math.min(4, spacing * 0.08))
-  const supported = centers.filter((center) =>
-    centers.some((other) => other !== center && Math.abs(Math.abs(other - center) - spacing) <= tolerance),
-  )
+  const supported = dominantGridLineRun({ lines, spacing })
   return supported.length < 3 ? undefined : Math.max(...supported)
 }
 

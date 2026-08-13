@@ -87,6 +87,18 @@ test("derives a visible scope channel zero independently of waveform edge state"
       second: { pixel: 300, value: 2 },
     }),
   ).toBe(400)
+  expect(
+    axisZeroReferencePixel({
+      first: { pixel: 635, value: 1 / 9 },
+      second: { pixel: 95.66666666666667, value: 12.096296296296298 },
+    }),
+  ).toBeCloseTo(640)
+  expect(
+    axisZeroReferencePixel({
+      first: { pixel: 635, value: 1 },
+      second: { pixel: 95.66666666666667, value: 13 },
+    }),
+  ).toBeUndefined()
 })
 
 const canonical_run93_crop = {

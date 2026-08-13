@@ -91,7 +91,7 @@ const plan: ValidationPlan = {
 }
 
 async function prepareRepair(input: {
-  mutate: (workspace: string, next_source: string, next_card: string) => Promise<void>
+  mutate: (workspace: string, next_source: string, next_card: string, prompt: string) => Promise<void>
 }) {
   const model_dir = await mkdtemp(join(tmpdir(), "model-repair-candidate-"))
   temporary_directories.push(model_dir)
@@ -111,8 +111,10 @@ async function prepareRepair(input: {
     model_source: previous_source,
     simulator: "ngspice",
   })
+  const validation_case = plan.cases[0]
+  if (!validation_case) throw new Error("The repair test requires one validation case")
   const previous_tsx = renderValidationCaseTsx({
-    validation_case: plan.cases[0]!,
+    validation_case,
     manifest: previous_manifest,
     model_source: previous_source,
     model_card: previous_card,
@@ -134,7 +136,7 @@ async function prepareRepair(input: {
   const next_card = "# Repaired model\n"
   const agent_client: AgentClient = {
     async run(agent_input) {
-      await input.mutate(agent_input.workspace, next_source, next_card)
+      await input.mutate(agent_input.workspace, next_source, next_card, agent_input.prompt)
       return { attempts: 1, duration_ms: 1, output_tail: "" }
     },
   }
@@ -167,7 +169,10 @@ async function prepareRepair(input: {
 
 test("repair binds the canonical changed model into unchanged TSX circuits", async () => {
   const prepared = await prepareRepair({
-    async mutate(workspace, next_source, next_card) {
+    async mutate(workspace, next_source, next_card, prompt) {
+      expect(prompt).toContain("Preserve the incumbent's ability to run every tscircuit viewer simulation")
+      expect(prompt).toContain("Never trade a higher-priority gate for a lower-priority improvement")
+      expect(prompt).toContain("Do not assume that a behavioral function is\n  portable")
       const tsx_path = join(workspace, "simulation-tsx", "startup.circuit.tsx")
       const tsx = await readFile(tsx_path, "utf8")
       await Promise.all([

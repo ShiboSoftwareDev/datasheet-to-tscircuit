@@ -638,7 +638,7 @@ test("Find Reference Graphs rejects a crop that omits its own printed figure cap
   const observation = parseFoundReferenceGraphObservation(value, discovery, model_interface)
   const workspace = await mkdtemp(join(tmpdir(), "model-reference-caption-test-"))
   temporary_directories.push(workspace)
-  const processRunnerForFigure = (figure: string): ProcessRunner => ({
+  const processRunnerForFigure = (figure: string, neighboring_figure?: string): ProcessRunner => ({
     async run(request) {
       const output_path = request.command.at(-1)
       if (request.command[0] !== "pdftotext" || !output_path) {
@@ -647,7 +647,11 @@ test("Find Reference Graphs rejects a crop that omits its own printed figure cap
       await Bun.write(
         output_path,
         `<word xMin="40" yMin="80" xMax="58" yMax="90">Figure</word>\n` +
-          `<word xMin="60" yMin="80" xMax="80" yMax="90">${figure}</word>\n`,
+          `<word xMin="60" yMin="80" xMax="80" yMax="90">${figure}</word>\n` +
+          (neighboring_figure
+            ? `<word xMin="82" yMin="80" xMax="88" yMax="90">Figure</word>\n` +
+              `<word xMin="90" yMin="80" xMax="104" yMax="90">${neighboring_figure}</word>\n`
+            : ""),
       )
       return { exit_code: 0, duration_ms: 1, output_tail: "" }
     },
@@ -670,6 +674,15 @@ test("Find Reference Graphs rejects a crop that omits its own printed figure cap
       signal: new AbortController().signal,
     }),
   ).resolves.toBeUndefined()
+
+  await expect(
+    assertFoundReferenceGraphCaptions({
+      observation,
+      workspace,
+      process_runner: processRunnerForFigure("8-18", "8-19"),
+      signal: new AbortController().signal,
+    }),
+  ).rejects.toThrow(/own adjacent printed figure number\/caption: load_transient/)
 })
 
 test("cannot dismiss a source-proven public graph as fixture-ineligible", () => {

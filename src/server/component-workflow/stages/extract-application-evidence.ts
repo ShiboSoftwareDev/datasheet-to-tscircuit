@@ -11,6 +11,10 @@ import {
   type ApplicationEvidenceCommitResult,
   writeApplicationEvidenceCommit,
 } from "../application-evidence-commit"
+import {
+  parseApplicationDesignEvidence,
+  parseUnmaterializedApplicationDesignEvidence,
+} from "../application-design-evidence"
 import { materializeApplicationEvidenceImages } from "../application-evidence-image-materialization"
 import { parseTypicalApplicationPlan, parseUnmaterializedTypicalApplicationPlan } from "../application-plan"
 import {
@@ -29,6 +33,7 @@ import { defineApplicationStage } from "./stage-factory"
 
 type ExtractedApplicationEvidence = {
   application_plan: ReturnType<typeof parseTypicalApplicationPlan>
+  application_design_evidence: ReturnType<typeof parseApplicationDesignEvidence>
   connectivity_verification: ReturnType<typeof applyApplicationConnectivityObservation>
 }
 
@@ -81,12 +86,14 @@ export const extractApplicationEvidenceStage = defineApplicationStage({
           }),
         heartbeat_paths: (workspace) => [
           join(workspace, "typical-application-plan.json"),
+          join(workspace, "application-design-evidence.json"),
           join(workspace, "visual-reference"),
         ],
         rejection_debug: {
           debug_dir,
           files: [
             "typical-application-plan.json",
+            "application-design-evidence.json",
             "application-connectivity-review.json",
             "application-connectivity-verification.json",
             "application-evidence-image-manifest.json",
@@ -103,15 +110,30 @@ export const extractApplicationEvidenceStage = defineApplicationStage({
               max_nodes: 100_000,
             }),
           )
+          const application_design_evidence = parseUnmaterializedApplicationDesignEvidence(
+            await readBoundedJsonArtifact({
+              path: join(workspace, "application-design-evidence.json"),
+              max_bytes: 4 * 1024 * 1024,
+              max_depth: 48,
+              max_nodes: 100_000,
+            }),
+          )
           const materialized = await materializeApplicationEvidenceImages({
             workspace,
             application_plan,
+            application_design_evidence,
             process_runner: services.process_runner,
             signal,
             on_output: (stream, message) =>
               appendJobLog(services.job_store, context.job_id, stream, message).catch(() => undefined),
           })
           application_plan = parseTypicalApplicationPlan(materialized.application_plan)
+          if (!materialized.application_design_evidence) {
+            throw new Error("Application evidence materialization omitted design evidence")
+          }
+          const canonical_design_evidence = parseApplicationDesignEvidence(
+            materialized.application_design_evidence,
+          )
           await validateStageDirectory({
             root: join(workspace, "visual-reference"),
             max_files: 64,
@@ -151,6 +173,7 @@ export const extractApplicationEvidenceStage = defineApplicationStage({
           })
           return {
             application_plan,
+            application_design_evidence: canonical_design_evidence,
             connectivity_verification: applyApplicationConnectivityObservation({
               plan: application_plan,
               observation: installed,
@@ -162,6 +185,10 @@ export const extractApplicationEvidenceStage = defineApplicationStage({
             Bun.write(
               join(workspace, "typical-application-plan.json"),
               `${JSON.stringify(value.application_plan, null, 2)}\n`,
+            ),
+            Bun.write(
+              join(workspace, "application-design-evidence.json"),
+              `${JSON.stringify(value.application_design_evidence, null, 2)}\n`,
             ),
             Bun.write(
               join(workspace, "application-connectivity-verification.json"),

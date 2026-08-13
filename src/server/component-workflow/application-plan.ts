@@ -1,6 +1,7 @@
 import { EVIDENCE_CONFIDENCES, EVIDENCE_METHODS } from "../component-evidence/contract"
 import type { ExpectedApplicationConnection } from "../job-artifact-validator"
 import { applicationSourceNetName, canonicalizeApplicationEndpoint } from "./application-endpoint"
+import { executableApplicationPassiveType } from "./application-passive-kind"
 
 export const TYPICAL_APPLICATION_PLAN_VERSION = 4 as const
 export const TYPICAL_APPLICATION_AVAILABILITIES = ["documented", "not_present"] as const
@@ -25,6 +26,14 @@ function normalizedIdentifier(value: string | undefined): string {
 
 function componentReferenceKey(value: string): string {
   return value.trim().toLowerCase()
+}
+
+function passiveTerminalKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "")
+    .replace(/^pin(?=[a-z0-9])/, "")
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -653,18 +662,31 @@ function parseTypicalApplicationPlanWithOptions(
     }
   }
   if (availability === "documented") {
-    const connected_component_names = new Set(
-      canonical_plan.connections.flatMap((connection) =>
-        connection.pins.flatMap((endpoint) => {
-          const separator = endpoint.indexOf(".")
-          return separator > 0 ? [componentReferenceKey(endpoint.slice(0, separator))] : []
-        }),
-      ),
+    const component_endpoints = canonical_plan.connections.flatMap((connection) =>
+      connection.pins.flatMap((endpoint) => {
+        const separator = endpoint.indexOf(".")
+        if (separator <= 0) return []
+        return [
+          {
+            reference: componentReferenceKey(endpoint.slice(0, separator)),
+            terminal: passiveTerminalKey(endpoint.slice(separator + 1)),
+          },
+        ]
+      }),
     )
     for (const component of canonical_plan.components) {
-      if (!connected_component_names.has(componentReferenceKey(component.reference))) {
+      const reference = componentReferenceKey(component.reference)
+      const endpoints = component_endpoints.filter((endpoint) => endpoint.reference === reference)
+      if (endpoints.length === 0) {
         throw new Error(
           `typical application component ${component.reference} is unconnected; every listed component must appear in at least one connection`,
+        )
+      }
+      const passive_type = executableApplicationPassiveType(component.kind)
+      const distinct_terminal_count = new Set(endpoints.map(({ terminal }) => terminal)).size
+      if (passive_type && (endpoints.length !== 2 || distinct_terminal_count !== 2)) {
+        throw new Error(
+          `typical application ${passive_type} ${component.reference} must have exactly two distinct connected terminals; found ${endpoints.length} endpoints across ${distinct_terminal_count} distinct terminals`,
         )
       }
     }

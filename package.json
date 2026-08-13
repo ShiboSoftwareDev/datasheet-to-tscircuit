@@ -26,6 +26,9 @@
     "@earendil-works/pi-coding-agent": "0.80.10",
     "@resvg/resvg-js": "^2.6.2",
     "@tscircuit/ngspice-spice-engine": "^0.0.19",
+    "circuit-json-to-kicad": "0.0.173",
+    "jszip": "^3.10.1",
+    "polygon-clipping": "0.15.7",
     "tsci-agent": "0.1.11",
     "tscircuit": "0.0.2110",
     "typescript": "^5.9.3"
@@ -63,7 +66,6 @@
     "debug": "^4.4.0",
     "fflate": "^0.8.2",
     "fuse.js": "^7.1.0",
-    "jszip": "^3.10.1",
     "ky": "^1.7.5",
     "lucide-react": "latest",
     "marked": "^15.0.12",

@@ -8,10 +8,17 @@ import type { ValidationPlan, ValidationRunResult } from "../../spice-validation
 import {
   compareCandidateQuality,
   createCandidateQuality,
+  formatRejectedCandidateQualityFeedback,
   viewerQualityCasesFromValidation,
 } from "../candidate-quality"
 import { type CandidateValidationResult, validateCandidate } from "../candidate-validation"
+import { hasRepairCandidateBudget } from "../repair-budget"
 import { generateRepairCandidate, type StoredRepairCandidate } from "../repair-candidate"
+import {
+  createRepairEffectivenessReport,
+  type RepairCandidateEvaluation,
+  writeRepairEffectivenessReport,
+} from "../repair-effectiveness"
 import {
   appendModelLog,
   createModelRepairFeedback,
@@ -26,8 +33,27 @@ import { REPAIR_BUDGET_MS_PER_EFFORT } from "../types"
 import { getNonRepairableValidationErrors } from "../validation-repair-policy"
 import { defineModelStage } from "./stage-factory"
 
-function budgetSignal(parent: AbortSignal, remaining_ms: number): AbortSignal {
-  return AbortSignal.any([parent, AbortSignal.timeout(Math.max(1, Math.floor(remaining_ms)))])
+interface RepairBudgetSignal {
+  signal: AbortSignal
+  dispose: () => void
+}
+
+function createRepairBudgetSignal(input: { parent: AbortSignal; remaining_ms: number }): RepairBudgetSignal {
+  const controller = new AbortController()
+  const abortForParent = () => controller.abort(input.parent.reason)
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException("The SPICE repair budget expired", "TimeoutError")),
+    Math.max(1, Math.floor(input.remaining_ms)),
+  )
+  input.parent.addEventListener("abort", abortForParent, { once: true })
+  if (input.parent.aborted) abortForParent()
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timeout)
+      input.parent.removeEventListener("abort", abortForParent)
+    },
+  }
 }
 
 function budgetExpired(error: unknown, parent: AbortSignal, attempt: AbortSignal): boolean {
@@ -93,7 +119,16 @@ export const repairModelStage = defineModelStage({
           repair_elapsed_ms: 0,
           revision: comparison.revision,
         },
-        metrics: { repair_attempts: 0, repair_elapsed_ms: 0 },
+        metrics: {
+          repair_attempts: 0,
+          repair_elapsed_ms: 0,
+          repair_promoted_candidates: 0,
+          repair_rejected_candidates: 0,
+          repair_quality_improved: false,
+          repair_revision_changed: false,
+          repair_baseline_failed_cases: 0,
+          repair_final_failed_cases: 0,
+        },
       }
     }
 
@@ -155,180 +190,251 @@ export const repairModelStage = defineModelStage({
         })),
       })),
     })
+    const baseline_quality = best_quality
+    const candidate_evaluations: RepairCandidateEvaluation[] = []
+    let rejected_candidate_feedback = ""
+    let last_evaluated_candidate_ms: number | undefined
+
+    const createEffectivenessArtifact = async (repair_elapsed_ms: number) => {
+      const effectiveness_path = join(debug_dir, "repair-effectiveness.json")
+      const report = createRepairEffectivenessReport({
+        baseline_revision: comparison.revision,
+        final_revision: previous_candidate.revision,
+        baseline_quality,
+        final_quality: best_quality,
+        attempted_candidate_count: attempted_repairs,
+        repair_elapsed_ms,
+        repair_budget_ms: initial_repair_budget_ms,
+        candidates: candidate_evaluations,
+      })
+      await writeRepairEffectivenessReport({ path: effectiveness_path, report })
+      return {
+        report,
+        artifact: await modelArtifact({
+          id: "repair_effectiveness",
+          path: effectiveness_path,
+          media_type: "application/json",
+          role: "evaluation",
+        }),
+      }
+    }
 
     try {
       while (true) {
         const live_run = services.model_run_store.getModelRun(context.model_run_id)
         const repair_budget_ms = live_run?.repair_budget_ms ?? initial_repair_budget_ms
         const elapsed_ms = Date.now() - repair_started_at
-        if (elapsed_ms >= repair_budget_ms) break
-        attempted_repairs += 1
         const remaining_ms = repair_budget_ms - elapsed_ms
-        const attempt_signal = budgetSignal(signal, remaining_ms)
-        services.model_run_store.updateModelRun(context.model_run_id, {
-          status: "running",
-          iteration: attempted_repairs,
-        })
-        updateModelProgress({
-          store: services.model_run_store,
-          model_run_id: context.model_run_id,
-          phase: "repairing",
-          message: `Diagnosing model and TSX candidate ${attempted_repairs} (${Math.ceil(remaining_ms / 60_000)} min remaining)`,
-          iteration: attempted_repairs,
-        })
-        let candidate: AgentArtifactAttempt<StoredRepairCandidate>
+        if (!hasRepairCandidateBudget({ remaining_ms, last_evaluated_candidate_ms })) break
+        const candidate_started_at = Date.now()
+        attempted_repairs += 1
+        const attempt_budget = createRepairBudgetSignal({ parent: signal, remaining_ms })
+        const attempt_signal = attempt_budget.signal
         try {
-          candidate = await generateRepairCandidate({
-            model_dir: context.model_dir,
-            contract,
-            plan,
-            evidence_dir: comparison.evidence_dir,
-            previous: previous_candidate,
-            strategy_guidance: strategy.guidance,
-            feedback: formatModelRepairFeedback(repair_feedback),
-            signal: attempt_signal,
-            use_openai: context.use_openai,
-            agent_client: services.agent_client,
-            // Artifact corrections are bounded by the stage's abort deadline,
-            // not exposed as the user's repair budget.
-            max_artifact_attempts: 8,
-            debug_dir: join(debug_dir, `candidate-${attempted_repairs}`),
-            phase_label: `SPICE repair diagnosis and edit ${attempted_repairs}`,
-            on_output: (stream, message) =>
-              appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+          services.model_run_store.updateModelRun(context.model_run_id, {
+            status: "running",
+            iteration: attempted_repairs,
           })
-        } catch (error) {
-          if (budgetExpired(error, signal, attempt_signal)) break
-          throw error
-        }
+          updateModelProgress({
+            store: services.model_run_store,
+            model_run_id: context.model_run_id,
+            phase: "repairing",
+            message: `Diagnosing model and TSX candidate ${attempted_repairs} (${Math.ceil(remaining_ms / 60_000)} min remaining)`,
+            iteration: attempted_repairs,
+          })
+          let candidate: AgentArtifactAttempt<StoredRepairCandidate>
+          try {
+            candidate = await generateRepairCandidate({
+              model_dir: context.model_dir,
+              contract,
+              plan,
+              evidence_dir: comparison.evidence_dir,
+              previous: previous_candidate,
+              strategy_guidance: strategy.guidance,
+              feedback: [formatModelRepairFeedback(repair_feedback), rejected_candidate_feedback]
+                .filter(Boolean)
+                .join("\n\n"),
+              signal: attempt_signal,
+              use_openai: context.use_openai,
+              agent_client: services.agent_client,
+              // Artifact corrections are bounded by the stage's abort deadline,
+              // not exposed as the user's repair budget.
+              max_artifact_attempts: 8,
+              debug_dir: join(debug_dir, `candidate-${attempted_repairs}`),
+              phase_label: `SPICE repair diagnosis and edit ${attempted_repairs}`,
+              on_output: (stream, message) =>
+                appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+            })
+          } catch (error) {
+            if (budgetExpired(error, signal, attempt_signal)) break
+            throw error
+          }
 
-        services.model_run_store.updateModelRun(context.model_run_id, { status: "validating" })
-        updateModelProgress({
-          store: services.model_run_store,
-          model_run_id: context.model_run_id,
-          phase: "validating",
-          message: `Running repaired candidate ${attempted_repairs} with tscircuit`,
-          iteration: attempted_repairs,
-        })
-        const validation_artifact_dir = join(candidate.value.artifact_dir, "validation")
-        let validation: CandidateValidationResult
-        try {
-          validation = await validateCandidate({
-            plan,
-            contract,
-            generated: candidate.value,
-            source_dir: candidate.value.source_dir,
-            model_dir: context.model_dir,
-            validation_artifact_dir,
-            evidence_dir: comparison.evidence_dir,
-            preview_generation: `${context.invocation_id}-${candidate.value.manifest.revision}`,
+          services.model_run_store.updateModelRun(context.model_run_id, { status: "validating" })
+          updateModelProgress({
+            store: services.model_run_store,
+            model_run_id: context.model_run_id,
+            phase: "validating",
+            message: `Running repaired candidate ${attempted_repairs} with tscircuit`,
+            iteration: attempted_repairs,
+          })
+          const validation_artifact_dir = join(candidate.value.artifact_dir, "validation")
+          let validation: CandidateValidationResult
+          try {
+            validation = await validateCandidate({
+              plan,
+              contract,
+              generated: candidate.value,
+              source_dir: candidate.value.source_dir,
+              model_dir: context.model_dir,
+              validation_artifact_dir,
+              evidence_dir: comparison.evidence_dir,
+              preview_generation: `${context.invocation_id}-${candidate.value.manifest.revision}`,
+              model_run_store: services.model_run_store,
+              model_run_id: context.model_run_id,
+              tsci_bin: services.tsci_bin,
+              process_runner: services.process_runner,
+              signal: attempt_signal,
+              append: (stream, message) =>
+                appendModelLog(services.model_run_store, context.model_run_id, stream, message),
+              fixture_policy: "repairable",
+            })
+          } catch (error) {
+            if (budgetExpired(error, signal, attempt_signal)) break
+            throw error
+          }
+
+          const candidate_quality = createCandidateQuality({
+            result: validation.result,
+            viewer_cases: viewerQualityCasesFromValidation({
+              case_ids: plan.cases.map(({ id }) => id),
+              viewer_validation_by_case: validation.preview_build.viewer_validation_by_case,
+            }),
+          })
+          last_evaluated_candidate_ms = Date.now() - candidate_started_at
+          const improved = validation.passed || compareCandidateQuality(candidate_quality, best_quality) < 0
+          candidate_evaluations.push({
+            attempt: attempted_repairs,
+            target: candidate.value.diagnosis.target,
+            revision: candidate.value.manifest.revision,
+            outcome: improved ? "promoted" : "rejected",
+            quality: candidate_quality,
+          })
+          if (!improved) {
+            rejected_candidate_feedback = [
+              formatRejectedCandidateQualityFeedback({
+                candidate: candidate_quality,
+                incumbent: best_quality,
+              }),
+              "Redacted failure categories from that rejected candidate:",
+              formatModelRepairFeedback(
+                createModelRepairFeedback(
+                  validation.result,
+                  validation.preview_build.viewer_validation_by_case,
+                  validation.stimulus_causality,
+                  validation.preview_build.viewer_model_errors_by_case,
+                ),
+              ),
+            ].join("\n")
+            // The model, TSX, diagnosis, and agent trace are sufficient to
+            // reproduce a rejected repair. Its multi-megabyte simulation/viewer
+            // bundle is neither live nor consumed by a later stage, so retaining
+            // one for every budget iteration makes repair storage grow without a
+            // bound. Keep complete bundles only for the baseline and candidates
+            // that become the new best revision.
+            await rm(validation_artifact_dir, { recursive: true, force: true })
+            await appendModelLog(
+              services.model_run_store,
+              context.model_run_id,
+              "system",
+              `Repair ${attempted_repairs} (${candidate.value.diagnosis.target}) did not improve the candidate; its derived validation bundle was discarded and the live TSX, simulation, and plots were left unchanged.\n`,
+            )
+            continue
+          }
+
+          await projectCandidateValidationUi({
             model_run_store: services.model_run_store,
             model_run_id: context.model_run_id,
-            tsci_bin: services.tsci_bin,
-            process_runner: services.process_runner,
+            model_dir: context.model_dir,
+            immutable_artifact_dir: validation_artifact_dir,
+            evidence_dir: comparison.evidence_dir,
+            revision: candidate.value.manifest.revision,
+            projection: validation.projection,
+            development_model: candidate.value,
             signal: attempt_signal,
-            append: (stream, message) =>
-              appendModelLog(services.model_run_store, context.model_run_id, stream, message),
-            fixture_policy: "repairable",
           })
-        } catch (error) {
-          if (budgetExpired(error, signal, attempt_signal)) break
-          throw error
-        }
-
-        const candidate_quality = createCandidateQuality({
-          result: validation.result,
-          viewer_cases: viewerQualityCasesFromValidation({
-            case_ids: plan.cases.map(({ id }) => id),
-            viewer_validation_by_case: validation.preview_build.viewer_validation_by_case,
-          }),
-        })
-        const improved = validation.passed || compareCandidateQuality(candidate_quality, best_quality) < 0
-        if (!improved) {
-          // The model, TSX, diagnosis, and agent trace are sufficient to
-          // reproduce a rejected repair. Its multi-megabyte simulation/viewer
-          // bundle is neither live nor consumed by a later stage, so retaining
-          // one for every budget iteration makes repair storage grow without a
-          // bound. Keep complete bundles only for the baseline and candidates
-          // that become the new best revision.
-          await rm(validation_artifact_dir, { recursive: true, force: true })
+          best_quality = candidate_quality
+          rejected_candidate_feedback = ""
+          result = validation.result
+          repair_feedback = createModelRepairFeedback(
+            validation.result,
+            validation.preview_build.viewer_validation_by_case,
+            validation.stimulus_causality,
+            validation.preview_build.viewer_model_errors_by_case,
+          )
+          previous_candidate = {
+            model_path: join(candidate.value.artifact_dir, "model.lib"),
+            model_card_path: join(candidate.value.artifact_dir, "model-card.md"),
+            manifest_path: join(candidate.value.artifact_dir, "model-manifest.json"),
+            source_dir: candidate.value.source_dir,
+            result_path: validation.result_path,
+            revision: candidate.value.manifest.revision,
+            diagnostic_path: validation.diagnostic_path,
+          }
           await appendModelLog(
             services.model_run_store,
             context.model_run_id,
             "system",
-            `Repair ${attempted_repairs} (${candidate.value.diagnosis.target}) did not improve the candidate; its derived validation bundle was discarded and the live TSX, simulation, and plots were left unchanged.\n`,
+            `Repair ${attempted_repairs} diagnosed ${candidate.value.diagnosis.target} and atomically promoted the improved model/TSX/simulation/comparison bundle.\n`,
           )
-          continue
-        }
 
-        await projectCandidateValidationUi({
-          model_run_store: services.model_run_store,
-          model_run_id: context.model_run_id,
-          model_dir: context.model_dir,
-          immutable_artifact_dir: validation_artifact_dir,
-          evidence_dir: comparison.evidence_dir,
-          revision: candidate.value.manifest.revision,
-          projection: validation.projection,
-          development_model: candidate.value,
-          signal: attempt_signal,
-        })
-        best_quality = candidate_quality
-        result = validation.result
-        repair_feedback = createModelRepairFeedback(
-          validation.result,
-          validation.preview_build.viewer_validation_by_case,
-          validation.stimulus_causality,
-          validation.preview_build.viewer_model_errors_by_case,
-        )
-        previous_candidate = {
-          model_path: join(candidate.value.artifact_dir, "model.lib"),
-          model_card_path: join(candidate.value.artifact_dir, "model-card.md"),
-          manifest_path: join(candidate.value.artifact_dir, "model-manifest.json"),
-          source_dir: candidate.value.source_dir,
-          result_path: validation.result_path,
-          revision: candidate.value.manifest.revision,
-          diagnostic_path: validation.diagnostic_path,
-        }
-        await appendModelLog(
-          services.model_run_store,
-          context.model_run_id,
-          "system",
-          `Repair ${attempted_repairs} diagnosed ${candidate.value.diagnosis.target} and atomically promoted the improved model/TSX/simulation/comparison bundle.\n`,
-        )
-
-        if (validation.passed) {
-          const repair_elapsed_ms = Date.now() - repair_started_at
-          return {
-            status: "completed",
-            output: {
-              result_path: validation.result_path,
-              model_path: previous_candidate.model_path,
-              model_card_path: previous_candidate.model_card_path,
-              manifest_path: previous_candidate.manifest_path,
-              contract_path: comparison.contract_path,
-              plan_path: comparison.plan_path,
-              evidence_dir: comparison.evidence_dir,
-              passed: true,
-              repair_attempts: attempted_repairs,
-              repair_elapsed_ms,
-              revision: previous_candidate.revision,
-            },
-            artifacts: [
-              await modelArtifact({
-                id: "final_validation_results",
-                path: validation.result_path,
-                media_type: "application/json",
-                role: "validation_result",
-              }),
-              await modelArtifact({
-                id: "repair_diagnosis",
-                path: join(candidate.value.artifact_dir, "repair-plan.json"),
-                media_type: "application/json",
-                role: "debug",
-              }),
-            ],
-            metrics: { repair_attempts: attempted_repairs, repair_elapsed_ms },
+          if (validation.passed) {
+            const repair_elapsed_ms = Date.now() - repair_started_at
+            const effectiveness = await createEffectivenessArtifact(repair_elapsed_ms)
+            return {
+              status: "completed",
+              output: {
+                result_path: validation.result_path,
+                model_path: previous_candidate.model_path,
+                model_card_path: previous_candidate.model_card_path,
+                manifest_path: previous_candidate.manifest_path,
+                contract_path: comparison.contract_path,
+                plan_path: comparison.plan_path,
+                evidence_dir: comparison.evidence_dir,
+                passed: true,
+                repair_attempts: attempted_repairs,
+                repair_elapsed_ms,
+                revision: previous_candidate.revision,
+              },
+              artifacts: [
+                await modelArtifact({
+                  id: "final_validation_results",
+                  path: validation.result_path,
+                  media_type: "application/json",
+                  role: "validation_result",
+                }),
+                await modelArtifact({
+                  id: "repair_diagnosis",
+                  path: join(candidate.value.artifact_dir, "repair-plan.json"),
+                  media_type: "application/json",
+                  role: "debug",
+                }),
+                effectiveness.artifact,
+              ],
+              metrics: {
+                repair_attempts: attempted_repairs,
+                repair_elapsed_ms,
+                repair_promoted_candidates: effectiveness.report.promoted_candidate_count,
+                repair_rejected_candidates: effectiveness.report.rejected_candidate_count,
+                repair_quality_improved: effectiveness.report.quality_improved,
+                repair_revision_changed: effectiveness.report.revision_changed,
+                repair_baseline_failed_cases: baseline_quality.failed_case_count,
+                repair_final_failed_cases: best_quality.failed_case_count,
+              },
+            }
           }
+        } finally {
+          attempt_budget.dispose()
         }
       }
     } finally {
@@ -336,8 +442,9 @@ export const repairModelStage = defineModelStage({
     }
 
     const repair_elapsed_ms = Date.now() - repair_started_at
+    const effectiveness = await createEffectivenessArtifact(repair_elapsed_ms)
     const quality_message =
-      `Repair completed its ${Math.ceil(initial_repair_budget_ms / 60_000)} minute budget after ${attempted_repairs} candidate(s), but the best model and TSX remain outside the validation target.\n` +
+      `Repair completed within its ${Math.ceil(initial_repair_budget_ms / 60_000)} minute budget after ${attempted_repairs} candidate(s), but the best model and TSX remain outside the validation target.\n` +
       formatModelRepairFeedback(repair_feedback)
     const quality_hint = `The best complete candidate remains visible. Repair used ${Math.ceil(repair_elapsed_ms / 1_000)} seconds without changing any reference artifact.`
     await appendModelLog(
@@ -379,7 +486,17 @@ export const repairModelStage = defineModelStage({
           retryable: false,
         },
       ],
-      metrics: { repair_attempts: attempted_repairs, repair_elapsed_ms },
+      artifacts: [effectiveness.artifact],
+      metrics: {
+        repair_attempts: attempted_repairs,
+        repair_elapsed_ms,
+        repair_promoted_candidates: effectiveness.report.promoted_candidate_count,
+        repair_rejected_candidates: effectiveness.report.rejected_candidate_count,
+        repair_quality_improved: effectiveness.report.quality_improved,
+        repair_revision_changed: effectiveness.report.revision_changed,
+        repair_baseline_failed_cases: baseline_quality.failed_case_count,
+        repair_final_failed_cases: best_quality.failed_case_count,
+      },
     }
   },
 })

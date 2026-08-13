@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { constants, createReadStream, type Stats } from "node:fs"
 import {
   chmod,
+  copyFile,
   type FileHandle,
   link,
   lstat,
@@ -122,6 +123,16 @@ async function hashFile(path: string): Promise<string> {
   return hash.digest("hex")
 }
 
+async function statRegularFileWithoutFollowing(path: string): Promise<Stats> {
+  let handle: FileHandle | undefined
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    return await handle.stat()
+  } finally {
+    await closeQuietly(handle)
+  }
+}
+
 async function snapshotFileAttempt(input: {
   source_path: string
   relative_path: string
@@ -136,13 +147,10 @@ async function snapshotFileAttempt(input: {
     })
   }
 
-  let source: FileHandle | undefined
-  let destination: FileHandle | undefined
   let temporary_path: string | undefined
   try {
-    source = await open(input.source_path, constants.O_RDONLY | constants.O_NOFOLLOW)
-    const opened = await source.stat()
-    if (!opened.isFile() || before.dev !== opened.dev || before.ino !== opened.ino) {
+    const opened = await statRegularFileWithoutFollowing(input.source_path)
+    if (!opened.isFile() || !sameFile(before, opened)) {
       throw pipelineError({
         code: "task_input_file_changed",
         message: `Task input changed while it was opened: ${input.relative_path}`,
@@ -151,34 +159,15 @@ async function snapshotFileAttempt(input: {
     }
 
     temporary_path = join(input.objects_dir, `.${randomUUID()}.partial`)
-    destination = await open(
-      temporary_path,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      0o600,
-    )
-    const hash = createHash("sha256")
-    const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES)
-    let position = 0
-    while (true) {
-      const { bytesRead } = await source.read(buffer, 0, buffer.byteLength, position)
-      if (bytesRead === 0) break
-      const chunk = buffer.subarray(0, bytesRead)
-      hash.update(chunk)
-      let written = 0
-      while (written < bytesRead) {
-        const result = await destination.write(buffer, written, bytesRead - written, null)
-        if (result.bytesWritten === 0) throw new Error("Task input snapshot write made no progress")
-        written += result.bytesWritten
-      }
-      position += bytesRead
-    }
-    await destination.sync()
-    const [finished, current] = await Promise.all([source.stat(), lstat(input.source_path)])
+    await copyFile(input.source_path, temporary_path, constants.COPYFILE_EXCL)
+    const [snapshot, current] = await Promise.all([lstat(temporary_path), lstat(input.source_path)])
     if (
+      !snapshot.isFile() ||
+      snapshot.isSymbolicLink() ||
       !current.isFile() ||
       current.isSymbolicLink() ||
-      !sameFile(opened, finished) ||
-      !sameFile(opened, current)
+      !sameFile(opened, current) ||
+      snapshot.size !== opened.size
     ) {
       throw pipelineError({
         code: "task_input_file_changed",
@@ -186,10 +175,16 @@ async function snapshotFileAttempt(input: {
         path: input.source_path,
       })
     }
-    const digest = hash.digest("hex")
+    const digest = await hashFile(temporary_path)
+    const verified_snapshot = await lstat(temporary_path)
+    if (!sameFile(snapshot, verified_snapshot)) {
+      throw pipelineError({
+        code: "task_input_file_changed",
+        message: `Task input snapshot changed while it was verified: ${input.relative_path}`,
+        path: input.source_path,
+      })
+    }
     const object_path = join(input.objects_dir, digest)
-    await closeQuietly(destination)
-    destination = undefined
     await chmod(temporary_path, 0o400)
     try {
       await link(temporary_path, object_path)
@@ -199,7 +194,7 @@ async function snapshotFileAttempt(input: {
       if (
         !existing?.isFile() ||
         existing.isSymbolicLink() ||
-        existing.size !== position ||
+        existing.size !== snapshot.size ||
         (await hashFile(object_path)) !== digest
       ) {
         throw error
@@ -210,7 +205,7 @@ async function snapshotFileAttempt(input: {
     return {
       path: input.relative_path,
       hash: digest,
-      size_bytes: position,
+      size_bytes: snapshot.size,
       mode: opened.mode & 0o777,
     }
   } catch (error) {
@@ -222,11 +217,6 @@ async function snapshotFileAttempt(input: {
       cause: error,
     })
   } finally {
-    // Bun on macOS can intermittently stall when two handles for the same
-    // filesystem are closed concurrently. Close deterministically so Local
-    // input materialization cannot hang between otherwise tiny files.
-    await closeQuietly(destination)
-    await closeQuietly(source)
     await unlinkQuietly(temporary_path)
   }
 }

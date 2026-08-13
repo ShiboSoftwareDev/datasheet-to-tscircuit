@@ -7,12 +7,12 @@ import { runAgentArtifactStage } from "../infrastructure/agent"
 import { createStageWorkspace, promoteStageFile, readBoundedJsonArtifact } from "../infrastructure/artifacts"
 import { atomicWriteJsonSync } from "../infrastructure/persistence/atomic-write"
 import { normalizeElectricalPinLabel } from "../pin-label-normalization"
+import { canonicalizeApplicationEndpoint } from "./application-endpoint"
 import {
   type ApplicationSourceReference,
   parseApplicationSourceReferences,
   type TypicalApplicationPlan,
 } from "./application-plan"
-import { canonicalizeApplicationEndpoint } from "./application-endpoint"
 
 export const APPLICATION_CONNECTIVITY_REVIEW_SCHEMA_ID = "application-connectivity-review/v1" as const
 
@@ -986,6 +986,10 @@ must be retained. Represent whitespace in a printed external label with undersco
 every U1 endpoint to its physical pin number from the same datasheet; do not emit
 pin-name aliases. Inspect every junction dot and keep wire crossings
 without a junction in separate nodes.
+
+Every resistor, capacitor, inductor, ferrite, and diode must contribute exactly
+two distinct connected component.port endpoints. Never omit a terminal merely
+because its wire joins a common rail such as GND.
 
 Arrows, bus wedges, braces, interface labels, and text such as "To MCU" describe
 where wires leave the figure; they are not components and do not electrically join

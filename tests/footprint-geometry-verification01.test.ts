@@ -6,6 +6,7 @@ import { parseComponentEvidence } from "@/server/component-evidence"
 import {
   applyFootprintGeometryObservation,
   compareFootprintGeometry,
+  componentEvidenceWithVerifiedFootprintGeometry,
   observeFootprintGeometry,
   parseFootprintGeometryReview,
   verifyFootprintGeometry,
@@ -111,6 +112,69 @@ test("a well-formed independent review catches a copied special-pad width", () =
   )
 })
 
+test("an exposed-pad label outside the electrical pin interface is treated as mechanical copper", () => {
+  const component_evidence = evidence()
+  component_evidence.footprint.pads.push({
+    pin: null,
+    kind: "smt",
+    x: 0,
+    y: 1,
+    width: 1.2,
+    height: 1.4,
+    sources: [footprint_source],
+  })
+  const independent = parseFootprintGeometryReview(
+    {
+      version: 1,
+      source: footprint_source,
+      view: "pcb_top",
+      units: "mm",
+      pads: [...reviewPads(), { pin: "thermal_pad", kind: "smt", x: 0, y: 1, width: 1.2, height: 1.4 }],
+    },
+    component_evidence,
+  )
+
+  const agreement = compareFootprintGeometry({ evidence: component_evidence, review: independent })
+
+  expect(agreement.extractor_pads).toEqual(agreement.verifier_pads)
+  expect(agreement.verifier_pads).toContainEqual({
+    pin: null,
+    kind: "smt",
+    x: 0,
+    y: 1,
+    width: 1.2,
+    height: 1.4,
+  })
+})
+
+test("verified physical geometry replaces extractor geometry without changing its electrical contract", () => {
+  const component_evidence = evidence()
+  const independent = review(
+    reviewPads().map((pad) => (pad.pin === "3" ? { ...pad, x: 1.2, width: 1.4 } : { ...pad })),
+  )
+
+  const reconciled = componentEvidenceWithVerifiedFootprintGeometry({
+    evidence: component_evidence,
+    observation: {
+      review: independent,
+      verifier_attempts: 1,
+      verifier_agent_duration_ms: 10,
+    },
+  })
+
+  expect(reconciled.pinout).toEqual(component_evidence.pinout)
+  expect(reconciled.footprint.pads.find(({ pin }) => pin === "3")).toEqual({
+    pin: "3",
+    kind: "smt",
+    x: 1.2,
+    y: 0,
+    width: 1.4,
+    height: 0.8,
+    sources: [footprint_source],
+  })
+  expect(() => compareFootprintGeometry({ evidence: reconciled, review: independent })).not.toThrow()
+})
+
 test("geometry review schema rejects unknown fields and untrusted image provenance", () => {
   expect(() =>
     parseFootprintGeometryReview(
@@ -161,6 +225,22 @@ test("geometry review allows distinct copper pads on one pin but rejects contain
 
   expect(() =>
     review([...reviewPads(), { pin: null, kind: "smt", x: 1, y: 0, width: 1.5, height: 1 }]),
+  ).toThrow(/represents one physical copper area twice/)
+
+  expect(() =>
+    review([
+      ...reviewPads(),
+      {
+        pin: null,
+        kind: "plated_hole",
+        x: 1,
+        y: 0,
+        width: 0.4,
+        height: 0.4,
+        hole_width: 0.2,
+        hole_height: 0.2,
+      },
+    ]),
   ).toThrow(/represents one physical copper area twice/)
 })
 

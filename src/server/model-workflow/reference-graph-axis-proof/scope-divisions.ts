@@ -9,11 +9,19 @@ import {
   parseTesseractTsv,
   scopeControlDivisionScaleCandidates,
 } from "./ocr-extraction"
-import { ANCHOR_PIXEL_TOLERANCE, MAX_TSV_BYTES, OCR_DPI, OCR_SCALE, sha256 } from "./shared"
+import {
+  ANCHOR_PIXEL_TOLERANCE,
+  MAX_TSV_BYTES,
+  OCR_DPI,
+  OCR_SCALE,
+  ORTHOGONAL_ALIGNMENT_TOLERANCE,
+  sha256,
+} from "./shared"
 import type { ReferenceDivisionScaleSource, ReferenceGridCalibrationSource, TesseractWord } from "./types"
 
 const MAX_RIGHT_EDGE_PANEL_FALLBACK_WIDTH = 1_024 * OCR_SCALE
 const MIN_RIGHT_EDGE_CONTROL_STRIP_WIDTH = 80 * OCR_SCALE
+const MAX_FOCUSED_SCOPE_PANEL_WIDTH = 640
 
 export function hasRightEdgeScopeControlStrip(input: {
   render_width: number
@@ -107,14 +115,14 @@ export async function ocrScopePanels(input: {
       name: "horizontal-panel",
       left: panel_left,
       top: panel_top,
-      width: measurement_locates_compact_controls ? 1_500 : 384,
+      width: measurement_locates_compact_controls ? 1_500 : MAX_FOCUSED_SCOPE_PANEL_WIDTH,
       height: measurement_locates_compact_controls ? 360 : 450,
     },
     {
       name: "channel-panel",
       left: measurement_locates_compact_controls ? 0 : panel_left,
       top: measurement_locates_compact_controls ? bottom_panel_top : panel_top + 180,
-      width: measurement_locates_compact_controls ? input.render_width : 384,
+      width: measurement_locates_compact_controls ? input.render_width : MAX_FOCUSED_SCOPE_PANEL_WIDTH,
       height: measurement_locates_compact_controls ? input.render_height - bottom_panel_top : 760,
     },
     ...(measurement_locates_compact_controls
@@ -123,7 +131,7 @@ export async function ocrScopePanels(input: {
             name: "plot-control-panel",
             left: Math.max(0, Math.min(input.render_width - 384, Math.floor(traced_plot_right - 24))),
             top: 0,
-            width: 384,
+            width: MAX_FOCUSED_SCOPE_PANEL_WIDTH,
             height: Math.min(1_210, input.render_height),
           },
         ]
@@ -390,7 +398,7 @@ export function canonicalGridLineCenters(input: { lines: readonly number[]; spac
   // First reject strokes with no grid-period neighbor, then combine the
   // anti-aliased edges of each supported line. Filtering first prevents a
   // nearby waveform edge from pulling a real grid center away from the plot.
-  const threshold = input.spacing * 0.2
+  const threshold = support_tolerance
   for (const line of candidate_lines) {
     const current = clusters.at(-1)
     if (!current || line - current.at(-1)! > threshold) clusters.push([line])
@@ -403,6 +411,32 @@ export function canonicalGridLineCenters(input: { lines: readonly number[]; spac
   })
 }
 
+/** Select the longest regular sequence and exclude periodic-looking strokes in adjacent controls. */
+export function dominantGridLineRun(input: { lines: readonly number[]; spacing: number }): number[] {
+  const centers = canonicalGridLineCenters(input)
+  const tolerance = Math.max(1.5, Math.min(3, input.spacing * 0.04))
+  const runs: number[][] = []
+  for (const center of centers) {
+    const predecessor = runs
+      .filter((run) => Math.abs(center - run.at(-1)! - input.spacing) <= tolerance)
+      .sort(
+        (left, right) =>
+          right.length - left.length ||
+          right.at(-1)! - right[0]! - (left.at(-1)! - left[0]!) ||
+          left[0]! - right[0]!,
+      )[0]
+    runs.push(predecessor ? [...predecessor, center] : [center])
+  }
+  return (
+    runs.sort(
+      (left, right) =>
+        right.length - left.length ||
+        right.at(-1)! - right[0]! - (left.at(-1)! - left[0]!) ||
+        left[0]! - right[0]!,
+    )[0] ?? []
+  )
+}
+
 export function axisZeroReferencePixel(axis: {
   first: { pixel: number; value: number }
   second: { pixel: number; value: number }
@@ -410,8 +444,20 @@ export function axisZeroReferencePixel(axis: {
   const value_span = axis.second.value - axis.first.value
   if (value_span === 0) return undefined
   const zero_ratio = -axis.first.value / value_span
-  if (zero_ratio < 0 || zero_ratio > 1) return undefined
-  return axis.first.pixel + zero_ratio * (axis.second.pixel - axis.first.pixel)
+  const zero_pixel = axis.first.pixel + zero_ratio * (axis.second.pixel - axis.first.pixel)
+  const minimum_anchor_pixel = Math.min(axis.first.pixel, axis.second.pixel)
+  const maximum_anchor_pixel = Math.max(axis.first.pixel, axis.second.pixel)
+  // Raster grid centers and colored scope markers are detected independently.
+  // Permit only their existing alignment tolerance beyond an outer grid
+  // anchor, so a visible 0 V marker can ground an axis whose nearest neutral
+  // grid center is a few pixels inside the marker.
+  if (
+    zero_pixel < minimum_anchor_pixel - ORTHOGONAL_ALIGNMENT_TOLERANCE ||
+    zero_pixel > maximum_anchor_pixel + ORTHOGONAL_ALIGNMENT_TOLERANCE
+  ) {
+    return undefined
+  }
+  return zero_pixel
 }
 
 export function dominantGrid(input: {
@@ -425,10 +471,27 @@ export function dominantGrid(input: {
     lines: input.lines,
     spacing: median_spacing_px,
   })
-  const nearest = (anchor: number) =>
-    line_pixels
+  const nearest = (anchor: number) => {
+    const direct = line_pixels
       .map((line) => ({ line, error: Math.abs(line - anchor) }))
       .sort((left, right) => left.error - right.error)[0]!
+    if (direct.error <= ANCHOR_PIXEL_TOLERANCE) return direct
+    // A thick rasterized grid line can survive neutral-line extraction as two
+    // edges farther apart than the anti-alias cluster tolerance. Only recover
+    // their midpoint when they tightly bracket this observer anchor; this
+    // avoids globally merging a real grid edge through adjacent control
+    // strokes.
+    const midpoint = line_pixels
+      .flatMap((left, index) =>
+        line_pixels.slice(index + 1).flatMap((right) => {
+          if (left > anchor || right < anchor || right - left > median_spacing_px * 0.2) return []
+          const line = (left + right) / 2
+          return [{ line, error: Math.abs(line - anchor) }]
+        }),
+      )
+      .sort((left, right) => left.error - right.error)[0]
+    return midpoint && midpoint.error <= ANCHOR_PIXEL_TOLERANCE ? midpoint : direct
+  }
   const first = nearest(input.first_anchor)
   const second = nearest(input.second_anchor)
   if (first.error > ANCHOR_PIXEL_TOLERANCE || second.error > ANCHOR_PIXEL_TOLERANCE) return undefined

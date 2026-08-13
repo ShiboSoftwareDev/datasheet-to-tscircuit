@@ -1,5 +1,5 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu"
-import { Boxes, ChevronRight, CircuitBoard, Download, FlaskConical } from "lucide-react"
+import { Boxes, ChevronRight, CircuitBoard, Download, FileCode2, FlaskConical } from "lucide-react"
 import type { Job, JobDisplayStatus, ModelRun, ModelRunStatus } from "@/shared/job-types"
 import { isModelRunPaused } from "@/shared/model-run-status"
 import { hasRetainedAcceptedModel } from "@/shared/model-warnings"
@@ -84,7 +84,25 @@ export function WorkspaceStatusBar({
   const compact_model_status = `${getCompactStatus(model_status)}${
     has_retained_accepted_model ? " · Retained" : ""
   }`
-  const has_downloads = Boolean(job.component_code || job.typical_application_code || model_run?.model_source)
+  const catalog_applications = job.typical_applications?.applications.filter(
+    (application) => application.code,
+  )
+  const typical_applications =
+    catalog_applications && catalog_applications.length > 0
+      ? catalog_applications
+      : job.typical_application_code
+        ? [
+            {
+              application_id: "reference",
+              title: job.typical_application_title ?? "Typical application",
+              code: job.typical_application_code,
+              circuit_json: job.typical_application_circuit_json,
+            },
+          ]
+        : []
+  const has_downloads = Boolean(
+    job.component_code || typical_applications.length > 0 || model_run?.model_source,
+  )
 
   return (
     <section className="workspace-status-bar" aria-label="Artifact status and downloads">
@@ -140,19 +158,9 @@ export function WorkspaceStatusBar({
           <DropdownMenu.Content className="workspace-download-popover" align="end" sideOffset={7}>
             <DropdownMenu.Label className="workspace-download-label">Download artifact</DropdownMenu.Label>
             {job.component_code && (
-              <DropdownMenu.Item asChild>
-                <a
-                  className="workspace-download-item"
-                  href={getJobFileUrl(job.job_id, "component", { local_run_id })}
-                >
-                  <Boxes size={14} /> Component TSX
-                </a>
-              </DropdownMenu.Item>
-            )}
-            {job.typical_application_code && (
               <DropdownMenu.Sub>
                 <DropdownMenu.SubTrigger className="workspace-download-item workspace-download-subtrigger">
-                  <CircuitBoard size={14} /> Typical applications <ChevronRight size={12} />
+                  <Boxes size={14} /> Component <ChevronRight size={12} />
                 </DropdownMenu.SubTrigger>
                 <DropdownMenu.Portal>
                   <DropdownMenu.SubContent
@@ -163,12 +171,68 @@ export function WorkspaceStatusBar({
                     <DropdownMenu.Item asChild>
                       <a
                         className="workspace-download-item"
-                        href={getJobFileUrl(job.job_id, "typical_application", { local_run_id })}
+                        href={getJobFileUrl(job.job_id, "component_tsx", { local_run_id })}
                       >
-                        <CircuitBoard size={14} /> {job.typical_application_title ?? "Typical application"}{" "}
-                        TSX
+                        <FileCode2 size={14} /> TSX
                       </a>
                     </DropdownMenu.Item>
+                    {(job.circuit_json ||
+                      job.component_footprints?.footprints.some((footprint) => footprint.circuit_json)) && (
+                      <DropdownMenu.Item asChild>
+                        <a
+                          className="workspace-download-item"
+                          href={getJobFileUrl(job.job_id, "component_kicad", { local_run_id })}
+                        >
+                          <CircuitBoard size={14} /> KiCad
+                        </a>
+                      </DropdownMenu.Item>
+                    )}
+                  </DropdownMenu.SubContent>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Sub>
+            )}
+            {typical_applications.length > 0 && (
+              <DropdownMenu.Sub>
+                <DropdownMenu.SubTrigger className="workspace-download-item workspace-download-subtrigger">
+                  <CircuitBoard size={14} /> Typical applications <ChevronRight size={12} />
+                </DropdownMenu.SubTrigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.SubContent
+                    className="workspace-download-popover workspace-download-submenu"
+                    sideOffset={6}
+                    alignOffset={-5}
+                  >
+                    {typical_applications.map((application) => (
+                      <DropdownMenu.Group key={application.application_id}>
+                        <DropdownMenu.Label className="workspace-download-label">
+                          {application.title}
+                        </DropdownMenu.Label>
+                        <DropdownMenu.Item asChild>
+                          <a
+                            className="workspace-download-item"
+                            href={getJobFileUrl(job.job_id, "typical_application_tsx", {
+                              local_run_id,
+                              application_id: application.application_id,
+                            })}
+                          >
+                            <FileCode2 size={14} /> TSX
+                          </a>
+                        </DropdownMenu.Item>
+                        {application.circuit_json && (
+                          <DropdownMenu.Item asChild>
+                            <a
+                              className="workspace-download-item"
+                              href={getJobFileUrl(job.job_id, "typical_application_kicad", {
+                                local_run_id,
+                                application_id: application.application_id,
+                              })}
+                            >
+                              <CircuitBoard size={14} /> KiCad
+                            </a>
+                          </DropdownMenu.Item>
+                        )}
+                      </DropdownMenu.Group>
+                    ))}
                   </DropdownMenu.SubContent>
                 </DropdownMenu.Portal>
               </DropdownMenu.Sub>

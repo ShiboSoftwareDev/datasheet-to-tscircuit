@@ -19,10 +19,11 @@ export const PIPELINE_DEBUG_CATALOG = Object.freeze([
     pipeline_id: "typical_application" as const,
     title: "Typical application",
     description:
-      "Extract application evidence, wait for the component when needed, then generate, validate, repair, and publish it.",
+      "Extract application evidence, wait for the component, plan supported applications, then generate, validate, repair, and publish them.",
     stages: [
       "extract_application_evidence",
       "wait_for_component",
+      "plan_applications",
       "generate_application",
       "build_application",
       "validate_application",

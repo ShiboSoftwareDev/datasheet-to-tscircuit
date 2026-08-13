@@ -2,9 +2,7 @@ import { createHash } from "node:crypto"
 import { rm } from "node:fs/promises"
 import { join } from "node:path"
 import {
-  canonicalizeComponentEvidenceInput,
   COMPONENT_EVIDENCE_SCHEMA_ID,
-  createSingleFootprintCatalog,
   createFootprintPlanFromEvidence,
   getComponentEvidenceBlockingReasons,
   getFootprintEvidenceErrors,
@@ -15,11 +13,11 @@ import { createComponentSchematicPlan } from "../../component-schematic-plan"
 import { runAgentArtifactStage, type AgentArtifactAttempt } from "../../infrastructure/agent"
 import {
   createStageWorkspace,
-  readBoundedJsonArtifact,
   validatePngArtifact,
   validateStageDirectory,
 } from "../../infrastructure/artifacts"
 import { hasCommittedEvidence, writeEvidenceCommit } from "../evidence-commit"
+import { readExtractedFootprintCatalog } from "../extracted-footprint-catalog"
 import {
   assertEvidenceImageManifest,
   type EvidenceImageManifest,
@@ -30,7 +28,10 @@ import { COMPONENT_EVIDENCE_GUIDE, COMPONENT_EVIDENCE_GUIDE_SHA256 } from "../ev
 import {
   FOOTPRINT_GEOMETRY_OBSERVER_CONTRACT_SHA256,
   applyFootprintGeometryObservation,
+  componentEvidenceWithVerifiedFootprintGeometry,
+  createFootprintGeometryVerificationEntry,
   type FootprintGeometryObservation,
+  type FootprintGeometryVerificationCatalog,
   observeFootprintGeometry,
   verifyFootprintGeometry,
 } from "../footprint-geometry-verification"
@@ -56,6 +57,7 @@ type ExtractedEvidence = {
   component_footprint_catalog: ReturnType<typeof parseComponentFootprintCatalog>
   footprint_plan: ReturnType<typeof createFootprintPlanFromEvidence>
   footprint_verification: Awaited<ReturnType<typeof verifyFootprintGeometry>>
+  footprint_verification_catalog: FootprintGeometryVerificationCatalog
   canonicalization_count: number
 }
 
@@ -63,27 +65,31 @@ function observationFingerprint(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex")
 }
 
-function footprintObservationFingerprint(input: { manifest: EvidenceImageManifest }): string {
+function footprintObservationFingerprint(input: {
+  manifest: EvidenceImageManifest
+  evidence: ReturnType<typeof parseComponentEvidence>
+  footprint_id: string
+}): string {
+  const visual_source = [
+    ...input.evidence.footprint.drawing_orientation.sources,
+    ...input.evidence.footprint.pads.flatMap(({ sources }) => sources),
+  ].find(
+    (source) =>
+      source.method === "pdf_visual" &&
+      source.render_dpi === input.manifest.render_dpi &&
+      typeof source.image === "string",
+  )
+  if (!visual_source) throw new Error("Footprint evidence has no rendered pdf_visual geometry source")
+  const rendered_page = input.manifest.pages.find(({ page }) => page === visual_source.page)
+  if (!rendered_page) {
+    throw new Error(`Footprint geometry PDF page ${visual_source.page} was not rendered`)
+  }
   return observationFingerprint({
     reviewer_contract_sha256: FOOTPRINT_GEOMETRY_OBSERVER_CONTRACT_SHA256,
     source_pdf_sha256: input.manifest.source_pdf_sha256,
-    land_pattern: input.manifest.aliases.land_pattern,
+    footprint_id: input.footprint_id,
+    source_page: rendered_page,
   })
-}
-
-function extractedFootprintGeometryFingerprint(evidence: ReturnType<typeof parseComponentEvidence>): string {
-  return observationFingerprint(
-    evidence.footprint.pads.map(({ pin, kind, x, y, width, height, hole_width, hole_height }) => ({
-      pin,
-      kind,
-      x,
-      y,
-      width,
-      height,
-      hole_width: hole_width ?? null,
-      hole_height: hole_height ?? null,
-    })),
-  )
 }
 
 export const extractEvidenceStage = defineComponentStage({
@@ -131,19 +137,16 @@ export const extractEvidenceStage = defineComponentStage({
     const extension = join(import.meta.dir, "../../infrastructure/agent/image-read-extension.ts")
     let attempt: AgentArtifactAttempt<ExtractedEvidence>
     let committed_evidence_dir: string | undefined
-    let footprint_observation_cache:
-      | {
-          fingerprint: string
-          observation: FootprintGeometryObservation
-          rejected_extractor_geometry_fingerprint?: string
-        }
-      | undefined
+    const footprint_observation_cache: Array<{
+      fingerprint: string
+      observation: FootprintGeometryObservation
+    }> = []
     try {
       await Bun.write(join(context.job_dir, "EVIDENCE-SCHEMA.md"), COMPONENT_EVIDENCE_GUIDE)
       attempt = await runAgentArtifactStage<ExtractedEvidence>({
         stage_id: "extract_evidence",
         phase_label: "Datasheet evidence extraction",
-        max_artifact_attempts: 4,
+        max_artifact_attempts: footprint_hints.length > 1 ? 6 : 4,
         signal,
         use_openai: context.use_openai,
         agent_client: services.agent_client,
@@ -168,48 +171,25 @@ export const extractEvidenceStage = defineComponentStage({
             feedback,
           }),
         heartbeat_paths: (workspace) => [
-          join(workspace, "component-evidence.json"),
           join(workspace, "component-footprint-catalog.json"),
+          join(workspace, "component-footprints"),
           join(workspace, "visual-reference"),
         ],
         on_output: (stream, message) => appendJobLog(services.job_store, context.job_id, stream, message),
         rejection_debug: {
           debug_dir,
           files: [
-            "component-evidence.json",
             "component-footprint-catalog.json",
             "footprint-geometry-review.json",
             "footprint-geometry-verification.json",
             "evidence-image-manifest.json",
           ],
-          directories: ["visual-reference"],
+          directories: ["component-footprints", "visual-reference"],
         },
         validate: async (workspace, outer_attempt) => {
-          const catalog_path = join(workspace, "component-footprint-catalog.json")
-          const has_catalog = await Bun.file(catalog_path).exists()
-          let canonicalization_count = 0
-          const component_footprint_catalog = has_catalog
-            ? parseComponentFootprintCatalog(
-                await readBoundedJsonArtifact({
-                  path: catalog_path,
-                  max_bytes: 8 * 1024 * 1024,
-                  max_depth: 56,
-                  max_nodes: 240_000,
-                }),
-              )
-            : await (async () => {
-                const raw_component_evidence = await readBoundedJsonArtifact({
-                  path: join(workspace, "component-evidence.json"),
-                  max_bytes: 4 * 1024 * 1024,
-                  max_depth: 48,
-                  max_nodes: 100_000,
-                })
-                const canonicalization = canonicalizeComponentEvidenceInput(raw_component_evidence)
-                canonicalization_count = canonicalization.changes.length
-                return createSingleFootprintCatalog({
-                  component_evidence: parseComponentEvidence(canonicalization.value),
-                })
-              })()
+          const extracted_catalog = await readExtractedFootprintCatalog(workspace)
+          const component_footprint_catalog = extracted_catalog.component_footprint_catalog
+          const canonicalization_count = extracted_catalog.canonicalization_count
           const missing_land_patterns = getMissingLandPatternHints({
             catalog: component_footprint_catalog,
             hints: footprint_hints,
@@ -232,10 +212,8 @@ export const extractEvidenceStage = defineComponentStage({
             on_output: (stream, message) =>
               appendJobLog(services.job_store, context.job_id, stream, message).catch(() => undefined),
           })
-          const canonical_catalog = materialized.component_footprint_catalog
-          const component_evidence = materialized.component_evidence
-          const footprint_plan = createFootprintPlanFromEvidence(component_evidence)
-          const blocking = canonical_catalog.footprints.flatMap((footprint) => {
+          const materialized_catalog = materialized.component_footprint_catalog
+          const blocking = materialized_catalog.footprints.flatMap((footprint) => {
             const variant_plan = createFootprintPlanFromEvidence(footprint.component_evidence)
             return [
               ...getComponentEvidenceBlockingReasons(footprint.component_evidence),
@@ -255,77 +233,104 @@ export const extractEvidenceStage = defineComponentStage({
             application_available: false,
           })
           await Promise.all(
-            canonical_catalog.footprints.map((footprint) =>
+            materialized_catalog.footprints.map((footprint) =>
               assertComponentEvidenceImageProvenance({
                 workspace,
                 component_evidence: footprint.component_evidence,
               }),
             ),
           )
-          const footprint_fingerprint = footprintObservationFingerprint({
-            manifest: materialized.manifest,
-          })
-          const extractor_geometry_fingerprint = extractedFootprintGeometryFingerprint(component_evidence)
-          const reviewer_should_be_resampled =
-            footprint_observation_cache?.fingerprint === footprint_fingerprint &&
-            footprint_observation_cache.rejected_extractor_geometry_fingerprint ===
-              extractor_geometry_fingerprint
-          if (
-            footprint_observation_cache?.fingerprint !== footprint_fingerprint ||
-            reviewer_should_be_resampled
-          ) {
-            if (reviewer_should_be_resampled) {
+          const reconciled_footprints = []
+          const observations: Array<{
+            footprint_id: string
+            observation: FootprintGeometryObservation
+          }> = []
+          for (const footprint of materialized_catalog.footprints) {
+            signal.throwIfAborted()
+            const footprint_fingerprint = footprintObservationFingerprint({
+              manifest: materialized.manifest,
+              evidence: footprint.component_evidence,
+              footprint_id: footprint.footprint_id,
+            })
+            const cached = footprint_observation_cache.find(
+              ({ fingerprint }) => fingerprint === footprint_fingerprint,
+            )
+            const observation = cached
+              ? cached.observation
+              : await observeFootprintGeometry({
+                  workspace,
+                  evidence: footprint.component_evidence,
+                  outer_attempt,
+                  debug_dir: join(debug_dir, footprint.footprint_id),
+                  signal,
+                  use_openai: context.use_openai,
+                  agent_client: services.agent_client,
+                  image_extension: extension,
+                  subject: `${footprint.label} (${footprint.footprint_id})`,
+                  on_output: (stream, message) =>
+                    appendJobLog(services.job_store, context.job_id, stream, message),
+                })
+            if (!cached) {
+              footprint_observation_cache.push({
+                fingerprint: footprint_fingerprint,
+                observation,
+              })
+            } else {
               await appendJobLog(
                 services.job_store,
                 context.job_id,
                 "system",
-                `Extractor retained geometry ${extractor_geometry_fingerprint}; requesting a fresh independent footprint observation instead of reusing the disputed review.\n`,
+                `Reusing immutable footprint observation ${footprint_fingerprint} for ${footprint.footprint_id} on extractor attempt ${outer_attempt}.\n`,
               ).catch(() => undefined)
             }
-            footprint_observation_cache = {
-              fingerprint: footprint_fingerprint,
-              observation: await observeFootprintGeometry({
-                workspace,
-                evidence: component_evidence,
-                outer_attempt,
-                debug_dir,
-                signal,
-                use_openai: context.use_openai,
-                agent_client: services.agent_client,
-                image_extension: extension,
-                on_output: (stream, message) =>
-                  appendJobLog(services.job_store, context.job_id, stream, message),
+            observations.push({ footprint_id: footprint.footprint_id, observation })
+            reconciled_footprints.push({
+              ...footprint,
+              component_evidence: componentEvidenceWithVerifiedFootprintGeometry({
+                evidence: footprint.component_evidence,
+                observation,
               }),
-            }
-          } else {
-            await appendJobLog(
-              services.job_store,
-              context.job_id,
-              "system",
-              `Reusing immutable footprint observation ${footprint_fingerprint} for extractor attempt ${outer_attempt}.\n`,
-            ).catch(() => undefined)
-          }
-          signal.throwIfAborted()
-
-          let footprint_verification: Awaited<ReturnType<typeof verifyFootprintGeometry>> | undefined
-          const verification_errors: Error[] = []
-          try {
-            footprint_verification = applyFootprintGeometryObservation({
-              workspace,
-              evidence: component_evidence,
-              observation: footprint_observation_cache.observation,
             })
-          } catch (error) {
-            footprint_observation_cache.rejected_extractor_geometry_fingerprint =
-              extractor_geometry_fingerprint
-            verification_errors.push(error instanceof Error ? error : new Error(String(error)))
           }
-          if (verification_errors.length > 0) {
-            throw new AggregateError(verification_errors, "Independent footprint verification failed")
+          const canonical_catalog = parseComponentFootprintCatalog({
+            ...materialized_catalog,
+            footprints: reconciled_footprints,
+          })
+          const component_evidence = canonical_catalog.footprints.find(
+            ({ footprint_id }) => footprint_id === canonical_catalog.default_footprint_id,
+          )?.component_evidence
+          if (!component_evidence) throw new Error("Default footprint evidence is unavailable")
+          const footprint_plan = createFootprintPlanFromEvidence(component_evidence)
+          const verification_entries = canonical_catalog.footprints.map((footprint) => {
+            const observation = observations.find(
+              (candidate) => candidate.footprint_id === footprint.footprint_id,
+            )?.observation
+            if (!observation) {
+              throw new Error(`No independent geometry observation for ${footprint.footprint_id}`)
+            }
+            return createFootprintGeometryVerificationEntry({
+              footprint_id: footprint.footprint_id,
+              evidence: footprint.component_evidence,
+              observation,
+            })
+          })
+          const footprint_verification_catalog: FootprintGeometryVerificationCatalog = {
+            version: 1,
+            footprints: verification_entries,
           }
-          if (!footprint_verification) {
-            throw new Error("Independent footprint verification returned no agreement record")
-          }
+          const default_verification = footprint_verification_catalog.footprints.find(
+            ({ footprint_id }) => footprint_id === canonical_catalog.default_footprint_id,
+          )
+          if (!default_verification) throw new Error("Default footprint has no independent verification")
+          const footprint_verification = applyFootprintGeometryObservation({
+            workspace,
+            evidence: component_evidence,
+            observation: {
+              review: default_verification.review,
+              verifier_attempts: default_verification.verification.verifier_attempts ?? 0,
+              verifier_agent_duration_ms: default_verification.verification.verifier_agent_duration_ms ?? 0,
+            },
+          })
           if (canonicalization_count > 0) {
             await appendJobLog(
               services.job_store,
@@ -339,10 +344,12 @@ export const extractEvidenceStage = defineComponentStage({
             component_footprint_catalog: canonical_catalog,
             footprint_plan,
             footprint_verification,
+            footprint_verification_catalog,
             canonicalization_count,
           }
         },
         promote: async (workspace, evidence) => {
+          await rm(join(workspace, "component-footprints"), { recursive: true, force: true })
           await Promise.all(
             [
               "typical-application-plan.json",
@@ -371,6 +378,10 @@ export const extractEvidenceStage = defineComponentStage({
             Bun.write(
               join(workspace, "footprint-geometry-verification.json"),
               `${JSON.stringify(evidence.footprint_verification, null, 2)}\n`,
+            ),
+            Bun.write(
+              join(workspace, "footprint-geometry-verification-catalog.json"),
+              `${JSON.stringify(evidence.footprint_verification_catalog, null, 2)}\n`,
             ),
           ])
           signal.throwIfAborted()

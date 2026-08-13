@@ -1,3 +1,7 @@
+import {
+  type ExecutableApplicationPassiveType,
+  executableApplicationPassiveType,
+} from "../../component-workflow/application-passive-kind"
 import type { TypicalApplicationPlan } from "../../component-workflow/application-plan"
 import { normalizeElectricalPinLabel } from "../../pin-label-normalization"
 import type { ModelInterface, ModelInterfacePin, ModelPublicElectricalEndpoint } from "../types"
@@ -5,12 +9,12 @@ import { parseApplicationEngineeringValue } from "./engineering-value"
 import { hashApplicationFixtureContract } from "./hashing"
 import { requiredSha256 } from "./schema-helpers"
 import {
-  ApplicationFixtureContractError,
   type ApplicationFixtureContract,
+  ApplicationFixtureContractError,
   type ApplicationFixtureContractPayload,
-  type ApplicationNonExecutableComponent,
   type ApplicationFixtureNodeEndpoint,
   type ApplicationFixtureNodeGroup,
+  type ApplicationNonExecutableComponent,
   type ApplicationPassiveFixture,
 } from "./types"
 
@@ -28,22 +32,6 @@ const GROUND_IDENTITIES = new Set([
   "vssa",
   "vssd",
 ])
-
-function normalizeKind(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-}
-
-function passiveType(kind: string): ApplicationPassiveFixture["type"] | undefined {
-  const normalized = normalizeKind(kind)
-  if (normalized.includes("resistor")) return "resistor"
-  if (normalized.includes("capacitor")) return "capacitor"
-  if (normalized.includes("inductor") || normalized.includes("ferrite")) return "inductor"
-  if (normalized.includes("diode")) return "diode"
-  return undefined
-}
 
 function componentKey(value: string): string {
   return value.trim().toLowerCase()
@@ -84,19 +72,13 @@ function interfacePinForLabel(label: string, model_interface: ModelInterface): M
       (candidate) => normalizeElectricalPinLabel(candidate) === normalized,
     ),
   )
-  if (matches.length !== 1) {
+  const [match] = matches
+  if (!match || matches.length !== 1) {
     throw new ApplicationFixtureContractError(
       `typical application endpoint U1.${label} resolves to ${matches.length} public model-interface pins; expected exactly one`,
     )
   }
-  return matches[0]!
-}
-
-function interfaceEndpointForLabel(
-  label: string,
-  model_interface: ModelInterface,
-): ModelPublicElectricalEndpoint {
-  return `dut.${interfacePinForLabel(label, model_interface).spice_node}`
+  return match
 }
 
 function isGroundIdentity(value: string): boolean {
@@ -115,7 +97,9 @@ function compilePassiveFixture(input: {
     node_group: ApplicationFixtureNodeGroup
   }>
 }): ApplicationPassiveFixture {
-  const type = passiveType(input.component.kind)
+  const type: ExecutableApplicationPassiveType | undefined = executableApplicationPassiveType(
+    input.component.kind,
+  )
   if (!type) {
     throw new ApplicationFixtureContractError("compilePassiveFixture requires a supported passive kind")
   }
@@ -141,9 +125,10 @@ function compilePassiveFixture(input: {
     source_terminals,
   }
   if (type === "diode") {
-    const normalized_terminals = ordered.map(({ terminal }) => normalizeElectricalPinLabel(terminal))
-    const first_is_anode = ["1", "a", "anode", "pos", "positive"].includes(normalized_terminals[0]!)
-    const second_is_cathode = ["2", "c", "cathode", "k", "neg", "negative"].includes(normalized_terminals[1]!)
+    const first_terminal = normalizeElectricalPinLabel(ordered[0].terminal)
+    const second_terminal = normalizeElectricalPinLabel(ordered[1].terminal)
+    const first_is_anode = ["1", "a", "anode", "pos", "positive"].includes(first_terminal)
+    const second_is_cathode = ["2", "c", "cathode", "k", "neg", "negative"].includes(second_terminal)
     if (!first_is_anode || !second_is_cathode) {
       throw new ApplicationFixtureContractError(
         `typical application diode ${input.component.reference} terminals must identify anode/1 and cathode/2; found ${source_terminals.join(", ")}`,
@@ -176,12 +161,12 @@ function classifyGroundNodeGroups(groups: UnclassifiedNodeGroup[]): ApplicationF
     ({ has_explicit_ground_terminal, has_ground_net_name }) =>
       has_explicit_ground_terminal || has_ground_net_name,
   )
-  if (candidates.length === 0) {
+  const [primary] = candidates
+  if (!primary) {
     throw new ApplicationFixtureContractError(
       "documented typical application must identify an external or authoritative DUT ground node group",
     )
   }
-  const primary = candidates[0]!
   const ground_ids = new Set(candidates.map(({ id }) => id))
   const merged_ground: UnclassifiedNodeGroup = {
     id: primary.id,
@@ -287,7 +272,12 @@ export function compileApplicationFixtureContract(input: {
     }
   })
   const node_groups = classifyGroundNodeGroups(unclassified_groups)
-  const ground_group = node_groups.find(({ is_ground }) => is_ground)!
+  const ground_group = node_groups.find(({ is_ground }) => is_ground)
+  if (!ground_group) {
+    throw new ApplicationFixtureContractError(
+      "documented typical application has no compiled ground node group",
+    )
+  }
   const all_dut_endpoints = node_groups.flatMap(({ dut_endpoints }) => dut_endpoints)
   if (new Set(all_dut_endpoints).size !== all_dut_endpoints.length) {
     throw new ApplicationFixtureContractError(
@@ -336,7 +326,7 @@ export function compileApplicationFixtureContract(input: {
   const non_executable_components: ApplicationNonExecutableComponent[] = []
   for (const component of external_components) {
     const endpoints = terminal_occurrences.get(componentKey(component.reference)) ?? []
-    const type = passiveType(component.kind)
+    const type = executableApplicationPassiveType(component.kind)
     if (!type) {
       non_executable_components.push(
         compileNonExecutableComponent({

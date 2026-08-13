@@ -7,15 +7,27 @@ export function CodePanel({
   job,
   artifact = "component",
   local_run_id,
+  application_id,
 }: {
   job: Job
   artifact?: "component" | "typical_application"
   local_run_id?: string
+  application_id?: string
 }) {
   const [is_copied, setIsCopied] = useState(false)
-  const code = artifact === "component" ? job.component_code : job.typical_application_code
+  const code =
+    artifact === "component"
+      ? job.component_code
+      : (job.typical_applications?.applications.find(
+          (application) => application.application_id === application_id,
+        )?.code ?? job.typical_application_code)
   if (!code) return null
-  const file_name = artifact === "component" ? "index.circuit.tsx" : "typical-application.circuit.tsx"
+  const file_name =
+    artifact === "component"
+      ? "index.circuit.tsx"
+      : application_id && application_id !== "reference"
+        ? `typical-application-${application_id}.circuit.tsx`
+        : "typical-application.circuit.tsx"
 
   const copyCode = async () => {
     await navigator.clipboard.writeText(code)
@@ -38,6 +50,7 @@ export function CodePanel({
           <a
             href={getJobFileUrl(job.job_id, artifact, {
               local_run_id,
+              ...(application_id ? { application_id } : {}),
             })}
           >
             <Download size={14} /> Download

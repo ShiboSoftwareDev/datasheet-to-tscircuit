@@ -12,6 +12,7 @@ import { extractApplicationEvidenceStage } from "./stages/extract-application-ev
 import { generateApplicationStage } from "./stages/generate-application"
 import { generateComponentStage } from "./stages/generate-component"
 import { publishStage } from "./stages/publish"
+import { planApplicationsStage } from "./stages/plan-applications"
 import { publishComponentStage } from "./stages/publish-component"
 import { repairApplicationStage } from "./stages/repair-application"
 import { repairComponentStage } from "./stages/repair-component"
@@ -44,6 +45,7 @@ export const APPLICATION_PIPELINE: PipelineDefinition<
   stages: Object.freeze([
     extractApplicationEvidenceStage,
     waitForComponentStage,
+    planApplicationsStage,
     generateApplicationStage,
     buildApplicationStage,
     validateApplicationStage,

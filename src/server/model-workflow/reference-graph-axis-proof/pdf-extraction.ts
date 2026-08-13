@@ -81,19 +81,39 @@ export function figureIdentityFromPdfText(input: {
   if (!normalized_figure) return undefined
   const words = pdfTextWords(input.bbox_html)
   const crop = cropInPdfPoints(input.graph.crop)
+  const figure_labels: Array<{
+    normalized_figure: string
+    words: PdfTextWord[]
+    bbox: PdfTextWord["bbox"]
+  }> = []
+  for (let index = 0; index < words.length; index += 1) {
+    const window = words.slice(index, index + 2)
+    if (window.length !== 2 || !/^figure$/i.test(window[0]!.text)) continue
+    const normalized = normalizeFigureLabel(window.map(({ text }) => text).join(" "))
+    if (!normalized) continue
+    figure_labels.push({
+      normalized_figure: normalized,
+      words: window,
+      bbox: joinedPdfBoundingBox(window),
+    })
+  }
+  const contains_neighboring_figure = figure_labels.some((label) => {
+    if (label.normalized_figure === normalized_figure) return false
+    const gap = boxGap(crop, label.bbox)
+    return gap.vertical === 0 && gap.horizontal_overlap > 0
+  })
+  if (contains_neighboring_figure) return undefined
   const candidates: Array<{
     words: PdfTextWord[]
     bbox: PdfTextWord["bbox"]
     vertical: number
   }> = []
-  for (let index = 0; index < words.length; index += 1) {
-    const window = words.slice(index, index + 2)
-    if (window.length !== 2) continue
-    if (normalizeFigureLabel(window.map(({ text }) => text).join(" ")) !== normalized_figure) continue
-    const bbox = joinedPdfBoundingBox(window)
+  for (const label of figure_labels) {
+    if (label.normalized_figure !== normalized_figure) continue
+    const bbox = label.bbox
     const gap = boxGap(crop, bbox)
     if (gap.vertical > SOURCE_LOCAL_TEXT_GAP_PDF_POINTS || gap.horizontal_overlap < 8) continue
-    candidates.push({ words: window, bbox, vertical: gap.vertical })
+    candidates.push({ words: label.words, bbox, vertical: gap.vertical })
   }
   candidates.sort((left, right) => left.vertical - right.vertical)
   const nearest = candidates[0]

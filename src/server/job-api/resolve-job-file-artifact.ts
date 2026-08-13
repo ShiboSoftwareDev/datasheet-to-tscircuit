@@ -7,6 +7,8 @@ import {
 } from "../component-workflow/application-evidence-commit"
 import { readCommittedEvidenceSnapshot } from "../component-workflow/evidence-commit"
 import { parseComponentFootprintCatalog } from "../component-evidence"
+import { applicationSourceRelativePath } from "../component-workflow/application-artifacts"
+import { readApplicationPlanCatalog } from "../component-workflow/stage-helpers"
 import { readModelPublication, readVerifiedPublicationArtifact } from "../modeling"
 
 interface JobFileMetadata {
@@ -194,7 +196,7 @@ async function readSafeJobFile(
   }
 }
 
-async function readBaseComponentSource(
+export async function readBaseComponentSource(
   job_dir: string,
   options: { allow_legacy_index_fallback: boolean },
 ): Promise<Uint8Array<ArrayBuffer> | undefined> {
@@ -327,12 +329,19 @@ export async function resolveJobFileArtifact(input: {
   job_id: string
   file_kind: string | null
   footprint_id?: string
+  application_id?: string
 }): Promise<JobFileResolution> {
-  const { job_dir, job_id, file_kind, footprint_id } = input
+  const { job_dir, job_id, file_kind, footprint_id, application_id } = input
   let descriptor: JobFileMetadata
   let artifact_path: string | undefined
 
-  if (file_kind === "component_footprint_reference") {
+  if (file_kind === "typical_application" && application_id && application_id !== "reference") {
+    descriptor = static_job_files.typical_application
+    const catalog = await readApplicationPlanCatalog(job_dir)
+    const entry = catalog.applications.find((application) => application.application_id === application_id)
+    if (!entry) return { status: "missing", download_name: descriptor.download_name }
+    artifact_path = join(job_dir, applicationSourceRelativePath(entry))
+  } else if (file_kind === "component_footprint_reference") {
     descriptor = component_footprint_reference
     if (!footprint_id) return { status: "missing", download_name: descriptor.download_name }
     const committed_evidence = await readCommittedEvidenceSnapshot(job_dir)

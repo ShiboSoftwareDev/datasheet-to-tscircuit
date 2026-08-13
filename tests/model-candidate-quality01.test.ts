@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import {
   compareCandidateQuality,
   createCandidateQuality,
+  formatRejectedCandidateQualityFeedback,
   type CandidateViewerQualityCase,
 } from "@/server/model-workflow/candidate-quality"
 import type { ValidationRunResult } from "@/server/spice-validation"
@@ -125,4 +126,24 @@ test("candidate quality penalizes stimulus-insensitive overfit before residual s
   })
 
   expect(compareCandidateQuality(causal, overfit)).toBeLessThan(0)
+})
+
+test("rejected candidate feedback identifies the first regressed quality gate", () => {
+  const incumbent = createCandidateQuality({
+    result: result({ normalized_error: 0.08 }),
+    viewer_cases: viewer({ error: 0.08 }),
+  })
+  const regressed = createCandidateQuality({
+    result: result({ normalized_error: 0.12 }),
+    viewer_cases: viewer({ error: 0.12 }),
+  })
+
+  const feedback = formatRejectedCandidateQualityFeedback({
+    candidate: regressed,
+    incumbent,
+  })
+
+  expect(feedback).toContain("worst normalized error: worsened")
+  expect(feedback).toContain("first changed gate, worst normalized error, worsened")
+  expect(feedback).not.toMatch(/0\.08|0\.12/)
 })

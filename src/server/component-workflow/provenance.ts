@@ -5,7 +5,13 @@ import { repositoryRoot } from "../paths/repository-paths"
 import { getPinnedTscircuitVersion } from "../runtime-versions"
 import { getRuntimeSourceCommit } from "../runtime-source-commit"
 import { isRecord } from "./application-plan"
-import { applicationEvidencePrompt, applicationPrompt, componentPrompt, evidencePrompt } from "./prompts"
+import {
+  applicationEvidencePrompt,
+  applicationPlanningPrompt,
+  applicationPrompt,
+  componentPrompt,
+  evidencePrompt,
+} from "./prompts"
 import { APPLICATION_EVIDENCE_GUIDE_SHA256, COMPONENT_EVIDENCE_GUIDE_SHA256 } from "./evidence-schema"
 
 function sha256(value: string | Uint8Array): string {
@@ -101,6 +107,7 @@ export async function collectJobProvenance(input: {
           },
         })}`,
       ),
+      application_planning: sha256(applicationPlanningPrompt()),
     },
   }
 }

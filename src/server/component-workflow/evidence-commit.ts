@@ -27,7 +27,11 @@ import {
   type TypicalApplicationPlan,
 } from "./application-plan"
 import { parseEvidenceImageManifest } from "./evidence-image-materialization"
-import { compareFootprintGeometry, parseFootprintGeometryReview } from "./footprint-geometry-verification"
+import {
+  compareFootprintGeometry,
+  parseFootprintGeometryReview,
+  parseFootprintGeometryVerificationCatalog,
+} from "./footprint-geometry-verification"
 
 const EVIDENCE_COMMIT_FILE = "evidence-commit.json"
 const EVIDENCE_COMMIT_SCHEMA_ID = "evidence-commit/v2" as const
@@ -49,7 +53,10 @@ const COMPONENT_EVIDENCE_JSON_FILES = [
   "footprint-geometry-verification.json",
   "evidence-image-manifest.json",
 ] as const
-const COMPONENT_OPTIONAL_EVIDENCE_JSON_FILES = ["component-footprint-catalog.json"] as const
+const COMPONENT_OPTIONAL_EVIDENCE_JSON_FILES = [
+  "component-footprint-catalog.json",
+  "footprint-geometry-verification-catalog.json",
+] as const
 const APPLICATION_EVIDENCE_JSON_FILES = [
   "typical-application-plan.json",
   "application-connectivity-review.json",
@@ -549,6 +556,28 @@ async function validateV2Evidence(
   })
   if (!isDeepStrictEqual(deterministic_footprint_agreement, expected_footprint_agreement)) {
     throw new Error("footprint-geometry-verification.json does not match the committed independent geometry")
+  }
+  if (files.has("footprint-geometry-verification-catalog.json")) {
+    if (!component_footprint_catalog) {
+      throw new Error(
+        "footprint-geometry-verification-catalog.json requires component-footprint-catalog.json",
+      )
+    }
+    const raw_verification_catalog = parseJsonBytes(files, "footprint-geometry-verification-catalog.json")
+    const verification_catalog = parseFootprintGeometryVerificationCatalog(
+      raw_verification_catalog,
+      component_footprint_catalog,
+    )
+    const default_verification = verification_catalog.footprints.find(
+      ({ footprint_id }) => footprint_id === component_footprint_catalog.default_footprint_id,
+    )
+    if (
+      !default_verification ||
+      !isDeepStrictEqual(default_verification.review, footprint_review) ||
+      !isDeepStrictEqual(default_verification.verification, raw_footprint_agreement)
+    ) {
+      throw new Error("Default footprint geometry files must project the verification catalog default entry")
+    }
   }
 
   let application_plan: TypicalApplicationPlan | undefined

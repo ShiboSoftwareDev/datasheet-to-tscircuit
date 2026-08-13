@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises"
+import { readFile, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import type { ComponentFootprintPreviews } from "@/shared/job-types"
 import { createFootprintPlanFromEvidence } from "../component-evidence"
 import { createComponentSchematicPlan } from "../component-schematic-plan"
 import type { ProcessRunner } from "../infrastructure/process"
+import type { ExpectedFootprintPad } from "../job-artifact-validator"
 import type { JobStore } from "../job-store"
 import {
   buildComponentCandidate,
@@ -30,6 +31,45 @@ export interface ComponentFootprintBuild {
   build: CircuitBuildRecord
 }
 
+const DEFAULT_VALIDATION_PAD_CLEARANCE_MM = 0.1
+const COMPONENT_VARIANT_SOURCE_PATTERN = /^component-variant-[a-z0-9]+(?:-[a-z0-9]+)*\.circuit\.tsx$/
+const COMPONENT_VARIANT_DIST_PATTERN = /^component-variant-[a-z0-9]+(?:-[a-z0-9]+)*(?:-validation)?$/
+
+async function removeGeneratedEntries(input: { directory: string; pattern: RegExp }): Promise<void> {
+  const entries = await readdir(input.directory, { withFileTypes: true }).catch(() => [])
+  await Promise.all(
+    entries
+      .filter((entry) => input.pattern.test(entry.name))
+      .map((entry) => rm(join(input.directory, entry.name), { recursive: entry.isDirectory(), force: true })),
+  )
+}
+
+async function clearVariantBuildArtifacts(job_dir: string): Promise<void> {
+  await Promise.all([
+    rm(join(job_dir, "component-variant-builds"), { recursive: true, force: true }),
+    removeGeneratedEntries({ directory: job_dir, pattern: COMPONENT_VARIANT_SOURCE_PATTERN }),
+    removeGeneratedEntries({ directory: join(job_dir, "dist"), pattern: COMPONENT_VARIANT_DIST_PATTERN }),
+  ])
+}
+
+function rectangularPadGap(left: ExpectedFootprintPad, right: ExpectedFootprintPad): number {
+  const x_gap = Math.abs(left.x - right.x) - (left.width + right.width) / 2
+  const y_gap = Math.abs(left.y - right.y) - (left.height + right.height) / 2
+  if (x_gap > 0 && y_gap > 0) return Math.hypot(x_gap, y_gap)
+  return Math.max(x_gap, y_gap)
+}
+
+export function verifiedMinimumPadClearance(pads: readonly ExpectedFootprintPad[]): number {
+  let minimum_clearance = DEFAULT_VALIDATION_PAD_CLEARANCE_MM
+  for (let left_index = 0; left_index < pads.length; left_index += 1) {
+    for (let right_index = left_index + 1; right_index < pads.length; right_index += 1) {
+      const gap = rectangularPadGap(pads[left_index]!, pads[right_index]!)
+      if (gap > 0) minimum_clearance = Math.min(minimum_clearance, gap)
+    }
+  }
+  return minimum_clearance
+}
+
 function componentVariantFixtureSource(footprint_id: string): string {
   return `import Component from "./index.circuit"\n\nexport default function ComponentVariantFixture() {\n  return <Component name="U1" footprintVariant=${JSON.stringify(footprint_id)} />\n}\n`
 }
@@ -44,8 +84,10 @@ export async function buildComponentFootprintCandidates(input: {
   on_output: (stream: "stdout" | "stderr", message: string) => void | Promise<void>
 }): Promise<ComponentFootprintBuild[]> {
   const catalog = await readApprovedComponentFootprintCatalog(input.job_dir)
+  await clearVariantBuildArtifacts(input.job_dir)
   const builds: ComponentFootprintBuild[] = []
   for (const footprint of catalog.footprints) {
+    const footprint_plan = createFootprintPlanFromEvidence(footprint.component_evidence)
     const source_relative_path = componentBuildSourceRelativePath(catalog, footprint)
     if (footprint.footprint_id !== catalog.default_footprint_id) {
       await Bun.write(
@@ -60,6 +102,7 @@ export async function buildComponentFootprintCandidates(input: {
       source_relative_path,
       output_stem: source_relative_path.replace(/\.circuit\.tsx$/, ""),
       build_result_relative_path,
+      minimum_pad_clearance_mm: verifiedMinimumPadClearance(footprint_plan.pads),
     })
     builds.push({
       footprint_id: footprint.footprint_id,
@@ -96,6 +139,7 @@ export async function validateComponentFootprintCandidates(input: {
   previews: ComponentFootprintPreviews
 }> {
   const catalog = await readApprovedComponentFootprintCatalog(input.job_dir)
+  await rm(join(input.job_dir, "component-variant-validations"), { recursive: true, force: true })
   const base_previews = componentFootprintPreviewsFromCatalog(catalog)
   const validations: Array<{
     footprint_id: string

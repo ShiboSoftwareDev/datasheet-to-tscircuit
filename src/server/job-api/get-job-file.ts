@@ -1,5 +1,7 @@
 import { JobApiContext } from "./job-api-context"
 import { errorResponse, getJobId } from "./job-api-responses"
+import { isPackagedJobFileKind } from "./create-job-download-package"
+import { getJobDownloadResponse } from "./get-job-download-response"
 import { resolveJobFileArtifact } from "./resolve-job-file-artifact"
 
 export async function getJobFile(request_url: URL, context: JobApiContext): Promise<Response> {
@@ -17,6 +19,10 @@ export async function getJobFile(request_url: URL, context: JobApiContext): Prom
     })
   }
 
+  if (isPackagedJobFileKind(file_kind)) {
+    return getJobDownloadResponse({ request_url, context, job_id, job_dir, file_kind })
+  }
+
   let resolution: Awaited<ReturnType<typeof resolveJobFileArtifact>>
   try {
     resolution = await resolveJobFileArtifact({
@@ -24,6 +30,7 @@ export async function getJobFile(request_url: URL, context: JobApiContext): Prom
       job_id,
       file_kind,
       footprint_id: request_url.searchParams.get("footprint_id") ?? undefined,
+      application_id: request_url.searchParams.get("application_id") ?? undefined,
     })
   } catch (error) {
     console.error("[job-artifact] reader_failed", {

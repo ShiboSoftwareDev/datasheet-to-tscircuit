@@ -20,6 +20,8 @@ import {
   buildReferenceGraphSourceProof,
 } from "@/server/model-workflow/reference-graph-axis-proof"
 import {
+  dominantGrid,
+  dominantGridLineRun,
   hasRightEdgeScopeControlStrip,
   preferredTimeDivisionScale,
 } from "@/server/model-workflow/reference-graph-axis-proof/scope-divisions"
@@ -409,6 +411,15 @@ test("Find-stage preflight owns immutable crop calibration viability", () => {
   expect(
     referenceGraphDiscoveryPreflightErrors({
       ...complete,
+      y_axis: {
+        ...complete.y_axis,
+        source_volts_per_pixel_candidates: [0.01, 0.02],
+      },
+    }),
+  ).toEqual([])
+  expect(
+    referenceGraphDiscoveryPreflightErrors({
+      ...complete,
       figure_identity: undefined,
       y_axis: { ...complete.y_axis, source_volts_per_pixel_candidates: [] },
     }),
@@ -442,6 +453,32 @@ test("preflight prefers a printed time-per-division label over a compact cursor 
 test("preflight keeps scope OCR in a physical control strip beside the plot", () => {
   expect(hasRightEdgeScopeControlStrip({ render_width: 693 * 3, plot_right_px: 572 })).toBe(true)
   expect(hasRightEdgeScopeControlStrip({ render_width: 693 * 3, plot_right_px: 650 })).toBe(false)
+})
+
+test("preflight ignores a short periodic run inside an adjacent scope control panel", () => {
+  expect(
+    dominantGridLineRun({
+      lines: [105, 147.7, 189, 230.7, 272.3, 313.7, 355.3, 397, 438.7, 480.7, 521.7, 549.2, 561, 587.7],
+      spacing: 41.67,
+    }),
+  ).toEqual([105, 147.7, 189, 230.7, 272.3, 313.7, 355.3, 397, 438.7, 480.7, 521.7])
+})
+
+test("axis proof does not merge a real grid edge through a chain of adjacent control strokes", () => {
+  const lines = [
+    36.67, 37.33, 90, 143.67, 197, 250.67, 304, 357, 410.67, 464, 517.67, 571.33, 572, 578.67, 580.67, 584.33,
+    585.33, 586.33, 587.33, 589, 590, 590.67, 591.67, 592.33, 596, 606.67, 610, 619.67, 621.67, 622.33,
+    624.33, 628.67, 631.33, 632, 633, 634.33, 636, 636.67, 638.33, 641.33, 643, 643.67, 645.67, 647, 648.33,
+    654.33, 655.67,
+  ]
+
+  const grid = dominantGrid({ lines, first_anchor: 37, second_anchor: 571.5 })
+  expect(grid).toMatchObject({
+    first_anchor_line_pixel: 37,
+    second_anchor_line_pixel: 571.665,
+    first_anchor_error_px: 0,
+  })
+  expect(grid?.second_anchor_error_px).toBeCloseTo(0.165, 6)
 })
 
 test("reference graph preflight deterministically extracts immutable source calibration", async () => {

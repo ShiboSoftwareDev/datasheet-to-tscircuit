@@ -69,7 +69,7 @@ const REPAIR_ACTION_DESCRIPTIONS: Readonly<Record<ModelRepairAction, string>> = 
 }
 
 function simulatorRejectedSource(message: string): boolean {
-  return /\b(?:yyparse|syntax error|parse error|unknown (?:device|model|subcircuit)|undefined parameter|no such model|unrecognized|unsupported syntax)\b/i.test(
+  return /\b(?:yyparse|syntax error|parse error|unknown (?:device|model|subcircuit)|undefined parameter|no such (?:function|model)|unrecognized|unsupported syntax)\b/i.test(
     message,
   )
 }

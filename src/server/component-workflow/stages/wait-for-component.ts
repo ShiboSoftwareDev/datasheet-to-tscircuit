@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { PipelineError } from "../../pipeline"
 import { isCircuitJson } from "../../component-circuit-json"
-import { readApprovedApplicationEvidence, validateGeneratedSource } from "../stage-helpers"
+import { validateGeneratedSource } from "../stage-helpers"
 import { defineApplicationStage } from "./stage-factory"
 
 const WAIT_TIMEOUT_MS = 30 * 60 * 1000
@@ -30,14 +30,6 @@ export const waitForComponentStage = defineApplicationStage({
   id: "wait_for_component",
   depends_on: ["extract_application_evidence"],
   async execute({ context, services, signal }) {
-    const application_plan = await readApprovedApplicationEvidence(context.job_dir)
-    if (application_plan.availability === "not_present") {
-      return {
-        status: "completed",
-        output: { component_required: false },
-        metrics: { component_required: false, wait_duration_ms: 0 },
-      }
-    }
     const source_path = join(context.job_dir, "component.circuit.tsx")
     const circuit_json_path = join(context.job_dir, "component.circuit.json")
     const started_at = Date.now()

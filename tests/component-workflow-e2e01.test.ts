@@ -178,6 +178,25 @@ const application_plan = {
   ],
 }
 
+const application_design_evidence = {
+  version: 1,
+  capabilities: [
+    {
+      evidence_id: "input-bypass",
+      statement: "The target supports the documented input bypass function.",
+      source_references: [{ page: 3, method: "pdf_text", confidence: "high" }],
+    },
+  ],
+  constraints: [
+    {
+      evidence_id: "bypass-capacitor",
+      statement: "The bypass application requires its documented capacitor.",
+      source_references: [{ page: 3, method: "pdf_text", confidence: "high" }],
+    },
+  ],
+  prohibited_uses: [],
+}
+
 const application_connectivity_review = {
   version: 1,
   availability: "documented",
@@ -215,6 +234,17 @@ const footprint_geometry_review = {
   pads: component_evidence.footprint.pads.map(({ sources: _sources, ...pad }) => pad),
 }
 
+const wider_footprint_geometry_review = {
+  version: 1,
+  source: {
+    ...wider_visual_source,
+    image: "visual-reference/land-pattern.png",
+  },
+  view: "pcb_top",
+  units: "mm",
+  pads: wider_component_evidence.footprint.pads.map(({ sources: _sources, ...pad }) => pad),
+}
+
 const component_source = `export default function Generic2() {
   return (
     <chip
@@ -222,8 +252,8 @@ const component_source = `export default function Generic2() {
       manufacturerPartNumber="GENERIC-2"
       footprint={
         <footprint>
-          <smtpad pcbX={-0.75} pcbY={0} width={0.55} height={0.8} portHints={["pin1"]} />
-          <smtpad pcbX={0.75} pcbY={0} width={0.55} height={0.8} portHints={["pin2"]} />
+          <smtpad shape="rect" pcbX={-0.75} pcbY={0} width={0.55} height={0.8} portHints={["pin1"]} />
+          <smtpad shape="rect" pcbX={0.75} pcbY={0} width={0.55} height={0.8} portHints={["pin2"]} />
         </footprint>
       }
     />
@@ -435,11 +465,25 @@ function deterministicAgent(calls: string[]): AgentClient {
       calls.push(input.phase_label)
       if (input.phase_label === "Datasheet evidence extraction") {
         const reference_dir = join(input.workspace, "visual-reference")
+        const footprints_dir = join(input.workspace, "component-footprints")
         await mkdir(reference_dir, { recursive: true })
+        await mkdir(footprints_dir, { recursive: true })
         await Promise.all([
           Bun.write(
-            join(input.workspace, "component-evidence.json"),
-            `${JSON.stringify(component_evidence, null, 2)}\n`,
+            join(input.workspace, "component-footprint-catalog.json"),
+            `${JSON.stringify(
+              {
+                version: 1,
+                default_footprint_id: "default",
+                footprint_files: ["component-footprints/default.json"],
+              },
+              null,
+              2,
+            )}\n`,
+          ),
+          Bun.write(
+            join(footprints_dir, "default.json"),
+            `${JSON.stringify({ footprint_id: "default", component_evidence }, null, 2)}\n`,
           ),
           Bun.write(join(reference_dir, "land-pattern.png"), png_bytes),
         ])
@@ -451,8 +495,17 @@ function deterministicAgent(calls: string[]): AgentClient {
             join(input.workspace, "typical-application-plan.json"),
             `${JSON.stringify(application_plan, null, 2)}\n`,
           ),
+          Bun.write(
+            join(input.workspace, "application-design-evidence.json"),
+            `${JSON.stringify(application_design_evidence, null, 2)}\n`,
+          ),
           Bun.write(join(reference_dir, "typical-application.png"), png_bytes),
         ])
+      } else if (input.phase_label === "Application planning") {
+        await Bun.write(
+          join(input.workspace, "generated-application-plans.json"),
+          `${JSON.stringify({ version: 1, applications: [] }, null, 2)}\n`,
+        )
       } else if (input.phase_label === "Independent footprint geometry verification") {
         await Bun.write(
           join(input.workspace, "footprint-geometry-review.json"),
@@ -482,10 +535,30 @@ function multiFootprintAgent(calls: string[]): AgentClient {
     async run(input) {
       if (input.phase_label === "Datasheet evidence extraction") {
         calls.push(input.phase_label)
-        await Bun.write(
-          join(input.workspace, "component-footprint-catalog.json"),
-          `${JSON.stringify(component_footprint_catalog, null, 2)}\n`,
-        )
+        const footprints_dir = join(input.workspace, "component-footprints")
+        await mkdir(footprints_dir, { recursive: true })
+        await Promise.all([
+          Bun.write(
+            join(input.workspace, "component-footprint-catalog.json"),
+            `${JSON.stringify(
+              {
+                version: 1,
+                default_footprint_id: component_footprint_catalog.default_footprint_id,
+                footprint_files: component_footprint_catalog.footprints.map(
+                  ({ footprint_id }) => `component-footprints/${footprint_id}.json`,
+                ),
+              },
+              null,
+              2,
+            )}\n`,
+          ),
+          ...component_footprint_catalog.footprints.map((footprint) =>
+            Bun.write(
+              join(footprints_dir, `${footprint.footprint_id}.json`),
+              `${JSON.stringify(footprint, null, 2)}\n`,
+            ),
+          ),
+        ])
         await input.on_output("stdout", "fixture completed multi-footprint evidence extraction\n")
         return { attempts: 1, duration_ms: 1, output_tail: "" }
       }
@@ -493,6 +566,17 @@ function multiFootprintAgent(calls: string[]): AgentClient {
         calls.push(input.phase_label)
         await Bun.write(join(input.workspace, "index.circuit.tsx"), multi_footprint_component_source)
         await input.on_output("stdout", `fixture completed ${input.phase_label}\n`)
+        return { attempts: 1, duration_ms: 1, output_tail: "" }
+      }
+      if (
+        input.phase_label === "Independent footprint geometry verification" &&
+        input.prompt.includes("(wide)")
+      ) {
+        calls.push(input.phase_label)
+        await Bun.write(
+          join(input.workspace, "footprint-geometry-review.json"),
+          `${JSON.stringify(wider_footprint_geometry_review, null, 2)}\n`,
+        )
         return { attempts: 1, duration_ms: 1, output_tail: "" }
       }
       return single_footprint_agent.run(input)
@@ -569,7 +653,6 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
     Bun.write(join(job_dir, "tscircuit.config.json"), "{}\n"),
     Bun.write(join(job_dir, "tscircuit.config.ts"), "export default {}\n"),
   ])
-
   const job_store = new JobStore()
   job_store.createJob({
     job_id: "component_e2e",
@@ -638,6 +721,7 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
   expect(Object.keys(application_pipeline?.stage_results ?? {})).toEqual([
     "extract_application_evidence",
     "wait_for_component",
+    "plan_applications",
     "generate_application",
     "build_application",
     "validate_application",
@@ -645,7 +729,7 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
     "publish_application",
   ])
   expect(Object.values(application_pipeline?.stage_results ?? {}).map(({ status }) => status)).toEqual(
-    Array(7).fill("completed"),
+    Array(8).fill("completed"),
   )
   expect([...agent_calls].sort()).toEqual(
     [
@@ -654,6 +738,7 @@ test("COMPONENT_PIPELINE publishes a validated documented application end to end
       "Component source generation",
       "Typical-application evidence extraction",
       "Independent application connectivity verification",
+      "Application planning",
       "Application source generation",
     ].sort(),
   )
@@ -743,6 +828,17 @@ test("COMPONENT_PIPELINE publishes every distinct physical footprint without cha
     Bun.write(join(job_dir, "tscircuit.config.json"), "{}\n"),
     Bun.write(join(job_dir, "tscircuit.config.ts"), "export default {}\n"),
   ])
+  await Promise.all([
+    mkdir(join(job_dir, "component-variant-builds"), { recursive: true }),
+    mkdir(join(job_dir, "component-variant-validations"), { recursive: true }),
+    mkdir(join(job_dir, "dist", "component-variant-obsolete"), { recursive: true }),
+  ])
+  await Promise.all([
+    Bun.write(join(job_dir, "component-variant-obsolete.circuit.tsx"), "export default () => null\n"),
+    Bun.write(join(job_dir, "component-variant-builds", "obsolete.json"), "{}\n"),
+    Bun.write(join(job_dir, "component-variant-validations", "obsolete.json"), "{}\n"),
+    Bun.write(join(job_dir, "dist", "component-variant-obsolete", "circuit.json"), "[]\n"),
+  ])
   const job_store = new JobStore()
   job_store.createJob({ job_id: "component_multi", job_dir, file_name: "generic-2.pdf" })
   const agent_calls: string[] = []
@@ -792,9 +888,25 @@ test("COMPONENT_PIPELINE publishes every distinct physical footprint without cha
   expect(await Bun.file(join(job_dir, "component-variants", "wide.circuit.json")).json()).toEqual(
     wider_component_circuit_json,
   )
+  expect(await Bun.file(join(job_dir, "component-variant-obsolete.circuit.tsx")).exists()).toBe(false)
+  expect(await Bun.file(join(job_dir, "component-variant-builds", "obsolete.json")).exists()).toBe(false)
+  expect(await Bun.file(join(job_dir, "component-variant-validations", "obsolete.json")).exists()).toBe(false)
+  expect(await Bun.file(join(job_dir, "dist", "component-variant-obsolete")).exists()).toBe(false)
   expect(await Bun.file(join(job_dir, "component-validation.json")).json()).toMatchObject({
     passed: true,
     errors: [],
+  })
+  expect(
+    await Bun.file(
+      join(
+        job_dir,
+        (await Bun.file(join(job_dir, "evidence-commit.json")).json()).evidence_directory,
+        "footprint-geometry-verification-catalog.json",
+      ),
+    ).json(),
+  ).toMatchObject({
+    version: 1,
+    footprints: [{ footprint_id: "standard" }, { footprint_id: "wide" }],
   })
   expect(
     process_runner.calls.some(
@@ -808,6 +920,9 @@ test("COMPONENT_PIPELINE publishes every distinct physical footprint without cha
     ),
   ).toBe(true)
   expect(agent_calls.filter((phase) => phase === "Component source generation")).toHaveLength(1)
+  expect(agent_calls.filter((phase) => phase === "Independent footprint geometry verification")).toHaveLength(
+    2,
+  )
 })
 
 test("evidence correction repairs a retained agent-71-shaped candidate without re-extraction", async () => {
@@ -838,7 +953,9 @@ test("evidence correction repairs a retained agent-71-shaped candidate without r
       extraction_attempt += 1
       if (extraction_attempt === 1) {
         const result = await base_agent.run(input)
-        const variant = JSON.parse(await Bun.file(join(input.workspace, "component-evidence.json")).text())
+        const variant_path = join(input.workspace, "component-footprints", "default.json")
+        const variant_artifact = JSON.parse(await Bun.file(variant_path).text())
+        const variant = variant_artifact.component_evidence
         Reflect.deleteProperty(variant, "version")
         for (const pin of variant.pinout.pins) pin.number = Number(pin.number)
         for (const pad of variant.footprint.pads) {
@@ -847,20 +964,22 @@ test("evidence correction repairs a retained agent-71-shaped candidate without r
         }
         variant.footprint.drawing_orientation.value = "PCB-top land-pattern view; pin 1 is upper-left."
         await Bun.write(
-          join(input.workspace, "component-evidence.json"),
-          `${JSON.stringify(variant, null, 2)}\n`,
+          variant_path,
+          `${JSON.stringify({ ...variant_artifact, component_evidence: variant }, null, 2)}\n`,
         )
         return result
       }
 
       agent_calls.push(input.phase_label)
-      const retained = await Bun.file(join(input.workspace, "component-evidence.json")).json()
+      const variant_path = join(input.workspace, "component-footprints", "default.json")
+      const variant_artifact = await Bun.file(variant_path).json()
+      const retained = variant_artifact.component_evidence
       repaired_retained_candidate = retained.version === undefined && retained.pinout.pins[0].number === 1
       retained.version = 1
       retained.footprint.drawing_orientation.value = "pcb_top"
       await Bun.write(
-        join(input.workspace, "component-evidence.json"),
-        `${JSON.stringify(retained, null, 2)}\n`,
+        variant_path,
+        `${JSON.stringify({ ...variant_artifact, component_evidence: retained }, null, 2)}\n`,
       )
       await input.on_output("stdout", "fixture repaired the retained contract fields\n")
       return { attempts: 1, duration_ms: 1, output_tail: "" }

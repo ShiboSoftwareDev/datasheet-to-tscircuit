@@ -98,6 +98,7 @@ function cloneJobProjection(source: Job): Parameters<JobStore["updateJob"]>[1] {
     typical_application_title: source.typical_application_title,
     typical_application_code: source.typical_application_code,
     typical_application_circuit_json: source.typical_application_circuit_json,
+    typical_applications: source.typical_applications,
     validation: source.validation,
     provenance: source.provenance,
     evidence_available: source.evidence_available,

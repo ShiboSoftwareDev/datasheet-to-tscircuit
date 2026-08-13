@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto"
 import { mkdir, readdir, stat } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { runAgentArtifactStage } from "../../infrastructure/agent"
 import { createStageWorkspace, readBoundedJsonArtifact } from "../../infrastructure/artifacts"
+import { atomicWriteJsonSync } from "../../infrastructure/persistence/atomic-write"
 import { type ApplicationFixtureContract, type ModelInterface } from "../../modeling"
 import { PipelineError } from "../../pipeline"
 import type { JobLogStream } from "../../../shared/job-types"
@@ -10,6 +12,7 @@ import { appendModelLog, writeJson } from "../stage-helpers"
 import {
   analyzeReferenceGraphPreflight,
   buildReferenceGraphSourceProof,
+  parseReferenceGraphSourceProof,
   printedNominalSourcesByGraphId,
   type ReferenceGraphImmutableSourceAnalysis,
   type ReferenceGraphPreflight,
@@ -35,6 +38,7 @@ import {
 } from "../reference-graph-observation/source-canonicalization"
 import { isRecord, parseGraph } from "../reference-graph-observation/schema"
 import { discoverTimeGraphHints } from "../time-graph-hints"
+import type { TimeGraphHint } from "../time-graph-hints"
 import { assertObserverFoundEligibleTimeDomainGraph } from "./eligibility"
 import {
   MAX_CONCURRENT_REFERENCE_GRAPH_DIGITIZATIONS,
@@ -50,6 +54,7 @@ export interface ReferenceGraphInventory {
   readonly reference_graph_concurrency: number
   readonly reference_graph_first_attempt_successes: number
   readonly reference_graph_retry_count: number
+  readonly reference_graph_reused_count: number
   readonly reference_graph_agent_duration_ms: number
   readonly reference_graph_preflight_duration_ms: number
   readonly reused_from_invocation_id?: string
@@ -59,6 +64,102 @@ export interface FoundReferenceGraphInventory {
   readonly time_graph_hints_path: string
   readonly observation: ReferenceGraphObservation
   readonly observer_attempts: number
+}
+
+interface ReferenceGraphCheckpoint {
+  version: 1
+  source_pdf_sha256: string
+  found_graph: ReferenceGraphObservation["graphs"][number]
+  graph: ReferenceGraphObservation["graphs"][number]
+  source_proof: ReferenceGraphSourceProof
+  attempts: number
+  agent_duration_ms: number
+  preflight_duration_ms: number
+}
+
+function parseReferenceGraphCheckpoint(input: {
+  value: unknown
+  found_graph: ReferenceGraphObservation["graphs"][number]
+  source_pdf_sha256: string
+  graph_index: number
+  model_interface: ModelInterface
+  application_fixture: ApplicationFixtureContract
+  source_hints: TimeGraphHint[]
+}): ReferenceGraphCheckpoint | undefined {
+  if (!isRecord(input.value) || input.value.version !== 1) return undefined
+  const allowed_keys = [
+    "version",
+    "source_pdf_sha256",
+    "found_graph",
+    "graph",
+    "source_proof",
+    "attempts",
+    "agent_duration_ms",
+    "preflight_duration_ms",
+  ]
+  if (Object.keys(input.value).some((key) => !allowed_keys.includes(key))) return undefined
+  if (input.value.source_pdf_sha256 !== input.source_pdf_sha256) return undefined
+  if (JSON.stringify(input.value.found_graph) !== JSON.stringify(input.found_graph)) return undefined
+  const parsed_graph = parseGraph(
+    input.value.graph,
+    input.graph_index,
+    input.model_interface,
+    "canonical",
+    "comparison",
+  )
+  const graph = canonicalizeObservedGraphSource({
+    graph: parsed_graph,
+    source_hints: input.source_hints,
+    model_interface: input.model_interface,
+    application_fixture: input.application_fixture,
+    phase: "comparison",
+  })
+  assertComparisonGraphPreservesDiscovery({
+    source_pdf_sha256: input.source_pdf_sha256,
+    found_graph: input.found_graph,
+    candidate_graph: graph,
+  })
+  const source_proof = parseReferenceGraphSourceProof(input.value.source_proof, input.source_pdf_sha256)
+  assertReferenceGraphObservationVerified({
+    observation: {
+      version: 1,
+      source_pdf_sha256: input.source_pdf_sha256,
+      reviewed_hints: [],
+      graphs: [graph],
+    },
+    source_proof,
+  })
+  const attempts = input.value.attempts
+  const agent_duration_ms = input.value.agent_duration_ms
+  const preflight_duration_ms = input.value.preflight_duration_ms
+  if (
+    typeof attempts !== "number" ||
+    !Number.isInteger(attempts) ||
+    attempts < 1 ||
+    typeof agent_duration_ms !== "number" ||
+    !Number.isFinite(agent_duration_ms) ||
+    agent_duration_ms < 0 ||
+    typeof preflight_duration_ms !== "number" ||
+    !Number.isFinite(preflight_duration_ms) ||
+    preflight_duration_ms < 0
+  ) {
+    return undefined
+  }
+  return {
+    version: 1,
+    source_pdf_sha256: input.source_pdf_sha256,
+    found_graph: input.found_graph,
+    graph,
+    source_proof,
+    attempts,
+    agent_duration_ms,
+    preflight_duration_ms,
+  }
+}
+
+function referenceGraphCheckpointPath(model_dir: string, graph_id: string): string {
+  const checkpoint_id = createHash("sha256").update(graph_id).digest("hex")
+  return join(model_dir, "reference-graph-checkpoints", `${checkpoint_id}.json`)
 }
 
 interface PriorObservationCandidate {
@@ -384,7 +485,7 @@ function foundReferenceGraphPreflightError(failures: readonly FoundReferenceGrap
   throw new Error(
     "Find Reference Graphs marked crop(s) usable before their immutable source calibration was complete:\n" +
       `${diagnostics.join("\n")}\n` +
-      "Adjust each named crop to include the complete plot, time and voltage scales, scope controls, and its own caption. If the source figure itself lacks either numeric calibration, mark it fixture_reproducible:false. Create Comparison Graphs cannot repair a Find-stage crop.",
+      "Adjust each named crop to include the complete plot, time and voltage scales, scope controls, and its own caption. Do not change graph eligibility to bypass a crop correction; the server owns that decision after the correction budget. Create Comparison Graphs cannot repair a Find-stage crop.",
   )
 }
 
@@ -576,6 +677,45 @@ export async function digitizeReferenceGraphs(input: {
     signal,
     digitize: async (found_graph, graph_index, graph_signal) => {
       graph_signal.throwIfAborted()
+      const checkpoint_path = referenceGraphCheckpointPath(context.model_dir, found_graph.graph_id)
+      if (await Bun.file(checkpoint_path).exists()) {
+        try {
+          const checkpoint = parseReferenceGraphCheckpoint({
+            value: await readBoundedJsonArtifact({
+              path: checkpoint_path,
+              max_bytes: 1024 * 1024,
+              max_depth: 40,
+              max_nodes: 24_000,
+            }),
+            found_graph,
+            source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
+            graph_index,
+            model_interface,
+            application_fixture,
+            source_hints: graph_hints.get(found_graph.graph_id) ?? [],
+          })
+          if (checkpoint) {
+            await logOutput(
+              "system",
+              `[reference graph ${found_graph.graph_id}] Reusing the verified graph checkpoint.\n`,
+            )
+            return {
+              graph_id: found_graph.graph_id,
+              graph: checkpoint.graph,
+              source_proof: checkpoint.source_proof,
+              attempts: checkpoint.attempts,
+              agent_duration_ms: checkpoint.agent_duration_ms,
+              preflight_duration_ms: checkpoint.preflight_duration_ms,
+              reused: true,
+            }
+          }
+        } catch (error) {
+          await logOutput(
+            "system",
+            `[reference graph ${found_graph.graph_id}] Ignoring an invalid graph checkpoint: ${error instanceof Error ? error.message : String(error)}\n`,
+          )
+        }
+      }
       const seed_path = join(attempt_dir, `comparison-seed-${found_graph.graph_id}.json`)
       const reference_image_path = join(attempt_dir, "evidence", "figures", `${found_graph.graph_id}.png`)
       const graphLogOutput = (stream: JobLogStream, message: string) =>
@@ -706,29 +846,46 @@ export async function digitizeReferenceGraphs(input: {
         },
         promote: async () => undefined,
       })
-      return {
+      const result = {
         graph_id: found_graph.graph_id,
         graph: graph_observer.value.graph,
         source_proof: graph_observer.value.source_proof,
         attempts: graph_observer.attempts,
         agent_duration_ms: graph_observer.agent_duration_ms,
         preflight_duration_ms,
+        reused: false,
       }
+      atomicWriteJsonSync(checkpoint_path, {
+        version: 1,
+        source_pdf_sha256: immutable_found_observation.source_pdf_sha256,
+        found_graph,
+        graph: result.graph,
+        source_proof: result.source_proof,
+        attempts: result.attempts,
+        agent_duration_ms: result.agent_duration_ms,
+        preflight_duration_ms: result.preflight_duration_ms,
+      } satisfies ReferenceGraphCheckpoint)
+      return result
     },
   })
 
   const completed_graphs = new Map(graph_results.map((result) => [result.graph_id, result.graph]))
   const proof_results = graph_results.flatMap((result) => result.source_proof.results)
-  const observer_attempts = graph_results.reduce((sum, result) => sum + result.attempts, 0)
-  const reference_graph_first_attempt_successes = graph_results.filter(
+  const fresh_graph_results = graph_results.filter(({ reused }) => !reused)
+  const observer_attempts = fresh_graph_results.reduce((sum, result) => sum + result.attempts, 0)
+  const reference_graph_first_attempt_successes = fresh_graph_results.filter(
     ({ attempts }) => attempts === 1,
   ).length
-  const reference_graph_retry_count = observer_attempts - graph_results.length
-  const reference_graph_agent_duration_ms = graph_results.reduce(
+  const reference_graph_retry_count = fresh_graph_results.reduce(
+    (sum, result) => sum + Math.max(0, result.attempts - 1),
+    0,
+  )
+  const reference_graph_reused_count = graph_results.length - fresh_graph_results.length
+  const reference_graph_agent_duration_ms = fresh_graph_results.reduce(
     (sum, result) => sum + result.agent_duration_ms,
     0,
   )
-  const reference_graph_preflight_duration_ms = graph_results.reduce(
+  const reference_graph_preflight_duration_ms = fresh_graph_results.reduce(
     (sum, result) => sum + result.preflight_duration_ms,
     0,
   )
@@ -764,6 +921,7 @@ export async function digitizeReferenceGraphs(input: {
     reference_graph_concurrency: Math.min(found_graphs.length, MAX_CONCURRENT_REFERENCE_GRAPH_DIGITIZATIONS),
     reference_graph_first_attempt_successes,
     reference_graph_retry_count,
+    reference_graph_reused_count,
     reference_graph_agent_duration_ms,
     reference_graph_preflight_duration_ms,
   }

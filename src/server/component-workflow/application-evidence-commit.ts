@@ -6,6 +6,10 @@ import {
   compareApplicationGraphs,
   parseApplicationConnectivityReview,
 } from "./application-connectivity-verification"
+import {
+  applicationDesignEvidenceSources,
+  parseApplicationDesignEvidence,
+} from "./application-design-evidence"
 import { parseTypicalApplicationPlan } from "./application-plan"
 
 const COMMIT_FILE = "application-evidence-commit.json"
@@ -16,6 +20,7 @@ const REQUIRED_JSON_FILES = [
   "application-connectivity-verification.json",
   "application-evidence-image-manifest.json",
 ] as const
+const OPTIONAL_JSON_FILES = ["application-design-evidence.json"] as const
 const MAX_FILE_BYTES = 32 * 1024 * 1024
 const MAX_TOTAL_BYTES = 64 * 1024 * 1024
 
@@ -96,6 +101,14 @@ async function boundedFile(path: string): Promise<Uint8Array<ArrayBuffer>> {
 
 async function candidatePaths(source_dir: string): Promise<ApplicationEvidenceFilePath[]> {
   const paths = REQUIRED_JSON_FILES.map(applicationEvidenceFilePath)
+  for (const optional_path of OPTIONAL_JSON_FILES) {
+    const path = join(source_dir, optional_path)
+    const present = await lstat(path).then(
+      (metadata) => metadata.isFile() && !metadata.isSymbolicLink(),
+      () => false,
+    )
+    if (present) paths.push(applicationEvidenceFilePath(optional_path))
+  }
   const raw_manifest: unknown = JSON.parse(
     await readFile(join(source_dir, "application-evidence-image-manifest.json"), "utf8"),
   )
@@ -220,6 +233,15 @@ function validateCandidate(input: { files: ApplicationEvidenceFiles; source_pdf:
       ...(component.footprint_source_references ?? []),
     ]),
   ]
+  const design_evidence_path = applicationEvidenceFilePath("application-design-evidence.json")
+  const raw_design_evidence = input.files.has(design_evidence_path)
+    ? parseJson(input.files, design_evidence_path)
+    : undefined
+  const design_evidence =
+    raw_design_evidence === undefined ? undefined : parseApplicationDesignEvidence(raw_design_evidence)
+  if (design_evidence && !isDeepStrictEqual(raw_design_evidence, design_evidence)) {
+    throw new Error("application-design-evidence.json is not canonical")
+  }
   for (const source of application_sources) {
     if (!source.image) continue
     const source_image_path = applicationEvidenceFilePath(source.image)
@@ -229,6 +251,18 @@ function validateCandidate(input: { files: ApplicationEvidenceFiles; source_pdf:
     if (source_page_by_image.get(source_image_path) !== source.page) {
       throw new Error(
         `Application evidence page ${source.page} cites an image rendered from a different page`,
+      )
+    }
+  }
+  for (const source of design_evidence ? applicationDesignEvidenceSources(design_evidence) : []) {
+    if (!source.image) continue
+    const source_image_path = applicationEvidenceFilePath(source.image)
+    if (!declared_images.has(source_image_path)) {
+      throw new Error(`Application design evidence cites an image outside its manifest: ${source.image}`)
+    }
+    if (source_page_by_image.get(source_image_path) !== source.page) {
+      throw new Error(
+        `Application design evidence page ${source.page} cites an image rendered from a different page`,
       )
     }
   }
