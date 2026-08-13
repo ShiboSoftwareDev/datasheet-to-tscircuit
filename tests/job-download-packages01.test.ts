@@ -4,10 +4,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { CircuitJson } from "circuit-json"
 import JSZip from "jszip"
-import { createJobDownloadPackage } from "@/server/job-api/create-job-download-package"
+import { createJobDownloadPackage, isPackagedJobFileKind } from "@/server/job-api/create-job-download-package"
 import type { Job } from "@/shared/job-types"
 
 const temporary_directories: string[] = []
+
+test("recognizes Altium component and application downloads as packaged exports", () => {
+  expect(isPackagedJobFileKind("component_altium")).toBe(true)
+  expect(isPackagedJobFileKind("typical_application_altium")).toBe(true)
+})
 
 afterEach(async () => {
   await Promise.all(
@@ -186,7 +191,13 @@ test("component exports retain every footprint and provide self-contained TSX so
     file_kind: "component_kicad",
     ...fixture,
   })
-  if (!tsx_package || !kicad_package) throw new Error("Expected component download packages")
+  const altium_package = await createJobDownloadPackage({
+    file_kind: "component_altium",
+    ...fixture,
+  })
+  if (!tsx_package || !kicad_package || !altium_package) {
+    throw new Error("Expected component download packages")
+  }
 
   const tsx_zip = await JSZip.loadAsync(tsx_package.artifact_bytes)
   expect(Object.keys(tsx_zip.files)).toContain("index.circuit.tsx")
@@ -206,9 +217,17 @@ test("component exports retain every footprint and provide self-contained TSX so
   expect(file_names).toContain("sources/index.circuit.tsx")
   expect(file_names).toContain("fp-lib-table")
   expect(file_names).toContain("sym-lib-table")
+
+  const altium_zip = await JSZip.loadAsync(altium_package.artifact_bytes)
+  const altium_file_names = Object.keys(altium_zip.files)
+  expect(altium_file_names).toContain("multi-part-component.PrjPcb")
+  expect(altium_file_names).toContain("multi-part-component.PcbDoc")
+  expect(altium_file_names).toContain("multi-part-component.SchDoc")
+  expect(altium_file_names).toContain("variants/2-compact/multi-part-component-compact.PrjPcb")
+  expect(altium_file_names).toContain("sources/index.circuit.tsx")
 })
 
-test("each typical application exports its selected TSX bundle and KiCad project", async () => {
+test("each typical application exports its selected TSX bundle, KiCad project, and Altium project", async () => {
   const fixture = await createFixture()
   for (const application_id of ["reference", "generated-monitor"]) {
     const tsx_package = await createJobDownloadPackage({
@@ -221,7 +240,14 @@ test("each typical application exports its selected TSX bundle and KiCad project
       application_id,
       ...fixture,
     })
-    if (!tsx_package || !kicad_package) throw new Error("Expected application download packages")
+    const altium_package = await createJobDownloadPackage({
+      file_kind: "typical_application_altium",
+      application_id,
+      ...fixture,
+    })
+    if (!tsx_package || !kicad_package || !altium_package) {
+      throw new Error("Expected application download packages")
+    }
 
     const tsx_zip = await JSZip.loadAsync(tsx_package.artifact_bytes)
     expect(Object.keys(tsx_zip.files)).toContain(`${application_id}.circuit.tsx`)
@@ -234,5 +260,12 @@ test("each typical application exports its selected TSX bundle and KiCad project
     expect(file_names).toContain(`multi-part-${application_id}.kicad_pro`)
     expect(file_names).toContain(`sources/${application_id}.circuit.tsx`)
     expect(file_names.filter((name) => name.endsWith(".kicad_mod"))).toHaveLength(2)
+
+    const altium_zip = await JSZip.loadAsync(altium_package.artifact_bytes)
+    const altium_file_names = Object.keys(altium_zip.files)
+    expect(altium_file_names).toContain(`multi-part-${application_id}.PrjPcb`)
+    expect(altium_file_names).toContain(`multi-part-${application_id}.PcbDoc`)
+    expect(altium_file_names).toContain(`multi-part-${application_id}.SchDoc`)
+    expect(altium_file_names).toContain(`sources/${application_id}.circuit.tsx`)
   }
 })

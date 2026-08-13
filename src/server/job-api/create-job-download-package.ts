@@ -1,4 +1,5 @@
 import type { CircuitJson } from "circuit-json"
+import { convertCircuitJsonToAltiumZip } from "circuit-json-to-altium"
 import {
   CircuitJsonToKicadLibraryConverter,
   CircuitJsonToKicadPcbConverter,
@@ -13,8 +14,10 @@ import { readBaseComponentSource } from "./resolve-job-file-artifact"
 export type PackagedJobFileKind =
   | "component_tsx"
   | "component_kicad"
+  | "component_altium"
   | "typical_application_tsx"
   | "typical_application_kicad"
+  | "typical_application_altium"
 
 export interface JobDownloadPackage {
   artifact_bytes: Uint8Array<ArrayBuffer>
@@ -40,8 +43,10 @@ export function isPackagedJobFileKind(value: string | null): value is PackagedJo
   return (
     value === "component_tsx" ||
     value === "component_kicad" ||
+    value === "component_altium" ||
     value === "typical_application_tsx" ||
-    value === "typical_application_kicad"
+    value === "typical_application_kicad" ||
+    value === "typical_application_altium"
   )
 }
 
@@ -296,6 +301,46 @@ function addApplicationKicadProject(input: {
   input.zip.file(`${input.project_name}.kicad_pro`, project_converter.getOutputString())
 }
 
+async function addAltiumProject(input: {
+  zip: JSZip
+  circuit_json: CircuitJson
+  project_name: string
+  directory?: string
+}): Promise<void> {
+  const archive_bytes = await convertCircuitJsonToAltiumZip(input.circuit_json, input.project_name)
+  const archive = await JSZip.loadAsync(archive_bytes)
+  const directory = input.directory ? `${input.directory.replace(/\/$/, "")}/` : ""
+  for (const file of Object.values(archive.files)) {
+    const file_name = `${directory}${file.name}`
+    if (file.dir) {
+      input.zip.folder(file_name)
+    } else {
+      input.zip.file(file_name, await file.async("uint8array"))
+    }
+  }
+}
+
+async function addComponentAltiumProjects(input: {
+  zip: JSZip
+  job: Job
+  project_name: string
+}): Promise<boolean> {
+  const variants = componentCircuitVariants(input.job)
+  if (variants.length === 0) return false
+
+  for (const [index, variant] of variants.entries()) {
+    const variant_name = safeFileStem(variant.footprint_id, `variant-${index + 1}`)
+    const is_default = index === 0
+    await addAltiumProject({
+      zip: input.zip,
+      circuit_json: variant.circuit_json,
+      project_name: is_default ? input.project_name : `${input.project_name}-${variant_name}`,
+      directory: is_default ? undefined : `variants/${index + 1}-${variant_name}`,
+    })
+  }
+  return true
+}
+
 async function generateZip(zip: JSZip): Promise<Uint8Array<ArrayBuffer>> {
   const bytes = await zip.generateAsync({
     type: "uint8array",
@@ -340,6 +385,17 @@ export async function createJobDownloadPackage(input: {
     }
   }
 
+  if (input.file_kind === "component_altium") {
+    const project_name = `${part_name}-component`
+    if (!(await addComponentAltiumProjects({ zip, job: input.job, project_name }))) return undefined
+    addComponentSources({ zip, sources: component_sources, directory: "sources" })
+    return {
+      artifact_bytes: await generateZip(zip),
+      content_type: "application/zip",
+      download_name: `${part_name}-component-altium.zip`,
+    }
+  }
+
   const application = resolveApplication(input.job, input.application_id)
   if (!application) return undefined
   const application_name = safeFileStem(application.application_id, "application")
@@ -361,12 +417,16 @@ export async function createJobDownloadPackage(input: {
 
   if (!application.circuit_json) return undefined
   const project_name = `${part_name}-${application_name}`
-  addApplicationKicadProject({ zip, circuit_json: application.circuit_json, project_name })
-  addComponentKicadLibrary({
-    zip,
-    job: input.job,
-    library_name: `${part_name}_component`,
-  })
+  if (input.file_kind === "typical_application_kicad") {
+    addApplicationKicadProject({ zip, circuit_json: application.circuit_json, project_name })
+    addComponentKicadLibrary({
+      zip,
+      job: input.job,
+      library_name: `${part_name}_component`,
+    })
+  } else {
+    await addAltiumProject({ zip, circuit_json: application.circuit_json, project_name })
+  }
   addApplicationSources({
     zip,
     directory: "sources",
@@ -378,6 +438,6 @@ export async function createJobDownloadPackage(input: {
   return {
     artifact_bytes: await generateZip(zip),
     content_type: "application/zip",
-    download_name: `${project_name}-kicad.zip`,
+    download_name: `${project_name}-${input.file_kind === "typical_application_kicad" ? "kicad" : "altium"}.zip`,
   }
 }

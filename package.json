@@ -2,6 +2,9 @@
   "name": "datasheet-to-tscircuit",
   "version": "0.1.0",
   "private": true,
+  "trustedDependencies": [
+    "altiumts"
+  ],
   "type": "module",
   "description": "Turn component datasheets into validated tscircuit components and SPICE models",
   "scripts": {
@@ -26,6 +29,7 @@
     "@earendil-works/pi-coding-agent": "0.80.10",
     "@resvg/resvg-js": "^2.6.2",
     "@tscircuit/ngspice-spice-engine": "^0.0.19",
+    "circuit-json-to-altium": "github:tscircuit/circuit-json-to-altium#b7027586888496a21c8531fffd2f871068d5f64d",
     "circuit-json-to-kicad": "0.0.173",
     "jszip": "^3.10.1",
     "polygon-clipping": "0.15.7",

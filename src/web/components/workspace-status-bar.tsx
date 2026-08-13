@@ -178,14 +178,24 @@ export function WorkspaceStatusBar({
                     </DropdownMenu.Item>
                     {(job.circuit_json ||
                       job.component_footprints?.footprints.some((footprint) => footprint.circuit_json)) && (
-                      <DropdownMenu.Item asChild>
-                        <a
-                          className="workspace-download-item"
-                          href={getJobFileUrl(job.job_id, "component_kicad", { local_run_id })}
-                        >
-                          <CircuitBoard size={14} /> KiCad
-                        </a>
-                      </DropdownMenu.Item>
+                      <>
+                        <DropdownMenu.Item asChild>
+                          <a
+                            className="workspace-download-item"
+                            href={getJobFileUrl(job.job_id, "component_kicad", { local_run_id })}
+                          >
+                            <CircuitBoard size={14} /> KiCad
+                          </a>
+                        </DropdownMenu.Item>
+                        <DropdownMenu.Item asChild>
+                          <a
+                            className="workspace-download-item"
+                            href={getJobFileUrl(job.job_id, "component_altium", { local_run_id })}
+                          >
+                            <CircuitBoard size={14} /> Altium
+                          </a>
+                        </DropdownMenu.Item>
+                      </>
                     )}
                   </DropdownMenu.SubContent>
                 </DropdownMenu.Portal>
@@ -219,17 +229,30 @@ export function WorkspaceStatusBar({
                           </a>
                         </DropdownMenu.Item>
                         {application.circuit_json && (
-                          <DropdownMenu.Item asChild>
-                            <a
-                              className="workspace-download-item"
-                              href={getJobFileUrl(job.job_id, "typical_application_kicad", {
-                                local_run_id,
-                                application_id: application.application_id,
-                              })}
-                            >
-                              <CircuitBoard size={14} /> KiCad
-                            </a>
-                          </DropdownMenu.Item>
+                          <>
+                            <DropdownMenu.Item asChild>
+                              <a
+                                className="workspace-download-item"
+                                href={getJobFileUrl(job.job_id, "typical_application_kicad", {
+                                  local_run_id,
+                                  application_id: application.application_id,
+                                })}
+                              >
+                                <CircuitBoard size={14} /> KiCad
+                              </a>
+                            </DropdownMenu.Item>
+                            <DropdownMenu.Item asChild>
+                              <a
+                                className="workspace-download-item"
+                                href={getJobFileUrl(job.job_id, "typical_application_altium", {
+                                  local_run_id,
+                                  application_id: application.application_id,
+                                })}
+                              >
+                                <CircuitBoard size={14} /> Altium
+                              </a>
+                            </DropdownMenu.Item>
+                          </>
                         )}
                       </DropdownMenu.Group>
                     ))}
