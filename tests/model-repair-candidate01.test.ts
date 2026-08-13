@@ -173,6 +173,7 @@ test("repair binds the canonical changed model into unchanged TSX circuits", asy
       expect(prompt).toContain("Preserve the incumbent's ability to run every tscircuit viewer simulation")
       expect(prompt).toContain("Never trade a higher-priority gate for a lower-priority improvement")
       expect(prompt).toContain("Do not assume that a behavioral function is\n  portable")
+      expect(prompt).toContain("keep controller capacitors and inductors on private state nodes")
       const tsx_path = join(workspace, "simulation-tsx", "startup.circuit.tsx")
       const tsx = await readFile(tsx_path, "utf8")
       await Promise.all([

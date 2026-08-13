@@ -162,6 +162,7 @@ Then implement exactly that diagnosis:
   portable merely because another SPICE implementation accepts it; prefer portable circuit primitives
   and syntax already proven by the runnable incumbent.
 - TSX may change its executable circuit topology, fixture, or stimulus when the diagnosis shows the circuit is wrong, but it must preserve the named observation and time-domain reference contract and remain a genuine general simulation of its named reference case.
+- In a power-converter model, keep controller capacitors and inductors on private state nodes. Do not connect stored-energy or copied load passives directly to a modeled output; application passives belong to the server-owned fixture.
 - For a power converter, every private state read by a source that drives the modeled output must itself be driven by the measured output response. Do not add a separate EN/VIN-only soft-start state; express startup through an EN-qualified, output-error-driven controller state.
 - Do not add per-sample lookup tables, figure-specific output forcing, hidden reference data, or other curve-fitting hacks.
 - Do not run ngspice. The server will run the exact promoted TSX with tscircuit after this artifact is complete.

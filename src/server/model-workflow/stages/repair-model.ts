@@ -193,7 +193,7 @@ export const repairModelStage = defineModelStage({
     const baseline_quality = best_quality
     const candidate_evaluations: RepairCandidateEvaluation[] = []
     let rejected_candidate_feedback = ""
-    let last_evaluated_candidate_ms: number | undefined
+    const evaluated_candidate_ms: number[] = []
 
     const createEffectivenessArtifact = async (repair_elapsed_ms: number) => {
       const effectiveness_path = join(debug_dir, "repair-effectiveness.json")
@@ -225,7 +225,7 @@ export const repairModelStage = defineModelStage({
         const repair_budget_ms = live_run?.repair_budget_ms ?? initial_repair_budget_ms
         const elapsed_ms = Date.now() - repair_started_at
         const remaining_ms = repair_budget_ms - elapsed_ms
-        if (!hasRepairCandidateBudget({ remaining_ms, last_evaluated_candidate_ms })) break
+        if (!hasRepairCandidateBudget({ remaining_ms, evaluated_candidate_ms })) break
         const candidate_started_at = Date.now()
         attempted_repairs += 1
         const attempt_budget = createRepairBudgetSignal({ parent: signal, remaining_ms })
@@ -311,7 +311,7 @@ export const repairModelStage = defineModelStage({
               viewer_validation_by_case: validation.preview_build.viewer_validation_by_case,
             }),
           })
-          last_evaluated_candidate_ms = Date.now() - candidate_started_at
+          evaluated_candidate_ms.push(Date.now() - candidate_started_at)
           const improved = validation.passed || compareCandidateQuality(candidate_quality, best_quality) < 0
           candidate_evaluations.push({
             attempt: attempted_repairs,
